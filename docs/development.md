@@ -36,6 +36,21 @@ The pre-commit hook checks formatting, lint, and staged-diff whitespace. The pre
 full local gate. GitHub Actions installs the locked environment and runs the same `make check` target.
 Hooks and CI are guardrails, not substitutes for focused tests.
 
+## Review workflow
+
+Ordinary feature pull requests target `dev`. A branch that depends on an unmerged pull request targets
+that parent branch and is retargeted to `dev` after the parent merges. Deliberate promotion pull
+requests from `dev` to `main` are separate from feature review.
+
+Use the repository's `create-pull-request` skill to open or update a pull request. It derives the
+blast radius from the final diff and maps acceptance criteria and changed invariants to observed
+verification evidence. The issue owns the original problem and acceptance criteria; the pull request
+owns the delivered delta, review risk, and merge evidence.
+
+GitHub closing keywords take effect only when a pull request targets the repository's default branch.
+Keep `dev` as the default branch for the ordinary workflow. A stacked pull request's `Closes` link
+becomes active only after it is retargeted to `dev`.
+
 ## Quality commands
 
 The root `AGENTS.md` indexes the stable command surface and the `Makefile` is executable authority.

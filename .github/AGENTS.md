@@ -9,3 +9,5 @@
 - Pin third-party actions to a full commit SHA with the release tag in a comment. Let Dependabot
   propose updates.
 - Keep required check names stable once branch protection depends on them.
+- Use the `create-pull-request` skill to open or update a pull request. It owns base resolution,
+  evidence-backed template completion, issue linkage, and stacked-branch handling.

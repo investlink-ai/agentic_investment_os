@@ -1,0 +1,4 @@
+interface:
+  display_name: "Create Pull Request"
+  short_description: "Create evidence-backed project pull requests"
+  default_prompt: "Use $create-pull-request to open a concise, evidence-backed pull request for the current branch."
