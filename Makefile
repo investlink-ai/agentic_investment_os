@@ -17,6 +17,7 @@ harness:
 	test "$$(readlink .claude/skills)" = "../.agents/skills"
 	test -f .agents/skills/find-simplifications/SKILL.md
 	test -f .agents/skills/create-pull-request/SKILL.md
+	test -f .agents/skills/start-issue-worktree/SKILL.md
 	test -f .agents/skills/manage-agent-notes/SKILL.md
 	test -f .agents/skills/prose-standard/SKILL.md
 	test -f .agents/notes/AGENTS.md
@@ -29,6 +30,8 @@ harness:
 	test -f .github/workflows/mutation.yml
 	test -f scripts/__init__.py
 	test -f scripts/run_mutation.py
+	test -x scripts/start-issue.sh
+	grep -qx '/.agents/worktrees/' .gitignore
 	test -f CONTEXT.md
 	test -f docs/architecture.md
 	test -f docs/config-catalog.md

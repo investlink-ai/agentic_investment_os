@@ -22,6 +22,9 @@ repository owns implementation authority, executable code, and runtime state.
   concurrency, filesystem handling, or execution.
 - Read `docs/testing.md` before adding or changing tests; use `docs/development.md` for setup and
   dependency commands.
+- Use the `start-issue-worktree` skill before writing tracked files for a new or resumed issue. The
+  main `dev` checkout is a clean control checkout; issue implementation belongs under
+  `.agents/worktrees/`.
 - Treat `docs/research/` as non-authoritative input. Promote accepted conclusions into the owning
   active document before using them for implementation.
 
@@ -53,6 +56,7 @@ CONTEXT.md                   Canonical investment-system terminology
 docs/                       Product, architecture, investment, engineering policy, and ADRs
 .agents/skills/             Canonical project skills; .claude/skills points here
 .agents/notes/              Durable decision reasoning below the ADR threshold
+.agents/worktrees/          Ignored linked worktrees, one per active issue
 ```
 
 ## Commands
@@ -63,6 +67,7 @@ make format                 Apply Ruff formatting and safe lint fixes
 make harness                Verify shared agent instructions and required engineering docs
 make check                  Run formatting, lint, strict mypy, and deterministic tests
 make mutation               Verify tests reject mutations in deterministic safety behavior
+./scripts/start-issue.sh N  Create or resume the linked worktree for issue N
 uv add <package>            Add a runtime dependency
 uv add --dev <package>      Add a development dependency
 ```

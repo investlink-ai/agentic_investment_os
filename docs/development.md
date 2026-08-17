@@ -22,10 +22,44 @@ make bootstrap
 Bootstrap creates `.venv`, installs the locked development environment, and configures Git to use
 the versioned hooks in `.githooks/`. Setup is complete when `make check` passes.
 
+## Issue worktrees
+
+Agent-written changes use one open issue, one `issue/<number>-<slug>` branch, one linked worktree, and
+one pull request. The main checkout remains a clean `dev` control checkout. Run the project
+`start-issue-worktree` skill before editing; its executable operation is:
+
+```bash
+./scripts/start-issue.sh <issue-number>
+```
+
+The script reads the issue and either resumes its exact registered worktree or fetches and
+fast-forwards from `origin/dev` before creating `.agents/worktrees/<number>-<slug>`. New branches have
+no upstream. Creation and resumption run `make bootstrap`; a refusal preserves existing state for
+inspection, so resolve it explicitly rather than stashing, resetting, forcing, or deleting work.
+
+Run the implementation session with the linked worktree as its exact working root. Every concurrent
+writer requires a different worktree; serial handoff may reuse the same one. Worktrees isolate files,
+`HEAD`, and indexes, but share Git refs, configuration, hooks, credentials, caches, and external
+services. Keep `.venv` local to each worktree and never copy `.env`, broker credentials, ledgers, or
+generated financial evidence into it.
+
+Publish a new issue branch with `git push -u origin HEAD`. After its pull request merges or the user
+explicitly abandons it, remove only a clean worktree and then its merged local branch:
+
+```bash
+git worktree remove .agents/worktrees/<number>-<slug>
+git branch -d issue/<number>-<slug>
+git worktree prune --dry-run
+```
+
+Git's refusal to remove dirty work is a safety boundary. Do not automate forced cleanup. Local hooks
+reject commits outside linked issue branches and direct pushes to `dev` or `main`; repository rules
+must independently protect those remote branches because hooks can be bypassed.
+
 ## Daily workflow
 
-1. Read the documents referenced by the relevant `AGENTS.md` trigger and search applicable Agent Notes
-   before making a durable design choice.
+1. Enter the issue's linked worktree, then read the documents referenced by the relevant `AGENTS.md`
+   trigger and search applicable Agent Notes before making a durable design choice.
 2. Make the smallest coherent change and run the narrowest relevant test while iterating.
 3. Run `make format` when Python code changes.
 4. Inspect the diff for generated state, secrets, accidental source-of-truth duplication, and missing

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Start Issue Worktree"
+  short_description: "Create guarded issue worktrees"
+  default_prompt: "Use $start-issue-worktree to create or resume the isolated worktree for a GitHub issue."

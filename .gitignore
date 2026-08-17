@@ -39,5 +39,5 @@ htmlcov/
 *~
 
 # Local worktrees and scratch files
-/.worktrees/
+/.agents/worktrees/
 /tmp/

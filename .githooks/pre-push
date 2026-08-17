@@ -1,4 +1,14 @@
 #!/bin/sh
 set -eu
 
+while IFS=' ' read -r _local_ref _local_oid remote_ref _remote_oid; do
+    case "$remote_ref" in
+        refs/heads/main | refs/heads/dev)
+            printf 'pre-push: direct pushes to %s are prohibited; use a pull request\n' \
+                "$remote_ref" >&2
+            exit 1
+            ;;
+    esac
+done
+
 make check

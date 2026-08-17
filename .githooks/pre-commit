@@ -1,6 +1,47 @@
 #!/bin/sh
 set -eu
 
+fail() {
+    printf 'pre-commit: %s\n' "$*" >&2
+    exit 1
+}
+
+branch=$(git symbolic-ref --quiet --short HEAD 2>/dev/null) || \
+    fail "commits require an issue branch, not detached HEAD"
+case "$branch" in
+    main | dev) fail "commit issue work in a linked worktree, not directly on $branch" ;;
+esac
+
+case "$branch" in
+    issue/*-*) ;;
+    *) fail "branch must match issue/<number>-<slug>" ;;
+esac
+issue_name=${branch#issue/}
+issue_number=${issue_name%%-*}
+issue_slug=${issue_name#"$issue_number"-}
+case "$issue_number" in
+    '' | *[!0-9]*) fail "branch must match issue/<number>-<slug>" ;;
+esac
+if [ -z "$issue_slug" ]; then
+    fail "branch must match issue/<number>-<slug>"
+fi
+case "$issue_slug" in
+    -* | *- | *[!a-z0-9-]*) fail "branch must match issue/<number>-<slug>" ;;
+esac
+
+git_dir=$(git rev-parse --path-format=absolute --git-dir)
+common_dir=$(git rev-parse --path-format=absolute --git-common-dir)
+if [ "$git_dir" = "$common_dir" ]; then
+    fail "issue commits require a linked worktree"
+fi
+main_worktree=$(CDPATH= cd -- "$common_dir/.." && pwd -P)
+current_worktree=$(git rev-parse --show-toplevel)
+current_worktree=$(CDPATH= cd -- "$current_worktree" && pwd -P)
+case "$current_worktree" in
+    "$main_worktree/.agents/worktrees/"*) ;;
+    *) fail "issue worktree must be below .agents/worktrees" ;;
+esac
+
 uv run ruff format --check .
 uv run ruff check .
 git diff --cached --check

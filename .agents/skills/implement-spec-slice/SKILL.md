@@ -10,15 +10,17 @@ durability, evidence, or testing rule to make progress appear faster.
 
 ## Establish the slice
 
-1. Read `AGENTS.md`, the exact `docs/product-requirements.md` outcome in scope, and
+1. Require an open issue and apply [start-issue-worktree](../start-issue-worktree/SKILL.md). Continue
+   only from its registered linked worktree on the matching `issue/<number>-<slug>` branch.
+2. Read `AGENTS.md`, the exact `docs/product-requirements.md` outcome in scope, and
    `docs/architecture.md`.
-2. Read `CONTEXT.md` and `docs/investment-domain.md` when the slice changes domain language or
+3. Read `CONTEXT.md` and `docs/investment-domain.md` when the slice changes domain language or
    investment rules. Read `docs/module-graph.md` when an import or interface may change. Follow the
    conditional pointers in `AGENTS.md` for configuration, defensive patterns, and testing.
-3. Inspect current code, tests, ADRs, and relevant proposed or implemented Agent Notes. Distinguish
+4. Inspect current code, tests, ADRs, and relevant proposed or implemented Agent Notes. Distinguish
    approved requirements from executable behavior and notes from authority; never infer that a
    scaffolded module or proposal already implements the requirement.
-4. State the smallest vertical outcome that satisfies the request, its public interface, its authority
+5. State the smallest vertical outcome that satisfies the request, its public interface, its authority
    owner, and acceptance criteria traceable to the active documents. Split unrelated outcomes.
 
 The slice is established when every planned change is necessary for one observable outcome and every

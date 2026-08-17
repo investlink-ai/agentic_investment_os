@@ -23,10 +23,14 @@ problem and acceptance criteria; the pull request owns the resulting delta, revi
 4. Use `dev` as the base for an ordinary feature pull request. If the branch depends on an unmerged
    pull request, use that pull request's head branch as the base and identify it with `Stacked on`.
    A deliberate `dev`-to-`main` promotion is allowed only when the user requests it.
-5. Reject `main` as a pull-request head. Reject `dev` as a head unless the user explicitly requested a
+5. For an ordinary feature pull request, require an `issue/<number>-<slug>` branch registered in a
+   linked worktree below `.agents/worktrees/`. Read the encoded issue, require it to be open, and
+   reject a supplied issue number that does not match the branch. A deliberate `dev`-to-`main`
+   promotion is the only exception.
+6. Reject `main` as a pull-request head. Reject `dev` as a head unless the user explicitly requested a
    `dev`-to-`main` promotion. For feature work, require at least one committed delta from the selected
    base and do not push directly to `main` or `dev`.
-6. Do not publish while in-scope changes are uncommitted; report them because this skill does not
+7. Do not publish while in-scope changes are uncommitted; report them because this skill does not
    stage or commit work.
 
 GitHub applies closing keywords only when a pull request targets the repository's default branch.
@@ -37,8 +41,9 @@ the issue.
 
 ## Establish the review contract
 
-1. If an issue number is supplied, read the issue and extract each applicable acceptance criterion.
-   Do not invent an issue. Remove the `Closes` line when no issue exists.
+1. For feature work, read the issue encoded in the verified branch and extract each applicable
+   acceptance criterion. Do not invent an issue. Remove the `Closes` line for a promotion without an
+   issue.
 2. Inspect `base...HEAD`, every changed file, and enough callers and consumers to understand the final
    behavior. Describe the net diff, not the sequence of commits or authoring journey.
 3. Trace the change across these blast-radius surfaces:
