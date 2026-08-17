@@ -1,0 +1,4 @@
+interface:
+  display_name: "Implement Spec Slice"
+  short_description: "Implement one verified requirement slice"
+  default_prompt: "Use $implement-spec-slice to implement one coherent, verified slice from the active product and domain requirements."

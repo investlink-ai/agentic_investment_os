@@ -10,8 +10,8 @@ isolated Research Lab.
 
 ## Status
 
-Engineering scaffold only. The approved solution specification remains in Sam's Second Brain; this
-repository is the independent implementation boundary and has no runtime dependency on that repo.
+Engineering scaffold only. The approved design originated in Sam's Second Brain; active repository
+documentation now owns implementation authority and has no runtime dependency on that source.
 
 ## Setup
 
@@ -31,8 +31,17 @@ Git hooks. Dependencies live only in `pyproject.toml` and `uv.lock`.
 - `tests/unit/`: fast domain and policy behavior
 - `tests/integration/`: persistence and composition behavior with local or recorded adapters
 - `tests/contract/`: external schema, LLM, SEC, and Alpaca boundary fixtures
-- `docs/architecture.md`: module, authority, and state boundaries
+- `CONTEXT.md`: canonical investment-system terminology
+- `docs/product-requirements.md`: V0 outcomes, scope, acceptance, and implementation order
+- `docs/architecture.md`: system topology, module seams, lifecycle, authority, and durable state
+- `docs/investment-domain.md`: evidence, research, memory, portfolio, execution, and evaluation rules
+- `docs/config-catalog.md`: implemented configuration sources and ownership
+- `docs/defensive-patterns.md`: reusable prevention rules for high-risk bug classes
+- `docs/testing.md`: deterministic, contract, integration, and live-test policy
+- `docs/module-graph.md`: allowed Python import directions
 - `docs/adr/`: durable architectural decisions
+- `docs/research/`: non-authoritative investigations awaiting explicit promotion
+- `.github/`: keyless CI, dependency updates, and concise contribution templates
 - `.agents/skills/`: canonical repository-specific coding-agent skills
 
 See `docs/development.md` for the development workflow.
