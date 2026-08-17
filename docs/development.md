@@ -40,6 +40,8 @@ Hooks and CI are guardrails, not substitutes for focused tests.
 
 The root `AGENTS.md` indexes the stable command surface and the `Makefile` is executable authority.
 Run a focused test directly with `uv run pytest <path-or-node-id>`; finish with `make check`.
+Run `make mutation` for mutation-critical domain, portfolio, or execution behavior. The mutation gate
+is deliberately separate from the fast default gate and Git hooks.
 
 ## Dependency workflow
 

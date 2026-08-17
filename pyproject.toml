@@ -13,6 +13,7 @@ dependencies = []
 
 [dependency-groups]
 dev = [
+  "mutmut>=3.7.0",
   "mypy>=1.15",
   "pytest>=8.3",
   "pytest-cov>=6.0",
@@ -118,3 +119,21 @@ source = ["agentic_investment_os"]
 [tool.coverage.report]
 show_missing = true
 skip_covered = false
+
+[tool.mutmut]
+source_paths = ["src"]
+only_mutate = [
+  "src/agentic_investment_os/domain/*",
+  "src/agentic_investment_os/portfolio/*",
+  "src/agentic_investment_os/execution/*",
+]
+pytest_add_cli_args = [
+  "-o",
+  "addopts=--strict-config --strict-markers -ra",
+]
+pytest_add_cli_args_test_selection = [
+  "tests/unit",
+  "tests/integration",
+  "tests/contract",
+]
+mutate_only_covered_lines = true

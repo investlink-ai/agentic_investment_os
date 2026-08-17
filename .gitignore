@@ -16,6 +16,7 @@ htmlcov/
 .mypy_cache/
 .pytest_cache/
 .ruff_cache/
+/mutants/
 
 # Secrets and local configuration
 .env

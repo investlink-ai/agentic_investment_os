@@ -62,6 +62,7 @@ make bootstrap              Create the environment and enable repository hooks
 make format                 Apply Ruff formatting and safe lint fixes
 make harness                Verify shared agent instructions and required engineering docs
 make check                  Run formatting, lint, strict mypy, and deterministic tests
+make mutation               Verify tests reject mutations in deterministic safety behavior
 uv add <package>            Add a runtime dependency
 uv add --dev <package>      Add a development dependency
 ```
@@ -135,5 +136,7 @@ over accumulating exceptions.
 
 ## Completion criteria
 
-Run the smallest relevant tests while iterating and then `make check` before handoff. Report any gate
-that could not run. Never weaken a gate, type check, test, or safety boundary to make a change pass.
+Run the smallest relevant tests while iterating and then `make check` before handoff. Also run
+`make mutation` when changing the deterministic domain, portfolio, or execution behavior scoped by
+`docs/testing.md`. Report any gate that could not run. Never weaken a gate, type check, test, or safety
+boundary to make a change pass.

@@ -51,6 +51,36 @@ deletion and design signal, not proof of correctness. Do not add meaningless ass
 or unreachable branches to satisfy the number. If a line cannot be exercised through a useful
 contract, simplify or remove it.
 
+## Mutation testing
+
+`make mutation` uses `mutmut` to verify that tests reject incorrect deterministic safety behavior.
+It is a separate, slower gate: `make check`, pre-commit, and pre-push do not run it. Pull requests that
+change its source, tests, configuration, or runner execute the same Make target in a keyless job; a
+weekly run detects drift outside those path filters.
+
+The active scope is every callable under `domain/`, `portfolio/`, and `execution/`. This includes
+decision-packet validation, deterministic sizing and limits, target bands, order planning, executor
+authorization, effect-local idempotency, execution state transitions, and reconciliation as those
+capabilities are implemented. Add semantic Alpaca request mapping, response parsing, and status
+normalization to the configured scope with their implementation; keep raw transport and process
+wiring under contract and integration tests. Add evidence cutoff, staleness, append-only transition,
+and lifecycle recovery logic when those behaviors become executable safety decisions.
+
+The gate accepts only killed mutants and narrowly skipped equivalent mutations. It fails on surviving,
+uncovered, timed-out, suspicious, interrupted, or crashing mutants; it does not reduce those outcomes
+to a repository-wide score. A skip must use the narrowest supported pragma with an adjacent explanation
+of the semantic equivalence. Prefer adding an observable-behavior test or simplifying meaningless code
+over excluding a mutant.
+
+The Make target starts from a clean ignored `mutants/` workspace so a cached result cannot certify a
+changed safety path. Invoke `mutmut` directly only for incremental local diagnosis; its cached outcome
+is not the repository gate.
+
+Mutation runs select only deterministic unit, integration, and contract tiers. They use fake or
+recorded broker boundaries and receive no credentials or network-enabled live rehearsal. While the
+repository contains no callable in the configured scope, the runner reports the scaffold exemption
+and exits successfully; adding the first scoped callable activates the gate automatically.
+
 ## Fixtures
 
 - Record the smallest external representation needed to preserve the contract under test.

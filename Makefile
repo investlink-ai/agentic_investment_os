@@ -1,4 +1,4 @@
-.PHONY: bootstrap check format harness lint sync test typecheck
+.PHONY: bootstrap check format harness lint mutation sync test typecheck
 
 bootstrap: sync
 	git config core.hooksPath .githooks
@@ -25,6 +25,9 @@ harness:
 	test -f .github/dependabot.yml
 	test -f .github/pull_request_template.md
 	test -f .github/workflows/ci.yml
+	test -f .github/workflows/mutation.yml
+	test -f scripts/__init__.py
+	test -f scripts/run_mutation.py
 	test -f CONTEXT.md
 	test -f docs/architecture.md
 	test -f docs/config-catalog.md
@@ -43,9 +46,12 @@ lint:
 	uv run ruff check .
 
 typecheck:
-	uv run mypy src tests
+	uv run mypy src tests scripts
 
 test:
 	uv run pytest
+
+mutation:
+	uv run python scripts/run_mutation.py
 
 check: harness lint typecheck test

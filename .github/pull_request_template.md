@@ -5,6 +5,7 @@
 ## Verification
 
 - [ ] `make check`
+- [ ] `make mutation` when mutation-critical behavior changed
 - Other evidence:
 
 ## Safety and documentation
