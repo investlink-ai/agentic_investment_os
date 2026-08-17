@@ -1,0 +1,42 @@
+# Python and uv
+.venv/
+__pycache__/
+*.py[cod]
+*.pyd
+*.so
+*.egg-info/
+build/
+dist/
+
+# Quality-tool state
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Local runtime state: never commit financial records or generated evidence
+/artifacts/
+/data/
+/logs/
+/var/
+
+# Editors and operating systems
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*~
+
+# Local worktrees and scratch files
+/.worktrees/
+/tmp/

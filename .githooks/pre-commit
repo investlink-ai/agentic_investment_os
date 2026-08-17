@@ -1,0 +1,6 @@
+#!/bin/sh
+set -eu
+
+uv run ruff format --check .
+uv run ruff check .
+git diff --cached --check
