@@ -1,0 +1,4 @@
+interface:
+  display_name: "Prose Standard"
+  short_description: "Preserve contracts while tightening prose"
+  default_prompt: "Use $prose-standard to review and improve the requested prose without losing contractual meaning."

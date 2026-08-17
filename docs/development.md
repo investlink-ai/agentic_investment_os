@@ -24,7 +24,8 @@ the versioned hooks in `.githooks/`. Setup is complete when `make check` passes.
 
 ## Daily workflow
 
-1. Read the documents referenced by the relevant `AGENTS.md` trigger.
+1. Read the documents referenced by the relevant `AGENTS.md` trigger and search applicable Agent Notes
+   before making a durable design choice.
 2. Make the smallest coherent change and run the narrowest relevant test while iterating.
 3. Run `make format` when Python code changes.
 4. Inspect the diff for generated state, secrets, accidental source-of-truth duplication, and missing
@@ -71,6 +72,10 @@ behind typed ports so deterministic tests require no credentials or network.
 - Update `testing.md` when test tiers, fixtures, gates, or live-test policy change.
 - Update `module-graph.md` when allowed dependency directions change; once a generated graph exists,
   update its generator rather than its output.
+- Use `.agents/notes/` for durable feature, simplification, testing, bug-prevention, or process
+  reasoning below the ADR threshold. Issues own task state; ADRs own hard-to-reverse boundaries.
+- Apply the `prose-standard` skill to substantial documentation, docstring, prompt, diagnostic, or
+  Agent Note edits.
 
 Active documentation is authoritative within the ownership declared at the top of each file. Git
-history preserves superseded documents; do not keep parallel archive copies.
+history preserves superseded documents and deleted notes; do not keep parallel archive copies.

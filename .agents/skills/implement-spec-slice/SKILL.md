@@ -15,8 +15,9 @@ durability, evidence, or testing rule to make progress appear faster.
 2. Read `CONTEXT.md` and `docs/investment-domain.md` when the slice changes domain language or
    investment rules. Read `docs/module-graph.md` when an import or interface may change. Follow the
    conditional pointers in `AGENTS.md` for configuration, defensive patterns, and testing.
-3. Inspect current code, tests, and ADRs. Distinguish approved requirements from executable behavior;
-   never infer that a scaffolded module already implements the requirement.
+3. Inspect current code, tests, ADRs, and relevant proposed or implemented Agent Notes. Distinguish
+   approved requirements from executable behavior and notes from authority; never infer that a
+   scaffolded module or proposal already implements the requirement.
 4. State the smallest vertical outcome that satisfies the request, its public interface, its authority
    owner, and acceptance criteria traceable to the active documents. Split unrelated outcomes.
 
@@ -36,6 +37,8 @@ acceptance criterion names evidence a test can inspect.
 - Identify the durable checkpoint before each external effect, the effect-local idempotency key, and
   the append-only observation recorded afterward.
 - Keep deployment choices in typed configuration. Record a durable architecture change in an ADR.
+- When real alternatives create durable reasoning below the ADR threshold, use
+  [manage-agent-notes](../manage-agent-notes/SKILL.md). Do not create a note for routine slice work.
 
 The design is ready when callers and tests need one narrow interface and no planned step grants Codex,
 the Research Lab, or the executor new authority.
@@ -60,6 +63,8 @@ The test is red only when its failure demonstrates the requested observable beha
   text out of workflow control.
 - Update affected architecture, configuration, module-graph, defensive-pattern, testing, and public
   documentation in the same change. Link to one authoritative home rather than copying rules.
+- Apply [prose-standard](../prose-standard/SKILL.md) to substantial changed prose. If the slice
+  implements a proposed Agent Note, move and rewrite that note as shipped reality in the same change.
 - Add no speculative framework, generic seam, metered dependency, compatibility layer, or future
   configuration key.
 
@@ -72,8 +77,8 @@ needed to prove the behavior.
 2. Run `make format` after Python edits and inspect the complete diff for secrets, generated runtime
    state, source-of-truth duplication, and module-direction violations.
 3. Run `make check`. Resolve failures at their cause; preserve every gate and safety invariant.
-4. Report the implemented requirement, observable evidence, tests run, documentation or ADR
-   changes, and explicitly deferred work.
+4. Report the implemented requirement, observable evidence, tests run, documentation, ADR, or Agent
+   Note changes, and explicitly deferred work.
 
 Do not claim the slice complete while a required acceptance path, invalid case, documentation update,
 or repository gate remains unresolved.

@@ -12,6 +12,9 @@ repository owns implementation authority, executable code, and runtime state.
   changing evidence, research, belief, portfolio, execution-policy, evaluation, or learning rules.
 - Read `docs/architecture.md` before changing runtime topology, module seams, lifecycle, authority,
   durable state, or trust boundaries; record durable architecture decisions in `docs/adr/`.
+- Search relevant `.agents/notes/implemented/` and `.agents/notes/proposed/` records before planning or
+  reviewing a feature, simplification, testing strategy, bug-prevention rule, or development-process
+  change. Notes preserve reasoning but never override active documents, ADRs, or code.
 - Read `docs/module-graph.md` before adding a cross-module import or moving an interface.
 - Read `docs/config-catalog.md` before adding configuration, an environment variable, a default, or a
   tunable policy.
@@ -49,6 +52,7 @@ tests/contract/             Hostile-input and external-boundary compatibility
 CONTEXT.md                   Canonical investment-system terminology
 docs/                       Product, architecture, investment, engineering policy, and ADRs
 .agents/skills/             Canonical project skills; .claude/skills points here
+.agents/notes/              Durable decision reasoning below the ADR threshold
 ```
 
 ## Commands
@@ -109,7 +113,8 @@ details in the relevant ADR or issue rather than in the pattern.
   timing, and safe use. Do not restate signatures or implementation steps.
 - Documentation authority is explicit: product outcomes live in `docs/product-requirements.md`,
   investment rules in `docs/investment-domain.md`, architecture in `docs/architecture.md`, canonical
-  terms in `CONTEXT.md`, operational testing in `docs/testing.md`, and durable rationale in ADRs.
+  terms in `CONTEXT.md`, operational testing in `docs/testing.md`, hard-to-reverse rationale in ADRs,
+  and lower-threshold decision reasoning in Agent Notes. Issues own work state.
 - Update affected documentation with the code change. Keep each fact in one authoritative location
   and link to it elsewhere.
 - Use Git history for superseded documentation; keep no archive copies in the working tree.
@@ -118,6 +123,10 @@ details in the relevant ADR or issue rather than in the pattern.
 
 `CLAUDE.md` is a symbolic link to this file, and `.claude/skills` links to `.agents/skills`. Edit the
 real `AGENTS.md` or `.agents/skills` content only; never replace the links with copies.
+
+Use the `prose-standard` skill for substantial changes to agent instructions, Markdown, docstrings,
+comments, prompts, diagnostics, or other visible prose. Use `manage-agent-notes` for Agent Note
+lifecycle changes.
 
 Keep this file limited to always-applicable rules and precise pointers. Move detailed, conditional
 workflows into the owning document or a project skill. When a rule changes architecture or an

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Manage Agent Notes"
+  short_description: "Preserve durable decision reasoning"
+  default_prompt: "Use $manage-agent-notes to create or maintain the relevant Agent Note."

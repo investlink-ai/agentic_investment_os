@@ -10,7 +10,7 @@
 ## Safety and documentation
 
 - Authority, evidence, durability, risk, or execution impact:
-- Documentation or ADR updated:
+- Documentation, ADR, or Agent Note updated:
 - Generated runtime state and secrets excluded:
 
 ## Related issue

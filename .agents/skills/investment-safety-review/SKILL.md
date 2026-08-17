@@ -15,9 +15,10 @@ failure over a list of stylistic observations.
 2. Read the changed files and enough callers, consumers, tests, configuration, and persistence code to
    trace the behavior through its real entrypoint.
 3. Read `AGENTS.md`, `docs/product-requirements.md`, `docs/architecture.md`,
-   `docs/module-graph.md`, `docs/defensive-patterns.md`, `docs/testing.md`, and applicable ADRs. Read
-   `CONTEXT.md` and `docs/investment-domain.md` for changed domain language or investment behavior.
-   Treat active requirements as required behavior and code as current implementation.
+   `docs/module-graph.md`, `docs/defensive-patterns.md`, `docs/testing.md`, applicable ADRs, and
+   relevant proposed or implemented Agent Notes. Read `CONTEXT.md` and `docs/investment-domain.md` for
+   changed domain language or investment behavior. Treat active requirements as required behavior,
+   code as current implementation, and Agent Notes as rationale rather than authority.
 4. Map each changed behavior to its authority owner, authoritative state, external effects, model-
    visible inputs, and acceptance evidence.
 
@@ -62,6 +63,15 @@ observable effect.
 - Keep interfaces with their owning modules, adapters outside domain logic, and concrete construction
   in `entrypoints`. Challenge pass-through modules and speculative seams.
 
+### Interface and decision fit
+
+- Trace both sides of every changed interface through real production consumers and the composition
+  root. Challenge generic methods or configuration introduced for one private consumer.
+- Identify duplicated authoritative state, consumer-specific behavior placed on a generic interface,
+  compatibility with no supported caller, and abstraction added ahead of an approved requirement.
+- Compare implemented Agent Notes with shipped behavior. A proposal left active after implementation,
+  stale mechanism claim, or note that contradicts its current owner is a review defect.
+
 ### Failure and isolation
 
 - Verify stale, incomplete, contradictory, unauthorized, or invalid state becomes an explicit durable
@@ -80,6 +90,14 @@ observable effect.
   not prove the scenario.
 - Confirm the deterministic suite needs no network, broker credentials, wall clock, or mutable local
   state and that relevant repository gates pass.
+
+### Prose and model-visible behavior
+
+- Apply [prose-standard](../prose-standard/SKILL.md) to changed Markdown, docstrings, comments,
+  prompts, schemas, diagnostics, and visible strings. Preserve authority, timing, refusal, provenance,
+  and negative guarantees while removing narration or duplicated rationale.
+- Verify model-visible wording and fields against the owning schema and observable behavior. Require
+  contract evidence for semantic changes without pinning arbitrary LLM prose.
 
 Every applicable lens is complete only after the changed path has been followed from entrypoint to its
 authoritative record or external effect.

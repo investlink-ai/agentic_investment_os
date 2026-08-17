@@ -173,7 +173,7 @@ sequenceDiagram
     Broker-->>Executor: Order event or ambiguous timeout
     Executor->>Ledger: Append independent observations and receipt
     Executor-->>OS: OutcomeBatch
-    OS->>Ledger: Append outcomes; preserve original decision
+    OS->>Ledger: Append outcomes and preserve original decision
 ```
 
 Timeout and broker acceptance remain independent facts. Reconciliation resolves ambiguity by stable

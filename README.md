@@ -43,5 +43,6 @@ Git hooks. Dependencies live only in `pyproject.toml` and `uv.lock`.
 - `docs/research/`: non-authoritative investigations awaiting explicit promotion
 - `.github/`: keyless CI, dependency updates, and concise contribution templates
 - `.agents/skills/`: canonical repository-specific coding-agent skills
+- `.agents/notes/`: durable feature, simplification, testing, and process decision reasoning
 
 See `docs/development.md` for the development workflow.

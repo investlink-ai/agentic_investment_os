@@ -15,6 +15,12 @@ harness:
 	test "$$(readlink CLAUDE.md)" = "AGENTS.md"
 	test -L .claude/skills
 	test "$$(readlink .claude/skills)" = "../.agents/skills"
+	test -f .agents/skills/find-simplifications/SKILL.md
+	test -f .agents/skills/manage-agent-notes/SKILL.md
+	test -f .agents/skills/prose-standard/SKILL.md
+	test -f .agents/notes/AGENTS.md
+	test -f .agents/notes/README.md
+	test ! -d .agents/notes/archived
 	test -f .github/AGENTS.md
 	test -f .github/dependabot.yml
 	test -f .github/pull_request_template.md

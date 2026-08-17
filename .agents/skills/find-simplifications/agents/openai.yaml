@@ -1,0 +1,4 @@
+interface:
+  display_name: "Find Simplifications"
+  short_description: "Prove safe reductions in code and surface"
+  default_prompt: "Use $find-simplifications to find evidence-backed simplifications in the requested scope."
