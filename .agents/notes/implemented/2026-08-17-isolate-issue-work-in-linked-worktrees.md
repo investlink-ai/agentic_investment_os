@@ -13,18 +13,21 @@ policy implementation.
 
 [The development workflow](../../../docs/development.md#issue-worktrees) binds each agent-written
 change to one open issue, one `issue/<number>-<slug>` branch, one ignored worktree below
-`.agents/worktrees/`, and one pull request. The main `dev` checkout remains a clean control checkout.
+`.agents/worktrees/`, and one pull request. The primary `main` checkout remains a clean control
+checkout.
 
 [The creation script](../../../scripts/start-issue.sh) owns deterministic Git and GitHub operations:
-issue validation, a fresh `origin/dev` base, branch and path derivation, collision refusal, creation
+issue validation, a fresh `origin/main` base, branch and path derivation, collision refusal, creation
 without an upstream, bootstrap, and conservative resumption. [The
 skill](../../skills/start-issue-worktree/SKILL.md) owns agent preflight and binds subsequent file and
 command operations to the reported worktree.
 
 The versioned pre-commit hook accepts commits only from linked issue branches. The pre-push hook
-checks Git's resolved destination refs, rejects direct publication to `dev` or `main`, and then runs
-the repository gate. These hooks prevent routine mistakes; remote branch protection remains the
-enforcement boundary because local hooks are bypassable.
+checks Git's resolved destination refs, rejects direct publication to `main`, and then runs
+the repository gate after clearing Git's repository-local environment. This prevents nested fixture
+repositories from inheriting and mutating the issue worktree's index or refs. These hooks prevent
+routine mistakes; remote branch protection remains the enforcement boundary because local hooks are
+bypassable.
 
 ## Alternatives considered
 
@@ -40,7 +43,7 @@ enforcement boundary because local hooks are bypassable.
 
 ## Consequences
 
-Starting work requires an actionable open issue and a clean `dev` control checkout. Each worktree has
+Starting work requires an actionable open issue and a clean `main` control checkout. Each worktree has
 its own environment and can survive setup failure, interruption, or agent handoff without losing
 state. Existing mismatched branches, paths, remote work, or divergent integration history stop the
 workflow for explicit recovery.
@@ -54,5 +57,6 @@ cannot be discarded merely to restore a tidy inventory.
 ## Verification
 
 Focused integration tests exercise creation, resumption, invalid context, collisions, setup failure,
-and hook destination-ref behavior. `make harness` verifies the canonical skill, executable script,
-and ignore rule; `make check` remains the complete local handoff gate.
+hook destination-ref behavior, and repository-environment isolation before the pre-push gate.
+`make harness` verifies the canonical skill, executable script, and ignore rule; `make check` remains
+the complete local handoff gate.

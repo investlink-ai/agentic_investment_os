@@ -1,12 +1,24 @@
 ---
 name: investment-safety-review
-description: Review agentic-investment-os changes for violations of authority, deterministic portfolio and execution behavior, append-only durability, evidence provenance and as-of time, idempotency, fail-closed operation, credential isolation, and required tests. Use when asked to review a diff, branch, pull request, commit, or implementation touching lifecycle, evidence, memory, research, configuration, portfolio, execution, evaluation, adapters, or entrypoints. Do not implement fixes unless the user separately asks for them.
+description: Perform the supplemental domain-safety review for agentic-investment-os changes that can affect investment authority, deterministic portfolio or execution behavior, append-only durability, evidence provenance or as-of time, retry and idempotency, fail-closed operation, credential isolation, or model-visible safety contracts. Use in addition to general code review when a diff, branch, pull request, commit, or implementation changes lifecycle, evidence, research, memory, persistence, runtime or investment configuration, portfolio, execution, evaluation, external adapters, entrypoints, prompts, or model-visible schemas. Do not use this skill as a replacement for complete Standards and Spec review, and do not implement fixes unless the user separately asks for them.
 ---
 
 # Review Investment-System Safety
 
 Report substantiated defects in severity order. Prefer one reproducible authority or data-integrity
 failure over a list of stylistic observations.
+
+## Keep the review independent
+
+Apply this skill as a domain-safety axis alongside general code review. Use the same pinned base and
+head, but do not invoke or repeat the general review from this skill. The general review owns complete
+repository-standards and originating-spec coverage; this review owns reachable investment authority,
+financial safety, provenance, durability, and operational-safety failures.
+
+Read standards and specifications as evidence for a safety finding. Omit generic style,
+maintainability, and scope findings unless their behavior creates a concrete safety impact. Report a
+defect found by both reviews when its end-to-end trace establishes that additional impact, and keep
+the safety severity independent. Passing either review does not imply that the other passed.
 
 ## Establish review scope
 

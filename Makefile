@@ -16,8 +16,11 @@ harness:
 	test -L .claude/skills
 	test "$$(readlink .claude/skills)" = "../.agents/skills"
 	test -f .agents/skills/find-simplifications/SKILL.md
+	test -f .agents/skills/code-review/SKILL.md
 	test -f .agents/skills/create-pull-request/SKILL.md
+	test -f .agents/skills/deliver-issue/SKILL.md
 	test -f .agents/skills/start-issue-worktree/SKILL.md
+	test -f .agents/skills/plan-stage-issues/SKILL.md
 	test -f .agents/skills/manage-agent-notes/SKILL.md
 	test -f .agents/skills/prose-standard/SKILL.md
 	test -f .agents/notes/AGENTS.md

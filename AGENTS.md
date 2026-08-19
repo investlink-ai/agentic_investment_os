@@ -22,9 +22,16 @@ repository owns implementation authority, executable code, and runtime state.
   concurrency, filesystem handling, or execution.
 - Read `docs/testing.md` before adding or changing tests; use `docs/development.md` for setup and
   dependency commands.
-- Use the `start-issue-worktree` skill before writing tracked files for a new or resumed issue. The
-  main `dev` checkout is a clean control checkout; issue implementation belongs under
-  `.agents/worktrees/`.
+- Use the `plan-stage-issues` skill when turning requirements or architecture into delivery work.
+  Plan only the next capability frontier and approve its issue graph before publishing it.
+- Use the `deliver-issue` skill when implementing or resuming an open issue. It owns the guarded path
+  from issue through a verified local commit or draft pull request and invokes `start-issue-worktree`
+  before tracked writes; the primary `main` checkout remains a clean control checkout.
+- Treat repository hooks as mandatory delivery gates. Resolve their refusal through the owning issue
+  workflow; never commit or push with `--no-verify`.
+- Review changes to agent-review or publication gates with reviewer instructions outside the changed
+  diff, preferring the verified base version. Stop for human review when no trusted contract exists;
+  a changed workflow never approves itself.
 - Treat `docs/research/` as non-authoritative input. Promote accepted conclusions into the owning
   active document before using them for implementation.
 
@@ -98,7 +105,8 @@ Use `pyproject.toml` and `uv.lock` only; never create `requirements.txt` files.
   terminate the process. Keep exception scopes narrow and preserve the original cause.
 - Tests assert observable behavior, durable events, receipts, and invariants—not private class
   layout, mock call choreography, or exact LLM prose.
-- Comments explain constraints or non-obvious intent; never narrate code.
+- Comments explain a hidden invariant and its consequence. Track deferred work in issues; an inline
+  `TODO(#N)` names its issue and removal condition.
 
 ## Defensive patterns
 
@@ -115,8 +123,9 @@ details in the relevant ADR or issue rather than in the pattern.
   construct. Exhaust closed unions with `typing.assert_never()`.
 - Never use a type assertion to bless parsed JSON, database rows, model output, or broker responses.
   Validate first and construct the typed value from validated fields.
-- Public modules and exported types document non-obvious behavior, failure modes, ownership, units,
-  timing, and safe use. Do not restate signatures or implementation steps.
+- Document an exported boundary with a docstring when its return distinctions, failure modes,
+  ownership, units, timing, side effects, or safe use are not evident from its name and types. Begin
+  with a concise imperative summary; omit boilerplate that restates the signature or implementation.
 - Documentation authority is explicit: product outcomes live in `docs/product-requirements.md`,
   investment rules in `docs/investment-domain.md`, architecture in `docs/architecture.md`, canonical
   terms in `CONTEXT.md`, operational testing in `docs/testing.md`, hard-to-reverse rationale in ADRs,
@@ -131,7 +140,8 @@ details in the relevant ADR or issue rather than in the pattern.
 real `AGENTS.md` or `.agents/skills` content only; never replace the links with copies.
 
 Use the `prose-standard` skill for substantial changes to agent instructions, Markdown, docstrings,
-comments, prompts, diagnostics, or other visible prose. Use `manage-agent-notes` for Agent Note
+comments, commit messages, prompts, diagnostics, or other visible prose. Read
+`docs/development.md#commit-messages` before committing. Use `manage-agent-notes` for Agent Note
 lifecycle changes.
 
 Keep this file limited to always-applicable rules and precise pointers. Move detailed, conditional

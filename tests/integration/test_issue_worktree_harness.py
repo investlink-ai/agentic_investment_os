@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import textwrap
@@ -17,6 +18,7 @@ ROOT = Path(__file__).resolve().parents[2]
 START_ISSUE = ROOT / "scripts" / "start-issue.sh"
 PRE_COMMIT = ROOT / ".githooks" / "pre-commit"
 PRE_PUSH = ROOT / ".githooks" / "pre-push"
+CREATE_PULL_REQUEST = ROOT / ".agents" / "skills" / "create-pull-request" / "SKILL.md"
 
 
 def _required_executable(name: str) -> str:
@@ -80,7 +82,7 @@ def issue_repository(tmp_path: Path) -> IssueRepository:
     make_log = tmp_path / "make.log"
 
     _must_run([GIT, "init", "--bare", str(origin)], cwd=tmp_path)
-    _must_run([GIT, "init", "-b", "dev", str(seed)], cwd=tmp_path)
+    _must_run([GIT, "init", "-b", "main", str(seed)], cwd=tmp_path)
     _git(seed, "config", "user.name", "Harness Test")
     _git(seed, "config", "user.email", "harness@example.invalid")
     (seed / ".agents" / "skills").mkdir(parents=True)
@@ -90,9 +92,9 @@ def issue_repository(tmp_path: Path) -> IssueRepository:
     _git(seed, "add", ".")
     _git(seed, "commit", "-m", "Initial fixture")
     _git(seed, "remote", "add", "origin", str(origin))
-    _git(seed, "push", "-u", "origin", "dev")
+    _git(seed, "push", "-u", "origin", "main")
     _must_run(
-        [GIT, f"--git-dir={origin}", "symbolic-ref", "HEAD", "refs/heads/dev"],
+        [GIT, f"--git-dir={origin}", "symbolic-ref", "HEAD", "refs/heads/main"],
         cwd=tmp_path,
     )
     _must_run([GIT, "clone", str(origin), str(control)], cwd=tmp_path)
@@ -131,6 +133,13 @@ def issue_repository(tmp_path: Path) -> IssueRepository:
             #!/bin/sh
             set -eu
             printf '%s\\n' "$*" >> "$FAKE_MAKE_LOG"
+            if [ "$*" = "check" ]; then
+                {
+                    printf 'GIT_DIR=%s\\n' "${GIT_DIR-unset}"
+                    printf 'GIT_WORK_TREE=%s\\n' "${GIT_WORK_TREE-unset}"
+                    printf 'GIT_INDEX_FILE=%s\\n' "${GIT_INDEX_FILE-unset}"
+                } > "$FAKE_GIT_ENV_LOG"
+            fi
             if [ "${FAKE_SETUP_FAIL:-0}" = "1" ]; then
                 exit 9
             fi
@@ -156,6 +165,7 @@ def issue_repository(tmp_path: Path) -> IssueRepository:
     environment = os.environ.copy()
     environment["PATH"] = f"{fake_bin}{os.pathsep}{environment['PATH']}"
     environment["FAKE_MAKE_LOG"] = str(make_log)
+    environment["FAKE_GIT_ENV_LOG"] = str(tmp_path / "git-env.log")
     environment["FAKE_UV_LOG"] = str(tmp_path / "uv.log")
     return IssueRepository(
         control=control,
@@ -177,7 +187,7 @@ def _start_issue(
     )
 
 
-def test_start_issue_creates_untracked_branch_from_fresh_dev(
+def test_start_issue_creates_untracked_branch_from_fresh_main(
     issue_repository: IssueRepository,
 ) -> None:
     completed = _start_issue(issue_repository)
@@ -187,7 +197,7 @@ def test_start_issue_creates_untracked_branch_from_fresh_dev(
     assert worktree.is_dir()
     assert _git(worktree, "branch", "--show-current") == "issue/42-guard-the-worktree"
     assert _git(worktree, "rev-parse", "HEAD") == _git(
-        issue_repository.control, "rev-parse", "origin/dev"
+        issue_repository.control, "rev-parse", "origin/main"
     )
     assert (
         _git(
@@ -223,7 +233,7 @@ def test_start_issue_reuses_registered_worktree_after_title_change(
     ("prepare", "expected_error"),
     [
         ("dirty", "must be clean"),
-        ("wrong-branch", "must be on dev"),
+        ("wrong-branch", "must be on main"),
         ("closed", "is not open"),
     ],
 )
@@ -249,7 +259,7 @@ def test_start_issue_rejects_invalid_control_state(
 def test_start_issue_refuses_existing_remote_issue_branch(
     issue_repository: IssueRepository,
 ) -> None:
-    _git(issue_repository.control, "branch", "issue/42-existing", "origin/dev")
+    _git(issue_repository.control, "branch", "issue/42-existing", "origin/main")
     _git(issue_repository.control, "push", "origin", "issue/42-existing")
     _git(issue_repository.control, "branch", "-D", "issue/42-existing")
 
@@ -288,7 +298,7 @@ def test_pre_commit_requires_linked_issue_branch(issue_repository: IssueReposito
         env=issue_repository.environment,
     )
     assert rejected.returncode != 0
-    assert "not directly on dev" in rejected.stderr
+    assert "not directly on main" in rejected.stderr
 
     created = _start_issue(issue_repository)
     assert created.returncode == 0, created.stderr
@@ -328,7 +338,7 @@ def test_pre_commit_rejects_invalid_linked_context(
         "-b",
         branch,
         str(worktree),
-        "origin/dev",
+        "origin/main",
     )
 
     completed = _run([str(PRE_COMMIT)], cwd=worktree, env=issue_repository.environment)
@@ -346,12 +356,12 @@ def test_pre_push_rejects_protected_destination_before_checks(
         env=issue_repository.environment,
         input_text=(
             "refs/heads/issue/42-guard 1111111111111111111111111111111111111111 "
-            "refs/heads/dev 2222222222222222222222222222222222222222\n"
+            "refs/heads/main 2222222222222222222222222222222222222222\n"
         ),
     )
 
     assert completed.returncode != 0
-    assert "direct pushes to refs/heads/dev are prohibited" in completed.stderr
+    assert "direct pushes to refs/heads/main are prohibited" in completed.stderr
     assert not issue_repository.make_log.exists()
 
 
@@ -368,3 +378,58 @@ def test_pre_push_runs_gate_for_issue_destination(issue_repository: IssueReposit
 
     assert completed.returncode == 0, completed.stderr
     assert issue_repository.make_log.read_text(encoding="utf-8") == "check\n"
+
+
+def test_pre_push_clears_repository_local_git_environment_before_gate(
+    issue_repository: IssueRepository,
+) -> None:
+    environment = issue_repository.environment | {
+        "GIT_DIR": str(issue_repository.control / ".git"),
+        "GIT_WORK_TREE": str(issue_repository.control),
+        "GIT_INDEX_FILE": str(issue_repository.control / ".git" / "index"),
+    }
+
+    completed = _run(
+        [str(PRE_PUSH), "origin", str(issue_repository.origin)],
+        cwd=issue_repository.control,
+        env=environment,
+        input_text=(
+            "refs/heads/issue/42-guard 1111111111111111111111111111111111111111 "
+            "refs/heads/issue/42-guard 0000000000000000000000000000000000000000\n"
+        ),
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    git_environment_log = Path(environment["FAKE_GIT_ENV_LOG"])
+    assert git_environment_log.read_text(encoding="utf-8") == (
+        "GIT_DIR=unset\nGIT_WORK_TREE=unset\nGIT_INDEX_FILE=unset\n"
+    )
+
+
+def test_pull_request_handoff_rechecks_live_refs_after_readback() -> None:
+    publication = CREATE_PULL_REQUEST.read_text(encoding="utf-8").split(
+        "## Publish and verify", maxsplit=1
+    )[1]
+    steps = re.findall(r"(?ms)^\d+\. (.*?)(?=^\d+\. |\Z)", publication)
+    readback_steps = [
+        index
+        for index, step in enumerate(steps)
+        if all(token in step for token in ("rendered body", "issue relationship", "draft state"))
+    ]
+    final_ref_steps = [
+        index
+        for index, step in enumerate(steps)
+        if all(
+            token in step
+            for token in (
+                "`git ls-remote`",
+                "`reviewed_base`",
+                "`reviewed_head`",
+                "demotion-only safeguard",
+            )
+        )
+    ]
+
+    assert len(readback_steps) == 1
+    assert len(final_ref_steps) == 1
+    assert readback_steps[0] < final_ref_steps[0] == len(steps) - 2

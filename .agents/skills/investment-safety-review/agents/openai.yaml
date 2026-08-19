@@ -1,4 +1,4 @@
 interface:
   display_name: "Investment Safety Review"
   short_description: "Review investment-system safety invariants"
-  default_prompt: "Use $investment-safety-review to review changes for authority, durability, evidence, risk, and execution defects."
+  default_prompt: "Use $investment-safety-review alongside general code review to find authority, durability, evidence-time, fail-closed, and execution-safety defects."

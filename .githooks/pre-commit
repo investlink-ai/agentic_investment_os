@@ -9,7 +9,7 @@ fail() {
 branch=$(git symbolic-ref --quiet --short HEAD 2>/dev/null) || \
     fail "commits require an issue branch, not detached HEAD"
 case "$branch" in
-    main | dev) fail "commit issue work in a linked worktree, not directly on $branch" ;;
+    main) fail "commit issue work in a linked worktree, not directly on main" ;;
 esac
 
 case "$branch" in

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Deliver Issue"
+  short_description: "Deliver one issue to a draft PR"
+  default_prompt: "Use $deliver-issue to deliver this ready issue through a verified draft pull request."

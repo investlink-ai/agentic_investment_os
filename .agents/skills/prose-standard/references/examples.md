@@ -39,6 +39,15 @@ ambiguous timeout without duplicating exposure.”
 
 The invariant and consequence matter; the visible control-flow walkthrough does not.
 
+## Commit subjects state outcomes
+
+**Activity log:** `chore: update lifecycle files and tests`
+
+**Balanced:** `feat(lifecycle): persist resumable session checkpoints`
+
+The type and stable capability aid scanning; the imperative outcome explains what the commit makes
+true without duplicating its diff or issue.
+
 ## Preserve a negative guarantee
 
 **Over-trimmed:** “Unused capital stays cash.”
