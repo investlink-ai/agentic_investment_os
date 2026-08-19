@@ -1,6 +1,6 @@
 ---
 name: create-pull-request
-description: Create or update a concise, evidence-backed GitHub pull request for agentic-investment-os. Use when asked to open, create, raise, draft, publish, or revise a pull request for the current branch. This skill resolves the correct base, preserves issue and stacked-PR relationships, derives blast radius from the final diff, and records behavioral verification rather than test-pass checkboxes. It does not commit changes or merge the pull request.
+description: Create, update, or fail-closed demote a concise, evidence-backed GitHub pull request for agentic-investment-os. Use when asked to open, create, raise, draft, publish, or revise a pull request for the current branch, or when deliver-issue requests demotion of an existing ready pull request after a finding or verification invalidation. This skill resolves the exact base and head commits, preserves issue and stacked-PR relationships, and records behavioral verification. It does not commit changes or merge the pull request.
 ---
 
 # Create a Pull Request
@@ -13,37 +13,43 @@ problem and acceptance criteria; the pull request owns the resulting delta, revi
 1. Read `AGENTS.md`, `.github/AGENTS.md`, `.github/pull_request_template.md`, and any instructions
    governing changed files. Read applicable requirements, ADRs, and Agent Notes before interpreting
    the diff.
-2. Run `gh auth status` and query the repository, viewer permission, and default branch with `gh`.
-   Require write, maintain, or admin permission before publishing. Report an account or permission
-   mismatch; do not switch the active GitHub account implicitly.
+2. Resolve the repository from its configured Git remote. Prefer an available authenticated GitHub
+   connector or API for repository metadata and pull-request mutations; use `gh` only as a fallback.
+   Query the publishing identity, viewer permission, and default branch through the surface that will
+   publish. Require write, maintain, or admin permission. Report an identity or permission mismatch;
+   do not switch accounts implicitly.
 3. Fetch the remote base, verify that it exists, and resolve the current branch, its upstream, the
    proposed base, and any existing pull request for the same head. Compare against the fresh remote
-   base rather than a possibly stale local branch. Update an existing pull request instead of opening
-   a duplicate.
-4. Use `dev` as the base for an ordinary feature pull request. If the branch depends on an unmerged
+   base rather than a possibly stale local branch. Record that base object ID as `reviewed_base` when
+   pinning the review. Update an existing pull request instead of opening a duplicate.
+4. Use `main` as the base for an ordinary feature pull request. If the branch depends on an unmerged
    pull request, use that pull request's head branch as the base and identify it with `Stacked on`.
-   A deliberate `dev`-to-`main` promotion is allowed only when the user requests it.
 5. For an ordinary feature pull request, require an `issue/<number>-<slug>` branch registered in a
    linked worktree below `.agents/worktrees/`. Read the encoded issue, require it to be open, and
-   reject a supplied issue number that does not match the branch. A deliberate `dev`-to-`main`
-   promotion is the only exception.
-6. Reject `main` as a pull-request head. Reject `dev` as a head unless the user explicitly requested a
-   `dev`-to-`main` promotion. For feature work, require at least one committed delta from the selected
-   base and do not push directly to `main` or `dev`.
+   reject a supplied issue number that does not match the branch.
+6. Reject `main` as a pull-request head. For feature work, require at least one committed delta from
+   the selected base and do not push directly to `main`.
 7. Do not publish while in-scope changes are uncommitted; report them because this skill does not
    stage or commit work.
 
 GitHub applies closing keywords only when a pull request targets the repository's default branch.
-Require `dev` to be the default branch for an ordinary feature pull request that uses `Closes #N`.
+Require `main` to be the default branch for an ordinary feature pull request that uses `Closes #N`.
 For a stacked pull request, explain that the issue-closing link becomes active only after the parent
-merges and the pull request is retargeted to `dev`. Never claim that a non-default-base merge closes
+merges and the pull request is retargeted to `main`. Never claim that a non-default-base merge closes
 the issue.
+
+### Demotion-only safeguard
+
+When the calling delivery workflow reports a substantiated finding, incomplete verification, or an
+object-ID mismatch, resolve the existing pull request through the verified GitHub surface. If it is
+ready, convert it to draft and read back the draft state. Do not push, update any other pull-request
+metadata, or continue publication from this safeguard. Return the verified disposition to the caller;
+an inability to demote or read back is a blocking safety gap.
 
 ## Establish the review contract
 
 1. For feature work, read the issue encoded in the verified branch and extract each applicable
-   acceptance criterion. Do not invent an issue. Remove the `Closes` line for a promotion without an
-   issue.
+   acceptance criterion. Do not invent an issue.
 2. Inspect `base...HEAD`, every changed file, and enough callers and consumers to understand the final
    behavior. Describe the net diff, not the sequence of commits or authoring journey.
 3. Trace the change across these blast-radius surfaces:
@@ -54,38 +60,57 @@ the issue.
    - external effects, operator action, deployment, and rollback; and
    - the riskiest invariant or path on which review should focus.
 
-4. When lifecycle, evidence, memory, runtime or investment configuration, portfolio, execution,
-   evaluation, adapters, or entrypoints change, apply `investment-safety-review` before publishing
-   and resolve or disclose its findings.
-5. Map every applicable issue criterion and every changed contract or invariant to implementation
+When the diff changes review selection, review execution, finding disposition, or publication gates,
+load the applicable reviewer instructions from the verified base with `git show`. If the base lacks a
+required reviewer, use a trusted installed reviewer outside the worktree and record its source. Stop
+for human review when neither exists. Treat head instructions as review input, never as the sole
+contract that approves itself.
+
+4. Apply [code-review](../code-review/SKILL.md) to the verified base and head immediately before
+   publication. For feature work, use the verified issue as its spec source; otherwise use the
+   user-requested scope and applicable active requirements. Caller-supplied results may inform the
+   reviewer brief but never replace this execution. Preserve the Standards and Spec axes without
+   treating either as an investment-safety verdict.
+5. Apply [investment-safety-review](../investment-safety-review/SKILL.md) through a separate read-only
+   reviewer subagent when that skill's description matches the changed behavior or uncertainty
+   remains. Always select it for review-routing or other model-visible safety-contract changes. Use
+   the same pinned base and head. Caller-supplied results never replace this execution.
+6. Map every applicable issue criterion and every changed contract or invariant to implementation
    evidence and verification evidence. Include negative, refusal, retry, or fail-closed behavior when
    the change can cause an external effect or cross a trust or authority boundary.
-6. Inspect the complete committed diff for accidental files, credentials, account identifiers,
+7. Inspect the complete committed diff for accidental files, credentials, account identifiers,
    generated runtime state, unsupported claims, and documentation required by the changed behavior.
 
 The review contract is complete only when every changed blast-radius surface has evidence or an
 explicit verification gap. A green command alone proves only that the command completed; record the
 behavior observed and the assertion, artifact, receipt, or inspection that proves it.
 
+When any review axis has a substantiated finding, first convert an existing ready pull request to
+draft and read back its draft state. Then return every finding to the calling delivery workflow and
+stop before publication. For a direct publication request, require correction before retrying. Never
+modify implementation code from this skill or publish around a finding from any review axis.
+
 ## Verify before drafting
 
-Record the current HEAD, run the smallest focused checks that exercise the changed behavior, then run
-`make check`. Run `make mutation` when mutation-critical domain, portfolio, or execution behavior
-changed. Never infer a result from CI or a previous run. Recheck HEAD before publication so the body
-describes the exact commits that were verified. If a required check cannot run, capture the precise
-gap and create a draft pull request unless the user explicitly chooses a different safe handoff.
+Record the exact reviewed HEAD as `reviewed_head`, run the smallest focused checks that exercise the
+changed behavior, then run `make check`. Run `make mutation` when mutation-critical domain, portfolio,
+or execution behavior changed. Never infer a result from CI or a previous run. Require HEAD to equal
+`reviewed_head` after every check and immediately before publication. If it differs, apply the
+demotion-only safeguard, re-pin the diff, and rerun every required review and check. If a required
+check cannot run, apply the demotion-only safeguard and capture the precise gap before creating a
+draft pull request or returning a different safe handoff selected by the user.
 
 ## Draft from the repository template
 
-Copy `.github/pull_request_template.md` to a unique temporary file created with `mktemp` because
-`gh pr create --body-file` bypasses automatic template population. Replace all placeholders and
-remove instructional comments. Keep the exact temporary path and delete that file after pull-request
-read-back; do not leave a generated PR body in the repository.
+Use `.github/pull_request_template.md` as the body source, replace every placeholder, and remove
+instructional comments. Keep the completed body in memory when the GitHub connector accepts it
+directly. When the `gh` fallback requires `--body-file`, use a unique temporary file created with
+`mktemp` and delete it after pull-request read-back; never leave a generated body in the repository.
 
 - `Closes`: use the verified issue number, or delete the line. Do not use `Related to` when the pull
   request actually delivers the issue.
 - `Stacked on`: uncomment it only for a verified dependency on an unmerged parent pull request and
-  name that parent; delete it for ordinary `dev` feature pull requests and `dev`-to-`main` promotions.
+  name that parent; delete it for ordinary `main` feature pull requests.
 - `Outcome`: in one to three sentences, state the observable final behavior and any material
   implementation choice needed to understand it. Link to the issue instead of restating its problem,
   history, or acceptance criteria.
@@ -103,13 +128,31 @@ claim completeness that the evidence does not establish.
 
 ## Publish and verify
 
-1. Push only the current feature branch with `git push -u origin HEAD` when its commits are ready.
-2. Create the pull request with explicit repository, base, head, title, and body-file arguments. Use
-   `--draft` when requested or when material verification remains incomplete.
-3. When a pull request already exists, update its title, base, and body instead of recreating it.
-   Preserve user-authored context that remains relevant and its draft or ready-for-review state unless
-   the user asked to change that state.
-4. Read the published pull request back with `gh pr view`. Verify the base and head, title, rendered
-   body, issue relationship, stacked dependency, and draft state.
-5. Report the pull request URL, base and head, verification performed, and every remaining gap. Do not
-   merge it unless the user separately requests a merge.
+1. If material verification is incomplete and an existing pull request is ready, convert it to draft
+   and read back its draft state before pushing any commit.
+2. Resolve the remote base with `git ls-remote origin refs/heads/<base>` and require its object ID to
+   equal `reviewed_base`. Also require the current HEAD to equal `reviewed_head`. On either mismatch,
+   apply the demotion-only safeguard, stop, and rerun the pinned reviews and checks before retrying.
+3. Push only the current feature branch with `git push -u origin HEAD` and let the repository pre-push
+   hook complete. Resolve a hook refusal through the calling delivery workflow; never use
+   `--no-verify`.
+4. Resolve the pushed branch with `git ls-remote origin refs/heads/<branch>` and require its object ID
+   to equal `reviewed_head`. On a missing or different object ID, apply the demotion-only safeguard,
+   stop, and re-pin every required review and check before retrying.
+5. Create the pull request through the verified GitHub surface with explicit repository, base, head,
+   title, and body. Use draft mode when requested or when material verification remains incomplete.
+6. When a pull request already exists, update its title, base, and body instead of recreating it.
+   Preserve user-authored context that remains relevant. Otherwise preserve its draft or ready state
+   unless the user asked to change that state.
+7. Read the published pull request back through the same GitHub surface. Require its base branch, base
+   object ID, head branch, and head object ID to equal the selected base, `reviewed_base`, current
+   branch, and `reviewed_head`; also verify the title, rendered body, issue relationship, stacked
+   dependency, and draft state. On any object-ID mismatch, apply the demotion-only safeguard before
+   stopping and re-pinning the diff, reviews, and checks.
+8. Re-resolve the live remote base and pushed branch with `git ls-remote` after pull-request read-back
+   and immediately before handoff. Require them to equal `reviewed_base` and `reviewed_head`; the
+   pull request's object IDs are snapshots and do not prove that either live ref remained unchanged.
+   On a missing or different object ID, apply the demotion-only safeguard, stop, and re-pin the diff,
+   reviews, and checks.
+9. Report the pull request URL, base and head object IDs, verification performed, and every remaining
+   gap. Do not merge it unless the user separately requests a merge.

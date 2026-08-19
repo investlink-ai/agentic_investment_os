@@ -1,6 +1,6 @@
 ---
 name: prose-standard
-description: Preserve complete technical and financial contracts while writing, reviewing, trimming, or restructuring prose in agentic-investment-os. Use for Markdown, Python docstrings, comments, tests, prompts, model-visible schemas, diagnostics, CLI or report strings, and Agent Notes; also use when prose duplicates an authority document, narrates an authoring session, or is either too sparse or too verbose.
+description: Preserve complete technical and financial contracts while writing, reviewing, trimming, or restructuring prose in agentic-investment-os. Use for Markdown, Python docstrings, comments, commit messages, tests, prompts, model-visible schemas, diagnostics, CLI or report strings, and Agent Notes; also use when prose duplicates an authority document, narrates an authoring session, or is either too sparse or too verbose.
 ---
 
 # Prose Standard
@@ -38,10 +38,18 @@ when omitting it would invite unsafe use or an incorrect simplification.
 
 ## Match prose to its location
 
-- **Public Python docstrings:** document non-obvious return distinctions, typed refusals, units,
-  timestamps, ownership, durability, side effects, and failure behavior. Do not restate annotations.
+- **Public Python docstrings:** begin with a concise imperative summary. Add prose or compact
+  Google-style sections only for non-obvious return distinctions, typed refusals, units, timestamps,
+  ownership, durability, side effects, and failure behavior. Omit sections that merely restate names,
+  annotations, or signatures.
 - **Internal comments:** explain invariants, authority, as-of semantics, effect ordering, concurrency,
   or surprising failure behavior. Let code show ordinary control flow.
+- **Deferred-work comments:** use `TODO(#N): <removal condition>` only when an open issue owns the
+  work. Put durable rationale in its authority owner rather than an inline essay.
+- **Git commit messages:** apply the subject and body contract in
+  [`docs/development.md`](../../../docs/development.md#commit-messages). Preserve the observable
+  outcome and non-obvious constraint; remove editing narration, duplicated issue or PR prose, and
+  temporary-history markers.
 - **Tests:** explain only why a fixture, real entry path, negative control, or indirect observation is
   required. Do not narrate setup and assertions.
 - **Prompts and model-visible schemas:** treat wording and field meaning as behavior. Preserve authority

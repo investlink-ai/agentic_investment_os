@@ -76,3 +76,19 @@ await owned work before returning.
 Resolve runtime paths from validated configuration. Create sensitive temporary state with private
 permissions and unpredictable names, refuse traversal outside the configured root, and unlink links
 without following their targets. Source directories never double as runtime storage.
+
+## Clear ambient repository context before nested Git
+
+Git hooks export repository-local variables such as `GIT_DIR`, `GIT_WORK_TREE`, and `GIT_INDEX_FILE`.
+After a hook finishes its own ref checks, unset every name reported by
+`git rev-parse --local-env-vars` before invoking a gate that can run Git against temporary or foreign
+repositories. A changed working directory cannot override those variables; leaking them can redirect
+fixture commits, indexes, or refs into the caller's repository.
+
+## Revalidate mutable external references at handoff
+
+When approval pins a mutable external reference, resolve it before effects and again after the final
+API read-back, immediately before reporting success. Stored request or pull-request metadata is a
+snapshot and cannot prove that a branch, tag, version, or other live reference remained unchanged.
+Treat a missing or different value as invalidation of the pinned evidence and fail closed before
+handoff.

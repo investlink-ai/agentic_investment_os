@@ -1,6 +1,6 @@
 ---
 name: implement-spec-slice
-description: Implement one coherent vertical slice from the active agentic-investment-os requirements and domain documents. Use when asked to implement, build, start, continue, or complete a product requirement or implementation-sequencing slice involving lifecycle, persistence, evidence, memory, research, portfolio, execution, evaluation, adapters, entrypoints, or runtime configuration. Do not use for explanation-only, review-only, or documentation-only requests.
+description: Implement one coherent vertical product-behavior slice from active agentic-investment-os requirements as a leaf of deliver-issue. Use when deliver-issue routes an open issue involving lifecycle, persistence, evidence, memory, research, portfolio, execution, evaluation, adapters, entrypoints, or runtime configuration. Return the scoped result to deliver-issue; do not use as a standalone issue-delivery workflow or for explanation, review, or documentation-only requests.
 ---
 
 # Implement a Specification Slice
@@ -10,21 +10,27 @@ durability, evidence, or testing rule to make progress appear faster.
 
 ## Establish the slice
 
-1. Require an open issue and apply [start-issue-worktree](../start-issue-worktree/SKILL.md). Continue
-   only from its registered linked worktree on the matching `issue/<number>-<slug>` branch.
-2. Read `AGENTS.md`, the exact `docs/product-requirements.md` outcome in scope, and
+1. Require an open issue. Read its body, comments, parent, and blocked-by relationships; fail closed
+   if those relationships cannot be verified and stop if any direct blocker is open.
+2. Treat the issue as the delivery contract and active repository documents as product and
+   architecture authority; stop on a contradiction or an unsupported proposed requirement.
+3. Require the issue and worktree binding verified by `deliver-issue`. Stop when invoked outside that
+   workflow or when the current root and matching `issue/<number>-<slug>` branch do not match the
+   registered linked worktree.
+4. Read `AGENTS.md`, the exact `docs/product-requirements.md` outcome in scope, and
    `docs/architecture.md`.
-3. Read `CONTEXT.md` and `docs/investment-domain.md` when the slice changes domain language or
+5. Read `CONTEXT.md` and `docs/investment-domain.md` when the slice changes domain language or
    investment rules. Read `docs/module-graph.md` when an import or interface may change. Follow the
    conditional pointers in `AGENTS.md` for configuration, defensive patterns, and testing.
-4. Inspect current code, tests, ADRs, and relevant proposed or implemented Agent Notes. Distinguish
+6. Inspect current code, tests, ADRs, and relevant proposed or implemented Agent Notes. Distinguish
    approved requirements from executable behavior and notes from authority; never infer that a
    scaffolded module or proposal already implements the requirement.
-5. State the smallest vertical outcome that satisfies the request, its public interface, its authority
-   owner, and acceptance criteria traceable to the active documents. Split unrelated outcomes.
+7. State the smallest vertical outcome that satisfies the request, its public interface, its authority
+   owner, and every applicable issue criterion mapped to an active requirement, invariant, or explicit
+   delivery constraint. Split unrelated outcomes.
 
 The slice is established when every planned change is necessary for one observable outcome and every
-acceptance criterion names evidence a test can inspect.
+acceptance criterion names evidence a test can inspect and an observation that would disprove it.
 
 ## Design through a deep interface
 
@@ -79,8 +85,9 @@ needed to prove the behavior.
 2. Run `make format` after Python edits and inspect the complete diff for secrets, generated runtime
    state, source-of-truth duplication, and module-direction violations.
 3. Run `make check`. Resolve failures at their cause; preserve every gate and safety invariant.
-4. Report the implemented requirement, observable evidence, tests run, documentation, ADR, or Agent
-   Note changes, and explicitly deferred work.
+4. Return to `deliver-issue` with status, exact diff scope, the implemented requirement, each issue
+   criterion mapped to observable evidence, tests run, documentation, ADR, or Agent Note changes, and
+   any blocker or explicitly deferred work. Do not select or invoke the next delivery step.
 
 Do not claim the slice complete while a required acceptance path, invalid case, documentation update,
 or repository gate remains unresolved.

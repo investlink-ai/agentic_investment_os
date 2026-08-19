@@ -1,5 +1,5 @@
 Closes #<!-- issue number. Delete the line if there is none. -->
-<!-- **Stacked on:** #N — merge that first. Delete unless the base is not `dev`. -->
+<!-- **Stacked on:** #N — merge that first. Delete unless the base is not `main`. -->
 
 ## Outcome
 

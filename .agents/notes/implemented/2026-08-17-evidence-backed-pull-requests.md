@@ -28,12 +28,16 @@ command, inspection, or artifact and its observed result. It includes relevant n
 paths and names what remains unverified. Passing `make check` or another command is supporting evidence,
 not a completeness claim by itself.
 
-[The pull-request skill](../../skills/create-pull-request/SKILL.md) owns the operational workflow:
-base and issue resolution, final-diff inspection, safety review triggers, evidence collection,
-publication, and read-back verification. Ordinary feature pull requests target `dev`; stacked pull
-requests target their unmerged parent and are retargeted after it merges. Because GitHub activates
-closing keywords only for the default branch, the workflow requires `dev` to be the default branch
-before claiming that `Closes #N` will take effect.
+[The pull-request skill](../../skills/create-pull-request/SKILL.md) owns base and issue resolution,
+final-diff inspection, review-readiness enforcement, evidence collection, publication, and read-back
+verification. Every pull request receives the general Standards and Spec review. The independent
+`investment-safety-review` owns its behavioral selection boundary; uncertainty selects the safety
+review. A caller may supply review results only when they pin the exact base and head. Passing either
+review does not imply that the other passed.
+
+Ordinary feature pull requests target `main`; stacked pull requests target their unmerged parent and
+are retargeted to `main` after it merges. Because `main` is the default branch, GitHub activates
+closing keywords when an ordinary feature pull request merges.
 
 ## Alternatives considered
 
@@ -43,6 +47,12 @@ before claiming that `Closes #N` will take effect.
   the issue or `Blast radius`, and requiring both encourages duplication and empty prose.
 - Using only a summary and test plan was rejected because this system needs explicit visibility into
   authority, durable state, and external effects before merge.
+- Folding investment safety into the general code review was rejected because whole-spec and
+  repository-conformance findings have different scope and severity semantics from reachable
+  authority, financial, provenance, and durability failures.
+- Requiring the investment safety review for every mechanical change was rejected because it adds no
+  assurance when behavior cannot reach a safety-sensitive surface. The general review remains the
+  default, while uncertainty about behavioral reach selects the safety review.
 - Automating body generation in a script was deferred because the work requires semantic inspection
   of the issue, diff, consumers, and evidence; a fixed script would either miss that reasoning or add
   another schema to maintain.
@@ -52,14 +62,17 @@ before claiming that `Closes #N` will take effect.
 Pull-request authors must provide behavioral evidence rather than check boxes, and reviewers receive a
 stable place to assess completeness and the riskiest invariant. Small documentation or harness changes
 remain concise by marking inapplicable blast-radius surfaces as `none` or `unchanged`. Feature work
-depends on `dev` being the repository default branch for automatic issue closure. Stacked work carries
-an explicit retargeting step before its closing keyword becomes effective.
+receives a general code review, and most production features receive the supplemental investment
+safety review because their behavior reaches a listed safety-sensitive surface. Stacked work carries
+an explicit retargeting step to `main` before its closing keyword becomes effective.
 
-The skill does not commit, merge, or push protected branches. It stops when in-scope changes are not
-committed and uses a draft when material verification is incomplete.
+The skill does not implement findings, commit, merge, or push protected branches. It stops when
+in-scope changes are not committed or a substantiated finding lacks an explicit disposition, and uses
+a draft when material verification is incomplete.
 
 ## Verification
 
-The skill structure is validated with the repository skill validator and forward-tested against a
-realistic pull-request drafting request. `make check` verifies the template, skill, documentation,
-and harness integration with the repository's normal gate.
+The review skills are validated with the skill validator. The selection rule classifies changes to
+review routing and model-visible safety contracts as safety-sensitive while keeping unrelated
+mechanical changes conditional on reachable behavior. `make check` verifies the template, skills,
+documentation, and harness integration with the repository's normal gate.

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Plan Stage Issues"
+  short_description: "Plan one capability stage as issues"
+  default_prompt: "Use $plan-stage-issues to draft and publish the next capability stage as reviewed GitHub issues."

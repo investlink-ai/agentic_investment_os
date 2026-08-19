@@ -1,11 +1,11 @@
 ---
 name: start-issue-worktree
-description: Create or resume the guarded linked worktree for an agentic-investment-os GitHub issue. Use before an agent writes tracked files for an issue, when asked to start, begin, implement, fix, or continue an issue, or when an implementation session is still in the dev control checkout. This skill validates the issue relationship, delegates Git mechanics to the repository script, and binds subsequent work to the issue worktree.
+description: Create or resume the guarded linked worktree for an agentic-investment-os GitHub issue. Use when deliver-issue requests workspace binding or the user explicitly requests only worktree setup or resumption. Return the bound path and branch to deliver-issue; do not use this skill as a standalone implementation workflow.
 ---
 
 # Start Issue Worktree
 
-Establish one writable workspace for one open issue. Leave the main `dev` checkout as a clean control
+Establish one writable workspace for one open issue. Leave the primary `main` checkout as a clean control
 checkout and delegate branch and worktree mechanics to `scripts/start-issue.sh`.
 
 ## Establish the issue
@@ -14,7 +14,7 @@ checkout and delegate branch and worktree mechanics to `scripts/start-issue.sh`.
 2. Require a GitHub issue number. Read the issue with `gh`, confirm it is open, and determine whether
    its acceptance criteria are actionable. Do not invent or create an issue without an explicit user
    request.
-3. From the clean main checkout on `dev`, run:
+3. From the clean primary checkout on `main`, run:
 
    ```bash
    ./scripts/start-issue.sh <issue-number>
@@ -47,8 +47,9 @@ The session is bound when its repository root and current branch equal the scrip
 - Let repeated invocation resume the registered worktree. One writing agent uses it at a time; a
   concurrent writer requires a different issue or an explicit stack.
 - Commit only from the linked issue worktree. Publish the first time with `git push -u origin HEAD`;
-  the project hooks prohibit direct pushes to `dev` and `main`.
-- Use `create-pull-request` for review handoff. Ordinary issue branches target `dev`.
+  the project hooks prohibit direct pushes to `main`.
+- Return control to `deliver-issue` for implementation and review handoff. Use `create-pull-request`
+  directly only for a standalone publication request. Ordinary issue branches target `main`.
 - After merge or explicit abandonment, remove only a clean worktree with `git worktree remove`, then
   delete the local branch with `git branch -d`. Leave any refusal intact for human inspection and
   never automate forced cleanup.

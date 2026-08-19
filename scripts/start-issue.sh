@@ -25,18 +25,18 @@ common_dir=$(git rev-parse --path-format=absolute --git-common-dir)
 main_worktree=$(CDPATH= cd -- "$common_dir/.." && pwd -P)
 
 if [ "$control_root" != "$main_worktree" ]; then
-    fail "run from the main dev control checkout, not a linked worktree"
+    fail "run from the main control checkout, not a linked worktree"
 fi
 
 current_branch=$(git symbolic-ref --quiet --short HEAD 2>/dev/null) || \
-    fail "the dev control checkout must not be detached"
-if [ "$current_branch" != "dev" ]; then
-    fail "the control checkout must be on dev, not $current_branch"
+    fail "the main control checkout must not be detached"
+if [ "$current_branch" != "main" ]; then
+    fail "the control checkout must be on main, not $current_branch"
 fi
 
 status=$(git status --porcelain=v1 --untracked-files=all)
 if [ -n "$status" ]; then
-    fail "the dev control checkout must be clean before starting issue work"
+    fail "the main control checkout must be clean before starting issue work"
 fi
 
 if [ ! -d "$control_root/.agents" ] || [ -L "$control_root/.agents" ]; then
@@ -112,8 +112,8 @@ if [ -n "$existing_branches" ]; then
 fi
 
 git fetch origin || fail "cannot fetch origin"
-git rev-parse --verify 'refs/remotes/origin/dev^{commit}' >/dev/null 2>&1 || \
-    fail "origin/dev does not exist"
+git rev-parse --verify 'refs/remotes/origin/main^{commit}' >/dev/null 2>&1 || \
+    fail "origin/main does not exist"
 
 remote_branches=$(git for-each-ref --format='%(refname:short)' \
     "refs/remotes/origin/issue/$issue_number-*")
@@ -121,17 +121,17 @@ if [ -n "$remote_branches" ]; then
     fail "remote issue work already exists; fetch and inspect it before creating a local worktree"
 fi
 
-if ! git merge-base --is-ancestor dev origin/dev; then
-    fail "local dev is ahead of or diverged from origin/dev; reconcile it explicitly"
+if ! git merge-base --is-ancestor main origin/main; then
+    fail "local main is ahead of or diverged from origin/main; reconcile it explicitly"
 fi
-git merge --ff-only origin/dev || fail "cannot fast-forward local dev to origin/dev"
+git merge --ff-only origin/main || fail "cannot fast-forward local main to origin/main"
 
 worktree_path="$worktree_root/$issue_number-$slug"
 if [ -e "$worktree_path" ] || [ -L "$worktree_path" ]; then
     fail "worktree path already exists: $worktree_path"
 fi
 
-base_commit=$(git rev-parse 'refs/remotes/origin/dev^{commit}')
+base_commit=$(git rev-parse 'refs/remotes/origin/main^{commit}')
 git worktree add --no-track -b "$branch" "$worktree_path" "$base_commit" || \
     fail "cannot create the issue worktree"
 
