@@ -1,0 +1,4 @@
+interface:
+  display_name: "Create Issue"
+  short_description: "Create consistent, actionable project issues"
+  default_prompt: "Use $create-issue to draft and create an actionable GitHub issue for this repository."

@@ -15,6 +15,7 @@ harness:
 	test "$$(readlink CLAUDE.md)" = "AGENTS.md"
 	test -L .claude/skills
 	test "$$(readlink .claude/skills)" = "../.agents/skills"
+	test -f .agents/skills/create-issue/SKILL.md
 	test -f .agents/skills/find-simplifications/SKILL.md
 	test -f .agents/skills/code-review/SKILL.md
 	test -f .agents/skills/create-pull-request/SKILL.md

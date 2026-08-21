@@ -27,8 +27,10 @@ outcome and falsifiable acceptance criteria. Active product, domain, architectur
 documents remain authoritative. A pull request owns the delivered delta, blast radius, and
 verification evidence.
 
-The executable agent workflow lives in
-[`plan-stage-issues`](../../skills/plan-stage-issues/SKILL.md); the stable human-facing policy lives in
+The executable decomposition and stage lifecycle live in
+[`plan-stage-issues`](../../skills/plan-stage-issues/SKILL.md). It delegates each role-specific issue
+contract and authorized GitHub write to [`create-issue`](../../skills/create-issue/SKILL.md). The
+stable human-facing policy lives in
 [`docs/development.md`](../../../docs/development.md#stage-planning).
 
 ## Alternatives considered
@@ -50,6 +52,8 @@ The executable agent workflow lives in
 - The native GitHub graph makes the executable frontier visible without a parallel planning artifact.
 - Publication is a deliberate external write and therefore waits for user approval and repository
   write permission.
+- One issue-format and publication workflow serves standalone work, coordination parents, and stage
+  children without moving frontier selection or graph ownership out of stage planning.
 - Parent closure is an explicit, resumable outcome audit owned by the planning skill, not an automatic
   side effect of one child pull request.
 - Milestones, Projects, label taxonomies, sprint objects, registries, and a full-roadmap issue backlog

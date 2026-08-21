@@ -63,6 +63,11 @@ For every acceptance criterion, name what observation would disprove completion.
 issue owns the implementation needed to satisfy it and does not depend on an unstated future issue.
 Reference authoritative prose instead of copying it into the ticket.
 
+Apply [create-issue](../create-issue/SKILL.md) to select and complete the repository template and
+role-specific contract for each coordination parent or implementation child. This skill owns frontier
+selection, decomposition, and relationships; `create-issue` owns issue validation and the GitHub
+mutation safeguards.
+
 Use blocker edges only for real implementation dependencies. Keep the graph acyclic and remove
 transitive or preference-only edges. At least one child should normally be immediately unblocked.
 If none is unblocked, narrow the stage until a child is executable or identify the missing predecessor
@@ -81,27 +86,23 @@ parent relationships.
 Read the child titles once without their bodies. Redraft any issue whose observable capability and
 completion boundary are not clear from its title and one-sentence outcome.
 
-Ask the user to approve the selected frontier, issue granularity, and dependency edges. Stop after
-the draft. Do not create or modify GitHub issues until the user explicitly approves publication.
+Include the complete issue bodies, metadata, and native relationships required by `create-issue` in
+the numbered draft. Ask the user to approve the selected frontier, issue granularity, dependency
+edges, and exact write set. Stop after the draft. Do not create or modify GitHub issues until the
+user explicitly approves publication.
 
 ## Publish the approved graph
 
-1. Confirm the GitHub account, repository, and write permission without switching accounts. Refuse
-   to publish if permission is insufficient.
-2. Re-check open and recently closed issues plus existing parent, sub-issue, and blocked-by
-   relationships. Reuse an open issue only when its outcome and acceptance scope require no material
-   rewrite. Treat a matching closed issue as implementation evidence and re-evaluate the frontier; do
-   not reopen or duplicate it automatically. Stop for renewed approval if the re-check materially
-   changes the approved graph.
-3. For one standalone outcome, create one issue. For a batch, create the parent first, then children
-   in topological order with `gh issue create --parent` and direct `--blocked-by` relationships.
-4. Supply bodies through temporary files outside the repository. Do not create a tracked issue-plan
-   artifact or repeat native relationship metadata in issue prose.
-5. Read every created or reused issue back from GitHub. Verify title, body, URL, state, parent, and
-   blocker relationships against the approved draft before continuing.
-6. If publication partially fails, preserve and report every created issue number. Resume by reading
-   the parent's current sub-issues and matching exact outcomes; never delete and recreate the batch
-   to make it look atomic.
+Apply [create-issue](../create-issue/SKILL.md) to publish the approved standalone issue or graph. Pass
+the unchanged approved preview so it does not ask for redundant approval. Preserve these stage-owned
+constraints:
+
+- create the parent before children and children in topological order;
+- represent hierarchy and direct blockers with native parent, sub-issue, and blocked-by
+  relationships rather than issue prose;
+- create no tracked issue-plan artifact, milestone, project, or label scheme; and
+- on partial publication, resume from verified native relationships and exact outcomes rather than
+  deleting and recreating the graph.
 
 Child pull requests close their child issues. Do not put a closing keyword for the parent in a child
 pull request. Close the parent only after every child is closed and its stage-completion evidence has
@@ -123,7 +124,7 @@ after the audit. Read a closed parent back and verify its final comment, child i
 ## Completion criteria
 
 Planning is complete only when the approved stage—and no speculative later stage—is represented by
-an accurate native issue graph, every child is agent-ready and falsifiable, and the unblocked frontier
-is explicit. Stage completion is complete only when the merged outcome is audited against the parent,
-the evidence is recorded, and the parent's final state is verified. Report issue URLs, direct
-dependencies, and any mismatch or unpublished item.
+an accurate native issue graph, every parent and child passes its role-specific `create-issue`
+contract, and the unblocked frontier is explicit. Stage completion is complete only when the merged
+outcome is audited against the parent, the evidence is recorded, and the parent's final state is
+verified. Report issue URLs, direct dependencies, and any mismatch or unpublished item.

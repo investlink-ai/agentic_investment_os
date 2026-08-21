@@ -22,6 +22,20 @@ make bootstrap
 Bootstrap creates `.venv`, installs the locked development environment, and configures Git to use
 the versioned hooks in `.githooks/`. Setup is complete when `make check` passes.
 
+## Issue authoring
+
+Use the project `create-issue` skill to draft and publish standalone issues or a caller-defined issue
+set. The files under `.github/ISSUE_TEMPLATE/` own the format for features, bugs, tasks, and research;
+active product, domain, architecture, and engineering documents own their requirements. Each
+implementation issue defines one independently verifiable outcome suitable for one worktree and one
+pull request.
+
+Preview the complete write set before publishing. GitHub writes require approval of that preview,
+use only existing repository metadata, and are read back so a partial set can resume without creating
+duplicates. Issue publication grants no authority to start implementation or publish a pull request.
+Use `plan-stage-issues` when the request requires capability-stage decomposition and native issue
+relationships.
+
 ## Stage planning
 
 Plan delivery as dependency-based capability stages, not time-boxed sprints. The
