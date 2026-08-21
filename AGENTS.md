@@ -26,9 +26,10 @@ repository owns implementation authority, executable code, and runtime state.
   Repository templates own body format; use `plan-stage-issues` for capability-stage decomposition.
 - Use the `plan-stage-issues` skill when turning requirements or architecture into delivery work.
   Plan only the next capability frontier and approve its issue graph before publishing it.
-- Use the `deliver-issue` skill when implementing or resuming an open issue. It owns the guarded path
-  from issue through a verified local commit or draft pull request and invokes `start-issue-worktree`
-  before tracked writes; the primary `main` checkout remains a clean control checkout.
+- Use the `deliver-issue` skill when working on an open issue. It owns the guarded issue-to-review
+  handoff and invokes `start-issue-worktree` before tracked writes; the primary `main` checkout
+  remains a clean control checkout. `docs/architecture.md#development-delivery-authority` owns its
+  authorization boundary; `docs/development.md#daily-workflow` owns its operating procedure.
 - Treat repository hooks as mandatory delivery gates. Resolve their refusal through the owning issue
   workflow; never commit or push with `--no-verify`.
 - Review changes to agent-review or publication gates with reviewer instructions outside the changed
