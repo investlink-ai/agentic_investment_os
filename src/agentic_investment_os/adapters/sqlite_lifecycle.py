@@ -16,15 +16,19 @@ from agentic_investment_os.domain.lifecycle import (
     AdvanceRequest,
     CheckpointResult,
     CheckpointWrite,
+    DurableAdvanceConflict,
+    DurableAdvanceRefusal,
     IdempotencyKey,
     InputRefusal,
     InvalidLifecycleStateError,
     LifecyclePersistenceError,
     LifecyclePhase,
     LifecycleProgress,
+    LifecycleStatus,
     PinnedRunIdentity,
     StartResult,
     StreamConflict,
+    derive_lifecycle_status,
     is_sha256,
 )
 
@@ -49,6 +53,10 @@ _LOAD_CONFLICT_SQL = (
 _ENABLE_FOREIGN_KEYS_SQL = "PRAGMA foreign_keys = ON"
 _BUSY_TIMEOUT_SQL = "PRAGMA busy_timeout = 5000"
 _BEGIN_IMMEDIATE_SQL = "BEGIN IMMEDIATE"
+_DROP_PROJECTION_SQL = (
+    "DROP TABLE IF EXISTS lifecycle_status_projection"  # pragma: no mutate
+    # SQLite keywords and identifiers are case-insensitive, so case-only mutants are equivalent.
+)
 _PIN_REQUIRES_RECONCILIATION = "PinRunInputs requires the ReconcilePriorState checkpoint"
 _REQUIRED_STREAM_MISSING = "required lifecycle stream is missing or terminal"
 _READ_FAILED = "SQLite lifecycle read failed"
@@ -63,6 +71,10 @@ _INVALID_CHECKPOINT_ORDER = "lifecycle stream checkpoint order is invalid"
 _INVALID_RECORDED_AT = "invalid recorded_at in lifecycle ledger"
 _UNKNOWN_REASON_CODE = "unknown reason_code in lifecycle ledger"
 _CONFLICT_WITHOUT_COMPLETION = "lifecycle conflict does not belong to a completed stream"
+_INVALID_REFUSAL_ORDER = "lifecycle refusal order is invalid"
+_INVALID_REFUSAL_KEY = "invalid idempotency_key in lifecycle refusal ledger"
+_INVALID_UNKEYED_REASON = "unkeyed lifecycle refusal reason is invalid"
+_INVALID_CONFLICT_KEY = "invalid idempotency_key in lifecycle conflict ledger"
 _RECORDED_AT_NOT_AWARE = "recorded_at must be timezone-aware"
 _CLOCK_NOT_AWARE = "lifecycle clock must return a timezone-aware timestamp"
 
@@ -129,6 +141,19 @@ CREATE TRIGGER IF NOT EXISTS advance_conflicts_are_append_only_delete
 BEFORE DELETE ON advance_conflicts BEGIN SELECT RAISE(ABORT, 'append-only conflict ledger'); END;
 """
 
+_PROJECTION_SCHEMA = """
+CREATE TABLE lifecycle_status_projection (
+    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+    active_phase TEXT,
+    last_completed_session TEXT,
+    run_id TEXT,
+    configuration_version INTEGER,
+    configuration_hash TEXT,
+    liveness TEXT NOT NULL,
+    durable_reason TEXT
+) STRICT;
+"""
+
 
 @dataclass(frozen=True, slots=True)
 class RuntimeRootRefusal:
@@ -141,12 +166,51 @@ class _RequestHistory:
     conflict: AdvanceReceipt | None
 
 
-def prepare_runtime_database(state_root: Path) -> Path | RuntimeRootRefusal:
-    """Create a private state root and database file without following a final symlink."""
+@dataclass(frozen=True, slots=True)
+class PreparedRuntimeDatabase:
+    """Identify a validated database path and whether this call created it."""
+
+    path: Path
+    created: bool
+
+
+@dataclass(frozen=True, slots=True)
+class _RuntimeDatabaseLocation:
+    path: Path
+    root_created: bool
+    database_exists: bool
+
+
+def prepare_runtime_database(state_root: Path) -> PreparedRuntimeDatabase | RuntimeRootRefusal:
+    """Validate private runtime storage and create a missing database."""
+    location = _locate_runtime_database(state_root)
+    if isinstance(location, RuntimeRootRefusal):
+        return location
+    if location.database_exists:
+        return PreparedRuntimeDatabase(path=location.path, created=False)
+    return _create_runtime_database(location.path)
+
+
+def open_runtime_database(state_root: Path) -> PreparedRuntimeDatabase | RuntimeRootRefusal:
+    """Validate runtime storage without replacing a database missing from an existing root."""
+    location = _locate_runtime_database(state_root)
+    if isinstance(location, RuntimeRootRefusal):
+        return location
+    if location.database_exists:
+        return PreparedRuntimeDatabase(path=location.path, created=False)
+    if location.root_created:
+        return _create_runtime_database(location.path)
+    return PreparedRuntimeDatabase(path=location.path, created=False)
+
+
+def _locate_runtime_database(
+    state_root: Path,
+) -> _RuntimeDatabaseLocation | RuntimeRootRefusal:
     try:
         if state_root.is_symlink():
             return _invalid_root()
-        if state_root.exists():
+        root_created = not state_root.exists()
+        if not root_created:
             if not state_root.is_dir() or stat.S_IMODE(state_root.stat().st_mode) & 0o077:
                 return _invalid_root()
         else:
@@ -154,15 +218,27 @@ def prepare_runtime_database(state_root: Path) -> Path | RuntimeRootRefusal:
         database = state_root / _DATABASE_NAME
         if database.is_symlink():
             return _invalid_root()
-        if database.exists():
-            if not database.is_file() or stat.S_IMODE(database.stat().st_mode) & 0o077:
-                return _invalid_root()
-        else:
-            descriptor = os.open(database, _PRIVATE_DATABASE_FLAGS, 0o600)
-            os.close(descriptor)
-        return database
+        database_exists = database.exists()
+        if database_exists and (
+            not database.is_file() or stat.S_IMODE(database.stat().st_mode) & 0o077
+        ):
+            return _invalid_root()
+        return _RuntimeDatabaseLocation(
+            path=database,
+            root_created=root_created,
+            database_exists=database_exists,
+        )
     except OSError:
         return _invalid_root()
+
+
+def _create_runtime_database(database: Path) -> PreparedRuntimeDatabase | RuntimeRootRefusal:
+    try:
+        descriptor = os.open(database, _PRIVATE_DATABASE_FLAGS, 0o600)
+        os.close(descriptor)
+    except OSError:
+        return _invalid_root()
+    return PreparedRuntimeDatabase(path=database, created=True)
 
 
 def _invalid_root() -> RuntimeRootRefusal:
@@ -172,14 +248,46 @@ def _invalid_root() -> RuntimeRootRefusal:
 class SQLiteLifecycleLedger:
     """Store each lifecycle transition in its own atomic append transaction."""
 
-    def __init__(self, database: Path) -> None:
+    def __init__(self, database: Path, *, initialize_schema: bool = True) -> None:
         self._database = database
-        self._write(lambda connection: connection.executescript(_SCHEMA))
+        if initialize_schema:
+            self._write(lambda connection: connection.executescript(_SCHEMA))
 
     def load_by_idempotency_key(
         self, key: IdempotencyKey
     ) -> LifecycleProgress | AdvanceReceipt | None:
         return self._read(lambda connection: self._load(connection, key))
+
+    def rebuild_status(self) -> LifecycleStatus:
+        """Replace the disposable status projection after validating all source history."""
+
+        def operation(connection: sqlite3.Connection) -> LifecycleStatus:
+            status = _reconstruct_status(
+                connection.execute(
+                    """
+                    SELECT stream_id, sequence, idempotency_key, session, mode,
+                           configuration_version, configuration_hash, run_id,
+                           event_kind, completed_phase, recorded_at
+                    FROM lifecycle_events ORDER BY stream_id, sequence
+                    """
+                ).fetchall(),
+                connection.execute(
+                    """
+                    SELECT refusal_id, idempotency_key, reason_code, recorded_at
+                    FROM advance_refusals ORDER BY refusal_id
+                    """
+                ).fetchall(),
+                connection.execute(
+                    """
+                    SELECT idempotency_key, reason_code, recorded_at
+                    FROM advance_conflicts ORDER BY idempotency_key
+                    """
+                ).fetchall(),
+            )
+            _replace_status_projection(connection, status)
+            return status
+
+        return self._write(operation)
 
     def start(
         self,
@@ -507,7 +615,7 @@ class SQLiteLifecycleLedger:
         )
 
     def _connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self._database)
+        connection = sqlite3.connect(f"{self._database.as_uri()}?mode=rw", uri=True)
         connection.execute(_ENABLE_FOREIGN_KEYS_SQL)
         connection.execute(_BUSY_TIMEOUT_SQL)
         return connection
@@ -580,6 +688,83 @@ def _reconstruct_progress(rows: list[tuple[object, ...]]) -> LifecycleProgress:
     return LifecycleProgress(request, identity, phase, len(rows) - 1)
 
 
+def _reconstruct_status(
+    event_rows: list[tuple[object, ...]],
+    refusal_rows: list[tuple[object, ...]],
+    conflict_rows: list[tuple[object, ...]],
+) -> LifecycleStatus:
+    streams: dict[str, list[tuple[object, ...]]] = {}
+    for row in event_rows:
+        stream_id = _text(row[0], "stream_id")
+        streams.setdefault(stream_id, []).append(row)
+
+    progresses: list[LifecycleProgress] = []
+    for rows in streams.values():
+        progress = _reconstruct_progress(rows)
+        progresses.append(progress)
+
+    refusals = _reconstruct_refusals(refusal_rows)
+    conflicts = _reconstruct_conflicts(conflict_rows)
+    return derive_lifecycle_status(tuple(progresses), tuple(refusals), tuple(conflicts))
+
+
+def _reconstruct_refusals(rows: list[tuple[object, ...]]) -> list[DurableAdvanceRefusal]:
+    refusals: list[DurableAdvanceRefusal] = []
+    for expected_id, row in enumerate(rows, start=1):
+        refusal_id = _integer(row[0], "refusal_id")
+        if refusal_id != expected_id:
+            raise InvalidLifecycleStateError(_INVALID_REFUSAL_ORDER)
+        key = _optional_idempotency_key(row[1])
+        reason = _failure_reason(row[2])
+        if (key is None) != (reason is AdvanceFailureReason.INVALID_IDEMPOTENCY_KEY):
+            raise InvalidLifecycleStateError(_INVALID_UNKEYED_REASON)
+        _aware_timestamp(row[3])
+        refusals.append(DurableAdvanceRefusal(key, reason))
+    return refusals
+
+
+def _reconstruct_conflicts(rows: list[tuple[object, ...]]) -> list[DurableAdvanceConflict]:
+    conflicts: list[DurableAdvanceConflict] = []
+    for row in rows:
+        key = IdempotencyKey.parse(row[0])
+        if key is None:
+            raise InvalidLifecycleStateError(_INVALID_CONFLICT_KEY)
+        reason = _failure_reason(row[1])
+        _aware_timestamp(row[2])
+        conflicts.append(DurableAdvanceConflict(key, reason))
+    return conflicts
+
+
+def _replace_status_projection(
+    connection: sqlite3.Connection,
+    status: LifecycleStatus,
+) -> None:
+    connection.execute(_DROP_PROJECTION_SQL)
+    connection.execute(_PROJECTION_SCHEMA)
+    identity = status.pinned_run_identity
+    connection.execute(
+        """
+        INSERT INTO lifecycle_status_projection (
+            singleton, active_phase, last_completed_session, run_id,
+            configuration_version, configuration_hash, liveness, durable_reason
+        ) VALUES (1, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            None if status.active_phase is None else status.active_phase.value,
+            (
+                None
+                if status.last_completed_session is None
+                else status.last_completed_session.isoformat()
+            ),
+            None if identity is None else identity.run_id,
+            None if identity is None else identity.configuration_version,
+            None if identity is None else identity.configuration_hash,
+            status.liveness.value,
+            None if status.durable_reason is None else status.durable_reason.value,
+        ),
+    )
+
+
 def _text(value: object, field: str) -> str:
     if not isinstance(value, str) or not value:
         message = f"invalid {field} in lifecycle ledger"
@@ -613,6 +798,15 @@ def _failure_reason(value: object) -> AdvanceFailureReason:
         return AdvanceFailureReason(text)
     except ValueError as error:
         raise InvalidLifecycleStateError(_UNKNOWN_REASON_CODE) from error
+
+
+def _optional_idempotency_key(value: object) -> IdempotencyKey | None:
+    if value is None:
+        return None
+    key = IdempotencyKey.parse(value)
+    if key is None:
+        raise InvalidLifecycleStateError(_INVALID_REFUSAL_KEY)
+    return key
 
 
 def _aware_timestamp(value: object) -> datetime:

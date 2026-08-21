@@ -1,4 +1,4 @@
-"""Advance a Market Session through the implemented durable checkpoints."""
+"""Advance and report a Market Session through durable lifecycle capabilities."""
 
 from __future__ import annotations
 
@@ -17,6 +17,8 @@ from agentic_investment_os.domain.lifecycle import (
     LifecycleLedger,
     LifecyclePhase,
     LifecycleProgress,
+    LifecycleStatus,
+    LifecycleStatusProjection,
     PinnedRunIdentity,
     StreamConflict,
 )
@@ -122,3 +124,13 @@ def _completed_receipt(
     if receipt is None:
         raise InvalidLifecycleStateError(_INCOMPLETE_CHECKPOINT_RESULT)
     return receipt
+
+
+@dataclass(frozen=True, slots=True)
+class Status:
+    """Rebuild and return lifecycle status without advancing authoritative history."""
+
+    projection: LifecycleStatusProjection
+
+    def __call__(self) -> LifecycleStatus:
+        return self.projection.rebuild_status()
