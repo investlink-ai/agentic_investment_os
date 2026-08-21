@@ -16,6 +16,8 @@ committed checkpoint; it never guesses whether an effect occurred.
 A lifecycle key does not make broker submission, outcome recording, or evidence ingestion idempotent.
 Give each effect a stable domain identity and enforce uniqueness at its authoritative store. Replays
 return the prior disposition or append a new observation; they do not duplicate exposure or history.
+When hostile input supplies no trustworthy key, bound identical durable refusals without retaining
+the hostile value.
 
 ## Report independent outcomes independently
 

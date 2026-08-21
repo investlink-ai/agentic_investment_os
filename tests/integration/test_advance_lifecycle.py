@@ -268,7 +268,26 @@ def test_invalid_required_input_has_a_durable_fail_closed_receipt(tmp_path: Path
         mode="champion",
         idempotency_key="not valid",
     )
+    invalid_key_replay = capability(
+        session="2026-08-21",
+        mode="champion",
+        idempotency_key="not valid",
+    )
+    another_invalid_key = capability(
+        session="2026-08-21",
+        mode="champion",
+        idempotency_key="also not valid",
+    )
     assert invalid_key.failure_reason == "invalid_idempotency_key"
+    assert invalid_key_replay == invalid_key
+    assert another_invalid_key == invalid_key
+    with sqlite3.connect(state_root / "lifecycle.sqlite3") as connection:
+        assert connection.execute(
+            """
+            SELECT COUNT(*) FROM advance_refusals
+            WHERE idempotency_key IS NULL AND reason_code = 'invalid_idempotency_key'
+            """
+        ).fetchone() == (1,)
 
 
 def test_completed_request_cannot_be_shadowed_by_a_later_invalid_reuse(tmp_path: Path) -> None:

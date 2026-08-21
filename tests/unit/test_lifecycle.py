@@ -208,7 +208,7 @@ def test_runtime_configuration_is_complete_immutable_and_deterministically_hashe
                     {"schema_version": 1, "state_root": "/runtime/state", "extra": True},
                 ),
             ),
-            ConfigurationRefusal(ConfigurationRefusalCode.UNKNOWN_FIELD, ("extra",)),
+            ConfigurationRefusal(ConfigurationRefusalCode.UNKNOWN_FIELD),
         ),
         (
             (ConfigurationSource("file", {"schema_version": 2, "state_root": "/runtime/state"}),),
@@ -240,7 +240,9 @@ def test_runtime_configuration_rejects_invalid_sources(
 
 
 def test_rejected_configuration_does_not_disclose_unknown_values(tmp_path: Path) -> None:
+    max_bounded_refusal_length = 100
     sentinel = "value-never-persisted"
+    hostile_field = f"secret-field-{sentinel}-{'x' * 5_000}"
     resolution = resolve_runtime_configuration(
         (
             ConfigurationSource(
@@ -248,15 +250,16 @@ def test_rejected_configuration_does_not_disclose_unknown_values(tmp_path: Path)
                 {
                     "schema_version": 1,
                     "state_root": str(tmp_path / "state"),
-                    "broker_secret": sentinel,
+                    hostile_field: sentinel,
                 },
             ),
         ),
         repository_root=Path(__file__).resolve().parents[2],
     )
 
-    assert isinstance(resolution, ConfigurationRefusal)
+    assert resolution == ConfigurationRefusal(ConfigurationRefusalCode.UNKNOWN_FIELD)
     assert sentinel not in repr(resolution)
+    assert len(repr(resolution)) < max_bounded_refusal_length
 
 
 @pytest.mark.parametrize(

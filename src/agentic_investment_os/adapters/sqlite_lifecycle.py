@@ -38,6 +38,10 @@ _STREAM_EXISTS_SQL = "SELECT 1 FROM lifecycle_events WHERE stream_id = ? LIMIT 1
 _LOAD_REFUSAL_SQL = (
     "SELECT reason_code, recorded_at FROM advance_refusals WHERE idempotency_key = ?"
 )
+_LOAD_UNKEYED_REFUSAL_SQL = """
+SELECT reason_code, recorded_at FROM advance_refusals
+WHERE idempotency_key IS NULL AND reason_code = ?
+"""
 _ENABLE_FOREIGN_KEYS_SQL = "PRAGMA foreign_keys = ON"
 _BUSY_TIMEOUT_SQL = "PRAGMA busy_timeout = 5000"
 _BEGIN_IMMEDIATE_SQL = "BEGIN IMMEDIATE"
@@ -95,6 +99,10 @@ CREATE TABLE IF NOT EXISTS advance_refusals (
     ),
     recorded_at TEXT NOT NULL
 ) STRICT;
+
+CREATE UNIQUE INDEX IF NOT EXISTS one_unkeyed_refusal_per_reason
+ON advance_refusals(reason_code)
+WHERE idempotency_key IS NULL;
 
 CREATE TRIGGER IF NOT EXISTS lifecycle_events_are_append_only_update
 BEFORE UPDATE ON lifecycle_events BEGIN SELECT RAISE(ABORT, 'append-only lifecycle ledger'); END;
@@ -275,7 +283,11 @@ class SQLiteLifecycleLedger:
     ) -> AdvanceReceipt:
         def operation(connection: sqlite3.Connection) -> AdvanceReceipt:
             resolved_reason = reason_code
-            if key is not None:
+            if key is None:
+                existing = self._load_unkeyed_refusal(connection, reason_code)
+                if existing is not None:
+                    return existing
+            else:
                 existing = self._load_refusal(connection, key)
                 if existing is not None:
                     return existing
@@ -340,6 +352,18 @@ class SQLiteLifecycleLedger:
     @staticmethod
     def _load_refusal(connection: sqlite3.Connection, key: IdempotencyKey) -> AdvanceReceipt | None:
         row = connection.execute(_LOAD_REFUSAL_SQL, (key.value,)).fetchone()
+        if row is None:
+            return None
+        reason = _failure_reason(row[0])
+        _aware_timestamp(row[1])
+        return AdvanceReceipt.failed_closed(reason)
+
+    @staticmethod
+    def _load_unkeyed_refusal(
+        connection: sqlite3.Connection,
+        reason_code: AdvanceFailureReason,
+    ) -> AdvanceReceipt | None:
+        row = connection.execute(_LOAD_UNKEYED_REFUSAL_SQL, (reason_code.value,)).fetchone()
         if row is None:
             return None
         reason = _failure_reason(row[0])

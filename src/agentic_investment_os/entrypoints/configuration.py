@@ -64,6 +64,7 @@ _UNSUPPORTED_VERSION_REFUSAL = ConfigurationRefusal(
 _INVALID_STATE_ROOT_REFUSAL = ConfigurationRefusal(
     ConfigurationRefusalCode.INVALID_STATE_ROOT, _STATE_ROOT_FIELDS
 )
+_UNKNOWN_FIELD_REFUSAL = ConfigurationRefusal(ConfigurationRefusalCode.UNKNOWN_FIELD)
 
 
 def resolve_runtime_configuration(
@@ -83,12 +84,8 @@ def _merge_sources(
 ) -> dict[str, object] | ConfigurationRefusal:
     merged: dict[str, object] = {}
     for source in sources:
-        unknown = set(source.values) - _FIELDS
-        if unknown:
-            return ConfigurationRefusal(
-                ConfigurationRefusalCode.UNKNOWN_FIELD,
-                tuple(sorted(str(field) for field in unknown)),
-            )
+        if any(field not in _FIELDS for field in source.values):
+            return _UNKNOWN_FIELD_REFUSAL
         for field, value in source.values.items():
             if field in merged:
                 previous = merged[field]
