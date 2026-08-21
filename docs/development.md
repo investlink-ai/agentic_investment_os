@@ -88,10 +88,10 @@ independently protect `main` because local hooks are not remote enforcement.
 
 Use `deliver-issue` as the agent entrypoint for a ready issue. It selects an implementation path from
 the issue and current code, keeps supporting skills conditional, remediates findings against a pinned
-commit, and creates a draft pull request only when publication is authorized. Detailed routing lives
-in the skill. One strong delivery agent remains the sole writer and applies implementation skills
-inline; independent Standards, Spec, and conditional investment-safety reviewers are read-only
-subagents. The stable local loop remains:
+commit, and creates or updates a draft pull request after the exact final commit passes its gates and
+reviews. Detailed routing lives in the skill. One strong delivery agent remains the sole writer and
+applies implementation skills inline; independent Standards, Spec, and conditional investment-safety
+reviewers are read-only subagents. The stable local loop remains:
 
 1. Confirm the issue has no open blocker, enter its linked worktree, then read the documents referenced
    by the relevant `AGENTS.md` trigger and search applicable Agent Notes before making a durable
@@ -109,12 +109,15 @@ installs the locked environment and runs the same `make check` target. Hooks and
 not substitutes for focused tests. Treat a hook refusal as a failed gate to resolve through the issue
 worktree; never commit or push with `--no-verify`.
 
-An implementation or fix request authorizes local issue-worktree edits, checks, and commits. Pushing
-the branch and creating a draft pull request require an explicit delivery, shipping, push, or pull-
-request request. Merge, deployment, stage closure, and issue-graph publication remain separately
-authorized actions. Fail-closed demotion of an existing ready pull request is always authorized when
-the current issue has a substantiated finding, incomplete material verification, or an object-ID
-mismatch; it must not push commits or change other pull-request metadata.
+A request to work on, implement, fix, refactor, document, complete, resume, deliver, or ship a numbered
+issue authorizes local edits, checks, commits, issue-branch push, and creation or update of a draft
+pull request after the exact final commit passes required gates and reviews. An explicit local-only or
+no-publication restriction stops after the verified commit. A coding request not bound to a numbered
+issue does not authorize GitHub publication. Marking a pull request ready, merging, deployment, issue
+or stage closure, issue-graph publication, and worktree cleanup remain separately authorized actions.
+Fail-closed demotion of an existing ready pull request is always authorized when the current issue has
+a substantiated finding, incomplete material verification, or an object-ID mismatch; it must not push
+commits or change other pull-request metadata.
 
 ## Commit messages
 

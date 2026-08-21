@@ -1,13 +1,13 @@
 ---
 name: deliver-issue
-description: Deliver one ready agentic-investment-os GitHub issue through a guarded worktree, context-appropriate implementation, review remediation, verification, and human-ready handoff. Use when asked to implement, fix, refactor, document, complete, resume, deliver, or ship a numbered issue. Create a draft pull request when the request authorizes publication; never plan a capability stage, merge, deploy, or close a parent stage from this skill.
+description: Deliver one ready agentic-investment-os GitHub issue through a guarded worktree, context-appropriate implementation, review remediation, verification, and a draft pull request. Use when asked to work on, implement, fix, refactor, document, complete, resume, deliver, or ship a numbered issue. Follow the repository authorization contract for a narrower handoff; never plan a capability stage, merge, deploy, or close an issue or stage from this skill.
 ---
 
 # Deliver an Issue
 
-Own the issue lifecycle from an actionable issue to a verified local commit or draft pull request.
-Apply specialized implementation skills inline and delegate independent review without copying the
-leaf skills' procedures.
+Own the issue lifecycle from an actionable issue through its authorized review handoff. Apply
+specialized implementation skills inline and delegate independent review without copying the leaf
+skills' procedures.
 
 ## Own the delivery path
 
@@ -116,16 +116,16 @@ verification gaps or unresolved reviewer uncertainty separately; neither can sil
 
 ## Hand off for human review
 
-When publication is authorized, apply [create-pull-request](../create-pull-request/SKILL.md) in draft
-mode and provide the pinned review history and verification evidence as reviewer context, not as a
-replacement for publication-time review. Let that skill verify the remote base, push the issue branch,
-publish or update the pull request, and read it back. If it finds a new readiness defect, return to the
-review loop rather than publishing around it.
+When the authorization contract selects publication, apply
+[create-pull-request](../create-pull-request/SKILL.md) in draft mode and provide the pinned review
+history and verification evidence as reviewer context, not as a replacement for publication-time
+review. Let that skill verify the remote base, push the issue branch, publish or update the pull
+request, and read it back. If it finds a new readiness defect, return to the review loop rather than
+publishing around it.
 
-Without publication authority, stop after the verified local commit and report the exact branch,
-commit, checks, review dispositions, and next external action. Never merge the pull request from this
-skill.
+When the authorization contract selects a local handoff, stop after the verified commit and report
+the exact branch, commit, checks, review dispositions, and omitted external action. Never merge the
+pull request from this skill.
 
 Delivery is complete only when every issue criterion has observable evidence, the exact final commit
-passes required gates and reviews, and the authorized handoff is either a verified local commit or a
-read-back draft pull request ready for human review.
+passes required gates and reviews, and the selected handoff is verified.

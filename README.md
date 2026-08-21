@@ -10,8 +10,10 @@ isolated Research Lab.
 
 ## Status
 
-Engineering scaffold only. The approved design originated in Sam's Second Brain; active repository
-documentation now owns implementation authority and has no runtime dependency on that source.
+Stage 1 implements `Advance` through the durable `PinRunInputs` checkpoint with validated runtime
+configuration and an append-only SQLite lifecycle ledger. Research, portfolio, execution, evaluation,
+and later lifecycle phases remain scaffolds. Active repository documentation owns implementation
+authority and the runtime has no dependency on the design's Second Brain origin.
 
 ## Setup
 

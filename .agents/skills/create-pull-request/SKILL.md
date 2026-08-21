@@ -1,6 +1,6 @@
 ---
 name: create-pull-request
-description: Create, update, or fail-closed demote a concise, evidence-backed GitHub pull request for agentic-investment-os. Use when asked to open, create, raise, draft, publish, or revise a pull request for the current branch, or when deliver-issue requests demotion of an existing ready pull request after a finding or verification invalidation. This skill resolves the exact base and head commits, preserves issue and stacked-PR relationships, and records behavioral verification. It does not commit changes or merge the pull request.
+description: Create, update, or fail-closed demote a concise, evidence-backed GitHub pull request for agentic-investment-os. Use when asked to open, create, raise, draft, publish, or revise a pull request for the current branch, or when deliver-issue hands off a verified commit or requests demotion of an existing ready pull request after a finding or verification invalidation. This skill resolves the exact base and head commits, preserves issue and stacked-PR relationships, and records behavioral verification. It does not commit changes or merge the pull request.
 ---
 
 # Create a Pull Request

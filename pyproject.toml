@@ -128,7 +128,11 @@ skip_covered = false
 [tool.mutmut]
 source_paths = ["src"]
 only_mutate = [
+  "src/agentic_investment_os/adapters/sqlite_lifecycle.py",
+  "src/agentic_investment_os/application/lifecycle.py",
   "src/agentic_investment_os/domain/*",
+  "src/agentic_investment_os/entrypoints/configuration.py",
+  "src/agentic_investment_os/entrypoints/lifecycle.py",
   "src/agentic_investment_os/portfolio/*",
   "src/agentic_investment_os/execution/*",
 ]
@@ -140,5 +144,6 @@ pytest_add_cli_args_test_selection = [
   "tests/unit",
   "tests/integration",
   "tests/contract",
+  "--ignore=tests/integration/test_issue_worktree_harness.py",
 ]
 mutate_only_covered_lines = true

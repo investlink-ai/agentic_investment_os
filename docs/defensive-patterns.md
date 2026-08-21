@@ -16,6 +16,8 @@ committed checkpoint; it never guesses whether an effect occurred.
 A lifecycle key does not make broker submission, outcome recording, or evidence ingestion idempotent.
 Give each effect a stable domain identity and enforce uniqueness at its authoritative store. Replays
 return the prior disposition or append a new observation; they do not duplicate exposure or history.
+When hostile input supplies no trustworthy key, bound identical durable refusals without retaining
+the hostile value.
 
 ## Report independent outcomes independently
 
@@ -45,7 +47,8 @@ packets, and broker responses are boundary data even when produced by our own ad
 
 Map stale, partial, contradictory, unauthorized, or unvalidated state to an explicit no-action or
 failure disposition. Persist enough context to reproduce the refusal. Never manufacture defaults,
-skip a required stage, or reuse a stale artifact to keep the lifecycle moving.
+skip a required stage, or reuse a stale artifact to keep the lifecycle moving. Once recorded, a
+terminal refusal takes precedence over partial checkpoints for the same idempotency key.
 
 ## Publish executable artifacts atomically
 
