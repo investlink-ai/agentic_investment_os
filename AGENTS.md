@@ -22,6 +22,8 @@ repository owns implementation authority, executable code, and runtime state.
   concurrency, filesystem handling, or execution.
 - Read `docs/testing.md` before adding or changing tests; use `docs/development.md` for setup and
   dependency commands.
+- Use the `create-issue` skill to draft or publish a standalone issue or caller-defined issue set.
+  Repository templates own body format; use `plan-stage-issues` for capability-stage decomposition.
 - Use the `plan-stage-issues` skill when turning requirements or architecture into delivery work.
   Plan only the next capability frontier and approve its issue graph before publishing it.
 - Use the `deliver-issue` skill when implementing or resuming an open issue. It owns the guarded path
