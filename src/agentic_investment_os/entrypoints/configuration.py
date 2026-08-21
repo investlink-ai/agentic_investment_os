@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import shutil
+import subprocess
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
@@ -16,8 +19,7 @@ _FIELDS = frozenset({"schema_version", "state_root"})
 _IGNORED_RUNTIME_ROOTS = frozenset({"artifacts", "data", "var"})
 _SCHEMA_VERSION_FIELDS = ("schema_version",)
 _STATE_ROOT_FIELDS = ("state_root",)
-_GITIGNORE_NAME = ".gitignore"
-_TEXT_ENCODING = "utf-8"
+_LIFECYCLE_DATABASE_NAME = "lifecycle.sqlite3"
 
 
 class ConfigurationRefusalCode(StrEnum):
@@ -163,15 +165,40 @@ def _validate_repository_location(
         relative = state_root.relative_to(resolved_repository)
         if relative.parts[0] not in _IGNORED_RUNTIME_ROOTS:
             return _INVALID_STATE_ROOT_REFUSAL
-        if f"/{relative.parts[0]}/" not in _gitignore_lines(resolved_repository):
+        if not _git_ignores_runtime_state(state_root, resolved_repository):
             return _INVALID_STATE_ROOT_REFUSAL
 
     return state_root
 
 
-def _gitignore_lines(repository_root: Path) -> frozenset[str]:
-    ignore_file = repository_root / _GITIGNORE_NAME
-    if not ignore_file.is_file():
-        return frozenset()
-    content = str(ignore_file.read_bytes(), encoding=_TEXT_ENCODING)
-    return frozenset(content.splitlines())
+def _git_ignores_runtime_state(state_root: Path, repository_root: Path) -> bool:
+    git = shutil.which("git")
+    if git is None:
+        return False
+    relative_root = state_root.relative_to(repository_root)
+    database = (state_root / _LIFECYCLE_DATABASE_NAME).relative_to(repository_root)
+    environment = {name: value for name, value in os.environ.items() if not name.startswith("GIT_")}
+    return all(
+        _git_ignores_path(git, path, repository_root, environment)
+        for path in (f"{relative_root.as_posix()}/", database.as_posix())
+    )
+
+
+def _git_ignores_path(
+    git: str,
+    path: str,
+    repository_root: Path,
+    environment: dict[str, str],
+) -> bool:
+    try:
+        completed = subprocess.run(  # noqa: S603
+            (git, "check-ignore", "--quiet", "--", path),
+            cwd=repository_root,
+            env=environment,
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except OSError:
+        return False
+    return completed.returncode == 0

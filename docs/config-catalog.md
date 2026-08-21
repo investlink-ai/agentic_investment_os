@@ -29,7 +29,7 @@ a typed refusal. Both fields are required and have no default.
 | Field | Type and validation | Run fingerprint | Activation and authority | Disclosure |
 | --- | --- | --- | --- | --- |
 | `schema_version` | Integer; must equal `1` | Included | Resolved at process composition; changes require a compatible code release | Safe to log or expose to a model |
-| `state_root` | Absolute path string; must be symlink-free and either outside the repository or below the ignored top-level `var/`, `data/`, or `artifacts/` root | Included after canonical path resolution | Resolved at process composition by the local operator | Do not log or expose the local path; only its configuration hash enters receipts and lifecycle records |
+| `state_root` | Absolute path string; must be symlink-free and either outside the repository or below the top-level `var/`, `data/`, or `artifacts/` root; Git's effective rules must ignore both the root and fixed database path | Included after canonical path resolution | Resolved at process composition by the local operator | Do not log or expose the local path; only its configuration hash enters receipts and lifecycle records |
 
 The resolver hashes canonical JSON containing exactly these validated fields with SHA-256. The state
 root is created with mode `0700`; the fixed `lifecycle.sqlite3` file is created with mode `0600`.

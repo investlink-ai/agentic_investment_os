@@ -45,7 +45,8 @@ packets, and broker responses are boundary data even when produced by our own ad
 
 Map stale, partial, contradictory, unauthorized, or unvalidated state to an explicit no-action or
 failure disposition. Persist enough context to reproduce the refusal. Never manufacture defaults,
-skip a required stage, or reuse a stale artifact to keep the lifecycle moving.
+skip a required stage, or reuse a stale artifact to keep the lifecycle moving. Once recorded, a
+terminal refusal takes precedence over partial checkpoints for the same idempotency key.
 
 ## Publish executable artifacts atomically
 

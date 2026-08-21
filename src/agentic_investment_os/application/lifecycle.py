@@ -57,9 +57,13 @@ class Advance:
         return self._advance_valid_request(parsed)
 
     def _advance_valid_request(self, parsed: AdvanceRequest) -> AdvanceReceipt:
-        existing = self.ledger.load_by_idempotency_key(parsed.idempotency_key)
+        existing = self.ledger.resolve_for_advance(
+            parsed.idempotency_key,
+            self.clock.now(),
+        )
         if isinstance(existing, AdvanceReceipt):
             return existing
+
         identity = PinnedRunIdentity.create(
             parsed,
             configuration_version=self.configuration_version,

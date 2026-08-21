@@ -18,6 +18,10 @@ class LifecyclePersistenceError(RuntimeError):
     """Report that a durable checkpoint could not be written or reconstructed."""
 
 
+class InvalidLifecycleStateError(LifecyclePersistenceError):
+    """Report that durable lifecycle rows cannot reconstruct a valid state."""
+
+
 class SessionMode(StrEnum):
     """Identify the only production lifecycle authority available in Stage 1."""
 
@@ -54,6 +58,7 @@ class AdvanceFailureReason(StrEnum):
     INVALID_IDEMPOTENCY_KEY = "invalid_idempotency_key"
     SESSION_STREAM_CONFLICT = "session_stream_conflict"
     IDEMPOTENCY_KEY_CONFLICT = "idempotency_key_conflict"
+    INVALID_DURABLE_STATE = "invalid_durable_state"
 
 
 @dataclass(frozen=True, slots=True)
@@ -190,6 +195,14 @@ class LifecycleLedger(Protocol):
     """Append and reconstruct Stage 1 lifecycle checkpoints."""
 
     def load_by_idempotency_key(self, key: IdempotencyKey) -> LifecycleState: ...
+
+    def resolve_for_advance(
+        self,
+        key: IdempotencyKey,
+        recorded_at: datetime,
+    ) -> LifecycleState:
+        """Load valid state or atomically append its invalid-state refusal."""
+        ...
 
     def start(
         self,

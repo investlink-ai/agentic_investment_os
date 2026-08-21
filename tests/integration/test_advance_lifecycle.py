@@ -299,6 +299,41 @@ def test_completed_request_cannot_be_shadowed_by_a_later_invalid_reuse(tmp_path:
         ).fetchone() == (0,)
 
 
+def test_terminal_conflict_refusal_prevents_partial_stream_resumption(tmp_path: Path) -> None:
+    state_root = tmp_path / "runtime"
+    capability = _configure(state_root)
+    ledger = capability.ledger
+    assert isinstance(ledger, SQLiteLifecycleLedger)
+    parsed = AdvanceRequest.parse(
+        session="2026-08-21",
+        mode="champion",
+        idempotency_key="partial-conflict",
+    )
+    assert isinstance(parsed, AdvanceRequest)
+    identity = PinnedRunIdentity.create(
+        parsed,
+        configuration_version=1,
+        configuration_hash="a" * SHA256_HEX_LENGTH,
+    )
+    now = datetime(2026, 8, 21, 22, 0, tzinfo=UTC)
+    ledger.start(parsed, identity, now)
+
+    refused = capability(
+        session="invalid",
+        mode="champion",
+        idempotency_key="partial-conflict",
+    )
+    replay = capability(
+        session="2026-08-21",
+        mode="champion",
+        idempotency_key="partial-conflict",
+    )
+
+    assert refused == AdvanceReceipt.failed_closed(AdvanceFailureReason.IDEMPOTENCY_KEY_CONFLICT)
+    assert replay == refused
+    assert _events(state_root / "lifecycle.sqlite3") == [("advance_requested", None)]
+
+
 def test_advance_resumes_after_a_checkpoint_transaction_rolls_back(tmp_path: Path) -> None:
     state_root = tmp_path / "runtime"
     capability = _configure(state_root)
@@ -451,13 +486,36 @@ def test_lifecycle_ledger_operations_are_individually_idempotent(tmp_path: Path)
         parsed.idempotency_key, AdvanceFailureReason.INVALID_SESSION, now
     )
     assert partial_conflict.failure_reason == "idempotency_key_conflict"
-    assert ledger.start(parsed, identity, now) == started
-    reconciled = ledger.complete_reconciliation(parsed.idempotency_key, now)
+    assert ledger.start(parsed, identity, now) == partial_conflict
+    assert (
+        ledger.record_refusal(parsed.idempotency_key, AdvanceFailureReason.INVALID_SESSION, now)
+        == partial_conflict
+    )
+    with pytest.raises(
+        LifecyclePersistenceError, match="required lifecycle stream is missing or terminal"
+    ):
+        ledger.complete_reconciliation(parsed.idempotency_key, now)
+
+    resumable = AdvanceRequest.parse(
+        session="2026-08-26",
+        mode="champion",
+        idempotency_key="adapter-idempotency-resumable",
+    )
+    assert isinstance(resumable, AdvanceRequest)
+    resumable_identity = PinnedRunIdentity.create(
+        resumable,
+        configuration_version=1,
+        configuration_hash="c" * SHA256_HEX_LENGTH,
+    )
+    resumable_started = ledger.start(resumable, resumable_identity, now)
+    assert isinstance(resumable_started, LifecycleProgress)
+    assert ledger.start(resumable, resumable_identity, now) == resumable_started
+    reconciled = ledger.complete_reconciliation(resumable.idempotency_key, now)
     assert isinstance(reconciled, LifecycleProgress)
-    assert ledger.complete_reconciliation(parsed.idempotency_key, now) == reconciled
-    pinned = ledger.pin_run_inputs(parsed.idempotency_key, now)
-    assert ledger.pin_run_inputs(parsed.idempotency_key, now) == pinned
-    assert ledger.complete_reconciliation(parsed.idempotency_key, now) == pinned
+    assert ledger.complete_reconciliation(resumable.idempotency_key, now) == reconciled
+    pinned = ledger.pin_run_inputs(resumable.idempotency_key, now)
+    assert ledger.pin_run_inputs(resumable.idempotency_key, now) == pinned
+    assert ledger.complete_reconciliation(resumable.idempotency_key, now) == pinned
 
     missing = IdempotencyKey("missing-stream")
     with pytest.raises(
@@ -547,6 +605,24 @@ def test_sqlite_read_failures_are_translated(tmp_path: Path) -> None:
         ledger.load_by_idempotency_key(IdempotencyKey("missing-after-drop"))
 
 
+def test_operational_read_failure_does_not_create_a_terminal_refusal(tmp_path: Path) -> None:
+    state_root = tmp_path / "runtime"
+    capability = _configure(state_root)
+    database = state_root / "lifecycle.sqlite3"
+    with sqlite3.connect(database) as connection:
+        connection.execute("DROP TABLE lifecycle_events")
+
+    with pytest.raises(LifecyclePersistenceError, match="checkpoint failed"):
+        capability(
+            session="2026-08-21",
+            mode="champion",
+            idempotency_key="operational-read-failure",
+        )
+
+    with sqlite3.connect(database) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM advance_refusals").fetchone() == (0,)
+
+
 @pytest.mark.parametrize(
     ("reason_code", "expected_message"),
     [
@@ -606,11 +682,26 @@ def test_advance_fails_closed_on_corrupt_durable_rows(
     _replace_with_corrupt_events(database, statements)
 
     with pytest.raises(LifecyclePersistenceError, match=expected_message):
-        capability(
-            session="2026-08-21",
-            mode="champion",
-            idempotency_key="corrupt-stream",
-        )
+        capability.ledger.load_by_idempotency_key(IdempotencyKey("corrupt-stream"))
+
+    refused = capability(
+        session="2026-08-21",
+        mode="champion",
+        idempotency_key="corrupt-stream",
+    )
+    replay = capability(
+        session="2026-08-21",
+        mode="champion",
+        idempotency_key="corrupt-stream",
+    )
+
+    assert refused == AdvanceReceipt.failed_closed(AdvanceFailureReason.INVALID_DURABLE_STATE)
+    assert replay == refused
+    with sqlite3.connect(database) as connection:
+        assert connection.execute(
+            "SELECT reason_code FROM advance_refusals WHERE idempotency_key = ?",
+            ("corrupt-stream",),
+        ).fetchall() == [("invalid_durable_state",)]
 
 
 def _replace_with_corrupt_events(database: Path, statements: tuple[str, ...]) -> None:

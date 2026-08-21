@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import shutil
+import subprocess
 from dataclasses import FrozenInstanceError, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Never
 
 import pytest
 
@@ -31,6 +34,20 @@ from agentic_investment_os.entrypoints.configuration import (
 SHA256_HEX_LENGTH = 64
 
 
+def _initialize_git_repository(repository: Path) -> None:
+    git = shutil.which("git")
+    if git is None:
+        message = "required test executable is unavailable: git"
+        raise RuntimeError(message)
+    subprocess.run(  # noqa: S603
+        (git, "init", "--quiet"),
+        cwd=repository,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+
 @dataclass(frozen=True)
 class FixedClock:
     def now(self) -> datetime:
@@ -44,6 +61,13 @@ class ConcurrentCompletionLedger:
 
     def load_by_idempotency_key(
         self, _key: IdempotencyKey
+    ) -> LifecycleProgress | AdvanceReceipt | None:
+        return None
+
+    def resolve_for_advance(
+        self,
+        _key: IdempotencyKey,
+        _recorded_at: datetime,
     ) -> LifecycleProgress | AdvanceReceipt | None:
         return None
 
@@ -268,6 +292,7 @@ def test_runtime_configuration_rejects_noncanonical_values_and_unignored_roots(
 ) -> None:
     repository = tmp_path / "repository"
     repository.mkdir()
+    _initialize_git_repository(repository)
     unsupported_version = ConfigurationRefusal(
         ConfigurationRefusalCode.UNSUPPORTED_VERSION, ("schema_version",)
     )
@@ -311,6 +336,173 @@ def test_runtime_configuration_rejects_noncanonical_values_and_unignored_roots(
     )
 
     assert isinstance(accepted, RuntimeConfiguration)
+
+
+@pytest.mark.parametrize(
+    "ignore_rules",
+    [
+        "/var/\n!/var/\n",
+        "/var/*\n!/var/lifecycle.sqlite3\n",
+        "/var/lifecycle.sqlite3\n",
+    ],
+)
+def test_runtime_configuration_rejects_unignored_database_paths(
+    tmp_path: Path,
+    ignore_rules: str,
+) -> None:
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    _initialize_git_repository(repository)
+    (repository / ".gitignore").write_text(ignore_rules, encoding="utf-8")
+
+    resolution = resolve_runtime_configuration(
+        (
+            ConfigurationSource(
+                "test",
+                {"schema_version": 1, "state_root": str(repository / "var")},
+            ),
+        ),
+        repository_root=repository,
+    )
+
+    assert resolution == ConfigurationRefusal(
+        ConfigurationRefusalCode.INVALID_STATE_ROOT, ("state_root",)
+    )
+
+
+def test_runtime_configuration_checks_the_database_with_clean_git_context(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    git = "/path/to/git"
+    commands: list[tuple[str, ...]] = []
+
+    def find_git(name: str) -> str:
+        assert name == "git"
+        return git
+
+    def run_git(
+        command: tuple[str, ...],
+        *,
+        cwd: Path,
+        env: dict[str, str],
+        **options: object,
+    ) -> subprocess.CompletedProcess[str]:
+        assert cwd == repository
+        assert options == {
+            "check": False,
+            "stdout": subprocess.DEVNULL,
+            "stderr": subprocess.DEVNULL,
+        }
+        assert env["CONFIGURATION_TEST_VALUE"] == "preserved"
+        assert "GIT_DIR" not in env
+        commands.append(command)
+        return subprocess.CompletedProcess(command, 0)
+
+    monkeypatch.setenv("CONFIGURATION_TEST_VALUE", "preserved")
+    monkeypatch.setenv("GIT_DIR", "/poisoned/repository")
+    monkeypatch.setattr(
+        "agentic_investment_os.entrypoints.configuration.shutil.which",
+        find_git,
+    )
+    monkeypatch.setattr(
+        "agentic_investment_os.entrypoints.configuration.subprocess.run",
+        run_git,
+    )
+
+    resolution = resolve_runtime_configuration(
+        (
+            ConfigurationSource(
+                "test",
+                {"schema_version": 1, "state_root": str(repository / "var")},
+            ),
+        ),
+        repository_root=repository,
+    )
+
+    assert isinstance(resolution, RuntimeConfiguration)
+    assert commands == [
+        (git, "check-ignore", "--quiet", "--", "var/"),
+        (git, "check-ignore", "--quiet", "--", "var/lifecycle.sqlite3"),
+    ]
+
+
+def test_runtime_configuration_rejects_a_tracked_database_path(tmp_path: Path) -> None:
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    _initialize_git_repository(repository)
+    (repository / ".gitignore").write_text("/var/\n", encoding="utf-8")
+    runtime_root = repository / "var"
+    runtime_root.mkdir()
+    database = runtime_root / "lifecycle.sqlite3"
+    database.write_text("", encoding="utf-8")
+    git = shutil.which("git")
+    assert git is not None
+    subprocess.run(  # noqa: S603
+        (git, "add", "--force", "var/lifecycle.sqlite3"),
+        cwd=repository,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    resolution = resolve_runtime_configuration(
+        (
+            ConfigurationSource(
+                "test",
+                {"schema_version": 1, "state_root": str(runtime_root)},
+            ),
+        ),
+        repository_root=repository,
+    )
+
+    assert resolution == ConfigurationRefusal(
+        ConfigurationRefusalCode.INVALID_STATE_ROOT, ("state_root",)
+    )
+
+
+def test_runtime_configuration_fails_closed_when_git_is_unavailable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    _initialize_git_repository(repository)
+    (repository / ".gitignore").write_text("/var/\n", encoding="utf-8")
+    source = (
+        ConfigurationSource(
+            "test",
+            {"schema_version": 1, "state_root": str(repository / "var")},
+        ),
+    )
+
+    git = shutil.which("git")
+    assert git is not None
+    monkeypatch.setattr(
+        "agentic_investment_os.entrypoints.configuration.shutil.which",
+        lambda _name: None,
+    )
+    missing = resolve_runtime_configuration(source, repository_root=repository)
+
+    monkeypatch.setattr(
+        "agentic_investment_os.entrypoints.configuration.shutil.which",
+        lambda _name: git,
+    )
+
+    def fail_to_start(*_args: object, **_kwargs: object) -> Never:
+        raise OSError
+
+    monkeypatch.setattr(
+        "agentic_investment_os.entrypoints.configuration.subprocess.run",
+        fail_to_start,
+    )
+    inaccessible = resolve_runtime_configuration(source, repository_root=repository)
+
+    expected = ConfigurationRefusal(ConfigurationRefusalCode.INVALID_STATE_ROOT, ("state_root",))
+    assert missing == expected
+    assert inaccessible == expected
 
 
 def test_runtime_configuration_rejects_nul_and_intermediate_symlinks(tmp_path: Path) -> None:

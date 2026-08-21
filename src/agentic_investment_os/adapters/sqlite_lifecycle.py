@@ -17,6 +17,7 @@ from agentic_investment_os.domain.lifecycle import (
     AdvanceRequest,
     IdempotencyKey,
     InputRefusal,
+    InvalidLifecycleStateError,
     LifecyclePersistenceError,
     LifecyclePhase,
     LifecycleProgress,
@@ -88,7 +89,8 @@ CREATE TABLE IF NOT EXISTS advance_refusals (
     reason_code TEXT NOT NULL CHECK (
         reason_code IN (
             'invalid_session', 'invalid_mode', 'invalid_idempotency_key',
-            'session_stream_conflict', 'idempotency_key_conflict'
+            'session_stream_conflict', 'idempotency_key_conflict',
+            'invalid_durable_state'
         )
     ),
     recorded_at TEXT NOT NULL
@@ -149,6 +151,29 @@ class SQLiteLifecycleLedger:
         self, key: IdempotencyKey
     ) -> LifecycleProgress | AdvanceReceipt | None:
         return self._read(lambda connection: self._load(connection, key))
+
+    def resolve_for_advance(
+        self,
+        key: IdempotencyKey,
+        recorded_at: datetime,
+    ) -> LifecycleProgress | AdvanceReceipt | None:
+        def operation(
+            connection: sqlite3.Connection,
+        ) -> LifecycleProgress | AdvanceReceipt | None:
+            refusal = self._load_refusal(connection, key)
+            if refusal is not None:
+                return refusal
+            try:
+                return self._load_events(connection, key)
+            except InvalidLifecycleStateError:
+                return self._append_refusal(
+                    connection,
+                    key,
+                    AdvanceFailureReason.INVALID_DURABLE_STATE,
+                    recorded_at,
+                )
+
+        return self._write(operation)
 
     def start(
         self,
@@ -251,37 +276,49 @@ class SQLiteLifecycleLedger:
         def operation(connection: sqlite3.Connection) -> AdvanceReceipt:
             resolved_reason = reason_code
             if key is not None:
+                existing = self._load_refusal(connection, key)
+                if existing is not None:
+                    return existing
                 progress = self._load_events(connection, key)
                 if progress is not None:
                     receipt = progress.receipt
                     if receipt is not None:
                         return receipt
                     resolved_reason = AdvanceFailureReason.IDEMPOTENCY_KEY_CONFLICT
-                existing = self._load_refusal(connection, key)
-                if existing is not None:
-                    return existing
-            connection.execute(
-                """
-                INSERT INTO advance_refusals (idempotency_key, reason_code, recorded_at)
-                VALUES (?, ?, ?)
-                """,
-                (
-                    None if key is None else key.value,
-                    resolved_reason.value,
-                    _timestamp(recorded_at),
-                ),
-            )
-            return AdvanceReceipt.failed_closed(resolved_reason)
+            return self._append_refusal(connection, key, resolved_reason, recorded_at)
 
         return self._write(operation)
 
     def _load(
         self, connection: sqlite3.Connection, key: IdempotencyKey
     ) -> LifecycleProgress | AdvanceReceipt | None:
+        refusal = self._load_refusal(connection, key)
+        if refusal is not None:
+            return refusal
         progress = self._load_events(connection, key)
         if progress is not None:
             return progress
-        return self._load_refusal(connection, key)
+        return None
+
+    @staticmethod
+    def _append_refusal(
+        connection: sqlite3.Connection,
+        key: IdempotencyKey | None,
+        reason_code: AdvanceFailureReason,
+        recorded_at: datetime,
+    ) -> AdvanceReceipt:
+        connection.execute(
+            """
+            INSERT INTO advance_refusals (idempotency_key, reason_code, recorded_at)
+            VALUES (?, ?, ?)
+            """,
+            (
+                None if key is None else key.value,
+                reason_code.value,
+                _timestamp(recorded_at),
+            ),
+        )
+        return AdvanceReceipt.failed_closed(reason_code)
 
     @staticmethod
     def _load_events(
@@ -358,11 +395,11 @@ def _reconstruct_progress(rows: list[tuple[object, ...]]) -> LifecycleProgress:
     first = rows[0]
     request = AdvanceRequest.parse(session=first[3], mode=first[4], idempotency_key=first[2])
     if isinstance(request, InputRefusal):
-        raise LifecyclePersistenceError(_INVALID_REQUEST)
+        raise InvalidLifecycleStateError(_INVALID_REQUEST)
     stream_id = _text(first[0], "stream_id")
     version = _integer(first[5], "configuration_version")
     if version != 1:
-        raise LifecyclePersistenceError(_UNSUPPORTED_CONFIGURATION_VERSION)
+        raise InvalidLifecycleStateError(_UNSUPPORTED_CONFIGURATION_VERSION)
     configuration_hash = _hash(first[6], "configuration_hash")
     run_id = _hash(first[7], "run_id")
     identity = PinnedRunIdentity.create(
@@ -371,17 +408,17 @@ def _reconstruct_progress(rows: list[tuple[object, ...]]) -> LifecycleProgress:
         configuration_hash=configuration_hash,
     )
     if stream_id != request.stream_id or run_id != identity.run_id:
-        raise LifecyclePersistenceError(_INVALID_DERIVED_IDENTITY)
+        raise InvalidLifecycleStateError(_INVALID_DERIVED_IDENTITY)
     expected = (
         ("advance_requested", None),
         ("phase_completed", LifecyclePhase.RECONCILE_PRIOR_STATE.value),
         ("run_inputs_pinned", LifecyclePhase.PIN_RUN_INPUTS.value),
     )
     if len(rows) > len(expected):
-        raise LifecyclePersistenceError(_UNSUPPORTED_LATER_PHASES)
+        raise InvalidLifecycleStateError(_UNSUPPORTED_LATER_PHASES)
     for sequence, row in enumerate(rows):
         if _integer(row[1], "sequence") != sequence:
-            raise LifecyclePersistenceError(_NONCONTIGUOUS_SEQUENCE)
+            raise InvalidLifecycleStateError(_NONCONTIGUOUS_SEQUENCE)
         invariant_values = (row[0], row[2], row[3], row[4], row[5], row[6], row[7])
         expected_invariants = (
             stream_id,
@@ -393,9 +430,9 @@ def _reconstruct_progress(rows: list[tuple[object, ...]]) -> LifecycleProgress:
             run_id,
         )
         if invariant_values != expected_invariants:
-            raise LifecyclePersistenceError(_CHANGED_PINNED_FACTS)
+            raise InvalidLifecycleStateError(_CHANGED_PINNED_FACTS)
         if (_text(row[8], "event_kind"), _optional_text(row[9])) != expected[sequence]:
-            raise LifecyclePersistenceError(_INVALID_CHECKPOINT_ORDER)
+            raise InvalidLifecycleStateError(_INVALID_CHECKPOINT_ORDER)
         _aware_timestamp(row[10])
     phase_by_event_count = (
         None,
@@ -409,7 +446,7 @@ def _reconstruct_progress(rows: list[tuple[object, ...]]) -> LifecycleProgress:
 def _text(value: object, field: str) -> str:
     if not isinstance(value, str) or not value:
         message = f"invalid {field} in lifecycle ledger"
-        raise LifecyclePersistenceError(message)
+        raise InvalidLifecycleStateError(message)
     return value
 
 
@@ -422,14 +459,14 @@ def _optional_text(value: object) -> str | None:
 def _integer(value: object, field: str) -> int:
     if not isinstance(value, int) or isinstance(value, bool):
         message = f"invalid {field} in lifecycle ledger"
-        raise LifecyclePersistenceError(message)
+        raise InvalidLifecycleStateError(message)
     return value
 
 
 def _hash(value: object, field: str) -> str:
     if not is_sha256(value):
         message = f"invalid {field} in lifecycle ledger"
-        raise LifecyclePersistenceError(message)
+        raise InvalidLifecycleStateError(message)
     return value
 
 
@@ -438,7 +475,7 @@ def _failure_reason(value: object) -> AdvanceFailureReason:
     try:
         return AdvanceFailureReason(text)
     except ValueError as error:
-        raise LifecyclePersistenceError(_UNKNOWN_REASON_CODE) from error
+        raise InvalidLifecycleStateError(_UNKNOWN_REASON_CODE) from error
 
 
 def _aware_timestamp(value: object) -> datetime:
@@ -446,9 +483,9 @@ def _aware_timestamp(value: object) -> datetime:
     try:
         parsed = datetime.fromisoformat(text)
     except ValueError as error:
-        raise LifecyclePersistenceError(_INVALID_RECORDED_AT) from error
+        raise InvalidLifecycleStateError(_INVALID_RECORDED_AT) from error
     if parsed.utcoffset() is None:
-        raise LifecyclePersistenceError(_RECORDED_AT_NOT_AWARE)
+        raise InvalidLifecycleStateError(_RECORDED_AT_NOT_AWARE)
     return parsed
 
 
