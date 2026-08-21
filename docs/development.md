@@ -109,11 +109,15 @@ installs the locked environment and runs the same `make check` target. Hooks and
 not substitutes for focused tests. Treat a hook refusal as a failed gate to resolve through the issue
 worktree; never commit or push with `--no-verify`.
 
-Resolve external-action authority from
-[the development delivery boundary](architecture.md#development-delivery-authority). After the exact
-final commit passes required gates and reviews, `deliver-issue` applies the selected local or draft-
-publication handoff. `create-pull-request` owns the remote operation and the demotion-only safeguard;
-the latter must not push commits or change unrelated pull-request metadata.
+A request to work on, implement, fix, refactor, document, complete, resume, deliver, or ship a numbered
+issue authorizes local edits, checks, commits, issue-branch push, and creation or update of a draft
+pull request after the exact final commit passes required gates and reviews. An explicit local-only or
+no-publication restriction stops after the verified commit. A coding request not bound to a numbered
+issue does not authorize GitHub publication. Marking a pull request ready, merging, deployment, issue
+or stage closure, issue-graph publication, and worktree cleanup remain separately authorized actions.
+Fail-closed demotion of an existing ready pull request is always authorized when the current issue has
+a substantiated finding, incomplete material verification, or an object-ID mismatch; it must not push
+commits or change other pull-request metadata.
 
 ## Commit messages
 

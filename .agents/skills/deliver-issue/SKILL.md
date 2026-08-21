@@ -41,10 +41,8 @@ per-leaf model or effort routing.
    multiple dependent steps, unresolved design choices, cross-module effects, or material review risk;
    otherwise proceed directly. Never use `plan-stage-issues` as an implementation plan for one issue.
 
-Resolve external and scope-expanding authority from
-[the development delivery boundary](../../../docs/architecture.md#development-delivery-authority),
-then apply [the operating procedure](../../../docs/development.md#daily-workflow). Stop before any
-step the authority boundary does not authorize.
+Apply [the repository authorization contract](../../../docs/development.md#daily-workflow) before each
+external or scope-expanding step. Stop before any step that contract does not authorize.
 
 Before any exit or suspension caused by a substantiated finding, incomplete material verification,
 or an object-ID mismatch, invoke [create-pull-request](../create-pull-request/SKILL.md)'s demotion-only

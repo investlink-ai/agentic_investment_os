@@ -251,21 +251,6 @@ surface.
 V0 runs locally on one Mac under an NYSE-calendar-aware scheduler. Live network rehearsals and Alpaca
 paper access remain explicitly invoked operations outside the deterministic developer gate.
 
-## Development delivery authority
-
-A request to work on a numbered issue authorizes one guarded delivery capability: bind its linked
-worktree, implement and commit its accepted scope, pass required reviews and gates against the exact
-commit, push only its issue branch, and create or update a draft pull request. An explicit local-only
-or no-publication restriction narrows that capability to a verified local commit. Requests that are
-not bound to a numbered issue do not acquire GitHub publication authority.
-
-The draft pull request is the automated handoff boundary. Marking it ready, merging, deploying,
-closing an issue or stage, publishing an issue graph, and cleaning up the worktree remain separate
-operator decisions. A substantiated finding, incomplete verification, or object-ID mismatch always
-authorizes fail-closed demotion of an existing ready pull request without pushing or changing other
-metadata. [`docs/development.md`](development.md#daily-workflow) owns the operational workflow;
-[ADR 0002](adr/0002-complete-numbered-issues-through-draft-pull-requests.md) records the decision.
-
 ## Changing the architecture
 
 Update this document when a change alters runtime topology, a module seam or interface, authority,

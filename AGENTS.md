@@ -28,8 +28,8 @@ repository owns implementation authority, executable code, and runtime state.
   Plan only the next capability frontier and approve its issue graph before publishing it.
 - Use the `deliver-issue` skill when working on an open issue. It owns the guarded issue-to-review
   handoff and invokes `start-issue-worktree` before tracked writes; the primary `main` checkout
-  remains a clean control checkout. `docs/architecture.md#development-delivery-authority` owns its
-  authorization boundary; `docs/development.md#daily-workflow` owns its operating procedure.
+  remains a clean control checkout. `docs/development.md#daily-workflow` owns its authorization and
+  operating procedure.
 - Treat repository hooks as mandatory delivery gates. Resolve their refusal through the owning issue
   workflow; never commit or push with `--no-verify`.
 - Review changes to agent-review or publication gates with reviewer instructions outside the changed
