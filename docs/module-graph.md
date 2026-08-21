@@ -1,11 +1,8 @@
 # Module graph
 
-This document owns allowed Python import directions. The production modules currently contain package
-markers only, so the executable inter-module graph has no edges. The diagram below is policy for the
-first implementation slices, not a claim that those dependencies already exist.
-
-Once production imports exist, generate the actual graph from Python source and gate it against these
-rules. Do not maintain a growing hand-written edge list.
+This document owns allowed Python import directions. The production package has executable edges, and
+`tests/unit/test_module_graph.py` derives the actual graph from Python imports and rejects edges that
+violate this policy. Do not maintain a separate hand-written list of actual edges.
 
 ## Allowed direction
 

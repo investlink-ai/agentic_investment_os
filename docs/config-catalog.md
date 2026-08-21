@@ -1,12 +1,11 @@
 # Configuration catalog
 
-This catalog records implemented configuration only. It is intentionally small while the repository
-is an engineering scaffold. `investment-domain.md` owns approved policy semantics; do not invent
-future runtime keys before their implementation slice.
+This catalog records implemented configuration only. `investment-domain.md` owns approved policy
+semantics; do not invent future runtime keys before their implementation slice.
 
-When typed runtime configuration exists, generate field-level reference from its schema and gate the
-generated catalog for freshness. Until then, this file owns configuration-source policy and points to
-the executable sources of truth.
+The typed schema and resolver live in
+`src/agentic_investment_os/entrypoints/configuration.py`. This catalog owns the field-level operator
+contract and points to that executable source of truth.
 
 ## Configuration rules
 
@@ -23,17 +22,19 @@ the executable sources of truth.
 
 ## Runtime configuration
 
-No production runtime configuration schema is implemented yet. The first implementation must add its
-typed schema, validation tests, version/hash behavior, and catalog entries in the same change.
+Stage 1 resolves one or more explicit non-secret sources without precedence. Repeating the same value
+is valid; conflicting values, unknown fields, missing fields, and unsupported schema versions return
+a typed refusal. Both fields are required and have no default.
 
-Each future catalog entry must state:
+| Field | Type and validation | Run fingerprint | Activation and authority | Disclosure |
+| --- | --- | --- | --- | --- |
+| `schema_version` | Integer; must equal `1` | Included | Resolved at process composition; changes require a compatible code release | Safe to log or expose to a model |
+| `state_root` | Absolute path string; must be symlink-free and either outside the repository or below the ignored top-level `var/`, `data/`, or `artifacts/` root | Included after canonical path resolution | Resolved at process composition by the local operator | Do not log or expose the local path; only its configuration hash enters receipts and lifecycle records |
 
-- canonical field name and type;
-- owning module and source file;
-- required/default behavior and validation constraints;
-- whether it contributes to the run fingerprint;
-- activation boundary and authority required to change it; and
-- whether it is safe to log or expose to a model.
+The resolver hashes canonical JSON containing exactly these validated fields with SHA-256. The state
+root is created with mode `0700`; the fixed `lifecycle.sqlite3` file is created with mode `0600`.
+Existing paths with broader permissions, unsafe shapes, or final symlinks fail closed. The database
+filename and private modes are safety constants rather than tunable configuration.
 
 ## Repository tooling configuration
 
