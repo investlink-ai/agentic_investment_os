@@ -77,13 +77,15 @@ def _projection(database: Path) -> list[tuple[object, ...]]:
         ).fetchall()
 
 
-def _authoritative_counts(database: Path) -> tuple[int, int]:
+def _authoritative_counts(database: Path) -> tuple[int, int, int]:
     with sqlite3.connect(database) as connection:
         event_count = connection.execute("SELECT COUNT(*) FROM lifecycle_events").fetchone()
         refusal_count = connection.execute("SELECT COUNT(*) FROM advance_refusals").fetchone()
+        conflict_count = connection.execute("SELECT COUNT(*) FROM advance_conflicts").fetchone()
     assert event_count is not None
     assert refusal_count is not None
-    return int(event_count[0]), int(refusal_count[0])
+    assert conflict_count is not None
+    return int(event_count[0]), int(refusal_count[0]), int(conflict_count[0])
 
 
 def test_database_preparation_reports_whether_it_created_authoritative_storage(
@@ -303,6 +305,41 @@ def test_status_reports_an_unrelated_refusal_without_terminating_the_current_str
     assert status.active_phase is None
     assert status.pinned_run_identity == receipt.pinned_run_identity
     assert status.durable_reason is AdvanceFailureReason.INVALID_SESSION
+
+
+def test_status_reports_completed_conflicts_without_terminating_a_stream(
+    tmp_path: Path,
+) -> None:
+    state_root = tmp_path / "runtime"
+    advance = _advance(state_root)
+    original = advance(
+        session="2026-08-01",
+        mode="champion",
+        idempotency_key="completed-before-conflict",
+    )
+    conflict = advance(
+        session="2026-08-02",
+        mode="champion",
+        idempotency_key="completed-before-conflict",
+    )
+
+    assert conflict.failure_reason is AdvanceFailureReason.IDEMPOTENCY_KEY_CONFLICT
+    conflicted_status = _status(state_root)()
+    assert conflicted_status.liveness is LifecycleLiveness.ACTIVE
+    assert conflicted_status.active_phase is None
+    assert conflicted_status.pinned_run_identity == original.pinned_run_identity
+    assert conflicted_status.durable_reason is AdvanceFailureReason.IDEMPOTENCY_KEY_CONFLICT
+
+    latest = advance(
+        session="2026-08-02",
+        mode="champion",
+        idempotency_key="latest-clean-stream",
+    )
+
+    latest_status = _status(state_root)()
+    assert latest_status.liveness is LifecycleLiveness.ACTIVE
+    assert latest_status.pinned_run_identity == latest.pinned_run_identity
+    assert latest_status.durable_reason is AdvanceFailureReason.IDEMPOTENCY_KEY_CONFLICT
 
 
 def test_status_selects_the_latest_market_session_independent_of_stream_order(
@@ -552,6 +589,60 @@ def test_status_rejects_corrupt_refusal_history(
         _status(state_root)()
 
 
+@pytest.mark.parametrize(
+    ("corruption", "expected_message"),
+    [
+        (
+            "UPDATE advance_conflicts SET idempotency_key = 'not valid'",
+            "invalid idempotency_key in lifecycle conflict ledger",
+        ),
+        (
+            "UPDATE advance_conflicts SET idempotency_key = 'orphan-conflict'",
+            "invalid conflict association",
+        ),
+        (
+            "UPDATE advance_conflicts SET reason_code = 'invalid_session'",
+            "invalid conflict association",
+        ),
+        (
+            "UPDATE advance_conflicts SET recorded_at = 'not-a-timestamp'",
+            "invalid recorded_at in lifecycle ledger",
+        ),
+    ],
+)
+def test_status_rejects_corrupt_conflict_history(
+    tmp_path: Path,
+    corruption: str,
+    expected_message: str,
+) -> None:
+    state_root = tmp_path / "runtime"
+    advance = _advance(state_root)
+    advance(
+        session="2026-08-21",
+        mode="champion",
+        idempotency_key="corrupt-status-conflict",
+    )
+    advance(
+        session="2026-08-22",
+        mode="champion",
+        idempotency_key="corrupt-status-conflict",
+    )
+    database = state_root / "lifecycle.sqlite3"
+    with sqlite3.connect(database) as connection:
+        rows = connection.execute(
+            "SELECT idempotency_key, reason_code, recorded_at FROM advance_conflicts"
+        ).fetchall()
+        connection.execute("DROP TABLE advance_conflicts")
+        connection.execute(
+            "CREATE TABLE advance_conflicts (idempotency_key, reason_code, recorded_at)"
+        )
+        connection.executemany("INSERT INTO advance_conflicts VALUES (?, ?, ?)", rows)
+        connection.execute(corruption)
+
+    with pytest.raises(InvalidLifecycleStateError, match=expected_message):
+        _status(state_root)()
+
+
 def test_status_configuration_refuses_invalid_configuration_and_runtime_root(
     tmp_path: Path,
 ) -> None:
@@ -586,6 +677,7 @@ def test_status_does_not_recreate_missing_authoritative_tables(tmp_path: Path) -
     with sqlite3.connect(database) as connection:
         connection.execute("DROP TABLE lifecycle_events")
         connection.execute("DROP TABLE advance_refusals")
+        connection.execute("DROP TABLE advance_conflicts")
 
     with pytest.raises(LifecyclePersistenceError, match="SQLite lifecycle checkpoint failed"):
         _status(state_root)()
@@ -599,6 +691,7 @@ def test_status_does_not_recreate_missing_authoritative_tables(tmp_path: Path) -
         }
     assert "lifecycle_events" not in tables
     assert "advance_refusals" not in tables
+    assert "advance_conflicts" not in tables
 
 
 def test_status_does_not_recreate_a_missing_authoritative_database(tmp_path: Path) -> None:

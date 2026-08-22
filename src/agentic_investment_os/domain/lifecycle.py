@@ -365,14 +365,6 @@ def derive_lifecycle_status(
             durable_reason=matching_refusal.reason,
         )
 
-    matching_conflict = next(
-        (
-            conflict
-            for conflict in conflicts
-            if conflict.idempotency_key == current.request.idempotency_key
-        ),
-        None,
-    )
     active_phase = {
         None: LifecyclePhase.RECONCILE_PRIOR_STATE,
         LifecyclePhase.RECONCILE_PRIOR_STATE: LifecyclePhase.PIN_RUN_INPUTS,
@@ -384,35 +376,20 @@ def derive_lifecycle_status(
         pinned_run_identity=current.pinned_run_identity,
         liveness=LifecycleLiveness.ACTIVE,
         durable_reason=_reported_reason(
-            current_conflict=matching_conflict,
             refusals=refusals,
             conflicts=conflicts,
-            progress_by_key=progress_by_key,
         ),
     )
 
 
 def _reported_reason(
     *,
-    current_conflict: DurableAdvanceConflict | None,
     refusals: tuple[DurableAdvanceRefusal, ...],
     conflicts: tuple[DurableAdvanceConflict, ...],
-    progress_by_key: dict[str, LifecycleProgress],
 ) -> AdvanceFailureReason | None:
-    if current_conflict is not None:
-        return current_conflict.reason
     if refusals:
         return refusals[-1].reason
-    if not conflicts:
-        return None
-    latest_conflict = max(
-        conflicts,
-        key=lambda conflict: (
-            progress_by_key[conflict.idempotency_key.value].request.session.trading_date,
-            conflict.idempotency_key.value,
-        ),
-    )
-    return latest_conflict.reason
+    return conflicts[-1].reason if conflicts else None
 
 
 class LifecycleLedger(Protocol):

@@ -148,12 +148,13 @@ continue. Neither state publishes a new discretionary order. A later LangGraph a
 the transition implementation but must preserve this interface, state meaning, checkpoints, and
 idempotency behavior.
 
-Lifecycle status is derived only from the append-only event and refusal ledgers. Rebuilding validates
-the complete authoritative history before atomically replacing the projection; missing or malformed
-projection state is discarded, while malformed authoritative history fails closed. A completed phase
-does not imply a completed Market Session: `last_completed_session` advances only from a durable
-`Complete` event. Status liveness describes whether the recorded lifecycle is not started, active, or
-failed closed; scheduler heartbeat and schedule health are separate operational concerns.
+Lifecycle status is derived only from the append-only event, refusal, and conflict ledgers. Rebuilding
+validates the complete authoritative history before atomically replacing the projection; missing or
+malformed projection state is discarded, while malformed authoritative history fails closed. A
+completed phase does not imply a completed Market Session: `last_completed_session` advances only
+from a durable `Complete` event. Status liveness describes whether the recorded lifecycle is not
+started, active, or failed closed; scheduler heartbeat and schedule health are separate operational
+concerns.
 
 ## Safe execution handoff
 
