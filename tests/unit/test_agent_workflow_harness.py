@@ -480,11 +480,35 @@ def test_trace_evaluation_rejects_forbidden_effect_even_when_output_matches() ->
             "filesystem.write",
         ),
         (
+            {"type": "command_execution", "command": "sort --out=unexpected.txt state.json"},
+            "filesystem.write",
+        ),
+        (
+            {"type": "command_execution", "command": "sort --temp=. state.json"},
+            "filesystem.write",
+        ),
+        (
             {"type": "command_execution", "command": "sort -S 1K -T . state.json"},
             "filesystem.write",
         ),
         (
             {"type": "command_execution", "command": "sort -S 1K state.json"},
+            "unknown.tool",
+        ),
+        (
+            {"type": "command_execution", "command": "sort --buff=1K state.json"},
+            "unknown.tool",
+        ),
+        (
+            {"type": "command_execution", "command": "sort --comp=touch state.json"},
+            "unknown.tool",
+        ),
+        (
+            {"type": "command_execution", "command": "sort --file=state.json"},
+            "unknown.tool",
+        ),
+        (
+            {"type": "command_execution", "command": "sort --rand=/etc/passwd state.json"},
             "unknown.tool",
         ),
         (

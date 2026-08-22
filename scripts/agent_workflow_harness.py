@@ -1010,14 +1010,13 @@ def _unsafe_reader_effect(
     elif (
         executable in {"diff", "sort"}
         and any(
-            argument in {"-o", "--output"} or argument.startswith(("--output=", "-o"))
+            argument in {"-o", "--output"} or argument.startswith(("--out", "-o"))
             for argument in arguments
         )
     ) or (
         executable == "sort"
         and any(
-            argument in {"-T", "--temporary-directory"}
-            or argument.startswith(("-T", "--temporary-directory="))
+            argument in {"-T", "--temporary-directory"} or argument.startswith(("-T", "--temp"))
             for argument in arguments
         )
     ):
@@ -1027,7 +1026,7 @@ def _unsafe_reader_effect(
             executable == "sort"
             and any(
                 argument in {"-S", "--buffer-size", "--compress-program"}
-                or argument.startswith(("-S", "--buffer-size=", "--compress-program="))
+                or argument.startswith(("-S", "--buff", "--comp", "--file", "--rand"))
                 for argument in arguments
             )
         )
