@@ -1,0 +1,3 @@
+from agentic_investment_os.domain.contracts import _PrivateContract
+
+USED_CONTRACT = _PrivateContract

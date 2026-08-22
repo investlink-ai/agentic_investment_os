@@ -1,8 +1,9 @@
 # Module graph
 
-This document owns allowed Python import directions. The production package has executable edges, and
-`tests/unit/test_module_graph.py` derives the actual graph from Python imports and rejects edges that
-violate this policy. Do not maintain a separate hand-written list of actual edges.
+This document owns allowed Python import directions and cross-module interface use. The production
+package has executable edges, and `tests/integration/test_module_graph.py` derives the actual graph
+and consumed symbols from Python imports. It rejects imports that violate either direction or the
+owning module's declared interface. Do not maintain a separate hand-written list of actual edges.
 
 This import gate is the module-structure layer of the
 [executable-invariants policy](architecture.md#executable-invariants). It proves dependency
@@ -72,3 +73,15 @@ functions or storage internals. Keep an interface with its owner:
 
 When a capability needs data owned elsewhere, prefer a typed input or owner-defined port. Add a direct
 capability dependency only when the relationship is stable and materially simpler than the port.
+
+A source module used across top-level module boundaries declares its intentional interface in one
+static, literal module-level `__all__`. Cross-module production imports name those declared symbols
+directly with `from ... import ...`; module-style and wildcard imports cannot prove the consumed
+interface and are rejected. A leading underscore remains private even if it is mistakenly listed.
+Imports between files under the same top-level module may use implementation details without an
+`__all__`, and standard-library or third-party imports are outside this repository interface policy.
+
+Treat `__all__` changes as module-interface changes. Add only contracts justified by an allowed
+consumer and the owning architecture; do not export every visible name, add pass-through re-exports,
+or imply a supported third-party Python SDK. A change that alters a module seam or caller obligation
+also updates this document or the architecture owner as applicable.

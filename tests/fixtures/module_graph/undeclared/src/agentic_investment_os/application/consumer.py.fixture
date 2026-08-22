@@ -1,0 +1,3 @@
+from agentic_investment_os.domain.contracts import UndeclaredContract
+
+USED_CONTRACT = UndeclaredContract
