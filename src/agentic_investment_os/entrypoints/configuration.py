@@ -10,7 +10,7 @@ import subprocess
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, assert_never
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -76,7 +76,10 @@ def resolve_runtime_configuration(
     merged = _merge_sources(sources)
     if isinstance(merged, ConfigurationRefusal):
         return merged
-    return _validate_configuration(merged, repository_root=repository_root)
+    if isinstance(merged, dict):
+        return _validate_configuration(merged, repository_root=repository_root)
+    # Strict mypy proves this line unreachable; removing it is runtime-equivalent.
+    assert_never(merged)  # pragma: no cover  # pragma: no mutate
 
 
 def _merge_sources(
@@ -115,6 +118,9 @@ def _validate_configuration(
     state_root = _validate_state_root(state_root_value, repository_root=repository_root)
     if isinstance(state_root, ConfigurationRefusal):
         return state_root
+    if not isinstance(state_root, Path):
+        # Strict mypy proves this line unreachable; removing it is runtime-equivalent.
+        assert_never(state_root)  # pragma: no cover  # pragma: no mutate
 
     canonical = {
         "state_root": str(state_root),

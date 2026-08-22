@@ -3,16 +3,18 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Protocol, assert_never
 
 from agentic_investment_os.domain.lifecycle import (
     AdvanceAttempt,
     AdvanceCommand,
     AdvanceReceipt,
     AdvanceRequest,
+    AppendLifecycleRecord,
     AppendTerminalLifecycleRecord,
     InputRefusal,
     InvalidLifecycleStateError,
+    LifecycleCommand,
     LifecycleLedger,
     LifecycleStatus,
     LifecycleStatusProjection,
@@ -53,10 +55,11 @@ class Advance:
             mode=mode,
             idempotency_key=idempotency_key,
         )
-        command = (
-            parsed
-            if isinstance(parsed, InputRefusal)
-            else AdvanceCommand(
+        command: LifecycleCommand
+        if isinstance(parsed, InputRefusal):
+            command = parsed
+        elif isinstance(parsed, AdvanceRequest):
+            command = AdvanceCommand(
                 parsed,
                 PinnedRunIdentity.create(
                     parsed,
@@ -64,7 +67,9 @@ class Advance:
                     configuration_hash=self.configuration_hash,
                 ),
             )
-        )
+        else:
+            # Strict mypy proves this line unreachable; removing it is runtime-equivalent.
+            assert_never(parsed)  # pragma: no cover  # pragma: no mutate
         attempt = AdvanceAttempt()
         while True:
             decision = self.ledger.advance_step(command, attempt, self.clock.now())
@@ -72,12 +77,16 @@ class Advance:
                 return decision
             if isinstance(decision, AppendTerminalLifecycleRecord):
                 return decision.receipt
-            if decision.attempt.last_sequence is None or (
-                attempt.last_sequence is not None
-                and decision.attempt.last_sequence <= attempt.last_sequence
-            ):
-                raise InvalidLifecycleStateError(_INCOMPLETE_CHECKPOINT_RESULT)
-            attempt = decision.attempt
+            if isinstance(decision, AppendLifecycleRecord):
+                if decision.attempt.last_sequence is None or (
+                    attempt.last_sequence is not None
+                    and decision.attempt.last_sequence <= attempt.last_sequence
+                ):
+                    raise InvalidLifecycleStateError(_INCOMPLETE_CHECKPOINT_RESULT)
+                attempt = decision.attempt
+                continue
+            # Strict mypy proves this line unreachable; removing it is runtime-equivalent.
+            assert_never(decision)  # pragma: no cover  # pragma: no mutate
 
 
 @dataclass(frozen=True, slots=True)
