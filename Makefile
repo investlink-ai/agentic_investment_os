@@ -34,6 +34,7 @@ harness:
 	test -f .github/workflows/mutation.yml
 	test -f scripts/__init__.py
 	test -f scripts/agent_workflow_harness.py
+	test -f scripts/check_unit_test_tier.py
 	test -f scripts/run_mutation.py
 	test -x scripts/start-issue.sh
 	grep -qx '/.agents/worktrees/' .gitignore
@@ -50,6 +51,7 @@ harness:
 	test ! -e docs/SPEC.md
 	test ! -d docs/archive
 	test ! -e pytest.ini
+	uv run python -m scripts.check_unit_test_tier --root .
 	uv run python -m scripts.agent_workflow_harness --root . validate
 	uv run pytest -o 'addopts=--strict-config --strict-markers -ra' tests/unit/test_agent_workflow_harness.py
 

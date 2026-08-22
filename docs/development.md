@@ -162,10 +162,11 @@ Run a focused test directly with `uv run pytest <path-or-node-id>`; finish with 
 Run `make mutation` for mutation-critical domain, portfolio, or execution behavior. The mutation gate
 is deliberately separate from the fast default gate and Git hooks.
 
-`make harness` validates the versioned agent-workflow scenario schemas, references, fixture hashes,
-and deterministic evaluator without invoking a model. An operator can explicitly run one model-backed
-scenario with `make agent-workflow SCENARIO=<scenario-id>`; `testing.md` owns its isolation, evidence,
-and non-authoritative result contract.
+`make harness` enforces the pure unit-test tier and validates the versioned agent-workflow scenario
+schemas, references, fixture hashes, and deterministic evaluator without invoking a model. An operator
+can explicitly run one model-backed scenario with `make agent-workflow SCENARIO=<scenario-id>`;
+`testing.md` owns both checks and the model-backed scenario's isolation, evidence, and
+non-authoritative result contract.
 
 ## Dependency workflow
 

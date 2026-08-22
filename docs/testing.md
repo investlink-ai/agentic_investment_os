@@ -15,6 +15,12 @@ fixtures, and live rehearsal policy. Tests prove `product-requirements.md` and
 - **Live rehearsal:** explicitly selected tests against paper or public services. They require operator
   intent, never run in `make check`, and never make the default suite depend on credentials or network.
 
+`make harness` statically rejects clear effectful imports, calls, and fixtures under `tests/unit/`
+before the suite runs. Each diagnostic identifies the test or module scope and the violated rule.
+The guard permits value-only use of `Path`, timezone-aware timestamps, immutable dataclasses, and
+injected clocks; its bounded syntax check supports but does not replace tier review or behavioral
+evidence.
+
 ## Selection
 
 Run the narrowest relevant node while iterating:
@@ -94,11 +100,11 @@ is not the repository gate.
 
 Mutation runs select only deterministic unit, integration, and contract tiers. They use fake or
 recorded broker boundaries and receive no credentials or network-enabled live rehearsal. Repository
-harness tests for issue worktrees and agent workflows are excluded because they exercise scripts
-outside the copied production tree and cannot distinguish product mutants. Their dedicated harness
-and ordinary test gates remain mandatory. While the repository contains no callable in the configured
-scope, the runner reports the scaffold exemption and exits successfully; adding the first scoped
-callable activates the gate automatically.
+harness tests for issue worktrees, agent workflows, and unit-tier enforcement are excluded because
+they exercise scripts outside the copied production tree and cannot distinguish product mutants.
+Their dedicated harness and ordinary test gates remain mandatory. While the repository contains no
+callable in the configured scope, the runner reports the scaffold exemption and exits successfully;
+adding the first scoped callable activates the gate automatically.
 
 ## Fixtures
 
