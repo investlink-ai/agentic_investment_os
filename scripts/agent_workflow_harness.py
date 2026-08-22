@@ -915,6 +915,18 @@ _REPOSITORY_READERS = frozenset(
     }
 )
 
+_SAFE_SORT_LONG_OPTIONS = frozenset(
+    {
+        "--heapsort",
+        "--human-numeric-sort",
+        "--mergesort",
+        "--mmap",
+        "--qsort",
+        "--radixsort",
+        "--version-sort",
+    }
+)
+
 
 def _reader_path_arguments(executable: str, words: tuple[str, ...]) -> tuple[str, ...]:
     arguments = list(words[1:])
@@ -1007,41 +1019,45 @@ def _unsafe_reader_effect(
             effect = Effect("filesystem.write", detail)
         elif any(argument in {"-exec", "-execdir", "-ok", "-okdir"} for argument in arguments):
             effect = Effect("unknown.tool", detail)
-    elif (
-        executable in {"diff", "sort"}
-        and any(
-            argument in {"-o", "--output"} or argument.startswith(("--out", "-o"))
-            for argument in arguments
-        )
-    ) or (
-        executable == "sort"
-        and any(
-            argument in {"-T", "--temporary-directory"} or argument.startswith(("-T", "--temp"))
-            for argument in arguments
-        )
+    elif executable == "diff" and any(
+        argument in {"-o", "--output"} or argument.startswith(("--output=", "-o"))
+        for argument in arguments
     ):
         effect = Effect("filesystem.write", detail)
+    elif executable == "sort":
+        effect = _unsafe_sort_effect(arguments, detail)
     elif (
-        (
-            executable == "sort"
-            and any(
-                argument in {"-S", "--buffer-size", "--compress-program"}
-                or argument.startswith(("-S", "--buff", "--comp", "--file", "--rand"))
-                for argument in arguments
-            )
+        executable == "rg"
+        and any(
+            argument in {"--pre", "--hostname-bin"}
+            or argument.startswith(("--pre=", "--hostname-bin="))
+            for argument in arguments
         )
-        or (
-            executable == "rg"
-            and any(
-                argument in {"--pre", "--hostname-bin"}
-                or argument.startswith(("--pre=", "--hostname-bin="))
-                for argument in arguments
-            )
-        )
-        or (executable == "sed" and not _sed_command_is_read_only(words))
-    ):
+    ) or (executable == "sed" and not _sed_command_is_read_only(words)):
         effect = Effect("unknown.tool", detail)
     return effect
+
+
+def _unsafe_sort_effect(arguments: tuple[str, ...], detail: str) -> Effect | None:
+    option_arguments: list[str] = []
+    for argument in arguments:
+        if argument == "--":
+            break
+        if argument.startswith("-") and argument != "-":
+            option_arguments.append(argument)
+    if any(
+        argument.startswith(("--o", "--t"))
+        or (not argument.startswith("--") and any(flag in argument[1:] for flag in "oT"))
+        for argument in option_arguments
+    ):
+        return Effect("filesystem.write", detail)
+    if any(
+        (argument.startswith("--") and argument not in _SAFE_SORT_LONG_OPTIONS)
+        or (not argument.startswith("--") and "S" in argument[1:])
+        for argument in option_arguments
+    ):
+        return Effect("unknown.tool", detail)
+    return None
 
 
 _SED_ADDRESS = r"(?:\d+|\$|/(?:\\.|[^/])*/)"
