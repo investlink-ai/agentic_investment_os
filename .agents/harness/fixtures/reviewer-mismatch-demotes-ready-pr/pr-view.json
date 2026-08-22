@@ -1,0 +1,7 @@
+{
+  "number": 53,
+  "state": "OPEN",
+  "isDraft": true,
+  "baseRefName": "main",
+  "headRefName": "issue/53-reviewer-mismatch-demotion"
+}

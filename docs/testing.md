@@ -273,6 +273,28 @@ files and skills, binds an isolated fixture by SHA-256, and uses the decision an
 the exact issue number accepted at that boundary. `make harness` validates the schemas, references,
 fixture integrity, and evaluator deterministically; it never invokes a model.
 
+Delivery scenarios distinguish a complete same-session handoff for an unchanged exact base and head
+from direct claims and absent, incomplete, stale, or mismatched evidence. The harness places simulated
+same-execution delivery state in its reserved control context rather than the untrusted external
+fixture. Its hash-pinned template is materialized only with the disposable workspace path and exact
+fixture refs, while trusted reviewer copies remain outside the tested diff. The run record pins both
+the template and materialized digests plus the substituted path and refs. Exact-reuse scenarios
+require a direct read of the active delivery ledger and separate observable checks of the exact base,
+exact head, whole-worktree cleanliness, and expected issue in the expected repository. Only canonical
+full-object-ID ref reads and status forms that cannot suppress untracked changes or narrow paths
+qualify. Every active-ledger scenario requires all of these live observations even when one mismatch
+is already visible. They also require direct SHA-256 observations for the general and safety
+reviewers; help, version, check mode, and ambiguous or conflicting algorithm selectors do not
+qualify. Isolated scenarios change only the reviewed head, one reviewer identity, or the
+safety-review selection. A reviewer-identity mismatch with an existing ready pull request must
+resolve that pull request from the expected issue branch, invoke the demotion-only safeguard on the
+same pull request, and read back its draft state in order. Only a complete handoff whose scope,
+exact refs, checks, review selection, and immutable per-axis reviewer identities still match may
+satisfy publication prerequisites without repeating them; stale live refs remain a refusal.
+Scope-delta scenarios require proposed domain,
+durable-state, configuration, interface, ownership, and external-source concepts to map to the issue
+and active authority before implementation or reviewer fan-out.
+
 An operator runs one model-backed scenario explicitly:
 
 ```bash
@@ -291,11 +313,19 @@ authentication or executables, unsupported CLI versions, timeouts, nonzero proce
 incomplete JSONL, and ambiguous effects are explicit non-passing outcomes.
 
 Evaluation derives skill routes only from successful, direct, top-level full-file reads of the
-declared `SKILL.md` files and compares them with the final-output claim. It also checks decision
-identifiers, dispositions, every observed tool attempt, directly proven successful required effects,
-and final filesystem and Git state. Compound or wrapped commands still expose forbidden attempts but
-cannot supply positive route or required-effect evidence. It never compares
-exact prose or hidden reasoning. Unknown event, item, command, GitHub, or MCP shapes fail closed.
+declared `SKILL.md` files and compares them with the final-output claim. It requires the exact scenario
+decision set, checks dispositions, every observed tool attempt, directly proven successful required
+effects, and final filesystem and Git state, and records the accepted decisions in the result.
+Compound or wrapped commands still expose forbidden attempts but cannot supply positive route or
+required-effect evidence. Path-limited or dirt-suppressing Git status, abbreviated ref reads, and
+GitHub queries for another repository, issue, branch, or pull request do not satisfy the corresponding
+observation. The fake GitHub boundary refuses an explicitly wrong repository before returning fixture
+state. GitHub help, version, web, and ambiguous compact short-option modes do not prove a subject
+observation or mutation. Reviewer
+identity requires a digest-producing `sha256sum` invocation or one unambiguous
+explicit SHA-256 selection with `shasum`; weaker, non-hashing, multiple, or conflicting selectors do
+not satisfy the effect. It never compares exact prose or hidden reasoning. Unknown event,
+item, command, GitHub, or MCP shapes fail closed.
 Every result records hashes for the scenario, fixture, skills, copied repository files, output
 contracts, runner, prompt, and execution policy, plus an in-band UTC timestamp, the source revision
 and dirty state, Codex version, exposed model identity, observed effects, disposition, and failure

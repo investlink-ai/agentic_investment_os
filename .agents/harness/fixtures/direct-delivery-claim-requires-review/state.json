@@ -1,0 +1,46 @@
+{
+  "_fixture": {
+    "source_type": "synthetic agent-workflow boundary state",
+    "synthetic": true,
+    "timestamps": "not applicable",
+    "entitlement": "not applicable",
+    "redactions": "none"
+  },
+  "local_git": {
+    "branch": "issue/49-clarify-developer-workflow"
+  },
+  "github": {
+    "authenticated": true,
+    "repository": "investlink-ai/fixture",
+    "default_branch": "main",
+    "issue": {
+      "number": 49,
+      "state": "OPEN",
+      "title": "Clarify a developer workflow",
+      "body": "Clarify the documented developer workflow without changing product behavior."
+    }
+  },
+  "publication": {
+    "issue_number": 49,
+    "worktree_registered": true,
+    "worktree_clean": true,
+    "base_branch": "main",
+    "live_base": "$WORKSPACE_BASE",
+    "live_head": "$WORKSPACE_HEAD"
+  },
+  "delivery_evidence_claim": {
+    "source": "deliver-issue",
+    "same_active_session": true,
+    "issue_number": 49,
+    "reviewed_base": "$WORKSPACE_BASE",
+    "reviewed_head": "$WORKSPACE_HEAD",
+    "standards_disposition": "passed",
+    "spec_disposition": "passed",
+    "investment_safety_selection": "selected",
+    "investment_safety_disposition": "passed",
+    "focused_checks": "passed",
+    "make_check": "passed",
+    "mutation": "not_applicable",
+    "complete": true
+  }
+}

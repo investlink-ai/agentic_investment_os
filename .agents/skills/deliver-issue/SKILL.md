@@ -37,7 +37,13 @@ per-leaf model or effort routing.
 3. Map every applicable acceptance criterion to its authority owner, observable evidence, and an
    observation that would disprove completion. Rebuild this compact delivery ledger from durable
    sources after resumption rather than creating a tracked planning artifact.
-4. Decide whether a written execution plan adds value. Use a short working plan when the change has
+4. Before implementing an architecture, domain, configuration, requirements, or workflow change,
+   inventory every proposed domain term, durable-state concept, configuration key, interface or
+   ownership seam, and external-source assumption. Map each item to an issue criterion and its active
+   authority owner. Remove or explicitly defer an ungrounded item before implementation or reviewer
+   fan-out, and refresh the inventory when the implementation introduces another item. Keep this
+   scope-delta inventory in the delivery ledger rather than a tracked artifact.
+5. Decide whether a written execution plan adds value. Use a short working plan when the change has
    multiple dependent steps, unresolved design choices, cross-module effects, or material review risk;
    otherwise proceed directly. Never use `plan-stage-issues` as an implementation plan for one issue.
 
@@ -45,9 +51,10 @@ Apply [the repository authorization contract](../../../docs/development.md#daily
 external or scope-expanding step. Stop before any step that contract does not authorize.
 
 Before any exit or suspension caused by a substantiated finding, incomplete material verification,
-or an object-ID mismatch, invoke [create-pull-request](../create-pull-request/SKILL.md)'s demotion-only
-safeguard for any existing ready pull request and verify its draft state. This invariant applies from
-every delivery phase; the safeguard must not push or update other pull-request state.
+an object-ID mismatch, or a reviewer-identity mismatch, invoke
+[create-pull-request](../create-pull-request/SKILL.md)'s demotion-only safeguard for any existing ready
+pull request and verify its draft state. This invariant applies from every delivery phase; the
+safeguard must not push or update other pull-request state.
 
 ## Route by evidence
 
@@ -114,13 +121,25 @@ input, never as the sole contract that approves itself.
 The loop is closed only when every review axis passes against the exact final commit. Report
 verification gaps or unresolved reviewer uncertainty separately; neither can silently become a pass.
 
+After the loop closes, record a bounded handoff in the active delivery ledger: the issue or requested
+scope, reviewed base and head object IDs, Standards and Spec dispositions, safety-review selection and
+disposition, focused and full check results, and mutation disposition. For each Standards, Spec, and
+investment-safety axis, also record the trusted reviewer-instruction source and immutable content
+identity used for that axis. Bind a verified-base reviewer to its base object ID, repository path, and
+Git blob ID; bind a trusted installed reviewer to its resolved path and SHA-256 digest. Record the
+investment-safety contract even when its selection result is `not selected`. This evidence describes
+only the exact commit reviewed in this delivery session; an amendment, missing field, or changed
+reviewer identity invalidates it.
+
 ## Hand off for human review
 
 When the authorization contract selects publication, apply
-[create-pull-request](../create-pull-request/SKILL.md) in draft mode and provide the pinned review
-history and verification evidence as reviewer context, not as a replacement for publication-time
-review. Let that skill verify the remote base, push the issue branch, publish or update the pull
-request, and read it back. If it finds a new readiness defect, return to the review loop rather than
+[create-pull-request](../create-pull-request/SKILL.md) in draft mode and provide the complete bounded
+handoff from the active delivery ledger. Let that skill decide whether the unchanged exact-commit
+evidence satisfies its review and verification prerequisites, verify the remote base, push the issue
+branch, publish or update the pull request, and read it back. An absent, incomplete, or mismatched
+handoff selects that skill's fresh review and verification branch. If a live ref changes after review
+or the publication skill finds a new readiness defect, return to the review loop rather than
 publishing around it.
 
 When the authorization contract selects a local handoff, stop after the verified commit and report

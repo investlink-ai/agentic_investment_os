@@ -1,0 +1,46 @@
+{
+  "_active_delivery_context": {
+    "source_type": "harness-controlled active delivery ledger",
+    "producer": "deliver-issue",
+    "same_execution": true
+  },
+  "delivery_evidence": {
+    "complete": true,
+    "issue_number": 98,
+    "requested_scope": "An unrelated workflow change.",
+    "reviewed_base": "$WORKSPACE_BASE",
+    "reviewed_head": "$WORKSPACE_BASE",
+    "review_axes": {
+      "standards": {
+        "disposition": "passed",
+        "reviewer_contract": {
+          "source": "trusted_installed",
+          "resolved_path": "$WORKSPACE/.agent-harness/trusted-reviewers/code-review/SKILL.md",
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      },
+      "spec": {
+        "disposition": "passed",
+        "reviewer_contract": {
+          "source": "trusted_installed",
+          "resolved_path": "$WORKSPACE/.agent-harness/trusted-reviewers/code-review/SKILL.md",
+          "sha256": "0322246723b9875dbf5a001e350d41f06cb63b239f8cda8660309e17d7bd59be"
+        }
+      },
+      "investment_safety": {
+        "selection": "selected",
+        "disposition": "passed",
+        "reviewer_contract": {
+          "source": "trusted_installed",
+          "resolved_path": "$WORKSPACE/.agent-harness/trusted-reviewers/investment-safety-review/SKILL.md",
+          "sha256": "e960521bf6a0ff300a7b71449800fdb6d242946fc2303178e9a6b8b6d15ba9e0"
+        }
+      }
+    },
+    "verification": {
+      "focused_checks": "passed",
+      "make_check": "passed",
+      "mutation": "not_applicable"
+    }
+  }
+}

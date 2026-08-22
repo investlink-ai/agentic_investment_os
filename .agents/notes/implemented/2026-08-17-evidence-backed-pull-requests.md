@@ -32,7 +32,10 @@ not a completeness claim by itself.
 final-diff inspection, review-readiness enforcement, evidence collection, publication, and read-back
 verification. Every pull request receives the general Standards and Spec review. The independent
 `investment-safety-review` owns its behavioral selection boundary; uncertainty selects the safety
-review. A caller may supply review results only when they pin the exact base and head. Passing either
+review. A complete handoff from the active issue-delivery session may satisfy publication review and
+verification only when the skill independently revalidates its exact base, head, issue scope, clean
+worktree, review selection, and immutable trusted instruction identity for every review axis. Direct
+requests and incomplete or reconstructed evidence execute the publication-time gates. Passing either
 review does not imply that the other passed.
 
 Ordinary feature pull requests target `main`; stacked pull requests target their unmerged parent and
@@ -53,6 +56,21 @@ closing keywords when an ordinary feature pull request merges.
 - Requiring the investment safety review for every mechanical change was rejected because it adds no
   assurance when behavior cannot reach a safety-sensitive surface. The general review remains the
   default, while uncertainty about behavioral reach selects the safety review.
+- Repeating exact-commit review and verification during publication was rejected because the delivery
+  orchestrator has already closed those gates. Reuse still requires the complete active-session
+  handoff contract: matching issue or scope, exact object IDs, clean worktree, review selection,
+  verification results, and immutable reviewer identity for every axis.
+- Persisting a review cache was rejected because same-session handoff evidence is sufficient and a
+  durable cache would add another stale authority surface.
+- Treating an external fixture claim as same-session evidence was rejected. Model-backed scenarios
+  use a hash-pinned harness control input, record its exact materialized digest and substitutions, and
+  require a direct ledger read plus repository- and subject-bound live observations of its issue,
+  canonical full object IDs, whole-worktree cleanliness, and both general and safety reviewer digests
+  before accepting reuse or rejecting a mismatch.
+- Treating a reviewer mismatch as harmless while a ready pull request remains mergeable was rejected.
+  Reviewer-identity invalidation invokes the same demotion-only safeguard as a stale object ID on the
+  pull request resolved from the expected issue branch, verifies its draft state afterward, and
+  publication independently re-evaluates safety-review selection before reuse.
 - Automating body generation in a script was deferred because the work requires semantic inspection
   of the issue, diff, consumers, and evidence; a fixed script would either miss that reasoning or add
   another schema to maintain.
@@ -68,7 +86,8 @@ an explicit retargeting step to `main` before its closing keyword becomes effect
 
 The skill does not implement findings, commit, merge, or push protected branches. It stops when
 in-scope changes are not committed or a substantiated finding lacks an explicit disposition, and uses
-a draft when material verification is incomplete.
+a draft when material verification is incomplete. Pre-push and CI continue to run the full repository
+gate independently of any delivery handoff.
 
 ## Verification
 

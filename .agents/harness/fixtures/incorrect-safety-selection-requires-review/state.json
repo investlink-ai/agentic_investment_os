@@ -1,0 +1,31 @@
+{
+  "_fixture": {
+    "source_type": "synthetic agent-workflow boundary state",
+    "synthetic": true,
+    "timestamps": "not applicable",
+    "entitlement": "not applicable",
+    "redactions": "none"
+  },
+  "local_git": {
+    "branch": "issue/52-persistence-review-selection"
+  },
+  "github": {
+    "authenticated": true,
+    "repository": "investlink-ai/fixture",
+    "default_branch": "main",
+    "issue": {
+      "number": 52,
+      "state": "OPEN",
+      "title": "Clarify persistence retry safety review selection",
+      "body": "Clarify the persistence-retry review handoff without changing production behavior. Because persistence retry semantics are in scope, investment-safety review is required."
+    }
+  },
+  "publication": {
+    "issue_number": 52,
+    "worktree_registered": true,
+    "worktree_clean": true,
+    "base_branch": "main",
+    "live_base": "$WORKSPACE_BASE",
+    "live_head": "$WORKSPACE_HEAD"
+  }
+}

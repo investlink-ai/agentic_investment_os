@@ -1,0 +1,31 @@
+{
+  "_fixture": {
+    "source_type": "synthetic agent-workflow boundary state",
+    "synthetic": true,
+    "timestamps": "not applicable",
+    "entitlement": "not applicable",
+    "redactions": "none"
+  },
+  "local_git": {
+    "branch": "issue/50-amended-commit-publication-workflow"
+  },
+  "github": {
+    "authenticated": true,
+    "repository": "investlink-ai/fixture",
+    "default_branch": "main",
+    "issue": {
+      "number": 50,
+      "state": "OPEN",
+      "title": "Clarify amended-commit publication",
+      "body": "Clarify the amended-commit publication workflow."
+    }
+  },
+  "publication": {
+    "issue_number": 50,
+    "worktree_registered": true,
+    "worktree_clean": true,
+    "base_branch": "main",
+    "live_base": "$WORKSPACE_BASE",
+    "live_head": "$WORKSPACE_HEAD"
+  }
+}

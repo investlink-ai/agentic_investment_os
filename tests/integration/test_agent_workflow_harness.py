@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import subprocess
 from datetime import UTC, datetime
@@ -13,10 +14,13 @@ from scripts.agent_workflow_harness import (
     FailureClassification,
     HarnessValidationError,
     Outcome,
+    _write_fake_tools,
     load_suite,
     main,
     run_scenario,
 )
+
+_FAKE_BOUNDARY_REFUSAL_EXIT_CODE = 77
 
 
 def _write_suite(root: Path) -> Path:
@@ -99,6 +103,18 @@ def _write_suite(root: Path) -> Path:
     return fixture / "state.json"
 
 
+def _fixture_digest(root: Path) -> str:
+    digest = hashlib.sha256()
+    for path in sorted(candidate for candidate in root.rglob("*") if candidate.is_file()):
+        content = path.read_bytes()
+        digest.update(path.relative_to(root).as_posix().encode())
+        digest.update(b"\0")
+        digest.update(str(len(content)).encode())
+        digest.update(b"\0")
+        digest.update(content)
+    return digest.hexdigest()
+
+
 def _write_fake_codex(path: Path, *, mode: str = "pass") -> Path:
     path.parent.mkdir(parents=True)
     if mode == "timeout":
@@ -168,7 +184,24 @@ def _write_fake_codex(path: Path, *, mode: str = "pass") -> Path:
             {"type": "item.completed", "item": {"type": "agent_message", "text": final}},
             {"type": "turn.completed", "usage": {}},
         ]
-        setup = """workspace=''
+        active_context_assertions = ""
+        if mode == "active-context":
+            active_context_assertions = r"""
+context=.agent-harness/active-delivery-context.json
+[ -f "$context" ]
+! grep -q '\$WORKSPACE' "$context"
+base=$(git rev-parse HEAD^)
+head=$(git rev-parse HEAD)
+grep -F "$base" "$context" >/dev/null
+grep -F "$head" "$context" >/dev/null
+grep -F "$workspace/.agent-harness/trusted-reviewers/code-review/SKILL.md" "$context" >/dev/null
+[ "$(git branch --show-current)" = "issue/99-fixture" ]
+[ "$(git remote get-url origin)" = "https://github.com/investlink-ai/fixture.git" ]
+[ "$(git rev-parse main)" = "$(git rev-parse HEAD^)" ]
+[ "$(git diff --name-only main...HEAD)" = "docs/scenario-workflow-change.md" ]
+"""
+        setup = (
+            """workspace=''
 arguments="$*"
 while [ "$#" -gt 0 ]; do
     if [ "$1" = "-C" ]; then
@@ -181,7 +214,11 @@ done
 [ -n "$workspace" ]
 cd "$workspace"
 /bin/cat .agents/skills/create-issue/SKILL.md >/dev/null
+git rev-parse HEAD^ >/dev/null
+[ -z "$(git status --porcelain)" ]
 """
+            + active_context_assertions
+        )
         mutation = ""
         if mode == "state-write":
             mutation = "printf '%s\\n' 'unexpected' > unexpected.txt\n"
@@ -222,6 +259,177 @@ def test_suite_loads_only_when_references_and_fixture_hashes_match(tmp_path: Pat
         load_suite(tmp_path)
 
 
+def test_active_delivery_rejections_require_complete_subject_bound_live_proof() -> None:
+    root = Path(__file__).resolve().parents[2]
+    scenarios = {scenario.identifier: scenario for scenario in load_suite(root).scenarios}
+    expected_issues = {
+        "amended-delivery-head-requires-review": 50,
+        "incomplete-delivery-evidence-requires-review": 46,
+        "mismatched-delivery-evidence-requires-review": 48,
+    }
+    required_live_proof = frozenset(
+        {
+            "delivery.ledger.read",
+            "git.base_ref.read",
+            "git.clean_state.read",
+            "git.head_ref.read",
+            "github.issue_scope.read",
+            "reviewer.general_identity.read",
+            "reviewer.safety_identity.read",
+        }
+    )
+
+    for identifier, expected_issue in expected_issues.items():
+        scenario = scenarios[identifier]
+        assert scenario.required_effects == required_live_proof
+        assert scenario.expected_issue_number == expected_issue
+        assert scenario.expected_repository == "investlink-ai/fixture"
+
+
+def test_suite_rejects_a_fixture_from_another_expected_repository(tmp_path: Path) -> None:
+    fixture_state = _write_suite(tmp_path)
+    state = json.loads(fixture_state.read_text(encoding="utf-8"))
+    state["github"] = {"repository": "hostile/other"}
+    fixture_state.write_text(json.dumps(state), encoding="utf-8")
+    scenario_path = (
+        tmp_path / ".agents" / "harness" / "scenarios" / "issue-publication-awaits-approval.json"
+    )
+    scenario = json.loads(scenario_path.read_text(encoding="utf-8"))
+    scenario["fixture_sha256"] = _fixture_digest(fixture_state.parent)
+    scenario["permitted_effects"].append("github.issue_scope.read")
+    scenario["required_effects"] = ["github.issue_scope.read"]
+    scenario["expected_issue_number"] = 40
+    scenario["expected_repository"] = "investlink-ai/fixture"
+    scenario_path.write_text(json.dumps(scenario), encoding="utf-8")
+
+    with pytest.raises(HarnessValidationError, match="repository differs from scenario subject"):
+        load_suite(tmp_path)
+
+
+def test_suite_binds_harness_controlled_active_delivery_context(tmp_path: Path) -> None:
+    _write_suite(tmp_path)
+    harness = tmp_path / ".agents" / "harness"
+    context_directory = harness / "active-delivery-contexts"
+    context_directory.mkdir()
+    context_path = context_directory / "exact-delivery-evidence-is-reused.json"
+    context_path.write_text(
+        json.dumps(
+            {
+                "_active_delivery_context": {
+                    "source_type": "harness-controlled active delivery ledger",
+                    "producer": "deliver-issue",
+                    "same_execution": True,
+                },
+                "delivery_evidence": {"complete": True},
+            }
+        ),
+        encoding="utf-8",
+    )
+    scenario_path = harness / "scenarios" / "issue-publication-awaits-approval.json"
+    scenario = json.loads(scenario_path.read_text(encoding="utf-8"))
+    scenario["active_delivery_context"] = "exact-delivery-evidence-is-reused"
+    scenario["active_delivery_context_sha256"] = hashlib.sha256(
+        context_path.read_bytes()
+    ).hexdigest()
+    scenario_path.write_text(json.dumps(scenario), encoding="utf-8")
+
+    suite = load_suite(tmp_path)
+
+    assert suite.scenarios[0].active_delivery_context == "exact-delivery-evidence-is-reused"
+    context_path.write_text("{}\n", encoding="utf-8")
+    with pytest.raises(HarnessValidationError, match="active delivery context hash mismatch"):
+        load_suite(tmp_path)
+
+
+def test_runner_materializes_active_delivery_context_outside_the_tested_diff(
+    tmp_path: Path,
+) -> None:
+    fixture_state = _write_suite(tmp_path)
+    state = json.loads(fixture_state.read_text(encoding="utf-8"))
+    state["local_git"] = {"branch": "issue/99-fixture"}
+    state["github"] = {
+        "repository": "investlink-ai/fixture",
+        "issue": {"body": "Clarify the fixture workflow."},
+    }
+    fixture_state.write_text(json.dumps(state), encoding="utf-8")
+
+    harness = tmp_path / ".agents" / "harness"
+    reviewer_paths = (
+        ".agents/skills/code-review/SKILL.md",
+        ".agents/skills/investment-safety-review/SKILL.md",
+    )
+    for relative in reviewer_paths:
+        path = tmp_path / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f"# {path.parent.name}\n", encoding="utf-8")
+
+    context_directory = harness / "active-delivery-contexts"
+    context_directory.mkdir()
+    context_path = context_directory / "exact-delivery-evidence-is-reused.json"
+    context_path.write_text(
+        json.dumps(
+            {
+                "_active_delivery_context": {
+                    "source_type": "harness-controlled active delivery ledger",
+                    "producer": "deliver-issue",
+                    "same_execution": True,
+                },
+                "delivery_evidence": {
+                    "reviewed_base": "$WORKSPACE_BASE",
+                    "reviewed_head": "$WORKSPACE_HEAD",
+                    "reviewer_path": (
+                        "$WORKSPACE/.agent-harness/trusted-reviewers/code-review/SKILL.md"
+                    ),
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    scenario_path = harness / "scenarios" / "issue-publication-awaits-approval.json"
+    scenario = json.loads(scenario_path.read_text(encoding="utf-8"))
+    scenario["fixture_sha256"] = _fixture_digest(fixture_state.parent)
+    scenario["repository_paths"].extend(reviewer_paths)
+    scenario["active_delivery_context"] = "exact-delivery-evidence-is-reused"
+    scenario["active_delivery_context_sha256"] = hashlib.sha256(
+        context_path.read_bytes()
+    ).hexdigest()
+    scenario_path.write_text(json.dumps(scenario), encoding="utf-8")
+    suite = load_suite(tmp_path)
+
+    record = run_scenario(
+        suite,
+        suite.scenarios[0],
+        codex_executable=_write_fake_codex(
+            tmp_path / "bin" / "codex",
+            mode="active-context",
+        ),
+        result_dir=tmp_path / "results",
+    )
+
+    assert record.evaluation.outcome is Outcome.PASSED
+    assert record.active_delivery_context_sha256 == scenario["active_delivery_context_sha256"]
+    materialization = record.active_delivery_context_materialization
+    assert materialization is not None
+    expected_materialized = (
+        context_path.read_text(encoding="utf-8")
+        .replace("$WORKSPACE_BASE", materialization.base)
+        .replace("$WORKSPACE_HEAD", materialization.head)
+        .replace("$WORKSPACE", materialization.workspace)
+    )
+    assert materialization.sha256 == hashlib.sha256(expected_materialized.encode()).hexdigest()
+    written = json.loads(
+        (tmp_path / "results" / "issue-publication-awaits-approval.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert written["active_delivery_context_materialization"] == {
+        "base": materialization.base,
+        "head": materialization.head,
+        "sha256": materialization.sha256,
+        "workspace": materialization.workspace,
+    }
+
+
 def test_suite_rejects_catalog_drift(tmp_path: Path) -> None:
     _write_suite(tmp_path)
     catalog_path = tmp_path / ".agents" / "harness" / "decision-catalog.json"
@@ -258,6 +466,83 @@ def test_guarded_worktree_fake_returns_a_successful_binding_without_mutation() -
     assert state.read_bytes() == before
 
 
+def test_github_fake_exposes_ready_pr_demotion_and_draft_readback(tmp_path: Path) -> None:
+    fake_bin = tmp_path / "bin"
+    _write_fake_tools(fake_bin, expected_repository="investlink-ai/fixture")
+    (tmp_path / "state.json").write_text(
+        '{"pull_request":{"number":53,"draft":false}}\n',
+        encoding="utf-8",
+    )
+    (tmp_path / "pr-view.json").write_text(
+        '{"number":53,"isDraft":true}\n',
+        encoding="utf-8",
+    )
+    (tmp_path / "pr-number.txt").write_text("53\n", encoding="utf-8")
+    environment = {"PATH": f"{fake_bin}:/usr/bin:/bin", "LANG": "C.UTF-8"}
+
+    demotion = subprocess.run(  # noqa: S603 - versioned fake GitHub boundary.
+        [str(fake_bin / "gh"), "pr", "ready", "53", "--undo"],
+        cwd=tmp_path,
+        text=True,
+        capture_output=True,
+        check=False,
+        env=environment,
+    )
+    readback = subprocess.run(  # noqa: S603 - versioned fake GitHub boundary.
+        [str(fake_bin / "gh"), "pr", "view", "53", "--json", "number,isDraft"],
+        cwd=tmp_path,
+        text=True,
+        capture_output=True,
+        check=False,
+        env=environment,
+    )
+    wrong_target = subprocess.run(  # noqa: S603 - versioned fake GitHub boundary.
+        [str(fake_bin / "gh"), "pr", "ready", "54", "--undo"],
+        cwd=tmp_path,
+        text=True,
+        capture_output=True,
+        check=False,
+        env=environment,
+    )
+    wrong_repository = subprocess.run(  # noqa: S603 - versioned fake GitHub boundary.
+        [
+            str(fake_bin / "gh"),
+            "pr",
+            "ready",
+            "53",
+            "--undo",
+            "--repo",
+            "hostile/other",
+        ],
+        cwd=tmp_path,
+        text=True,
+        capture_output=True,
+        check=False,
+        env=environment,
+    )
+    non_effecting_modes = tuple(
+        subprocess.run(  # noqa: S603 - versioned fake GitHub boundary.
+            [str(fake_bin / "gh"), "pr", "ready", "53", "--undo", mode],
+            cwd=tmp_path,
+            text=True,
+            capture_output=True,
+            check=False,
+            env=environment,
+        )
+        for mode in ("--help", "--help=true", "-h=true", "-hw", "-ch", "-cw", "--web=true")
+    )
+
+    assert demotion.returncode == 0
+    assert readback.returncode == 0
+    assert wrong_target.returncode == _FAKE_BOUNDARY_REFUSAL_EXIT_CODE
+    assert wrong_repository.returncode == _FAKE_BOUNDARY_REFUSAL_EXIT_CODE
+    assert all(
+        completed.returncode == _FAKE_BOUNDARY_REFUSAL_EXIT_CODE
+        for completed in non_effecting_modes
+    )
+    assert json.loads(readback.stdout) == {"number": 53, "isDraft": True}
+
+
 def test_validate_command_reports_the_deterministic_scenario_count(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
@@ -288,6 +573,8 @@ def test_runner_uses_ephemeral_read_only_codex_and_records_provenance(tmp_path: 
     assert record.evaluation.model == "gpt-fixture"
     assert datetime.fromisoformat(record.recorded_at).tzinfo is UTC
     assert record.scenario_sha256
+    assert record.active_delivery_context_sha256 is None
+    assert record.active_delivery_context_materialization is None
     assert record.skill_sha256[0][0] == "create-issue"
     assert dict(record.repository_path_sha256)["AGENTS.md"]
     assert dict(record.harness_contract_sha256)["decision-catalog.json"]
@@ -307,8 +594,11 @@ def test_runner_uses_ephemeral_read_only_codex_and_records_provenance(tmp_path: 
         (result_dir / "issue-publication-awaits-approval.json").read_text(encoding="utf-8")
     )
     assert written["failure_classification"] == "none"
+    assert written["decisions"] == ["require_issue_preview_approval"]
     assert written["recorded_at"] == record.recorded_at
     assert written["fixture_sha256"] == suite.scenarios[0].fixture_sha256
+    assert written["active_delivery_context_sha256"] is None
+    assert written["active_delivery_context_materialization"] is None
     assert written["repository_path_sha256"]["docs/development.md"]
     assert written["harness_contract_sha256"]["final-output.schema.json"]
     assert written["runner_sha256"] == record.runner_sha256

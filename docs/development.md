@@ -88,14 +88,15 @@ independently protect `main` because local hooks are not remote enforcement.
 
 Use `deliver-issue` as the agent entrypoint for a ready issue. It selects an implementation path from
 the issue and current code, keeps supporting skills conditional, remediates findings against a pinned
-commit, and creates or updates a draft pull request after the exact final commit passes its gates and
-reviews. Detailed routing lives in the skill. One strong delivery agent remains the sole writer and
-applies implementation skills inline; independent Standards, Spec, and conditional investment-safety
+commit, and hands complete exact-commit review evidence to draft-pull-request publication. Detailed
+routing lives in the skill. One strong delivery agent remains the sole writer and applies
+implementation skills inline; independent Standards, Spec, and conditional investment-safety
 reviewers are read-only subagents. The stable local loop remains:
 
 1. Confirm the issue has no open blocker, enter its linked worktree, then read the documents referenced
    by the relevant `AGENTS.md` trigger and search applicable Agent Notes before making a durable
-   design choice.
+   design choice. For architecture, domain, configuration, requirements, or workflow changes, remove
+   or defer proposed concepts that do not map to both the issue and an active authority owner.
 2. Make the smallest coherent change and run the narrowest relevant test while iterating.
 3. Run `make format` when Python code changes.
 4. Inspect the diff for generated state, secrets, accidental source-of-truth duplication, and missing
@@ -116,8 +117,8 @@ no-publication restriction stops after the verified commit. A coding request not
 issue does not authorize GitHub publication. Marking a pull request ready, merging, deployment, issue
 or stage closure, issue-graph publication, and worktree cleanup remain separately authorized actions.
 Fail-closed demotion of an existing ready pull request is always authorized when the current issue has
-a substantiated finding, incomplete material verification, or an object-ID mismatch; it must not push
-commits or change other pull-request metadata.
+a substantiated finding, incomplete material verification, an object-ID mismatch, or a
+reviewer-identity mismatch; it must not push commits or change other pull-request metadata.
 
 ## Commit messages
 
@@ -149,7 +150,10 @@ that parent branch and is retargeted to `main` after the parent merges.
 Use the repository's `create-pull-request` skill to open or update a pull request. It derives the
 blast radius from the final diff and maps acceptance criteria and changed invariants to observed
 verification evidence. The issue owns the original problem and acceptance criteria; the pull request
-owns the delivered delta, review risk, and merge evidence.
+owns the delivered delta, review risk, and merge evidence. A complete handoff from the active
+`deliver-issue` session can satisfy review and verification prerequisites only while its exact base,
+head, scope, clean worktree, review selection, and immutable reviewer-contract identity for every
+axis still match; a direct invocation executes those gates.
 
 GitHub closing keywords take effect only when a pull request targets the repository's default branch.
 Keep `main` as the default branch. A stacked pull request's `Closes` link becomes active only after it
