@@ -27,6 +27,12 @@ make check
 
 `make check` is the handoff gate: formatting, lint, strict mypy, and the deterministic pytest suite.
 
+The default Hypothesis profile in `tests/conftest.py` uses derandomized generation, no example
+database or wall-clock deadline, bounded example and state-machine step counts, one reported failure,
+and printed replay blobs. Generated tests remain credential-free and network-free, inject any clock,
+and shrink a failure to a reproducible counterexample; neither Hypothesis shrinking nor replay may
+turn a failure into a passing retry.
+
 ## Test contracts
 
 Use the earliest stable enforcement layer defined by the
