@@ -88,6 +88,10 @@ Use `pyproject.toml` and `uv.lock` only; never create `requirements.txt` files.
 
 ## Conventions
 
+- Make rules protecting investment authority, determinism, provenance, append-only durability, or
+  process isolation executable at the earliest stable layer. Follow
+  `docs/architecture.md#executable-invariants`, `docs/module-graph.md`, and `docs/testing.md`; a
+  passing mechanical gate does not replace semantic review.
 - Keep the modular monolith deep: expose lifecycle capabilities, not arbitrary research-stage calls.
 - Keep domain logic independent of frameworks and external services. Integrations live in
   `adapters/`; process assembly and credential wiring live in `entrypoints/`.
