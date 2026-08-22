@@ -99,6 +99,11 @@ The detailed investment contract for these outcomes lives in `investment-domain.
   network, mutable local account, or credential.
 - **PR-CON-005 — Maintenance budget:** Pause or narrow V0 if it creates routine manual research, daily
   recovery work, or another paid operating burden.
+- **PR-CON-006 — Bounded asset extension:** Stable public lifecycle results, provenance, durability,
+  packet-integrity, idempotency, and reconciliation contracts remain asset-neutral; instrument,
+  schedule, quantity, order, settlement, and lifecycle-phase differences use closed asset-class-owned
+  variants. V0 composition authorizes only US equities and refuses crypto or options before research,
+  portfolio, packet, or broker effects.
 
 ## V0 scope
 
@@ -127,6 +132,10 @@ Excluded:
 - autonomous code, objective, Constitution, evaluator, risk, broker-policy, or Champion changes;
 - LangGraph in V0; and
 - a dashboard, mobile application, notification platform, or multi-user permission system.
+
+The multi-asset extension constraint in PR-CON-006 does not widen V0. Crypto and options variants are
+design seams for separately authorized future work, not enabled research, portfolio, risk, market-data,
+or execution capabilities.
 
 ## Acceptance
 

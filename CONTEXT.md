@@ -5,7 +5,12 @@ not implementation structure, field schemas, or configurable values.
 
 ## Time and evidence
 
-- **Market Session:** one NYSE trading date and its exchange-relative operating lifecycle.
+- **Decision Cycle:** one asset-class-relative interval whose schedule, cutoff, and required activities
+  delimit a deterministic operating-system run.
+- **Decision Cycle Identity:** the versioned, asset-class-discriminated durable identity of a Decision
+  Cycle.
+- **Market Session:** the US-equity Decision Cycle for one NYSE trading date and its exchange-relative
+  operating lifecycle, represented durably by the `MarketSession` variant of `DecisionCycleIdentity`.
 - **Evidence Artifact:** immutable captured source content with identity, provenance, relevant times,
   entitlement, and content hash.
 - **Evidence Assertion:** a typed fact extracted from an Evidence Artifact that preserves its source,
@@ -13,6 +18,14 @@ not implementation structure, field schemas, or configurable values.
 - **Evidence Cutoff:** the latest availability time admitted to one decision context.
 - **Data Regime:** a versioned combination of feeds, entitlements, and interpretation rules under which
   observations are comparable.
+
+## Instruments and positions
+
+- **Instrument:** a financial security, spot pair, or listed contract that can be observed, held, or
+  traded under one asset class's rules.
+- **Instrument Identity:** the durable asset-class-discriminated identity of an Instrument. A display
+  symbol is only a source alias; a crypto identity includes its pair and venue, while an option identity
+  includes its underlying Instrument and expiration.
 
 ## Attention and research
 
@@ -47,7 +60,7 @@ not implementation structure, field schemas, or configurable values.
   under a declared risk envelope.
 - **Target Band:** the allowed lower and upper portfolio weight around a deterministic target; remaining
   inside the band is a no-trade outcome.
-- **DecisionPacket:** a complete, immutable, risk-clamped, versioned, account-bound, session-bound,
+- **DecisionPacket:** a complete, immutable, risk-clamped, versioned, account-bound, cycle-bound,
   signed, and expiring artifact that the executor may accept.
 - **Execution Receipt:** the append-only record of broker submissions, changes, rejections, fills,
   quotes, timestamps, and divergence from a DecisionPacket.

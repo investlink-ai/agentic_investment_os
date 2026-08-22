@@ -87,6 +87,14 @@ passing suite remains supporting evidence rather than proof of complete semantic
 - Test LLM output for schema, evidence support, role separation, and prohibited authority. Do not pin
   wording, style, or hidden reasoning.
 - Prove as-of availability rather than comparing only source timestamps.
+- Exercise every instrument, cycle, position, order, and broker-activity discriminator through its
+  owner-defined interface. Unknown, disabled, mixed, or version-incompatible variants are negative
+  controls and must produce no downstream authority or effect.
+- Key fixtures and assertions by canonical `InstrumentIdentity`; use display-symbol changes,
+  collisions, and legacy aliases to prove that no join, retry, packet, or reconciliation rule depends
+  on a symbol.
+- Test provider capability profiles from recorded contracts. Conflicting official enum or order
+  support is not normalized to the wider set; an unverified combination remains refused.
 - Keep the Research Lab and executor isolation properties under integration or contract test.
 
 ## Coverage
@@ -161,6 +169,35 @@ evidence. A scenario becomes mandatory when its owning behavior is implemented.
 - Persistence handles disk-full, transaction rollback, interrupted writes, duplicate event delivery,
   and projection corruption without publishing partial executable state.
 
+### Asset extension seams
+
+- The public `DecisionCycleIdentity` accepts its equity `MarketSession` variant and unwraps it into the
+  current Market-Session-specific kernel. A disabled variant is rejected before dispatch, and a later
+  concrete lifecycle cannot add an asset-class branch to that kernel.
+- Durable events and `Status.last_completed_cycle` preserve the cycle discriminator across retry,
+  reopen, and projection rebuild; the field advances only from a validated `Complete` event.
+- V0 configuration accepts exactly the equity asset-class set. Crypto, options, unknown classes,
+  duplicate activation, provider entitlement alone, and class/policy mismatch fail before runtime
+  state, research, portfolio, packet, credential, network, or broker effects.
+- Universe and position snapshots retain canonical instrument identities and aliases separately,
+  reject unresolved references, and preserve a disabled-class holding as an explicit portfolio
+  mismatch rather than dropping or activating it.
+- Asset payload unions reject missing or unknown discriminators, unsupported schema versions,
+  unrelated optional fields, mixed equity/crypto/option fields, implicit units, and implicit currency
+  or multipliers.
+- A future crypto cycle may complete while the NYSE calendar has no eligible session; its 24/7 clock,
+  pair quantities, increments, venue, order policy, and fee currency remain inside crypto-owned
+  variants.
+- A future option exercise, assignment, or expiration reconciles the contract, the owner's underlying
+  position, and cash from independent append-only observations. Delayed or missing activity, changed
+  positions, duplicate delivery, and contradictory multipliers remain unresolved and block
+  discretionary progress. An index or unknown underlying is refused before equity-owned schedule or
+  settlement policy.
+- Adding an asset lifecycle leaves the existing MarketSession phase order, common durable envelope,
+  snapshot hashes, packet integrity, receipt reconstruction, effect keys, and projection rebuild
+  evidence unchanged. The new lifecycle proves its own phase and checkpoint behavior without changing
+  the MarketSession kernel.
+
 ### Evidence, memory, and research
 
 - Evidence unavailable at the cutoff is rejected even when its source-event time is earlier.
@@ -209,14 +246,23 @@ evidence. A scenario becomes mandatory when its owning behavior is implemented.
 
 - Recorded Alpaca market-data and trading fixtures cover normal, stale, unavailable, partial,
   rejected, canceled, ambiguous-timeout, and out-of-order events.
+- Recorded Alpaca fixtures keep equity assets, crypto pairs, option contracts, positions, orders,
+  account entitlements, fills, fees, and non-trade activities in their raw adapter-owned shapes. They
+  cover provider ID and alias mapping, feed entitlement, quantity and currency precision, option
+  underlyings and multipliers, and delayed exercise, assignment, or expiration activity.
+- When current Alpaca references disagree about a field name, activity code, order form, or
+  time-in-force, contract evidence pins the accepted capability profile and rejects the unresolved or
+  wider interpretation. Tests never choose a provider contract from prose recency alone.
 - SEC and issuer fixtures cover acceptance times, amendments, duplicate content, changed mappings, and
   hostile embedded instructions.
 - Scripted model fixtures cover valid output, hallucinated citations, prohibited authority, missing
   Skeptic, conflicting schemas, long output, timeout, and quota exhaustion.
 - Scheduler fixtures cover weekends, exchange holidays, early closes, daylight-saving transitions,
   machine sleep and wake, late starts, and resume behavior.
-- Changed external or authority seams prove the absence of network, credential, broker, Champion, or
-  filesystem effects on every rejected path.
+- Changed external or authority seams prove the absence of network, credential, broker, Champion,
+  packet-publication, or other downstream effects on every rejected path. A trustworthy request key
+  instead asserts exactly its permitted bounded refusal under the configured runtime-state root; a
+  configuration refusal before state-root preparation asserts no filesystem change.
 
 ## Agent workflow scenarios
 

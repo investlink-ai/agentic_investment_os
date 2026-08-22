@@ -53,6 +53,17 @@ the dependency. Prefer passing typed values and ports over adding an edge.
 - `execution` never imports `research`, a model client, or a Codex adapter.
 - `portfolio` consumes validated typed research outcomes and deterministic market/risk inputs; it does
   not invoke a model.
+- `domain` owns the asset-neutral `InstrumentIdentity`, `DecisionCycleIdentity`, durable-envelope, and
+  receipt contracts. A capability owns its asset-class policy and payload variants; adding a variant
+  does not add a reverse dependency or a top-level asset plugin module.
+- The current `domain.lifecycle` kernel remains specific to `MarketSession`. `application` validates
+  the `DecisionCycleIdentity` boundary and, in V0, passes only its `MarketSession` variant to that
+  kernel. A later second lifecycle may justify extracting proven shared transition machinery; no
+  transition kernel switches on an asset-class discriminator.
+- `adapters` translate Alpaca identifiers, enums, response shapes, and capability differences into the
+  owner-defined variants. Provider types never cross into capability or domain interfaces.
+- `entrypoints` select a closed set of asset variants explicitly. Observed provider entitlements and
+  dynamic discovery cannot add a dependency or activate a capability.
 - Research Lab composition may reuse capability code but never imports or writes champion execution
   state.
 - A cycle, a reverse edge into adapters, or a new cross-capability edge requires an architecture
@@ -68,7 +79,8 @@ functions or storage internals. Keep an interface with its owner:
   and recovery decisions; persistence adapters validate representations and atomically append its
   selected records;
 - application code depends on capability interfaces and result types;
-- domain events and identifiers remain free of integration types; and
+- domain events and identifiers remain free of integration types; asset payloads use exhaustive
+  discriminated unions rather than registries or unrelated optional fields; and
 - composition-specific values stop at the entrypoint.
 
 When a capability needs data owned elsewhere, prefer a typed input or owner-defined port. Add a direct

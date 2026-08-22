@@ -24,6 +24,129 @@ test procedure, or design rationale. Those live in `investment-domain.md`,
 - Enforce safety-critical invariants at the earliest stable layer instead of relying only on prose
   or review convention.
 
+## Multi-asset extension constraint
+
+[PR-CON-006](product-requirements.md#operational-constraints) and
+[ADR 0005](adr/0005-share-core-contracts-with-typed-asset-variants.md) establish one deterministic
+core with closed asset-class-owned variants. The target vocabulary distinguishes `us_equity`,
+`crypto_spot`, and `listed_option`; V0 composition enables only `us_equity`. Describing the other
+variants does not authorize their research, portfolio, risk, market-data, or execution behavior.
+
+The official-provider facts behind this design are traced in the non-authoritative
+[Alpaca capability matrix](research/alpaca-multi-asset-capabilities.md). Provider documentation and
+responses are boundary input. This document and the ADR own the accepted architecture.
+
+Names are fixed across the public and durable contracts: Decision Cycle is the domain concept,
+`DecisionCycleIdentity` is its closed identity union, `MarketSession` is the equity variant and current
+kernel input, and `CryptoDecisionWindow` is a reserved future variant. Option expiration, exercise,
+and assignment are due reconciliation obligations rather than another cycle identity.
+
+### Instrument identity
+
+Every durable instrument reference uses a versioned `InstrumentIdentity` discriminated union. Its
+common envelope carries an asset-class discriminator plus a validated provider-and-environment
+catalog namespace and opaque catalog identifier. The identifier is interpreted only by the adapter
+for that namespace. A display symbol, name, or provider enum is alias provenance and never a join key,
+idempotency input, or durable foreign key.
+
+The variants carry only identity-defining semantics for their asset class:
+
+- `EquityInstrumentIdentity` carries the listing venue. Eligibility facts such as status,
+  tradability, and fractionability belong to the observed instrument record rather than its identity.
+- `CryptoSpotInstrumentIdentity` carries base currency, quote currency, and execution venue. Pair
+  spellings such as `BTC/USD` and `BTCUSD` are aliases of a resolved identity, not interchangeable
+  keys.
+- `ListedOptionInstrumentIdentity` carries its underlying `EquityInstrumentIdentity`, expiration,
+  call or put right, exercise style, strike amount and currency, and a terms version covering the
+  multiplier and deliverable. The option display symbol cannot substitute for the contract identity
+  or underlying relationship. Alpaca's current official surface also contains index-option evidence;
+  an index or unknown underlying is unsupported by this identity variant and fails closed until a
+  separately approved underlying and schedule variant exists.
+
+An adapter may retain the source identifier and aliases in provenance, but it must validate their
+one-to-one mapping at the pinned cutoff before constructing an identity. Missing, reused, or
+contradictory mappings fail closed; a symbol change never creates a new identity by itself.
+
+### Shared core and variant ownership
+
+The shared core owns invariants that have the same meaning for every asset class. A capability owns a
+closed variant where the provider facts change the meaning or allowed state.
+
+| Concept | Shared deterministic core | Asset-class-owned variant |
+| --- | --- | --- |
+| Instrument identity | Versioned discriminator, canonical identity bytes, hashes, alias provenance, and referential integrity | Equity listing identity; crypto base/quote pair and venue; option contract with a supported equity underlying, expiration, strike, style, multiplier, and deliverable terms |
+| Market data | Evidence cutoff, availability time, source identity, entitlement, Data Regime, content hash, and staleness disposition | Feed selection, venue codes, message parser, session coverage, and class-specific quote, trade, bar, chain, or order-book payload |
+| Trading clock and lifecycle | `DecisionCycleIdentity`, pinned cutoff, public disposition and liveness semantics, and due-obligation envelope | NYSE-relative `MarketSession` and its phase policy; a future UTC `CryptoDecisionWindow` and its own phase policy; supported option expiration or late-close obligations |
+| Quantity, currency, and multiplier | Exact decimal representation with explicit unit and currency; no binary-float or implicit conversion | Whole or fractional shares, base or quote crypto quantities and increments, and whole option contracts with explicit multiplier and deliverable |
+| Positions | Versioned snapshot envelope, instrument reference, observed and available times, signed quantity, valuation provenance, and snapshot hash | Share, coin, pair, or contract quantity semantics and any underlying or settlement relationship |
+| Orders and time-in-force | Packet identity, immutable intent, deterministic risk approval, expiry, canonical-instrument effect key, and receipt reconstruction | Allowed order shapes, quantity form, price fields, session eligibility, time-in-force, and cancel or replace policy |
+| Exercise, assignment, and expiration | Append-only broker-activity envelope, independent observations, idempotent activity identity, and reconciliation completion | Option exercise request, assignment, expiration, cash settlement, contract removal, and underlying-position effects |
+| Fills and reconciliation | Intent-before-effect, stable client identity, independent order and activity observations, typed receipts, and rebuildable outcomes | Provider status mapping, fee treatment, fill units, multi-leg grouping, and class-specific position or cash effects |
+
+Alpaca enum values, endpoint defaults, error codes, and response objects remain in `adapters`. Adapters
+map them into owner-defined variants and record the provider contract version in the Data Regime.
+When official sources disagree about a supported value, the adapter capability profile treats the
+combination as unsupported until recorded contract evidence resolves it; the core never widens an
+enum by inference.
+
+Entitlement, status, and buying-power facts in the capability matrix are boundary observations for
+the operator's own Trading API connection, not shared-core or asset-domain models. An adapter may
+validate those raw facts into an existing typed refusal path, but they never activate an asset class
+or create durable account, customer, or multi-account state. Closed configuration is the sole source
+of enabled capability authority.
+
+### Asset-neutral durable contracts
+
+Every shared snapshot, packet, receipt, and durable event has a common versioned envelope containing
+its record kind, envelope schema version, payload discriminator and payload schema version, canonical
+subject or cycle identity where applicable, relevant event and availability times, Data Regime,
+authority scope, material configuration and source fingerprints, and content hash. Asset payloads are
+closed variants validated on write and read. A flat record with unrelated nullable equity, crypto,
+and option fields is invalid.
+
+- Universe, position, and evidence snapshots use the same immutable envelope and canonical hashing
+  rules. Their variant payloads state exact units and never infer an asset class from a symbol.
+- `DecisionPacket` integrity, signature, authority scope, expiry, and deterministic risk approval
+  remain shared. An eventual packet payload is exactly one validated equity, crypto-spot, or
+  listed-option intent variant; the executor cannot reinterpret one variant as another.
+- Execution receipts and broker activities preserve order observations, fills, fees, exercise,
+  assignment, expiration, and position effects as independent facts. A delayed activity and an
+  already changed position may coexist without either being manufactured from the other.
+- Effect idempotency derives from the packet, canonical instrument identity, effect kind, and attempt,
+  never from a display symbol. Reconciliation keys provider observations by their stable source
+  identity and appends corrections rather than overwriting them.
+
+Unknown discriminators, unsupported schema versions, disabled classes, malformed variant payloads,
+stale observations, incompatible capability profiles, or unresolved identity mappings fail closed at
+the first seam. A trustworthy request key receives a bounded durable refusal. Configuration that
+attempts to enable an unsupported class is refused before runtime state or capability composition.
+
+### Composition and extension budget
+
+The V0 entrypoint statically composes only the equity variants and requires the enabled asset-class
+set to equal `{us_equity}`. Observed Alpaca entitlements cannot widen that set. Crypto or option
+configuration is rejected before `Advance` is constructed; a disabled variant arriving through a
+recorded or broker boundary is refused before research, portfolio construction, packet publication,
+or broker effects. A disabled-class holding is never silently dropped: it remains an explicit
+portfolio mismatch that blocks discretionary progress until an authorized capability can reconcile it.
+
+Adding one asset class may add:
+
+- one identity, cycle-plan, instrument, position, order-intent, and broker-activity variant;
+- asset-owned eligibility, portfolio, risk, execution, and reconciliation policy;
+- provider adapters and recorded contract fixtures for the new variant;
+- complete, versioned configuration with an explicit activation gate; and
+- unit, integration, contract, mutation-critical, and explicitly authorized live-rehearsal evidence.
+
+A new asset lifecycle owns its phase and checkpoint sequence. It must not alter the existing
+MarketSession phase order or require rewriting the public lifecycle results, common durable envelope,
+provenance and snapshot hashing, receipt reconstruction, packet-integrity checks, effect-idempotency
+rules, append-only correction behavior, or process authority separation. A demonstrated exception
+updates this document and receives an ADR before implementation. There is no dynamic plugin registry
+or runtime discovery path; composition and every closed union remain explicit and exhaustively
+checked. Later activation must also remain within PR-CON-001's existing-entitlement and
+no-metered-fallback constraint; this extension design adds no service dependency.
+
 ## Executable invariants
 
 Rules that protect investment authority, determinism, provenance, append-only durability, or process
@@ -109,16 +232,17 @@ credentials.
 
 Normal production callers see six capabilities:
 
-- **Advance** resolves or resumes a market session and returns a receipt containing its disposition,
-  completed phase, pinned inputs, published artifact identifiers, fail-closed reason, and whether the
-  call advanced fresh work, resumed committed progress, or replayed prior completion.
+- **Advance** resolves or resumes a `DecisionCycleIdentity`. V0 accepts only its `MarketSession`
+  variant; the receipt contains the disposition, completed phase, cycle and pinned inputs, published
+  artifact identifiers, fail-closed reason, and whether the call advanced fresh work, resumed
+  committed progress, or replayed prior completion.
 - **Status** validates authoritative lifecycle history, replaces its disposable projection, and returns
-  the active phase, last completed Market Session, pinned run identity, lifecycle liveness, and any
-  available durable terminal reason.
+  the active phase, `last_completed_cycle` as a `DecisionCycleIdentity`, pinned run identity, lifecycle
+  liveness, and any available durable terminal reason. In V0 that identity is always a `MarketSession`.
 - **Record** appends due market, forecast, thesis, and execution observations without changing the
   original decision.
 - **Govern** schedules a signed, operator-approved Constitution, champion, or controlled-policy
-  change for a future session boundary.
+  change for a future Market Session boundary.
 - **Apply** independently validates one published `DecisionPacket`, manages only its permitted paper
   orders, and returns an `ExecutionReceipt`.
 - **Reconcile** observes broker orders and positions, matches stable client order identifiers, and
@@ -129,9 +253,23 @@ Lab and can write only to its own namespace.
 
 ## Session lifecycle
 
-The operating system is a checkpointed state machine over append-only records. Each transition
+The V0 operating system is a checkpointed state machine over append-only records. Each transition
 persists intent before work and appends its observed result before advancing. Repeating a request
 returns its prior disposition or resumes from the last safe checkpoint.
+
+The implemented `domain.lifecycle` kernel remains specific to the `MarketSession` lifecycle under
+[the active kernel decision](../.agents/notes/implemented/2026-08-22-keep-lifecycle-kernel-specific.md).
+The application boundary validates `DecisionCycleIdentity` and unwraps only `MarketSession` before
+invoking that kernel. The equity planner resolves the session, Evidence Cutoff, schedule provenance,
+and due reconciliation obligations; the kernel never reads a calendar or switches on an asset-class
+discriminator.
+
+A separately authorized crypto implementation would first add a concrete `CryptoDecisionWindow`
+planner and its own transition policy while conforming to the public lifecycle results, durable
+envelope, and receipt contracts. Only that second implementation can justify extracting proven common
+transition machinery. Closed composition dispatch occurs before a transition kernel, so neither
+specific kernel accumulates asset-class branches. Option expiration, exercise, and assignment enter
+the equity path through `Reconcile` as due broker activities rather than new MarketSession phases.
 
 A framework-free lifecycle kernel reconstructs typed authoritative history and selects the next
 event, refusal, conflict, or receipt. Application code repeats that operation until it receives a
@@ -173,18 +311,59 @@ stateDiagram-v2
     FailedClosed --> PublishDigest
 ```
 
-`NoAction` is an expected, durable outcome. `FailedClosed` records why the session cannot safely
+`NoAction` is an expected, durable outcome. `FailedClosed` records why the cycle cannot safely
 continue. Neither state publishes a new discretionary order. A later LangGraph adapter may replace
 the transition implementation but must preserve this interface, state meaning, checkpoints, and
 idempotency behavior.
 
+A cycle whose due activities are missing, stale, contradictory, or not reconstructable also remains
+failed closed. Its transition policy sees only whether the typed reconciliation obligation is
+complete; asset-owned policy interprets the activity.
+
+### Lifecycle walkthroughs
+
+#### Equity daily cycle
+
+The V0 scheduler resolves an NYSE trading date and exchange-relative deadlines into an equity
+`MarketSession`. `ReconcilePriorState` proves cash, positions, pending orders, and prior receipts agree.
+`PinRunInputs` records the equity cycle identity, equity-feed Data Regime and Evidence Cutoff,
+configuration, instrument catalog, position snapshot, and policy fingerprints; the current Basic
+entitlement uses IEX, while a later SIP entitlement is a different regime. The remaining phases run
+once and publish at most one Champion decision and packet for that cycle. A non-equity activation
+request or position is refused before evidence or research; an NYSE holiday produces the existing
+durable no-action path rather than a synthetic session.
+
+#### Crypto while US equities are closed
+
+In a separately authorized future composition, a crypto planner can produce a UTC-bounded
+`CryptoDecisionWindow` while the NYSE planner produces none. Its concrete transition policy must
+own its phase and checkpoint sequence while conforming to the public lifecycle results, durable
+envelope, receipt, packet-integrity, and reconciliation contracts. Crypto policy also owns 24/7
+scheduling, base/quote quantities, venue data, order increments, time-in-force, and fee-currency
+observations; composition dispatches before transition logic rather than adding an `if crypto` branch.
+Under V0, the same activation attempt is a configuration refusal and creates no research, packet,
+order, or broker effect.
+
+#### Option expiration or assignment
+
+In a separately authorized future composition, the option planner marks expiration obligations in
+the cycle plan, while `Reconcile` independently consumes provider position snapshots and stable
+exercise, assignment, expiration, and paired underlying-transaction activities. The option variant
+links the contract identity to its underlying equity identity and applies the recorded multiplier and
+deliverable. Reconciliation appends each observation once, updates no prior record, and exposes the
+resulting option, the owner's underlying position, and cash state to the next cycle. A position change
+observed before a delayed activity remains an unresolved independent fact and blocks discretionary
+progress; the system neither invents the activity nor repeats an effect. The MarketSession transition
+graph gains no option-specific branch. An option with an index or unknown underlying is also refused
+rather than coerced into an equity identity. V0 refuses every option variant before this path is
+reachable.
+
 Lifecycle status is derived only from the append-only event, refusal, and conflict ledgers. Rebuilding
 validates the complete authoritative history before atomically replacing the projection; missing or
 malformed projection state is discarded, while malformed authoritative history fails closed. A
-completed phase does not imply a completed Market Session: `last_completed_session` advances only
-from a durable `Complete` event. Status liveness describes whether the recorded lifecycle is not
-started, active, or failed closed; scheduler heartbeat and schedule health are separate operational
-concerns.
+completed phase does not imply a completed Decision Cycle: `last_completed_cycle` advances only from
+a durable `Complete` event. Status liveness describes whether the recorded lifecycle is not started,
+active, or failed closed; scheduler heartbeat and schedule health are separate operational concerns.
 
 ## Safe execution handoff
 
@@ -199,7 +378,7 @@ sequenceDiagram
     participant Executor
     participant Broker as Alpaca Paper
 
-    Operator->>OS: Advance(session, mode, idempotency key)
+    Operator->>OS: Advance(cycle, mode, idempotency key)
     OS->>Ledger: Append phase intent and pinned inputs
     OS->>Research: Curated evidence + bounded schema
     Research-->>OS: Untrusted typed candidate artifacts
@@ -240,6 +419,50 @@ An interface lives with the module that owns its behavior. Adapters satisfy thos
 entrypoints assemble them. `module-graph.md` owns allowed Python import directions and the distinction
 between policy and executable edges.
 
+## Eligible-universe compatibility contract
+
+The compatibility delta requested for
+[issue #19](https://github.com/investlink-ai/agentic_investment_os/issues/19) and
+[PR #32](https://github.com/investlink-ai/agentic_investment_os/pull/32) is the permanent contract for the
+first and every later eligible-universe implementation. It must hold before evidence work can depend
+on eligible-universe records.
+
+- **Instrument identity:** Replace symbol keys with the versioned `InstrumentIdentity` union and its
+  equity, crypto-spot, and listed-option variants. Only `EquityInstrumentIdentity` is eligible in V0;
+  the disabled variants preserve explicit portfolio mismatches. Aliases remain provenance, while
+  deduplication, ordering, membership, retry, and hashes use canonical identity bytes. An option whose
+  underlying does not resolve to an equity identity is unsupported rather than eligible.
+- **Universe snapshots:** Replace flat equity-shaped asset and symbol-only holding records with
+  versioned instrument and position snapshot envelopes containing exactly one discriminated payload.
+  Subjects reference canonical identity, new-entry eligibility remains distinct from holding refresh,
+  and disabled-class holdings remain explicit portfolio mismatches.
+- **Lifecycle boundary:** The application accepts `DecisionCycleIdentity`, permits only its
+  `MarketSession` variant in V0, and unwraps it before the current Market-Session-specific kernel. The
+  durable event and Status projection expose the cycle discriminator and `last_completed_cycle` while
+  retaining the kernel's specific transition policy. Cycle, instrument-snapshot, position-snapshot,
+  eligibility-policy, cutoff, and Data Regime fingerprints are pinned; changed retry inputs conflict
+  before further work.
+- **Persistence:** Parse discriminators before payloads, validate exact fields and identity references,
+  and reconstruct canonical bytes and hashes on every reopen. Persist common cycle and snapshot
+  envelopes rather than Alpaca enums or symbol foreign keys. Physical-schema tampering fails at the
+  ADR 0004 startup boundary; content or reference tampering fails reconstruction under ADR 0002.
+  Under ADR 0004's current-schema policy, provisional pre-deployment shapes are replaced rather than
+  migrated, and every unsupported non-empty shape fails closed.
+- **Configuration:** Require a validated enabled-asset-class set and an explicitly discriminated equity
+  universe policy. V0 accepts only the equity class with the matching policy; crypto, options, unknown
+  or duplicate classes, missing policy, policy mismatch, and provider entitlement alone fail before
+  runtime state preparation. The implementation change records any concrete key and default in
+  `config-catalog.md`; this contract does not name an unimplemented configuration surface.
+- **Compatibility evidence:** The observable scenarios in
+  [Asset extension seams](testing.md#asset-extension-seams) are required through public `Advance` and
+  `Status`. They preserve the existing equity daily behavior while proving canonical identity,
+  snapshot reconstruction, cycle/status compatibility, retry conflict, reopen, disabled-class
+  refusal, and absence of downstream effects.
+
+Crypto and option eligibility, strategy, portfolio, risk, data, and execution remain unauthorized.
+Their identity variants preserve explicit refusal so a later authorized variant can expand an owned
+union instead of replacing durable identity or lifecycle contracts.
+
 ## Authority and trust
 
 The authority chain is monotonic:
@@ -271,6 +494,7 @@ captured evidence -> validated research -> HouseView -> deterministic portfolio
 | Decisions | Decision Journal | Freeze ex-ante record; append later observations |
 | Order intent and receipts | Executor ledger | Persist intent before effect; append observations |
 | Lifecycle checkpoints and refusals | Lifecycle event ledger | Append transitions and bounded conflict or refusal records under stable idempotency keys |
+| Eligible-universe snapshots | Lifecycle event ledger | Append one complete asset-neutral envelope with typed instrument and position variants, applied policy, dispositions, and immutable identity |
 | Graphs, reports, indexes | Projection stores | Replace only by deterministic rebuild |
 | Executable packets | Atomic packet store | Publish complete validated artifacts only |
 
