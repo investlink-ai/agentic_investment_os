@@ -259,6 +259,14 @@ SQLite is the initial event and checkpoint store, while the filesystem holds con
 artifacts and atomic publications. Runtime state uses ignored, configurable roots such as `var/`,
 `data/`, and `artifacts/`; source directories never serve as runtime storage.
 
+The SQLite database carries one database-wide physical schema version independent of run
+configuration and durable-record schema versions. Opening the store validates its complete schema
+and authoritative rows, then applies every supported migration in order as a separate atomic
+transaction. An unversioned store is accepted only when it is empty or exactly matches a pinned
+legacy schema. Unknown versions, missing migration steps, malformed schemas, and invalid migration
+input fail before lifecycle writes; authoritative rows are never rewritten to perform an upgrade.
+The migration transaction model is recorded in [ADR 0002](adr/0002-version-sqlite-schema.md).
+
 ## Configuration and deployment
 
 Entrypoints resolve typed configuration, explicit defaults, paths, and secret references before

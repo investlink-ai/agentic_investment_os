@@ -111,6 +111,8 @@ evidence. A scenario becomes mandatory when its owning behavior is implemented.
 - Repeated Record calls do not duplicate Outcome Observations.
 - Constitution, model, prompt, tool, policy, data, and source hashes remain pinned within a run.
 - Corrupted projections rebuild deterministically; corrupted authoritative ledgers fail closed.
+- SQLite startup upgrades exact supported schemas in order, preserves authoritative rows, and rolls
+  back an interrupted or failed migration without advancing its physical schema version.
 - Persistence handles disk-full, transaction rollback, interrupted writes, duplicate event delivery,
   and projection corruption without publishing partial executable state.
 
