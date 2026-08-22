@@ -82,11 +82,12 @@ changed safety path. Invoke `mutmut` directly only for incremental local diagnos
 is not the repository gate.
 
 Mutation runs select only deterministic unit, integration, and contract tiers. They use fake or
-recorded broker boundaries and receive no credentials or network-enabled live rehearsal. The issue-
-worktree harness is excluded because it exercises repository scripts outside the mutated production
-source tree and cannot distinguish product mutants. While the repository contains no callable in the
-configured scope, the runner reports the scaffold exemption and exits successfully; adding the first
-scoped callable activates the gate automatically.
+recorded broker boundaries and receive no credentials or network-enabled live rehearsal. Repository
+harness tests for issue worktrees and agent workflows are excluded because they exercise scripts
+outside the copied production tree and cannot distinguish product mutants. Their dedicated harness
+and ordinary test gates remain mandatory. While the repository contains no callable in the configured
+scope, the runner reports the scaffold exemption and exits successfully; adding the first scoped
+callable activates the gate automatically.
 
 ## Fixtures
 

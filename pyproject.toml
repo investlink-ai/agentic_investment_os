@@ -144,6 +144,8 @@ pytest_add_cli_args_test_selection = [
   "tests/unit",
   "tests/integration",
   "tests/contract",
+  "--ignore=tests/unit/test_agent_workflow_harness.py",
+  "--ignore=tests/integration/test_agent_workflow_harness.py",
   "--ignore=tests/integration/test_issue_worktree_harness.py",
 ]
 mutate_only_covered_lines = true
