@@ -172,6 +172,21 @@ def test_unversioned_nonempty_database_is_not_supported(tmp_path: Path) -> None:
     assert database.read_bytes() == before
 
 
+def test_unversioned_projection_only_database_is_not_treated_as_fresh(tmp_path: Path) -> None:
+    database = tmp_path / "projection-only.sqlite3"
+    with sqlite3.connect(database) as connection:
+        connection.execute("CREATE TABLE lifecycle_status_projection (payload TEXT)")
+    before = database.read_bytes()
+
+    with pytest.raises(
+        LifecyclePersistenceError,
+        match="unsupported SQLite database version",
+    ):
+        SQLiteLifecycleLedger(database)
+
+    assert database.read_bytes() == before
+
+
 def test_opening_a_current_database_is_a_no_op(tmp_path: Path) -> None:
     database = tmp_path / "current.sqlite3"
     SQLiteLifecycleLedger(database)

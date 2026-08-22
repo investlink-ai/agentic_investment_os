@@ -269,7 +269,7 @@ same-named objects attached to authoritative tables remain inside the signature.
 Startup runs the full SQLite integrity check with a recognized projection temporarily removed under
 a rolled-back savepoint, so projection-only corruption remains rebuildable without masking damage to
 authoritative or global database structures.
-Current-schema ownership is recorded in [ADR 0002](adr/0002-require-current-sqlite-schema.md).
+Current-schema ownership is recorded in [ADR 0003](adr/0003-require-current-sqlite-schema.md).
 
 ## Configuration and deployment
 

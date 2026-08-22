@@ -56,6 +56,12 @@ _DROP_PROJECTION_SQL = (
     # SQLite keywords and identifiers are case-insensitive, so case-only mutants are equivalent.
 )
 _USER_VERSION_SQL = "PRAGMA user_version"
+_USER_SCHEMA_OBJECT_EXISTS_SQL = """
+SELECT EXISTS (
+    SELECT 1 FROM sqlite_schema
+    WHERE name NOT LIKE 'sqlite_%'
+)
+"""
 _INTEGRITY_CHECK_SQL = "PRAGMA integrity_check"
 _INTEGRITY_SAVEPOINT_SQL = "SAVEPOINT validate_without_projection"
 _ROLLBACK_INTEGRITY_SAVEPOINT_SQL = "ROLLBACK TO validate_without_projection"
@@ -269,16 +275,14 @@ def _initialize_or_validate_database(connection: sqlite3.Connection) -> None:
     with connection:
         connection.execute(_BEGIN_IMMEDIATE_SQL)
         recorded_version = _database_version(connection)
-        schema = _schema_signature(connection)
-        is_fresh = recorded_version == 0 and not schema
+        is_fresh = recorded_version == 0 and not _user_schema_has_objects(connection)
         if is_fresh:
             for statement in _CURRENT_SCHEMA:
                 connection.execute(statement)
             _set_current_database_version(connection)
-            schema = _schema_signature(connection)
         elif recorded_version != _CURRENT_DATABASE_VERSION:
             raise LifecyclePersistenceError(_UNSUPPORTED_DATABASE_VERSION)
-        _validate_current_database(connection, schema)
+        _validate_current_database(connection, _schema_signature(connection))
         if is_fresh:
             connection.commit()
         else:
@@ -292,6 +296,11 @@ def _database_version(connection: sqlite3.Connection) -> int:
 
 def _set_current_database_version(connection: sqlite3.Connection) -> None:
     connection.execute(f"PRAGMA user_version = {_CURRENT_DATABASE_VERSION}")
+
+
+def _user_schema_has_objects(connection: sqlite3.Connection) -> bool:
+    row: tuple[object, ...] | None = connection.execute(_USER_SCHEMA_OBJECT_EXISTS_SQL).fetchone()
+    return row == (1,)
 
 
 def _schema_signature(connection: sqlite3.Connection) -> frozenset[str]:
