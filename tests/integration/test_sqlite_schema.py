@@ -38,7 +38,7 @@ def _schema(database: Path) -> list[tuple[str, str, str, str]]:
             """
             SELECT type, name, tbl_name, sql
             FROM sqlite_schema
-            WHERE name NOT LIKE 'sqlite_%' AND sql IS NOT NULL
+            WHERE name NOT LIKE 'sqlite!_%' ESCAPE '!' AND sql IS NOT NULL
             ORDER BY type, name
             """
         ).fetchall()
@@ -172,15 +172,42 @@ def test_unversioned_nonempty_database_is_not_supported(tmp_path: Path) -> None:
     assert database.read_bytes() == before
 
 
-def test_unversioned_projection_only_database_is_not_treated_as_fresh(tmp_path: Path) -> None:
-    database = tmp_path / "projection-only.sqlite3"
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "CREATE TABLE lifecycle_status_projection (payload TEXT)",
+        "CREATE TABLE sqlitex (payload TEXT)",
+    ],
+    ids=("projection-only", "legal-sqlite-prefix"),
+)
+def test_unversioned_database_with_user_objects_is_not_treated_as_fresh(
+    tmp_path: Path,
+    statement: str,
+) -> None:
+    database = tmp_path / "user-object.sqlite3"
     with sqlite3.connect(database) as connection:
-        connection.execute("CREATE TABLE lifecycle_status_projection (payload TEXT)")
+        connection.execute(statement)
     before = database.read_bytes()
 
     with pytest.raises(
         LifecyclePersistenceError,
         match="unsupported SQLite database version",
+    ):
+        SQLiteLifecycleLedger(database)
+
+    assert database.read_bytes() == before
+
+
+def test_current_database_with_legal_sqlite_prefix_object_fails_closed(tmp_path: Path) -> None:
+    database = tmp_path / "current-extra-object.sqlite3"
+    SQLiteLifecycleLedger(database)
+    with sqlite3.connect(database) as connection:
+        connection.execute("CREATE TABLE sqlitex (payload TEXT)")
+    before = database.read_bytes()
+
+    with pytest.raises(
+        LifecyclePersistenceError,
+        match="SQLite schema does not match database version",
     ):
         SQLiteLifecycleLedger(database)
 

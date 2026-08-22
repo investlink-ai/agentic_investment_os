@@ -59,7 +59,7 @@ _USER_VERSION_SQL = "PRAGMA user_version"
 _USER_SCHEMA_OBJECT_EXISTS_SQL = """
 SELECT EXISTS (
     SELECT 1 FROM sqlite_schema
-    WHERE name NOT LIKE 'sqlite_%'
+    WHERE name NOT LIKE 'sqlite!_%' ESCAPE '!'
 )
 """
 _INTEGRITY_CHECK_SQL = "PRAGMA integrity_check"
@@ -307,7 +307,7 @@ def _schema_signature(connection: sqlite3.Connection) -> frozenset[str]:
     rows = connection.execute(
         """
         SELECT sql FROM sqlite_schema
-        WHERE name NOT LIKE 'sqlite_%'
+        WHERE name NOT LIKE 'sqlite!_%' ESCAPE '!'
           AND NOT (
               type IN ('table', 'index', 'trigger')
               AND tbl_name = 'lifecycle_status_projection'
