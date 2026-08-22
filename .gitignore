@@ -17,6 +17,7 @@ htmlcov/
 .pytest_cache/
 .ruff_cache/
 /mutants/
+/.agents/harness/results/
 
 # Secrets and local configuration
 .env

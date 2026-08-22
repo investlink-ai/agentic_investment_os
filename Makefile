@@ -1,4 +1,4 @@
-.PHONY: bootstrap check format harness lint mutation sync test typecheck
+.PHONY: agent-workflow bootstrap check format harness lint mutation sync test typecheck
 
 bootstrap: sync
 	git config core.hooksPath .githooks
@@ -33,9 +33,11 @@ harness:
 	test -f .github/workflows/ci.yml
 	test -f .github/workflows/mutation.yml
 	test -f scripts/__init__.py
+	test -f scripts/agent_workflow_harness.py
 	test -f scripts/run_mutation.py
 	test -x scripts/start-issue.sh
 	grep -qx '/.agents/worktrees/' .gitignore
+	grep -qx '/.agents/harness/results/' .gitignore
 	test -f CONTEXT.md
 	test -f docs/architecture.md
 	test -f docs/config-catalog.md
@@ -48,6 +50,15 @@ harness:
 	test ! -e docs/SPEC.md
 	test ! -d docs/archive
 	test ! -e pytest.ini
+	uv run python -m scripts.agent_workflow_harness --root . validate
+	uv run pytest -o 'addopts=--strict-config --strict-markers -ra' tests/unit/test_agent_workflow_harness.py
+
+agent-workflow:
+	@test -n "$(SCENARIO)" || { \
+		echo 'usage: make agent-workflow SCENARIO=<scenario-id>' >&2; \
+		exit 2; \
+	}
+	uv run python -m scripts.agent_workflow_harness --root . run "$(SCENARIO)"
 
 lint:
 	uv run ruff format --check .

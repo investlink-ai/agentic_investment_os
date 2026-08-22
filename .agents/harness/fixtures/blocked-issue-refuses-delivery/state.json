@@ -1,0 +1,25 @@
+{
+  "_fixture": {
+    "source_type": "synthetic agent-workflow boundary state",
+    "synthetic": true,
+    "timestamps": "not applicable",
+    "entitlement": "not applicable",
+    "redactions": "none"
+  },
+  "github": {
+    "authenticated": true,
+    "repository": "investlink-ai/fixture",
+    "issue": {
+      "number": 43,
+      "state": "OPEN",
+      "title": "Implement a blocked capability"
+    },
+    "blocked_by": [
+      {
+        "number": 41,
+        "state": "OPEN",
+        "title": "Establish the required predecessor"
+      }
+    ]
+  }
+}

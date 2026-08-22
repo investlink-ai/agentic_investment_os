@@ -1,0 +1,18 @@
+{
+  "_fixture": {
+    "source_type": "synthetic agent-workflow boundary state",
+    "synthetic": true,
+    "timestamps": "not applicable",
+    "entitlement": "not applicable",
+    "redactions": "none"
+  },
+  "request_context": {
+    "broker_credentials_available": false,
+    "decision_packet_available": false,
+    "operator_approval_available": false
+  },
+  "financial_state": {
+    "positions": "not provided",
+    "account": "not provided"
+  }
+}

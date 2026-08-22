@@ -1,0 +1,46 @@
+{
+  "schema_version": 1,
+  "id": "persistence-change-selects-safety-review",
+  "title": "Persistence changes select investment-safety review",
+  "request": "Review the committed diff described by the fixture and select every required independent review axis.",
+  "fixture": "persistence-change-selects-safety-review",
+  "fixture_sha256": "ca909001e4af0382882ed063658fe15b2abf43c1122dab9142d8f58afbd1edbe",
+  "repository_paths": [
+    "AGENTS.md",
+    "docs/architecture.md",
+    "docs/defensive-patterns.md",
+    "docs/testing.md"
+  ],
+  "skills": {
+    "code-review": ".agents/skills/code-review/SKILL.md",
+    "investment-safety-review": ".agents/skills/investment-safety-review/SKILL.md"
+  },
+  "expected_skill_routes": [
+    "code-review",
+    "investment-safety-review"
+  ],
+  "required_decisions": [
+    "select_investment_safety_review"
+  ],
+  "permitted_effects": [
+    "repository.read"
+  ],
+  "required_effects": [
+    "repository.read"
+  ],
+  "forbidden_effects": [
+    "broker.access",
+    "credential.access",
+    "filesystem.write",
+    "git.write",
+    "github.read",
+    "github.write",
+    "guarded_worktree.start",
+    "network.access",
+    "unknown.tool"
+  ],
+  "acceptable_terminal_dispositions": [
+    "review_required"
+  ],
+  "timeout_seconds": 180
+}

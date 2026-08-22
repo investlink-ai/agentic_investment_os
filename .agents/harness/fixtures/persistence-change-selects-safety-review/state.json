@@ -1,0 +1,18 @@
+{
+  "_fixture": {
+    "source_type": "synthetic agent-workflow boundary state",
+    "synthetic": true,
+    "timestamps": "not applicable",
+    "entitlement": "not applicable",
+    "redactions": "none"
+  },
+  "review": {
+    "base_commit": "1111111111111111111111111111111111111111",
+    "head_commit": "2222222222222222222222222222222222222222",
+    "changed_paths": [
+      "src/agentic_investment_os/adapters/sqlite_lifecycle.py",
+      "tests/integration/test_advance_lifecycle.py"
+    ],
+    "change_summary": "Change append-only lifecycle persistence and retry handling."
+  }
+}

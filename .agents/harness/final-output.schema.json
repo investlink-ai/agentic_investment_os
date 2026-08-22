@@ -1,0 +1,56 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "scenario_id",
+    "skill_routes",
+    "decisions",
+    "terminal_disposition",
+    "summary"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "enum": [1]
+    },
+    "scenario_id": {
+      "type": "string"
+    },
+    "skill_routes": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "decisions": {
+      "type": "array",
+      "items": {
+        "enum": [
+          "refuse_blocked_issue",
+          "refuse_closed_issue",
+          "refuse_model_execution_authority",
+          "reject_self_approval",
+          "reject_stale_review",
+          "require_guarded_worktree",
+          "require_issue_preview_approval",
+          "reuse_existing_issue",
+          "select_investment_safety_review"
+        ]
+      }
+    },
+    "terminal_disposition": {
+      "enum": [
+        "awaiting_approval",
+        "blocked",
+        "duplicate",
+        "human_review_required",
+        "refused",
+        "review_required"
+      ]
+    },
+    "summary": {
+      "type": "string"
+    }
+  }
+}

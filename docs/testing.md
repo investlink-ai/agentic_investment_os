@@ -175,6 +175,47 @@ evidence. A scenario becomes mandatory when its owning behavior is implemented.
 - Changed external or authority seams prove the absence of network, credential, broker, Champion, or
   filesystem effects on every rejected path.
 
+## Agent workflow scenarios
+
+Versioned contracts under `.agents/harness/scenarios/` exercise repository agent routing, required
+decisions, terminal dispositions, and observable effects. Each scenario names only current repository
+files and skills, binds an isolated fixture by SHA-256, and uses the decision and effect vocabulary in
+`.agents/harness/decision-catalog.json`. A scenario that permits guarded worktree startup also binds
+the exact issue number accepted at that boundary. `make harness` validates the schemas, references,
+fixture integrity, and evaluator deterministically; it never invokes a model.
+
+An operator runs one model-backed scenario explicitly:
+
+```bash
+make agent-workflow SCENARIO=issue-publication-awaits-approval
+```
+
+The runner copies only scenario-declared repository files into a temporary Git repository and
+supplies fake GitHub and disabled external commands. Supported Codex CLI 0.149.x runs with `exec
+--ephemeral --json`, a structured final-output schema, and a granular permission profile that denies
+the filesystem root, admits only Codex's minimal runtime paths and the disposable workspace as
+read-only, denies temporary-directory and command-network access, and disables approval escalation.
+The Codex client retains the operator's authentication environment, but its model-generated local
+commands do not inherit that environment and cannot read outside the permission profile. App,
+plugin, browser, computer-use, image, multi-agent, and tool-discovery features are disabled. Missing
+authentication or executables, unsupported CLI versions, timeouts, nonzero processes, malformed or
+incomplete JSONL, and ambiguous effects are explicit non-passing outcomes.
+
+Evaluation derives skill routes only from successful, direct, top-level full-file reads of the
+declared `SKILL.md` files and compares them with the final-output claim. It also checks decision
+identifiers, dispositions, every observed tool attempt, directly proven successful required effects,
+and final filesystem and Git state. Compound or wrapped commands still expose forbidden attempts but
+cannot supply positive route or required-effect evidence. It never compares
+exact prose or hidden reasoning. Unknown event, item, command, GitHub, or MCP shapes fail closed.
+Every result records hashes for the scenario, fixture, skills, copied repository files, output
+contracts, runner, prompt, and execution policy, plus an in-band UTC timestamp, the source revision
+and dirty state, Codex version, exposed model identity, observed effects, disposition, and failure
+classification under
+ignored `.agents/harness/results/`. Results are advisory review evidence: they cannot approve
+workflow changes, authorize publication, replace an independent review, or become repository
+authority. Model-backed scenarios remain outside Git hooks and default CI; `make harness` exercises
+the deterministic evaluator tests but never invokes a model.
+
 ## Forward acceptance
 
 An end-to-end Alpaca paper rehearsal runs only with explicit operator intent. Before the formal

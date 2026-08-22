@@ -1,0 +1,17 @@
+{
+  "_fixture": {
+    "source_type": "synthetic agent-workflow boundary state",
+    "synthetic": true,
+    "timestamps": "not applicable",
+    "entitlement": "not applicable",
+    "redactions": "none"
+  },
+  "pull_request": {
+    "number": 12,
+    "draft": true,
+    "reviewed_base": "1111111111111111111111111111111111111111",
+    "reviewed_head": "2222222222222222222222222222222222222222",
+    "live_base": "1111111111111111111111111111111111111111",
+    "live_head": "3333333333333333333333333333333333333333"
+  }
+}
