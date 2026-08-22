@@ -10,6 +10,38 @@ from datetime import date, datetime
 from enum import StrEnum
 from typing import Protocol, TypeGuard, assert_never
 
+__all__ = (
+    "AdvanceAttempt",
+    "AdvanceCommand",
+    "AdvanceFailureReason",
+    "AdvanceReceipt",
+    "AdvanceRequest",
+    "AppendLifecycleRecord",
+    "AppendTerminalLifecycleRecord",
+    "DurableAdvanceConflict",
+    "DurableAdvanceRefusal",
+    "IdempotencyKey",
+    "InputRefusal",
+    "InvalidLifecycleStateError",
+    "LifecycleCommand",
+    "LifecycleDecision",
+    "LifecycleEvent",
+    "LifecycleEventKind",
+    "LifecycleHistory",
+    "LifecycleLedger",
+    "LifecyclePersistenceError",
+    "LifecyclePhase",
+    "LifecycleRecord",
+    "LifecycleStatus",
+    "LifecycleStatusProjection",
+    "PinnedRunIdentity",
+    "decide_advance",
+    "decide_invalid_history",
+    "decide_terminal_refusal",
+    "derive_lifecycle_status",
+    "is_sha256",
+)
+
 _IDEMPOTENCY_KEY = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\Z")
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 _INVALID_ADVANCED_RECEIPT = "advanced receipt requires completed recovery facts"

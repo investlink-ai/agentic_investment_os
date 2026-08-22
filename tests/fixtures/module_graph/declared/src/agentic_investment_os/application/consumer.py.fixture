@@ -1,0 +1,8 @@
+import json
+
+import third_party
+
+from agentic_investment_os.application.internal import _InternalContract
+from agentic_investment_os.domain.contracts import DeclaredContract
+
+USED_CONTRACTS = (json.JSONDecoder, third_party.Contract, _InternalContract, DeclaredContract)

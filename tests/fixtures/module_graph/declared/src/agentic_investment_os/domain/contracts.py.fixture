@@ -1,0 +1,11 @@
+__all__ = ("DeclaredContract",)
+assert __all__ == ("DeclaredContract",)
+
+
+class DeclaredContract:
+    pass
+
+
+def local_interface() -> tuple[str, ...]:
+    __all__ = ("LocalContract",)
+    return __all__

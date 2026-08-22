@@ -45,6 +45,14 @@ if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
 
+__all__ = (
+    "PreparedRuntimeDatabase",
+    "RuntimeRootRefusal",
+    "SQLiteLifecycleLedger",
+    "open_runtime_database",
+    "prepare_runtime_database",
+)
+
 _DATABASE_NAME = "lifecycle.sqlite3"
 _T = TypeVar("_T")
 _PRIVATE_DATABASE_FLAGS = os.O_CREAT | os.O_EXCL | os.O_WRONLY

@@ -24,6 +24,8 @@ from agentic_investment_os.domain.lifecycle import (
 if TYPE_CHECKING:
     from datetime import datetime
 
+__all__ = ("Advance", "Clock", "Status")
+
 
 _INCOMPLETE_CHECKPOINT_RESULT = "lifecycle ledger returned an incomplete checkpoint result"
 

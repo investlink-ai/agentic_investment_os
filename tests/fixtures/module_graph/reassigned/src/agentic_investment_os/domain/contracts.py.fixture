@@ -1,0 +1,10 @@
+__all__ = ("DeclaredContract",)
+__all__ = ("ReplacementContract",)
+
+
+class DeclaredContract:
+    pass
+
+
+class ReplacementContract:
+    pass
