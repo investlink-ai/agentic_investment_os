@@ -21,6 +21,29 @@ test procedure, or design rationale. Those live in `investment-domain.md`,
 - Persist intent before external effects and make every effect independently idempotent.
 - Fail closed with a durable disposition when required state is stale, incomplete, contradictory, or
   invalid.
+- Enforce safety-critical invariants at the earliest stable layer instead of relying only on prose
+  or review convention.
+
+## Executable invariants
+
+Rules that protect investment authority, determinism, provenance, append-only durability, or process
+isolation must have stable, proportionate mechanical enforcement when one can express the contract
+without weakening or duplicating its owner. Apply the earliest layer that can prove the rule:
+
+1. types and constructors make invalid internal states difficult to represent and exhaust closed
+   state;
+2. module structure prevents forbidden dependencies and authority from becoming reachable;
+3. validation at a seam refuses hostile or untrusted representations before typed construction and
+   before handoff to another authority domain;
+4. deterministic tests exercise observable and temporal invariants that the earlier layers cannot
+   prove; and
+5. human review judges semantics, proportionality, and cases that cannot be encoded reliably.
+
+The [module graph](module-graph.md) owns executable Python dependency direction, while the
+[testing policy](testing.md) owns behavioral evidence and gate selection. A passing mechanical check
+is supporting evidence, not proof that the owning semantic contract is complete or correct. Do not
+add brittle checks merely to mechanize prose, and do not let a changed review or publication gate
+approve itself.
 
 ## System topology
 

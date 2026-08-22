@@ -4,6 +4,10 @@ This document owns allowed Python import directions. The production package has 
 `tests/unit/test_module_graph.py` derives the actual graph from Python imports and rejects edges that
 violate this policy. Do not maintain a separate hand-written list of actual edges.
 
+This import gate is the module-structure layer of the
+[executable-invariants policy](architecture.md#executable-invariants). It proves dependency
+direction, not the semantic correctness or completeness of a module's authority contract.
+
 ## Allowed direction
 
 ```mermaid

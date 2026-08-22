@@ -29,6 +29,11 @@ make check
 
 ## Test contracts
 
+Use the earliest stable enforcement layer defined by the
+[executable-invariants policy](architecture.md#executable-invariants). Tests own observable and
+temporal behavior that types, constructors, module structure, or seam validation cannot prove; a
+passing suite remains supporting evidence rather than proof of complete semantic correctness.
+
 - Assert public receipts, durable events, stored artifacts, projections, packets, and observable world
   state. Avoid private methods and mock call choreography.
 - Use fixed timezone-aware clocks, deterministic identifiers, exchange calendars, content hashes, and
