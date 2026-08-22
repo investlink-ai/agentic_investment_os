@@ -325,7 +325,6 @@ def _validate_current_database(
     if schema != _CURRENT_SCHEMA_SIGNATURE:
         raise LifecyclePersistenceError(_SCHEMA_VERSION_MISMATCH)
     _validate_database_integrity(connection)
-    _validate_authoritative_rows(connection)
 
 
 def _validate_database_integrity(connection: sqlite3.Connection) -> None:
@@ -342,16 +341,6 @@ def _validate_database_integrity(connection: sqlite3.Connection) -> None:
         raise LifecyclePersistenceError(_DATABASE_INTEGRITY_FAILED)
 
 
-def _validate_authoritative_rows(connection: sqlite3.Connection) -> None:
-    derive_lifecycle_status(
-        LifecycleHistory(
-            events=tuple(_load_events(connection)),
-            refusals=tuple(_load_refusals(connection)),
-            conflicts=tuple(_load_conflicts(connection)),
-        )
-    )
-
-
 def _connect_database(database: Path, *, mode: _DatabaseOpenMode) -> sqlite3.Connection:
     connection = sqlite3.connect(f"{database.as_uri()}?mode={mode}", uri=True)
     connection.execute(_ENABLE_FOREIGN_KEYS_SQL)
@@ -363,7 +352,8 @@ class SQLiteLifecycleLedger:
     """Initialize or validate current storage, then append domain-selected records.
 
     Construction fails with ``LifecyclePersistenceError`` when the physical database
-    version, schema, integrity, or authoritative rows cannot be trusted.
+    version, schema, or integrity cannot be trusted. Capability operations validate the
+    authoritative rows within their owning request or global reconstruction scope.
     """
 
     def __init__(self, database: Path) -> None:

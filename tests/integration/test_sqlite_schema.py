@@ -463,7 +463,7 @@ def test_index_content_corruption_fails_before_lifecycle_writes_resume(tmp_path:
     assert _authoritative_rows(database) == before
 
 
-def test_invalid_durable_key_fails_current_schema_validation(tmp_path: Path) -> None:
+def test_invalid_durable_key_fails_global_status_reconstruction(tmp_path: Path) -> None:
     database = tmp_path / "invalid-key.sqlite3"
     SQLiteLifecycleLedger(database)
     with sqlite3.connect(database) as connection:
@@ -475,16 +475,18 @@ def test_invalid_durable_key_fails_current_schema_validation(tmp_path: Path) -> 
             (RECORDED_AT,),
         )
 
+    reopened = SQLiteLifecycleLedger(database)
+
     with pytest.raises(
         LifecyclePersistenceError,
         match="invalid idempotency_key in lifecycle refusal ledger",
     ):
-        SQLiteLifecycleLedger(database)
+        reopened.rebuild_status()
 
     assert _database_version(database) == CURRENT_DATABASE_VERSION
 
 
-def test_orphan_conflict_fails_on_current_database_reopen(tmp_path: Path) -> None:
+def test_orphan_conflict_fails_global_status_reconstruction(tmp_path: Path) -> None:
     database = tmp_path / "orphan-conflict.sqlite3"
     SQLiteLifecycleLedger(database)
     with sqlite3.connect(database) as connection:
@@ -496,16 +498,18 @@ def test_orphan_conflict_fails_on_current_database_reopen(tmp_path: Path) -> Non
             (RECORDED_AT,),
         )
 
+    reopened = SQLiteLifecycleLedger(database)
+
     with pytest.raises(
         LifecyclePersistenceError,
         match="invalid conflict association",
     ):
-        SQLiteLifecycleLedger(database)
+        reopened.rebuild_status()
 
     assert _database_version(database) == CURRENT_DATABASE_VERSION
 
 
-def test_refusal_that_overlaps_a_completed_stream_fails_current_validation(
+def test_refusal_that_overlaps_a_completed_stream_fails_global_status_reconstruction(
     tmp_path: Path,
 ) -> None:
     database = tmp_path / "overlapping-refusal.sqlite3"
@@ -521,11 +525,13 @@ def test_refusal_that_overlaps_a_completed_stream_fails_current_validation(
         )
     before = _authoritative_rows(database)
 
+    reopened = SQLiteLifecycleLedger(database)
+
     with pytest.raises(
         LifecyclePersistenceError,
         match="invalid refusal association",
     ):
-        SQLiteLifecycleLedger(database)
+        reopened.rebuild_status()
 
     assert _database_version(database) == CURRENT_DATABASE_VERSION
     assert _authoritative_rows(database) == before

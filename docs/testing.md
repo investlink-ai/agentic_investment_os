@@ -113,7 +113,8 @@ evidence. A scenario becomes mandatory when its owning behavior is implemented.
 - Corrupted projections rebuild deterministically; corrupted authoritative ledgers fail closed.
 - SQLite startup atomically initializes the one current schema or validates that exact current shape.
   Failed initialization returns to an empty unversioned database; every other non-empty version or
-  shape, index inconsistency, and contradictory cross-ledger history fails closed.
+  shape and index inconsistency fails closed. Advance validates request-relevant history, while Status
+  fails closed on contradictory global cross-ledger history.
 - Persistence handles disk-full, transaction rollback, interrupted writes, duplicate event delivery,
   and projection corruption without publishing partial executable state.
 

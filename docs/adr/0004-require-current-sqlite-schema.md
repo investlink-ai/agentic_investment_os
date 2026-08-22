@@ -26,10 +26,11 @@ initializes atomically, or a database already carrying the current version and e
 Every other non-empty shape or physical version is unsupported and fails before lifecycle writes.
 
 Fresh initialization creates every authoritative table, index, constraint, and append-only trigger,
-validates the resulting schema and rows, and records the current physical version in one transaction.
+validates the resulting physical schema, and records the current version in one transaction.
 Failure rolls the database back to its empty, unversioned state, so retry executes the same path.
-Opening a current database validates its exact schema, full SQLite integrity, and cross-ledger row
-invariants without writing it.
+Opening a current database validates its exact schema and full SQLite integrity without writing it.
+Semantic row validation follows the capability boundaries in [ADR 0002](0002-lifecycle-policy-in-domain-kernel.md):
+Advance selects request-relevant history, while Status reconstructs and validates global history.
 
 Only the lifecycle-status projection table and its owned indexes or triggers are excluded from the
 authoritative signature. A view or same-named object with another owner remains part of the signature.
@@ -53,7 +54,7 @@ while corruption shared with authoritative or global SQLite structures fails sta
 - While runtime state remains disposable, a schema change replaces the current definition and requires
   a fresh database. Introduce upgrade behavior only when preserving deployed state becomes an explicit
   product requirement.
-- Startup performs database-wide validation and can cost more as authoritative history grows; this is
-  accepted for the local single-operator V0 safety boundary.
+- Startup's full physical integrity check can cost more as the database grows; this is accepted for
+  the local single-operator V0 safety boundary.
 - Startup diagnostics remain bounded and omit database contents, SQL text, credentials, and local
   paths.
