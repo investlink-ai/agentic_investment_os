@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import sqlite3
 import stat
 import subprocess
@@ -7,10 +9,12 @@ import sys
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
-from random import Random
-from typing import override
+from tempfile import TemporaryDirectory
+from typing import Literal, override
 
 import pytest
+from hypothesis import strategies as st
+from hypothesis.stateful import RuleBasedStateMachine, invariant, precondition, rule
 
 from agentic_investment_os.adapters.sqlite_lifecycle import (
     RuntimeRootRefusal,
@@ -358,10 +362,13 @@ def _decision_operation(decision: LifecycleDecision, fallback: str) -> str:
 class _ReferenceStream:
     session: str
     events: int
+    pinned_run_identity: PinnedRunIdentity
 
 
 @dataclass
 class _LifecycleReferenceModel:
+    configuration_version: int
+    configuration_hash: str
     streams: dict[str, _ReferenceStream] = field(default_factory=dict)
     sessions: dict[str, str] = field(default_factory=dict)
     refusals: dict[str, AdvanceFailureReason] = field(default_factory=dict)
@@ -374,7 +381,7 @@ class _LifecycleReferenceModel:
         session: str,
         mode: str,
         key: str,
-    ) -> tuple[AdvanceDisposition, AdvanceRecovery | None, AdvanceFailureReason | None]:
+    ) -> AdvanceReceipt:
         if " " in key:
             self.has_unkeyed_refusal = True
             return self._failed(AdvanceFailureReason.INVALID_IDEMPOTENCY_KEY)
@@ -397,7 +404,7 @@ class _LifecycleReferenceModel:
         session: str,
         key: str,
         stream: _ReferenceStream | None,
-    ) -> tuple[AdvanceDisposition, AdvanceRecovery | None, AdvanceFailureReason | None]:
+    ) -> AdvanceReceipt:
         if stream is not None:
             if stream.session != session:
                 return self._record_idempotency_conflict(key, stream)
@@ -407,27 +414,28 @@ class _LifecycleReferenceModel:
                 else AdvanceRecovery.RESUMED
             )
             stream.events = PINNED_EVENT_COUNT
-            return AdvanceDisposition.ADVANCED, recovery, None
+            return AdvanceReceipt.advanced(stream.pinned_run_identity, recovery)
         if session in self.sessions:
             self.refusals[key] = AdvanceFailureReason.SESSION_STREAM_CONFLICT
             return self._failed(AdvanceFailureReason.SESSION_STREAM_CONFLICT)
-        self.streams[key] = _ReferenceStream(session, PINNED_EVENT_COUNT)
+        identity = self._identity(session)
+        self.streams[key] = _ReferenceStream(session, PINNED_EVENT_COUNT, identity)
         self.sessions[session] = key
-        return AdvanceDisposition.ADVANCED, AdvanceRecovery.FRESH, None
+        return AdvanceReceipt.advanced(identity, AdvanceRecovery.FRESH)
 
     def _advance_invalid(
         self,
         key: str,
         stream: _ReferenceStream | None,
         reason: AdvanceFailureReason,
-    ) -> tuple[AdvanceDisposition, None, AdvanceFailureReason]:
+    ) -> AdvanceReceipt:
         if stream is not None:
             return self._record_idempotency_conflict(key, stream)
         self.refusals[key] = reason
         return self._failed(reason)
 
     def interrupt(self, *, session: str, key: str, committed_events: int) -> None:
-        self.streams[key] = _ReferenceStream(session, committed_events)
+        self.streams[key] = _ReferenceStream(session, committed_events, self._identity(session))
         self.sessions[session] = key
 
     def counts(self) -> tuple[int, int, int]:
@@ -441,7 +449,7 @@ class _LifecycleReferenceModel:
         self,
         key: str,
         stream: _ReferenceStream,
-    ) -> tuple[AdvanceDisposition, None, AdvanceFailureReason]:
+    ) -> AdvanceReceipt:
         if stream.events == PINNED_EVENT_COUNT:
             self.conflicts.add(key)
         else:
@@ -449,51 +457,18 @@ class _LifecycleReferenceModel:
         return self._failed(AdvanceFailureReason.IDEMPOTENCY_KEY_CONFLICT)
 
     @staticmethod
-    def _failed(
-        reason: AdvanceFailureReason,
-    ) -> tuple[AdvanceDisposition, None, AdvanceFailureReason]:
-        return AdvanceDisposition.FAILED_CLOSED, None, reason
+    def _failed(reason: AdvanceFailureReason) -> AdvanceReceipt:
+        return AdvanceReceipt.failed_closed(reason)
 
-
-def _receipt_facts(
-    receipt: AdvanceReceipt,
-) -> tuple[AdvanceDisposition, AdvanceRecovery | None, AdvanceFailureReason | None]:
-    return receipt.disposition, receipt.recovery, receipt.failure_reason
-
-
-def _interrupt_and_resume_generated_request(
-    capability: Advance,
-    reference: _LifecycleReferenceModel,
-    random: Random,
-    *,
-    state_root: Path,
-    request: tuple[str, str],
-) -> tuple[
-    tuple[AdvanceDisposition, AdvanceRecovery | None, AdvanceFailureReason | None],
-    AdvanceReceipt,
-]:
-    session, key = request
-    operation, committed_events = random.choice(
-        (("start", 1), ("reconcile", 2), ("pin", PINNED_EVENT_COUNT))
-    )
-    ledger = capability.ledger
-    assert isinstance(ledger, SQLiteLifecycleLedger)
-    interrupted = Advance(
-        InterruptingLedger(ledger, operation, "after"),
-        capability.configuration_version,
-        capability.configuration_hash,
-        capability.clock,
-    )
-    with pytest.raises(SimulatedInterruptionError):
-        interrupted(session=session, mode="champion", idempotency_key=key)
-    reference.interrupt(session=session, key=key, committed_events=committed_events)
-    expected = reference.advance(session=session, mode="champion", key=key)
-    observed = _configure(state_root)(
-        session=session,
-        mode="champion",
-        idempotency_key=key,
-    )
-    return expected, observed
+    def _identity(self, session: str) -> PinnedRunIdentity:
+        encoded = json.dumps(
+            (self.configuration_hash, self.configuration_version, "champion", session)
+        ).encode()
+        return PinnedRunIdentity(
+            run_id=hashlib.sha256(encoded).hexdigest(),
+            configuration_version=self.configuration_version,
+            configuration_hash=self.configuration_hash,
+        )
 
 
 def _configure(state_root: Path) -> Advance:
@@ -780,84 +755,125 @@ def test_duplicate_delivery_reports_progress_committed_by_the_winner_as_resumed(
     assert len(_events(state_root / "lifecycle.sqlite3")) == PINNED_EVENT_COUNT
 
 
-def test_generated_advance_sequences_match_an_independent_reopened_reference_model(
-    tmp_path: Path,
-) -> None:
-    state_root = tmp_path / "runtime"
-    reference = _LifecycleReferenceModel()
-    random = Random(14)  # noqa: S311 - deterministic scenario generation is not security-sensitive.
-    next_identity = 0
-    actions = (
-        "new",
-        "replay",
-        "key_conflict",
-        "session_conflict",
-        "invalid",
-        "invalid_key",
-        "interrupt",
-    )
+class LifecycleStateMachine(RuleBasedStateMachine):
+    def __init__(self) -> None:
+        super().__init__()
+        self._temporary_directory = TemporaryDirectory(
+            prefix="agentic-investment-os-lifecycle-state-machine-"
+        )
+        self.state_root = Path(self._temporary_directory.name).resolve() / "runtime"
+        self.capability = _configure(self.state_root)
+        self.reference = _LifecycleReferenceModel(
+            self.capability.configuration_version,
+            self.capability.configuration_hash,
+        )
+        self.next_identity = 0
 
-    def new_request() -> tuple[str, str]:
-        nonlocal next_identity
-        next_identity += 1
-        session = date(2026, 9, 1) + timedelta(days=next_identity)
-        return session.isoformat(), f"generated-{next_identity}"
+    @override
+    def teardown(self) -> None:
+        self._temporary_directory.cleanup()
 
-    for step in range(70):
-        capability = _configure(state_root)
-        streams = tuple(reference.streams)
-        action = actions[step % len(actions)]
-        if action == "new" or not streams:
-            session, key = new_request()
-            expected = reference.advance(session=session, mode="champion", key=key)
-            observed = capability(session=session, mode="champion", idempotency_key=key)
-        elif action == "replay":
-            key = random.choice(streams)
-            session = reference.streams[key].session
-            expected = reference.advance(session=session, mode="champion", key=key)
-            observed = capability(session=session, mode="champion", idempotency_key=key)
-        elif action == "key_conflict":
-            key = random.choice(streams)
-            session, _ = new_request()
-            expected = reference.advance(session=session, mode="champion", key=key)
-            observed = capability(session=session, mode="champion", idempotency_key=key)
-        elif action == "session_conflict":
-            existing = reference.streams[random.choice(streams)]
-            _, key = new_request()
-            expected = reference.advance(session=existing.session, mode="champion", key=key)
-            observed = capability(
-                session=existing.session,
-                mode="champion",
-                idempotency_key=key,
-            )
-        elif action == "invalid":
-            key = random.choice(streams)
-            expected = reference.advance(session="invalid", mode="champion", key=key)
-            observed = capability(session="invalid", mode="champion", idempotency_key=key)
-        elif action == "invalid_key":
-            invalid_key = f"not valid {step}"
-            expected = reference.advance(
-                session="2026-08-21",
-                mode="champion",
-                key=invalid_key,
-            )
-            observed = capability(
-                session="2026-08-21",
-                mode="champion",
-                idempotency_key=invalid_key,
-            )
+    def _new_request(self) -> tuple[str, str]:
+        self.next_identity += 1
+        session = date(2026, 9, 1) + timedelta(days=self.next_identity)
+        return session.isoformat(), f"generated-{self.next_identity}"
+
+    def _advance(self, *, session: str, mode: str, key: str) -> None:
+        expected = self.reference.advance(session=session, mode=mode, key=key)
+        observed = self.capability(session=session, mode=mode, idempotency_key=key)
+        assert observed == expected
+
+    def _stream_key(self, selection: int) -> str:
+        streams = sorted(self.reference.streams)
+        return streams[selection % len(streams)]
+
+    @rule()
+    def advance_fresh(self) -> None:
+        session, key = self._new_request()
+        self._advance(session=session, mode="champion", key=key)
+
+    @precondition(lambda self: bool(self.reference.streams))
+    @rule(selection=st.integers(min_value=0, max_value=255))
+    def replay(self, selection: int) -> None:
+        key = self._stream_key(selection)
+        self._advance(
+            session=self.reference.streams[key].session,
+            mode="champion",
+            key=key,
+        )
+
+    @precondition(lambda self: bool(self.reference.streams))
+    @rule(selection=st.integers(min_value=0, max_value=255))
+    def reuse_idempotency_key_for_another_session(self, selection: int) -> None:
+        key = self._stream_key(selection)
+        session, _ = self._new_request()
+        self._advance(session=session, mode="champion", key=key)
+
+    @precondition(lambda self: bool(self.reference.streams))
+    @rule(selection=st.integers(min_value=0, max_value=255))
+    def reuse_session_for_another_idempotency_key(self, selection: int) -> None:
+        existing = self.reference.streams[self._stream_key(selection)]
+        _, key = self._new_request()
+        self._advance(session=existing.session, mode="champion", key=key)
+
+    @rule(invalid_field=st.sampled_from(("session", "mode", "idempotency_key")))
+    def submit_invalid_input(
+        self,
+        invalid_field: Literal["session", "mode", "idempotency_key"],
+    ) -> None:
+        session, key = self._new_request()
+        mode = "champion"
+        if invalid_field == "session":
+            session = "invalid"
+        elif invalid_field == "mode":
+            mode = "invalid"
         else:
-            session, key = new_request()
-            expected, observed = _interrupt_and_resume_generated_request(
-                capability,
-                reference,
-                random,
-                state_root=state_root,
-                request=(session, key),
-            )
+            key = f"not valid {self.next_identity}"
+        self._advance(session=session, mode=mode, key=key)
 
-        assert _receipt_facts(observed) == expected
-        assert _authoritative_counts(state_root / "lifecycle.sqlite3") == reference.counts()
+    @precondition(lambda self: bool(self.reference.refusals))
+    @rule(selection=st.integers(min_value=0, max_value=255))
+    def replay_durable_refusal(self, selection: int) -> None:
+        keys = sorted(self.reference.refusals)
+        key = keys[selection % len(keys)]
+        self._advance(session="2026-08-21", mode="champion", key=key)
+
+    @rule(
+        interrupted_write=st.sampled_from(
+            (("start", 1), ("reconcile", 2), ("pin", PINNED_EVENT_COUNT))
+        )
+    )
+    def interrupt_fresh_advance(self, interrupted_write: tuple[str, int]) -> None:
+        session, key = self._new_request()
+        operation, committed_events = interrupted_write
+        ledger = self.capability.ledger
+        assert isinstance(ledger, SQLiteLifecycleLedger)
+        interrupted = Advance(
+            InterruptingLedger(ledger, operation, "after"),
+            self.capability.configuration_version,
+            self.capability.configuration_hash,
+            self.capability.clock,
+        )
+        with pytest.raises(SimulatedInterruptionError):
+            interrupted(session=session, mode="champion", idempotency_key=key)
+        self.reference.interrupt(
+            session=session,
+            key=key,
+            committed_events=committed_events,
+        )
+
+    @rule()
+    def reopen_database(self) -> None:
+        self.capability = _configure(self.state_root)
+
+    @invariant()
+    def authoritative_counts_match_reference_model(self) -> None:
+        assert (
+            _authoritative_counts(self.state_root / "lifecycle.sqlite3") == self.reference.counts()
+        )
+
+
+TestLifecycleStateMachine = LifecycleStateMachine.TestCase
 
 
 def test_conflicting_valid_idempotency_reuse_fails_without_shadowing_completed_work(
