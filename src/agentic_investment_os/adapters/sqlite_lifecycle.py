@@ -72,9 +72,11 @@ _INVALID_RECORDED_AT = "invalid recorded_at in lifecycle ledger"
 _UNKNOWN_REASON_CODE = "unknown reason_code in lifecycle ledger"
 _CONFLICT_WITHOUT_COMPLETION = "lifecycle conflict does not belong to a completed stream"
 _INVALID_REFUSAL_ORDER = "lifecycle refusal order is invalid"
+_INVALID_REFUSAL_UNIQUENESS = "lifecycle refusal uniqueness is invalid"
 _INVALID_REFUSAL_KEY = "invalid idempotency_key in lifecycle refusal ledger"
 _INVALID_UNKEYED_REASON = "unkeyed lifecycle refusal reason is invalid"
 _INVALID_CONFLICT_KEY = "invalid idempotency_key in lifecycle conflict ledger"
+_INVALID_CONFLICT_UNIQUENESS = "lifecycle conflict uniqueness is invalid"
 _RECORDED_AT_NOT_AWARE = "recorded_at must be timezone-aware"
 _CLOCK_NOT_AWARE = "lifecycle clock must return a timezone-aware timestamp"
 
@@ -710,6 +712,8 @@ def _reconstruct_status(
 
 def _reconstruct_refusals(rows: list[tuple[object, ...]]) -> list[DurableAdvanceRefusal]:
     refusals: list[DurableAdvanceRefusal] = []
+    keyed_refusals: set[str] = set()
+    unkeyed_reasons: set[AdvanceFailureReason] = set()
     for expected_id, row in enumerate(rows, start=1):
         refusal_id = _integer(row[0], "refusal_id")
         if refusal_id != expected_id:
@@ -718,6 +722,14 @@ def _reconstruct_refusals(rows: list[tuple[object, ...]]) -> list[DurableAdvance
         reason = _failure_reason(row[2])
         if (key is None) != (reason is AdvanceFailureReason.INVALID_IDEMPOTENCY_KEY):
             raise InvalidLifecycleStateError(_INVALID_UNKEYED_REASON)
+        if key is None and reason in unkeyed_reasons:
+            raise InvalidLifecycleStateError(_INVALID_REFUSAL_UNIQUENESS)
+        if key is not None and key.value in keyed_refusals:
+            raise InvalidLifecycleStateError(_INVALID_REFUSAL_UNIQUENESS)
+        if key is None:
+            unkeyed_reasons.add(reason)
+        else:
+            keyed_refusals.add(key.value)
         _aware_timestamp(row[3])
         refusals.append(DurableAdvanceRefusal(key, reason))
     return refusals
@@ -725,10 +737,14 @@ def _reconstruct_refusals(rows: list[tuple[object, ...]]) -> list[DurableAdvance
 
 def _reconstruct_conflicts(rows: list[tuple[object, ...]]) -> list[DurableAdvanceConflict]:
     conflicts: list[DurableAdvanceConflict] = []
+    keys: set[str] = set()
     for row in rows:
         key = IdempotencyKey.parse(row[0])
         if key is None:
             raise InvalidLifecycleStateError(_INVALID_CONFLICT_KEY)
+        if key.value in keys:
+            raise InvalidLifecycleStateError(_INVALID_CONFLICT_UNIQUENESS)
+        keys.add(key.value)
         reason = _failure_reason(row[1])
         _aware_timestamp(row[2])
         conflicts.append(DurableAdvanceConflict(key, reason))

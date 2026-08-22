@@ -560,6 +560,13 @@ def test_status_rejects_an_invalid_refusal_reason_for_a_partial_stream(tmp_path:
             "UPDATE advance_refusals SET reason_code = 'invalid_durable_state'",
             "invalid refusal association",
         ),
+        (
+            """
+            INSERT INTO advance_refusals
+            SELECT 2, idempotency_key, reason_code, recorded_at FROM advance_refusals
+            """,
+            "refusal uniqueness is invalid",
+        ),
     ],
 )
 def test_status_rejects_corrupt_refusal_history(
@@ -589,6 +596,34 @@ def test_status_rejects_corrupt_refusal_history(
         _status(state_root)()
 
 
+def test_status_rejects_duplicate_unkeyed_refusal_authority(tmp_path: Path) -> None:
+    state_root = tmp_path / "runtime"
+    _advance(state_root)(
+        session="2026-08-21",
+        mode="champion",
+        idempotency_key="not valid",
+    )
+    database = state_root / "lifecycle.sqlite3"
+    with sqlite3.connect(database) as connection:
+        rows = connection.execute(
+            "SELECT refusal_id, idempotency_key, reason_code, recorded_at FROM advance_refusals"
+        ).fetchall()
+        connection.execute("DROP TABLE advance_refusals")
+        connection.execute(
+            "CREATE TABLE advance_refusals (refusal_id, idempotency_key, reason_code, recorded_at)"
+        )
+        connection.executemany("INSERT INTO advance_refusals VALUES (?, ?, ?, ?)", rows)
+        connection.execute(
+            """
+            INSERT INTO advance_refusals
+            SELECT 2, idempotency_key, reason_code, recorded_at FROM advance_refusals
+            """
+        )
+
+    with pytest.raises(InvalidLifecycleStateError, match="refusal uniqueness is invalid"):
+        _status(state_root)()
+
+
 @pytest.mark.parametrize(
     ("corruption", "expected_message"),
     [
@@ -607,6 +642,13 @@ def test_status_rejects_corrupt_refusal_history(
         (
             "UPDATE advance_conflicts SET recorded_at = 'not-a-timestamp'",
             "invalid recorded_at in lifecycle ledger",
+        ),
+        (
+            """
+            INSERT INTO advance_conflicts
+            SELECT idempotency_key, reason_code, recorded_at FROM advance_conflicts
+            """,
+            "conflict uniqueness is invalid",
         ),
     ],
 )
