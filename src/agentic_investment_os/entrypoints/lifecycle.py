@@ -43,7 +43,7 @@ def configure_advance(
 ) -> Advance | ConfigurationRefusal:
     """Validate configuration and compose Advance without credentials or network access.
 
-    Opening storage applies supported migrations before returning and raises
+    Opening storage initializes or validates the current schema before returning and raises
     ``LifecyclePersistenceError`` when durable state fails startup validation.
     """
     resolution = resolve_runtime_configuration(sources, repository_root=repository_root)
@@ -70,8 +70,9 @@ def configure_status(
 ) -> Status | ConfigurationRefusal:
     """Validate configuration and compose rebuildable lifecycle status.
 
-    Existing storage is migrated before returning and raises ``LifecyclePersistenceError`` when
-    durable state fails startup validation; missing authoritative storage is never recreated.
+    Existing storage is validated against the current schema before returning and raises
+    ``LifecyclePersistenceError`` when durable state fails startup validation; missing authoritative
+    storage is never recreated.
     """
     resolution = resolve_runtime_configuration(sources, repository_root=repository_root)
     if isinstance(resolution, ConfigurationRefusal):
