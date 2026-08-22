@@ -236,7 +236,7 @@ class MissingAggregateRowLedger(SQLiteLifecycleLedger):
 
     def __init__(self, database: Path) -> None:
         self.database = database
-        super().__init__(database, initialize_schema=False)
+        super().__init__(database)
 
     @override
     def _connect(self) -> sqlite3.Connection:
@@ -279,7 +279,7 @@ class InvalidAggregateRowLedger(SQLiteLifecycleLedger):
 
     def __init__(self, database: Path) -> None:
         self.database = database
-        super().__init__(database, initialize_schema=False)
+        super().__init__(database)
 
     @override
     def _connect(self) -> sqlite3.Connection:

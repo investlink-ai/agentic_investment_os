@@ -1,8 +1,8 @@
-# ADR 0003: Require the current SQLite schema
+# ADR 0004: Require the current SQLite schema
 
 - Status: Accepted
 - Date: 2026-08-22
-- Supersedes: [ADR 0002](0002-version-sqlite-schema.md)
+- Supersedes: [ADR 0003](0003-version-sqlite-schema.md)
 
 ## Context
 

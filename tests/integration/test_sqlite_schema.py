@@ -11,9 +11,11 @@ if TYPE_CHECKING:
 
 from agentic_investment_os.adapters.sqlite_lifecycle import SQLiteLifecycleLedger
 from agentic_investment_os.domain.lifecycle import (
-    AdvanceFailureReason,
+    AdvanceAttempt,
+    AdvanceCommand,
     AdvanceRequest,
-    IdempotencyKey,
+    AppendLifecycleRecord,
+    LifecycleEvent,
     LifecyclePersistenceError,
     LifecyclePhase,
     PinnedRunIdentity,
@@ -567,13 +569,32 @@ def test_initialization_diagnostic_is_bounded_for_corrupt_database_input(
 def test_current_ledger_remains_usable_after_startup_validation(tmp_path: Path) -> None:
     database = tmp_path / "usable.sqlite3"
     ledger = SQLiteLifecycleLedger(database)
-    refusal = ledger.record_refusal(
-        IdempotencyKey("usable-refusal"),
-        AdvanceFailureReason.INVALID_SESSION,
+    request = AdvanceRequest.parse(
+        session="2026-08-21",
+        mode="champion",
+        idempotency_key="usable-ledger",
+    )
+    assert isinstance(request, AdvanceRequest)
+    identity = PinnedRunIdentity.create(
+        request,
+        configuration_version=1,
+        configuration_hash=CONFIGURATION_HASH,
+    )
+    command = AdvanceCommand(request, identity)
+    started = ledger.advance_step(
+        command,
+        AdvanceAttempt(),
         datetime(2026, 8, 21, 22, 0, tzinfo=UTC),
     )
+    assert isinstance(started, AppendLifecycleRecord)
 
     reopened = SQLiteLifecycleLedger(database)
+    continued = reopened.advance_step(
+        command,
+        started.attempt,
+        datetime(2026, 8, 21, 22, 1, tzinfo=UTC),
+    )
 
-    assert refusal.failure_reason is AdvanceFailureReason.INVALID_SESSION
-    assert reopened.load_by_idempotency_key(IdempotencyKey("usable-refusal")) is not None
+    assert isinstance(continued, AppendLifecycleRecord)
+    assert isinstance(continued.record, LifecycleEvent)
+    assert continued.record.sequence == 1

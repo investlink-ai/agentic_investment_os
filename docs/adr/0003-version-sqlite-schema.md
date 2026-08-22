@@ -1,8 +1,8 @@
-# ADR 0002: Version the complete SQLite schema
+# ADR 0003: Version the complete SQLite schema
 
 - Status: Superseded
 - Date: 2026-08-22
-- Superseded by: [ADR 0003](0003-require-current-sqlite-schema.md)
+- Superseded by: [ADR 0004](0004-require-current-sqlite-schema.md)
 
 ## Context
 
