@@ -120,7 +120,7 @@ def _non_event_counts(database: Path) -> tuple[int, int]:
     return int(refusals[0]), int(conflicts[0])
 
 
-def test_stage1_journey_resumes_replays_and_rebuilds_status_across_processes(
+def test_lifecycle_journey_resumes_replays_and_rebuilds_status_across_processes(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

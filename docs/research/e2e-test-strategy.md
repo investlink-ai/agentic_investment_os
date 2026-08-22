@@ -121,7 +121,7 @@ tests/
   unit/
   integration/
     system/
-      test_stage1_lifecycle_journey.py
+      test_lifecycle_journey.py
       test_research_refusal_journey.py
       test_execution_recovery_journey.py
       test_market_session_journey.py

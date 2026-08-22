@@ -1,4 +1,4 @@
-"""Run one Stage 1 system-journey action in a fresh process."""
+"""Run one lifecycle system-journey action in a fresh process."""
 
 from __future__ import annotations
 
@@ -26,7 +26,7 @@ INTERRUPTED_EXIT_CODE = 75
 ARGUMENT_COUNT = 3
 SESSION = "2026-08-21"
 MODE = "champion"
-IDEMPOTENCY_KEY = "stage1-system-journey"
+IDEMPOTENCY_KEY = "lifecycle-system-journey"
 AUTHORITY_SENTINEL_NAMES = frozenset(
     {
         "SYSTEM_JOURNEY_BROKER_SENTINEL",
@@ -74,7 +74,7 @@ class InterruptAfterReconcileLedger:
 def _sources(state_root: Path) -> tuple[ConfigurationSource, ...]:
     return (
         ConfigurationSource(
-            "stage1-system-journey",
+            "lifecycle-system-journey",
             {"schema_version": 1, "state_root": str(state_root)},
         ),
     )
