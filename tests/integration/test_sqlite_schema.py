@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, override
 
 import pytest
 
@@ -15,6 +15,7 @@ from agentic_investment_os.domain.lifecycle import (
     AdvanceCommand,
     AdvanceRequest,
     AppendLifecycleRecord,
+    InvalidLifecycleStateError,
     LifecycleEvent,
     LifecyclePersistenceError,
     LifecyclePhase,
@@ -25,6 +26,31 @@ CURRENT_DATABASE_VERSION = 1
 CONFIGURATION_HASH = "a" * 64
 RECORDED_AT = "2026-08-21T22:00:00+00:00"
 MAX_DIAGNOSTIC_LENGTH = 100
+SQLiteValue = str | bytes | int | float | None
+
+
+class InvalidDatabaseVersionCursor(sqlite3.Cursor):
+    """Simulate a hostile driver returning a non-integer physical version."""
+
+    @override
+    def fetchall(self) -> list[tuple[object, ...]]:
+        return [("invalid",)]
+
+
+class InvalidDatabaseVersionConnection(sqlite3.Connection):
+    """Return a non-integer row only for the physical-version query."""
+
+    @override
+    def execute(
+        self,
+        sql: str,
+        # Typeshed's private SQLite parameter alias cannot be named in this hostile-driver override.
+        parameters: tuple[SQLiteValue, ...] = (),  # type: ignore[override]
+        /,
+    ) -> sqlite3.Cursor:
+        if sql == "PRAGMA user_version":
+            return self.cursor(factory=InvalidDatabaseVersionCursor)
+        return super().execute(sql, parameters)
 
 
 def _database_version(database: Path) -> int:
@@ -305,6 +331,26 @@ def test_unsupported_database_version_fails_before_schema_or_history_changes(
         SQLiteLifecycleLedger(database)
 
     assert database.read_bytes() == before
+
+
+def test_non_integer_database_version_is_rejected_with_a_bounded_field(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database = tmp_path / "invalid-version-type.sqlite3"
+    SQLiteLifecycleLedger(database)
+    connect = sqlite3.connect
+
+    def connect_with_invalid_version(database_uri: str, *, uri: bool) -> sqlite3.Connection:
+        return connect(database_uri, uri=uri, factory=InvalidDatabaseVersionConnection)
+
+    with monkeypatch.context() as fault:
+        fault.setattr(sqlite3, "connect", connect_with_invalid_version)
+        with pytest.raises(
+            InvalidLifecycleStateError,
+            match="invalid database_version in lifecycle ledger",
+        ):
+            SQLiteLifecycleLedger(database)
 
 
 def test_projection_name_does_not_hide_an_object_owned_by_authoritative_state(
