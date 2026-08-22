@@ -59,6 +59,9 @@ Cross-module callers use lifecycle capabilities and narrow public types rather t
 functions or storage internals. Keep an interface with its owner:
 
 - storage and external implementations depend on the port they implement;
+- the framework-free lifecycle kernel owns transition ordering, reconstruction, refusals, conflicts,
+  and recovery decisions; persistence adapters validate representations and atomically append its
+  selected records;
 - application code depends on capability interfaces and result types;
 - domain events and identifiers remain free of integration types; and
 - composition-specific values stop at the entrypoint.

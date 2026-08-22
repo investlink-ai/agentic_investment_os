@@ -11,21 +11,23 @@ import pytest
 
 from agentic_investment_os.application.lifecycle import Advance
 from agentic_investment_os.domain.lifecycle import (
+    AdvanceAttempt,
+    AdvanceCommand,
     AdvanceDisposition,
     AdvanceFailureReason,
     AdvanceReceipt,
     AdvanceRecovery,
     AdvanceRequest,
-    CheckpointResult,
-    CheckpointWrite,
-    IdempotencyKey,
+    AppendLifecycleRecord,
     InputRefusal,
     InputRefusalCode,
     InvalidLifecycleStateError,
+    LifecycleCommand,
+    LifecycleDecision,
+    LifecycleEvent,
+    LifecycleEventKind,
     LifecyclePhase,
-    LifecycleProgress,
     PinnedRunIdentity,
-    StartResult,
 )
 from agentic_investment_os.entrypoints.configuration import (
     ConfigurationRefusal,
@@ -36,6 +38,7 @@ from agentic_investment_os.entrypoints.configuration import (
 )
 
 SHA256_HEX_LENGTH = 64
+PINNED_SEQUENCE = 2
 
 
 def _initialize_git_repository(repository: Path) -> None:
@@ -62,80 +65,52 @@ class FixedClock:
 class ConcurrentCompletionLedger:
     completion_point: str
     receipt: AdvanceReceipt
+    steps: int = 0
 
-    def _progress(
+    def advance_step(
         self,
-        phase: LifecyclePhase | None,
-        sequence: int,
-    ) -> LifecycleProgress:
-        assert self.receipt.pinned_run_identity is not None
-        request = AdvanceRequest.parse(
-            session="2026-08-21",
-            mode="champion",
-            idempotency_key="concurrent-request",
-        )
-        assert isinstance(request, AdvanceRequest)
-        return LifecycleProgress(request, self.receipt.pinned_run_identity, phase, sequence)
-
-    def load_by_idempotency_key(
-        self, _key: IdempotencyKey
-    ) -> LifecycleProgress | AdvanceReceipt | None:
-        return None
-
-    def start(
-        self,
-        request: AdvanceRequest,
-        identity: PinnedRunIdentity,
+        command: LifecycleCommand,
+        attempt: AdvanceAttempt,
         _recorded_at: datetime,
-    ) -> StartResult:
-        if self.completion_point == "start":
-            return CheckpointResult(
-                self._progress(LifecyclePhase.PIN_RUN_INPUTS, 2),
-                CheckpointWrite.OBSERVED,
-            )
-        return CheckpointResult(
-            LifecycleProgress(request, identity, None, 0),
-            CheckpointWrite.APPENDED,
-        )
-
-    def complete_reconciliation(
-        self, _key: IdempotencyKey, _recorded_at: datetime
-    ) -> CheckpointResult | AdvanceReceipt:
-        if self.completion_point == "reconcile_failure":
+    ) -> LifecycleDecision:
+        assert isinstance(command, AdvanceCommand)
+        if self.completion_point == "start" and self.steps == 0:
+            return self.receipt
+        if self.completion_point == "reconcile_failure" and self.steps == 1:
             return AdvanceReceipt.failed_closed(AdvanceFailureReason.INVALID_DURABLE_STATE)
-        if self.completion_point == "incomplete_reconcile":
-            return CheckpointResult(self._progress(None, 0), CheckpointWrite.OBSERVED)
-        if self.completion_point in {"pin_failure", "pin_observed"}:
-            return CheckpointResult(
-                self._progress(LifecyclePhase.RECONCILE_PRIOR_STATE, 1),
-                CheckpointWrite.APPENDED,
-            )
-        return CheckpointResult(
-            self._progress(LifecyclePhase.PIN_RUN_INPUTS, 2),
-            CheckpointWrite.OBSERVED,
-        )
-
-    def pin_run_inputs(
-        self, _key: IdempotencyKey, _recorded_at: datetime
-    ) -> CheckpointResult | AdvanceReceipt:
-        if self.completion_point == "pin_failure":
+        if self.completion_point == "reconcile" and self.steps == 1:
+            return self.receipt
+        if self.completion_point == "pin_failure" and self.steps == PINNED_SEQUENCE:
             return AdvanceReceipt.failed_closed(AdvanceFailureReason.INVALID_DURABLE_STATE)
-        if self.completion_point == "pin_observed":
-            return CheckpointResult(
-                self._progress(LifecyclePhase.PIN_RUN_INPUTS, 2),
-                CheckpointWrite.OBSERVED,
-            )
-        message = "concurrent completion must return before pinning"
-        raise AssertionError(message)
+        if self.completion_point == "pin_observed" and self.steps == PINNED_SEQUENCE:
+            return self.receipt
 
-    def record_refusal(
-        self,
-        _key: IdempotencyKey | None,
-        _reason_code: AdvanceFailureReason,
-        _recorded_at: datetime,
-    ) -> AdvanceReceipt:
-        message = "valid concurrent completion cannot be refused"
-        raise AssertionError(message)
+        event_kind, phase = (
+            (LifecycleEventKind.ADVANCE_REQUESTED, None)
+            if self.steps == 0
+            else (
+                LifecycleEventKind.PHASE_COMPLETED,
+                LifecyclePhase.RECONCILE_PRIOR_STATE,
+            )
+        )
+        next_attempt = (
+            attempt
+            if self.completion_point == "incomplete_reconcile" and self.steps == 1
+            else AdvanceAttempt(AdvanceRecovery.FRESH, self.steps)
+        )
+        decision = AppendLifecycleRecord(
+            LifecycleEvent(
+                command.request.stream_id,
+                self.steps,
+                command.request,
+                command.pinned_run_identity,
+                event_kind,
+                phase,
+            ),
+            next_attempt,
+        )
+        self.steps += 1
+        return decision
 
 
 def test_advance_request_validates_the_complete_boundary() -> None:
