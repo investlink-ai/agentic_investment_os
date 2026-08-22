@@ -22,8 +22,9 @@ result and stop without rationalizing continued activity.
   Session; normal operation never requires manually sequencing research stages.
 - **PR-OPS-002 — Idempotent operation:** Repeated operations survive process interruption without
   duplicating evidence, beliefs, decisions, outcomes, or orders.
-- **PR-OPS-003 — Observable status:** Status exposes the active phase, last completed session, pinned
-  run identity, liveness, and any durable no-action or fail-closed reason.
+- **PR-OPS-003 — Observable status:** Status exposes the active phase, last completed Decision Cycle,
+  latest eligible-universe checkpoint as an exact cycle-and-snapshot pair, pinned run identity,
+  liveness, and any durable no-action or fail-closed reason.
 - **PR-OPS-004 — Operator digest:** A concise Markdown or static HTML digest links to stable detailed
   artifacts and reports decisions, objections, changes, fills, costs, resolutions, Challenger state,
   resource use, and failures.

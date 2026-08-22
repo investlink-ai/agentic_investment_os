@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import sqlite3
 import stat
@@ -11,6 +12,11 @@ from datetime import datetime
 from enum import StrEnum
 from typing import TYPE_CHECKING, Self, TypeVar, assert_never
 
+from agentic_investment_os.adapters.recorded_universe import parse_persisted_universe_snapshot
+from agentic_investment_os.domain.identity import (
+    MarketSession,
+    parse_decision_cycle_identity,
+)
 from agentic_investment_os.domain.lifecycle import (
     AdvanceAttempt,
     AdvanceCommand,
@@ -24,13 +30,13 @@ from agentic_investment_os.domain.lifecycle import (
     IdempotencyKey,
     InputRefusal,
     InvalidLifecycleStateError,
+    LifecycleCheckpoint,
     LifecycleCommand,
     LifecycleDecision,
     LifecycleEvent,
     LifecycleEventKind,
     LifecycleHistory,
     LifecyclePersistenceError,
-    LifecyclePhase,
     LifecycleRecord,
     LifecycleStatus,
     PinnedRunIdentity,
@@ -39,6 +45,12 @@ from agentic_investment_os.domain.lifecycle import (
     decide_terminal_refusal,
     derive_lifecycle_status,
     is_sha256,
+    parse_lifecycle_checkpoint,
+)
+from agentic_investment_os.domain.universe import (
+    UniverseRefusal,
+    UniverseSnapshot,
+    is_data_regime,
 )
 
 if TYPE_CHECKING:
@@ -82,13 +94,13 @@ _UNSUPPORTED_DATABASE_VERSION = "unsupported SQLite database version"
 _SCHEMA_VERSION_MISMATCH = "SQLite schema does not match database version"
 _DATABASE_INTEGRITY_FAILED = "SQLite database integrity check failed"
 _INVALID_REQUEST = "invalid request values in lifecycle ledger"
-_INVALID_RECORDED_AT = "invalid recorded_at in lifecycle ledger"
 _UNKNOWN_REASON_CODE = "unknown reason_code in lifecycle ledger"
 _INVALID_REFUSAL_KEY = "invalid idempotency_key in lifecycle refusal ledger"
 _INVALID_CONFLICT_KEY = "invalid idempotency_key in lifecycle conflict ledger"
-_RECORDED_AT_NOT_AWARE = "recorded_at must be timezone-aware"
 _CLOCK_NOT_AWARE = "lifecycle clock must return a timezone-aware timestamp"
 _INVALID_CHECKPOINT_ORDER = "lifecycle stream checkpoint order is invalid"
+_INVALID_DATA_REGIME = "invalid data_regime in lifecycle ledger"
+_FUTURE_EVIDENCE_CUTOFF = "evidence_cutoff cannot be later than recorded_at"
 
 _CURRENT_SCHEMA = (
     """
@@ -96,19 +108,40 @@ CREATE TABLE lifecycle_events (
     stream_id TEXT NOT NULL,
     sequence INTEGER NOT NULL,
     idempotency_key TEXT NOT NULL,
-    session TEXT NOT NULL,
+    cycle_identity TEXT NOT NULL,
     mode TEXT NOT NULL CHECK (mode = 'champion'),
     configuration_version INTEGER NOT NULL CHECK (configuration_version = 1),
     configuration_hash TEXT NOT NULL CHECK (length(configuration_hash) = 64),
     run_id TEXT NOT NULL CHECK (length(run_id) = 64),
+    data_regime TEXT NOT NULL,
+    evidence_cutoff TEXT NOT NULL,
+    instrument_snapshot_hash TEXT NOT NULL CHECK (length(instrument_snapshot_hash) = 64),
+    position_snapshot_hash TEXT NOT NULL CHECK (length(position_snapshot_hash) = 64),
+    eligibility_policy_hash TEXT NOT NULL CHECK (length(eligibility_policy_hash) = 64),
     event_kind TEXT NOT NULL CHECK (
-        event_kind IN ('advance_requested', 'phase_completed', 'run_inputs_pinned')
+        event_kind IN (
+            'advance_requested', 'phase_completed', 'run_inputs_pinned',
+            'universe_snapshotted'
+        )
     ),
-    completed_phase TEXT CHECK (
-        completed_phase IS NULL
-        OR completed_phase IN ('ReconcilePriorState', 'PinRunInputs')
+    completed_phase TEXT,
+    universe_snapshot_id TEXT CHECK (
+        universe_snapshot_id IS NULL OR length(universe_snapshot_id) = 64
     ),
+    universe_snapshot TEXT,
+    event_envelope TEXT NOT NULL,
     recorded_at TEXT NOT NULL,
+    CHECK (
+        (event_kind = 'run_inputs_pinned'
+            AND universe_snapshot_id IS NOT NULL
+            AND universe_snapshot IS NOT NULL)
+        OR (event_kind = 'universe_snapshotted'
+            AND universe_snapshot_id IS NOT NULL
+            AND universe_snapshot IS NULL)
+        OR (event_kind NOT IN ('run_inputs_pinned', 'universe_snapshotted')
+            AND universe_snapshot_id IS NULL
+            AND universe_snapshot IS NULL)
+    ),
     PRIMARY KEY (stream_id, sequence),
     UNIQUE (idempotency_key, sequence)
 ) STRICT
@@ -122,9 +155,12 @@ WHERE event_kind = 'advance_requested'
 CREATE TABLE advance_refusals (
     refusal_id INTEGER PRIMARY KEY,
     idempotency_key TEXT UNIQUE,
+    cycle_identity TEXT,
     reason_code TEXT NOT NULL CHECK (
         reason_code IN (
             'invalid_session', 'invalid_mode', 'invalid_idempotency_key',
+            'missing_universe_input', 'invalid_universe_input',
+            'stale_universe_input', 'contradictory_universe_input',
             'session_stream_conflict', 'idempotency_key_conflict',
             'invalid_durable_state'
         )
@@ -133,8 +169,8 @@ CREATE TABLE advance_refusals (
 ) STRICT
 """,
     """
-CREATE UNIQUE INDEX one_unkeyed_refusal_per_reason
-ON advance_refusals(reason_code)
+CREATE UNIQUE INDEX one_unkeyed_refusal_per_reason_and_cycle
+ON advance_refusals(reason_code, COALESCE(cycle_identity, ''))
 WHERE idempotency_key IS NULL
 """,
     """
@@ -176,19 +212,26 @@ class _DatabaseOpenMode(StrEnum):
     EXISTING_ONLY = "rw"
 
 
-_CURRENT_DATABASE_VERSION = 1
+_CURRENT_DATABASE_VERSION = 5
 _CURRENT_SCHEMA_SIGNATURE = frozenset(" ".join(statement.split()) for statement in _CURRENT_SCHEMA)
 
 _PROJECTION_SCHEMA = """
 CREATE TABLE lifecycle_status_projection (
     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
     active_phase TEXT,
-    last_completed_session TEXT,
+    last_completed_cycle TEXT,
     run_id TEXT,
     configuration_version INTEGER,
     configuration_hash TEXT,
+    data_regime TEXT,
+    evidence_cutoff TEXT,
+    instrument_snapshot_hash TEXT,
+    position_snapshot_hash TEXT,
+    eligibility_policy_hash TEXT,
     liveness TEXT NOT NULL,
-    durable_reason TEXT
+    durable_reason TEXT,
+    universe_snapshot_cycle TEXT,
+    universe_snapshot_id TEXT
 ) STRICT;
 """
 
@@ -395,7 +438,7 @@ class SQLiteLifecycleLedger:
 
         def operation(connection: sqlite3.Connection) -> LifecycleDecision:
             key = _command_key(command)
-            refusals = _load_refusals(connection, key=key, command=command)
+            refusals = _load_refusals(connection, command=command)
             terminal = decide_terminal_refusal(tuple(refusals), command)
             if terminal is not None:
                 return terminal
@@ -414,7 +457,7 @@ class SQLiteLifecycleLedger:
                     next_refusal_sequence=next_refusal_sequence,
                 )
             else:
-                decision = decide_advance(history, command, attempt)
+                decision = decide_advance(history, command, attempt, recorded_at)
             if isinstance(decision, (AppendLifecycleRecord, AppendTerminalLifecycleRecord)):
                 _append_record(connection, decision.record, recorded_at)
                 return decision
@@ -460,96 +503,178 @@ def _load_events(
     if key is None:
         rows = connection.execute(
             """
-            SELECT stream_id, sequence, idempotency_key, session, mode,
+            SELECT stream_id, sequence, idempotency_key, cycle_identity, mode,
                    configuration_version, configuration_hash, run_id,
-                   event_kind, completed_phase, recorded_at
+                   data_regime, evidence_cutoff, instrument_snapshot_hash,
+                   position_snapshot_hash, eligibility_policy_hash,
+                   event_kind, completed_phase, universe_snapshot_id,
+                   universe_snapshot, event_envelope, recorded_at
             FROM lifecycle_events ORDER BY stream_id, sequence
             """
         ).fetchall()
     else:
         rows = connection.execute(
             """
-            SELECT stream_id, sequence, idempotency_key, session, mode,
+            SELECT stream_id, sequence, idempotency_key, cycle_identity, mode,
                    configuration_version, configuration_hash, run_id,
-                   event_kind, completed_phase, recorded_at
+                   data_regime, evidence_cutoff, instrument_snapshot_hash,
+                   position_snapshot_hash, eligibility_policy_hash,
+                   event_kind, completed_phase, universe_snapshot_id,
+                   universe_snapshot, event_envelope, recorded_at
             FROM lifecycle_events WHERE idempotency_key = ? ORDER BY sequence
             """,
             (key.value,),
         ).fetchall()
-    events: list[LifecycleEvent] = []
-    for row in rows:
-        request = AdvanceRequest.parse(session=row[3], mode=row[4], idempotency_key=row[2])
-        if isinstance(request, InputRefusal):
-            raise InvalidLifecycleStateError(_INVALID_REQUEST)
-        if not isinstance(request, AdvanceRequest):
-            # Strict mypy proves this line unreachable; removing it is runtime-equivalent.
-            assert_never(request)  # pragma: no cover  # pragma: no mutate
-        stream_id = _text(row[0], "stream_id")
-        sequence = _integer(row[1], "sequence")
-        version = _integer(row[5], "configuration_version")
-        configuration_hash = _hash(row[6], "configuration_hash")
-        run_id = _hash(row[7], "run_id")
-        try:
-            event_kind = LifecycleEventKind(_text(row[8], "event_kind"))
-        except ValueError as error:
-            raise InvalidLifecycleStateError(_INVALID_CHECKPOINT_ORDER) from error
-        phase_text = _optional_text(row[9])
-        try:
-            completed_phase = None if phase_text is None else LifecyclePhase(phase_text)
-        except ValueError as error:
-            raise InvalidLifecycleStateError(_INVALID_CHECKPOINT_ORDER) from error
-        _aware_timestamp(row[10])
-        events.append(
-            LifecycleEvent(
-                stream_id,
-                sequence,
-                request,
-                PinnedRunIdentity(run_id, version, configuration_hash),
-                event_kind,
-                completed_phase,
-            )
-        )
-    return events
+    return [_load_event(row) for row in rows]
+
+
+def _load_event(row: tuple[object, ...]) -> LifecycleEvent:
+    cycle = _market_session(row[3])
+    request = AdvanceRequest.parse(session=cycle, mode=row[4], idempotency_key=row[2])
+    if isinstance(request, InputRefusal):
+        raise InvalidLifecycleStateError(_INVALID_REQUEST)
+    if not isinstance(request, AdvanceRequest):
+        # Strict mypy proves this line unreachable; removing it is runtime-equivalent.
+        assert_never(request)  # pragma: no cover  # pragma: no mutate
+    stream_id = _text(row[0], "stream_id")
+    sequence = _integer(row[1], "sequence")
+    version = _integer(row[5], "configuration_version")
+    configuration_hash = _hash(row[6], "configuration_hash")
+    run_id = _hash(row[7], "run_id")
+    data_regime = _data_regime(row[8])
+    evidence_cutoff = _aware_timestamp(row[9], "evidence_cutoff")
+    instrument_snapshot_hash = _hash(row[10], "instrument_snapshot_hash")
+    position_snapshot_hash = _hash(row[11], "position_snapshot_hash")
+    eligibility_policy_hash = _hash(row[12], "eligibility_policy_hash")
+    recorded_at = _aware_timestamp(row[18], "recorded_at")
+    if evidence_cutoff > recorded_at:
+        raise InvalidLifecycleStateError(_FUTURE_EVIDENCE_CUTOFF)
+    try:
+        event_kind = LifecycleEventKind(_text(row[13], "event_kind"))
+    except ValueError as error:
+        raise InvalidLifecycleStateError(_INVALID_CHECKPOINT_ORDER) from error
+    completed_phase = _optional_checkpoint(row[14])
+    prepared_snapshot, published_snapshot_id = _load_universe_reference(
+        row[15],
+        row[16],
+        event_kind=event_kind,
+        run_id=run_id,
+        recorded_at=recorded_at,
+    )
+    event = LifecycleEvent(
+        stream_id=stream_id,
+        sequence=sequence,
+        request=request,
+        pinned_run_identity=PinnedRunIdentity(
+            run_id,
+            cycle,
+            version,
+            configuration_hash,
+            data_regime,
+            evidence_cutoff,
+            instrument_snapshot_hash,
+            position_snapshot_hash,
+            eligibility_policy_hash,
+        ),
+        event_kind=event_kind,
+        completed_phase=completed_phase,
+        prepared_universe_snapshot=prepared_snapshot,
+        published_universe_snapshot_id=published_snapshot_id,
+    )
+    envelope = _text(row[17], "event_envelope")
+    if _canonical_json(event.to_envelope(recorded_at)) != envelope:
+        raise InvalidLifecycleStateError(_INVALID_CHECKPOINT_ORDER)
+    return event
+
+
+def _load_universe_reference(
+    snapshot_id_value: object,
+    snapshot_json_value: object,
+    *,
+    event_kind: LifecycleEventKind,
+    run_id: str,
+    recorded_at: datetime,
+) -> tuple[UniverseSnapshot | None, str | None]:
+    if event_kind is LifecycleEventKind.RUN_INPUTS_PINNED:
+        snapshot_id = _hash(snapshot_id_value, "universe_snapshot_id")
+        snapshot_json = _text(snapshot_json_value, "universe_snapshot")
+    elif event_kind is LifecycleEventKind.UNIVERSE_SNAPSHOTTED:
+        if snapshot_json_value is not None:
+            raise InvalidLifecycleStateError(_INVALID_CHECKPOINT_ORDER)
+        return None, _hash(snapshot_id_value, "universe_snapshot_id")
+    elif snapshot_id_value is None and snapshot_json_value is None:
+        return None, None
+    else:
+        if snapshot_id_value is not None:
+            _hash(snapshot_id_value, "universe_snapshot_id")
+        raise InvalidLifecycleStateError(_INVALID_CHECKPOINT_ORDER)
+    parsed = parse_persisted_universe_snapshot(
+        snapshot_json,
+        expected_run_id=run_id,
+        expected_snapshot_id=snapshot_id,
+        recorded_at=recorded_at,
+    )
+    if isinstance(parsed, UniverseRefusal):
+        raise InvalidLifecycleStateError(_INVALID_CHECKPOINT_ORDER)
+    if isinstance(parsed, UniverseSnapshot):
+        return parsed, None
+    # Strict mypy proves this line unreachable; removing it is runtime-equivalent.
+    assert_never(parsed)  # pragma: no cover  # pragma: no mutate
 
 
 def _load_refusals(
     connection: sqlite3.Connection,
     *,
-    key: IdempotencyKey | None = None,
     command: LifecycleCommand | None = None,
 ) -> list[DurableAdvanceRefusal]:
     if command is None:
         rows = connection.execute(
             """
-            SELECT refusal_id, idempotency_key, reason_code, recorded_at
+            SELECT refusal_id, idempotency_key, cycle_identity, reason_code, recorded_at
             FROM advance_refusals ORDER BY refusal_id
             """
         ).fetchall()
-    elif key is None:
-        rows = connection.execute(
-            """
-            SELECT refusal_id, idempotency_key, reason_code, recorded_at
-            FROM advance_refusals
-            WHERE idempotency_key IS NULL AND reason_code = ?
-            ORDER BY refusal_id
-            """,
-            (AdvanceFailureReason.INVALID_IDEMPOTENCY_KEY.value,),
-        ).fetchall()
+    elif isinstance(command, InputRefusal):
+        refusal_key = command.idempotency_key
+        if refusal_key is None:
+            cycle = command.cycle
+            rows = connection.execute(
+                """
+                SELECT refusal_id, idempotency_key, cycle_identity, reason_code, recorded_at
+                FROM advance_refusals
+                WHERE idempotency_key IS NULL AND reason_code = ?
+                    AND cycle_identity IS ?
+                ORDER BY refusal_id
+                """,
+                (
+                    AdvanceFailureReason.INVALID_IDEMPOTENCY_KEY.value,
+                    None if cycle is None else _canonical_json(cycle.to_payload()),
+                ),
+            ).fetchall()
+        else:
+            rows = connection.execute(
+                """
+                SELECT refusal_id, idempotency_key, cycle_identity, reason_code, recorded_at
+                FROM advance_refusals WHERE idempotency_key = ? ORDER BY refusal_id
+                """,
+                (refusal_key.value,),
+            ).fetchall()
     else:
         rows = connection.execute(
             """
-            SELECT refusal_id, idempotency_key, reason_code, recorded_at
+            SELECT refusal_id, idempotency_key, cycle_identity, reason_code, recorded_at
             FROM advance_refusals WHERE idempotency_key = ? ORDER BY refusal_id
             """,
-            (key.value,),
+            (command.request.idempotency_key.value,),
         ).fetchall()
     refusals: list[DurableAdvanceRefusal] = []
     for row in rows:
         sequence = _integer(row[0], "refusal_id")
         key = _optional_refusal_key(row[1])
-        reason = _failure_reason(row[2])
-        _aware_timestamp(row[3])
-        refusals.append(DurableAdvanceRefusal(sequence, key, reason))
+        cycle = None if row[2] is None else _market_session(row[2])
+        reason = _failure_reason(row[3])
+        _aware_timestamp(row[4], "recorded_at")
+        refusals.append(DurableAdvanceRefusal(sequence, key, reason, cycle))
     return refusals
 
 
@@ -577,7 +702,7 @@ def _load_conflicts(
     for row in rows:
         key = _conflict_key(row[0])
         reason = _failure_reason(row[1])
-        _aware_timestamp(row[2])
+        _aware_timestamp(row[2], "recorded_at")
         conflicts.append(DurableAdvanceConflict(key, reason))
     return conflicts
 
@@ -624,22 +749,41 @@ def _append_record(
         connection.execute(
             """
             INSERT INTO lifecycle_events (
-                stream_id, sequence, idempotency_key, session, mode,
+                stream_id, sequence, idempotency_key, cycle_identity, mode,
                 configuration_version, configuration_hash, run_id,
-                event_kind, completed_phase, recorded_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                data_regime, evidence_cutoff, instrument_snapshot_hash,
+                position_snapshot_hash, eligibility_policy_hash,
+                event_kind, completed_phase, universe_snapshot_id,
+                universe_snapshot, event_envelope, recorded_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 record.stream_id,
                 record.sequence,
                 request.idempotency_key.value,
-                request.session.isoformat(),
+                _canonical_json(request.session.to_payload()),
                 request.mode.value,
                 identity.configuration_version,
                 identity.configuration_hash,
                 identity.run_id,
+                identity.data_regime,
+                identity.evidence_cutoff.isoformat(),
+                identity.instrument_snapshot_hash,
+                identity.position_snapshot_hash,
+                identity.eligibility_policy_hash,
                 record.event_kind.value,
-                None if record.completed_phase is None else record.completed_phase.value,
+                (
+                    None
+                    if record.completed_phase is None
+                    else _canonical_json(record.completed_phase.to_payload())
+                ),
+                (record.universe_snapshot_id),
+                (
+                    None
+                    if record.prepared_universe_snapshot is None
+                    else record.prepared_universe_snapshot.to_json()
+                ),
+                _canonical_json(record.to_envelope(recorded_at)),
                 timestamp,
             ),
         )
@@ -648,12 +792,13 @@ def _append_record(
         connection.execute(
             """
             INSERT INTO advance_refusals (
-                refusal_id, idempotency_key, reason_code, recorded_at
-            ) VALUES (?, ?, ?, ?)
+                refusal_id, idempotency_key, cycle_identity, reason_code, recorded_at
+            ) VALUES (?, ?, ?, ?, ?)
             """,
             (
                 record.sequence,
                 None if record.idempotency_key is None else record.idempotency_key.value,
+                (None if record.cycle is None else _canonical_json(record.cycle.to_payload())),
                 record.reason.value,
                 timestamp,
             ),
@@ -682,37 +827,84 @@ def _replace_status_projection(
     connection.execute(
         """
         INSERT INTO lifecycle_status_projection (
-            singleton, active_phase, last_completed_session, run_id,
-            configuration_version, configuration_hash, liveness, durable_reason
-        ) VALUES (1, ?, ?, ?, ?, ?, ?, ?)
+            singleton, active_phase, last_completed_cycle, run_id,
+            configuration_version, configuration_hash, data_regime, evidence_cutoff,
+            instrument_snapshot_hash, position_snapshot_hash, eligibility_policy_hash,
+            liveness, durable_reason, universe_snapshot_cycle, universe_snapshot_id
+        ) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
-            None if status.active_phase is None else status.active_phase.value,
             (
                 None
-                if status.last_completed_session is None
-                else status.last_completed_session.isoformat()
+                if status.active_phase is None
+                else _canonical_json(status.active_phase.to_payload())
+            ),
+            (
+                None
+                if status.last_completed_cycle is None
+                else _canonical_json(status.last_completed_cycle.to_payload())
             ),
             None if identity is None else identity.run_id,
             None if identity is None else identity.configuration_version,
             None if identity is None else identity.configuration_hash,
+            None if identity is None else identity.data_regime,
+            None if identity is None else identity.evidence_cutoff.isoformat(),
+            None if identity is None else identity.instrument_snapshot_hash,
+            None if identity is None else identity.position_snapshot_hash,
+            None if identity is None else identity.eligibility_policy_hash,
             status.liveness.value,
             None if status.durable_reason is None else status.durable_reason.value,
+            (
+                None
+                if status.universe_snapshot_cycle is None
+                else _canonical_json(status.universe_snapshot_cycle.to_payload())
+            ),
+            status.universe_snapshot_id,
         ),
     )
 
 
 def _text(value: object, field: str) -> str:
-    if not isinstance(value, str) or not value:
+    if type(value) is not str or not value:
         message = f"invalid {field} in lifecycle ledger"
         raise InvalidLifecycleStateError(message)
     return value
 
 
-def _optional_text(value: object) -> str | None:
+def _optional_checkpoint(value: object) -> LifecycleCheckpoint | None:
+    encoded = _optional_string(value, "completed_phase")
+    if encoded is None:
+        return None
+    try:
+        decoded: object = json.loads(encoded)
+    except (ValueError, RecursionError) as error:
+        raise InvalidLifecycleStateError(_INVALID_CHECKPOINT_ORDER) from error
+    checkpoint = parse_lifecycle_checkpoint(decoded)
+    if checkpoint is None or _canonical_json(checkpoint.to_payload()) != encoded:
+        raise InvalidLifecycleStateError(_INVALID_CHECKPOINT_ORDER)
+    return checkpoint
+
+
+def _optional_string(value: object, field: str) -> str | None:
     if value is None:
         return None
-    return _text(value, "completed_phase")
+    return _text(value, field)
+
+
+def _market_session(value: object) -> MarketSession:
+    encoded = _text(value, "cycle_identity")
+    try:
+        decoded: object = json.loads(encoded)
+    except (ValueError, RecursionError) as error:
+        raise InvalidLifecycleStateError(_INVALID_REQUEST) from error
+    cycle = parse_decision_cycle_identity(decoded)
+    if type(cycle) is not MarketSession or _canonical_json(cycle.to_payload()) != encoded:
+        raise InvalidLifecycleStateError(_INVALID_REQUEST)
+    return cycle
+
+
+def _canonical_json(value: object) -> str:
+    return json.dumps(value, sort_keys=True, separators=(",", ":"))
 
 
 def _integer(value: object, field: str) -> int:
@@ -726,6 +918,12 @@ def _hash(value: object, field: str) -> str:
     if not is_sha256(value):
         message = f"invalid {field} in lifecycle ledger"
         raise InvalidLifecycleStateError(message)
+    return value
+
+
+def _data_regime(value: object) -> str:
+    if not is_data_regime(value):
+        raise InvalidLifecycleStateError(_INVALID_DATA_REGIME)
     return value
 
 
@@ -753,14 +951,16 @@ def _conflict_key(value: object) -> IdempotencyKey:
     return key
 
 
-def _aware_timestamp(value: object) -> datetime:
-    text = _text(value, "recorded_at")
+def _aware_timestamp(value: object, field: str) -> datetime:
+    text = _text(value, field)
     try:
         parsed = datetime.fromisoformat(text)
     except ValueError as error:
-        raise InvalidLifecycleStateError(_INVALID_RECORDED_AT) from error
+        message = f"invalid {field} in lifecycle ledger"
+        raise InvalidLifecycleStateError(message) from error
     if parsed.utcoffset() is None:
-        raise InvalidLifecycleStateError(_RECORDED_AT_NOT_AWARE)
+        message = f"{field} must be timezone-aware"
+        raise InvalidLifecycleStateError(message)
     return parsed
 
 

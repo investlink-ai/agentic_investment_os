@@ -14,6 +14,7 @@ direction, not the semantic correctness or completeness of a module's authority 
 ```mermaid
 flowchart TD
     entrypoints --> application
+    entrypoints --> domain
     entrypoints --> execution
     entrypoints --> adapters
 
@@ -49,7 +50,8 @@ the dependency. Prefer passing typed values and ports over adding an edge.
 - Adapters implement ports owned by `domain` or the capability they serve. They do not own domain
   policy.
 - Entrypoints are the only modules that construct concrete adapters, read credential references, or
-  choose a process composition.
+  choose a process composition. They may construct public immutable domain contracts while resolving
+  configuration.
 - `execution` never imports `research`, a model client, or a Codex adapter.
 - `portfolio` consumes validated typed research outcomes and deterministic market/risk inputs; it does
   not invoke a model.

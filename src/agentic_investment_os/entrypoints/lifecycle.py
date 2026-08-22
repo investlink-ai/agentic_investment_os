@@ -1,4 +1,4 @@
-"""Compose uncredentialed Stage 1 lifecycle capabilities."""
+"""Compose uncredentialed lifecycle capabilities through universe snapshotting."""
 
 from __future__ import annotations
 
@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, assert_never
 
+from agentic_investment_os.adapters.recorded_universe import RecordedUniverseSource
 from agentic_investment_os.adapters.sqlite_lifecycle import (
     PreparedRuntimeDatabase,
     RuntimeRootRefusal,
@@ -41,6 +42,7 @@ def configure_advance(
     sources: Sequence[ConfigurationSource],
     *,
     repository_root: Path,
+    recorded_universe: object,
     clock: Clock | None = None,
 ) -> Advance | ConfigurationRefusal:
     """Validate configuration and compose Advance without credentials or network access.
@@ -65,6 +67,9 @@ def configure_advance(
             ledger=SQLiteLifecycleLedger(database.path),
             configuration_version=resolution.schema_version,
             configuration_hash=resolution.fingerprint,
+            universe_source=RecordedUniverseSource(recorded_universe),
+            enabled_asset_classes=resolution.enabled_asset_classes,
+            universe_policy=resolution.universe_policy,
             clock=clock if clock is not None else SystemClock(),
         )
     # Strict mypy proves this line unreachable; removing it is runtime-equivalent.
