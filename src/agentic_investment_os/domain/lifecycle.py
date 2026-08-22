@@ -12,6 +12,8 @@ from typing import Protocol, TypeGuard
 
 _IDEMPOTENCY_KEY = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\Z")
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
+_INVALID_ADVANCED_RECEIPT = "advanced receipt requires completed recovery facts"
+_INVALID_FAILED_RECEIPT = "failed receipt requires one bounded reason"
 
 
 class LifecyclePersistenceError(RuntimeError):
@@ -40,6 +42,21 @@ class AdvanceDisposition(StrEnum):
 
     ADVANCED = "advanced"
     FAILED_CLOSED = "failed_closed"
+
+
+class AdvanceRecovery(StrEnum):
+    """Identify how the current call reached its durable completed checkpoint."""
+
+    FRESH = "fresh"
+    RESUMED = "resumed"
+    PREVIOUSLY_COMPLETED = "previously_completed"
+
+
+class CheckpointWrite(StrEnum):
+    """Distinguish a checkpoint appended by this call from committed progress it observed."""
+
+    APPENDED = "appended"
+    OBSERVED = "observed"
 
 
 class InputRefusalCode(StrEnum):
@@ -149,12 +166,45 @@ class PinnedRunIdentity:
 
 @dataclass(frozen=True, slots=True)
 class AdvanceReceipt:
-    """Report only durable lifecycle facts reconstructed from the ledger."""
+    """Report durable lifecycle facts and how this call observed their completion."""
 
     disposition: AdvanceDisposition
     completed_phase: LifecyclePhase | None
     pinned_run_identity: PinnedRunIdentity | None
     failure_reason: AdvanceFailureReason | None
+    recovery: AdvanceRecovery | None = None
+
+    def __post_init__(self) -> None:
+        if self.disposition is AdvanceDisposition.ADVANCED:
+            if (
+                self.completed_phase is not LifecyclePhase.PIN_RUN_INPUTS
+                or self.pinned_run_identity is None
+                or self.failure_reason is not None
+                or self.recovery is None
+            ):
+                raise ValueError(_INVALID_ADVANCED_RECEIPT)
+            return
+        if (
+            self.completed_phase is not None
+            or self.pinned_run_identity is not None
+            or self.failure_reason is None
+            or self.recovery is not None
+        ):
+            raise ValueError(_INVALID_FAILED_RECEIPT)
+
+    @classmethod
+    def advanced(
+        cls,
+        identity: PinnedRunIdentity,
+        recovery: AdvanceRecovery,
+    ) -> AdvanceReceipt:
+        return cls(
+            AdvanceDisposition.ADVANCED,
+            LifecyclePhase.PIN_RUN_INPUTS,
+            identity,
+            None,
+            recovery,
+        )
 
     @classmethod
     def failed_closed(cls, reason: AdvanceFailureReason) -> AdvanceReceipt:
@@ -171,15 +221,21 @@ class LifecycleProgress:
     sequence: int
 
     @property
-    def receipt(self) -> AdvanceReceipt | None:
-        if self.completed_phase is not LifecyclePhase.PIN_RUN_INPUTS:
+    def is_complete(self) -> bool:
+        return self.completed_phase is LifecyclePhase.PIN_RUN_INPUTS
+
+    def receipt(self, recovery: AdvanceRecovery) -> AdvanceReceipt | None:
+        if not self.is_complete:
             return None
-        return AdvanceReceipt(
-            AdvanceDisposition.ADVANCED,
-            LifecyclePhase.PIN_RUN_INPUTS,
-            self.pinned_run_identity,
-            None,
-        )
+        return AdvanceReceipt.advanced(self.pinned_run_identity, recovery)
+
+
+@dataclass(frozen=True, slots=True)
+class CheckpointResult:
+    """Return committed progress and whether this operation appended its checkpoint."""
+
+    progress: LifecycleProgress
+    write: CheckpointWrite
 
 
 @dataclass(frozen=True, slots=True)
@@ -188,21 +244,13 @@ class StreamConflict:
 
 
 LifecycleState = LifecycleProgress | AdvanceReceipt | None
-StartResult = LifecycleProgress | AdvanceReceipt | StreamConflict
+StartResult = CheckpointResult | AdvanceReceipt | StreamConflict
 
 
 class LifecycleLedger(Protocol):
     """Append and reconstruct Stage 1 lifecycle checkpoints."""
 
     def load_by_idempotency_key(self, key: IdempotencyKey) -> LifecycleState: ...
-
-    def resolve_for_advance(
-        self,
-        key: IdempotencyKey,
-        recorded_at: datetime,
-    ) -> LifecycleState:
-        """Load valid state or atomically append its invalid-state refusal."""
-        ...
 
     def start(
         self,
@@ -213,9 +261,11 @@ class LifecycleLedger(Protocol):
 
     def complete_reconciliation(
         self, key: IdempotencyKey, recorded_at: datetime
-    ) -> LifecycleProgress | AdvanceReceipt: ...
+    ) -> CheckpointResult | AdvanceReceipt: ...
 
-    def pin_run_inputs(self, key: IdempotencyKey, recorded_at: datetime) -> AdvanceReceipt: ...
+    def pin_run_inputs(
+        self, key: IdempotencyKey, recorded_at: datetime
+    ) -> CheckpointResult | AdvanceReceipt: ...
 
     def record_refusal(
         self,

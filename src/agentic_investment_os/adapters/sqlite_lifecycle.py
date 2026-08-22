@@ -11,10 +11,11 @@ from datetime import datetime
 from typing import TYPE_CHECKING, TypeVar
 
 from agentic_investment_os.domain.lifecycle import (
-    AdvanceDisposition,
     AdvanceFailureReason,
     AdvanceReceipt,
     AdvanceRequest,
+    CheckpointResult,
+    CheckpointWrite,
     IdempotencyKey,
     InputRefusal,
     InvalidLifecycleStateError,
@@ -42,6 +43,9 @@ _LOAD_UNKEYED_REFUSAL_SQL = """
 SELECT reason_code, recorded_at FROM advance_refusals
 WHERE idempotency_key IS NULL AND reason_code = ?
 """
+_LOAD_CONFLICT_SQL = (
+    "SELECT reason_code, recorded_at FROM advance_conflicts WHERE idempotency_key = ?"
+)
 _ENABLE_FOREIGN_KEYS_SQL = "PRAGMA foreign_keys = ON"
 _BUSY_TIMEOUT_SQL = "PRAGMA busy_timeout = 5000"
 _BEGIN_IMMEDIATE_SQL = "BEGIN IMMEDIATE"
@@ -58,6 +62,7 @@ _CHANGED_PINNED_FACTS = "lifecycle stream changed pinned request facts"
 _INVALID_CHECKPOINT_ORDER = "lifecycle stream checkpoint order is invalid"
 _INVALID_RECORDED_AT = "invalid recorded_at in lifecycle ledger"
 _UNKNOWN_REASON_CODE = "unknown reason_code in lifecycle ledger"
+_CONFLICT_WITHOUT_COMPLETION = "lifecycle conflict does not belong to a completed stream"
 _RECORDED_AT_NOT_AWARE = "recorded_at must be timezone-aware"
 _CLOCK_NOT_AWARE = "lifecycle clock must return a timezone-aware timestamp"
 
@@ -104,6 +109,12 @@ CREATE UNIQUE INDEX IF NOT EXISTS one_unkeyed_refusal_per_reason
 ON advance_refusals(reason_code)
 WHERE idempotency_key IS NULL;
 
+CREATE TABLE IF NOT EXISTS advance_conflicts (
+    idempotency_key TEXT PRIMARY KEY,
+    reason_code TEXT NOT NULL CHECK (reason_code = 'idempotency_key_conflict'),
+    recorded_at TEXT NOT NULL
+) STRICT;
+
 CREATE TRIGGER IF NOT EXISTS lifecycle_events_are_append_only_update
 BEFORE UPDATE ON lifecycle_events BEGIN SELECT RAISE(ABORT, 'append-only lifecycle ledger'); END;
 CREATE TRIGGER IF NOT EXISTS lifecycle_events_are_append_only_delete
@@ -112,12 +123,22 @@ CREATE TRIGGER IF NOT EXISTS advance_refusals_are_append_only_update
 BEFORE UPDATE ON advance_refusals BEGIN SELECT RAISE(ABORT, 'append-only refusal ledger'); END;
 CREATE TRIGGER IF NOT EXISTS advance_refusals_are_append_only_delete
 BEFORE DELETE ON advance_refusals BEGIN SELECT RAISE(ABORT, 'append-only refusal ledger'); END;
+CREATE TRIGGER IF NOT EXISTS advance_conflicts_are_append_only_update
+BEFORE UPDATE ON advance_conflicts BEGIN SELECT RAISE(ABORT, 'append-only conflict ledger'); END;
+CREATE TRIGGER IF NOT EXISTS advance_conflicts_are_append_only_delete
+BEFORE DELETE ON advance_conflicts BEGIN SELECT RAISE(ABORT, 'append-only conflict ledger'); END;
 """
 
 
 @dataclass(frozen=True, slots=True)
 class RuntimeRootRefusal:
     """Signal that private runtime storage cannot be established safely."""
+
+
+@dataclass(frozen=True, slots=True)
+class _RequestHistory:
+    progress: LifecycleProgress | None
+    conflict: AdvanceReceipt | None
 
 
 def prepare_runtime_database(state_root: Path) -> Path | RuntimeRootRefusal:
@@ -160,29 +181,6 @@ class SQLiteLifecycleLedger:
     ) -> LifecycleProgress | AdvanceReceipt | None:
         return self._read(lambda connection: self._load(connection, key))
 
-    def resolve_for_advance(
-        self,
-        key: IdempotencyKey,
-        recorded_at: datetime,
-    ) -> LifecycleProgress | AdvanceReceipt | None:
-        def operation(
-            connection: sqlite3.Connection,
-        ) -> LifecycleProgress | AdvanceReceipt | None:
-            refusal = self._load_refusal(connection, key)
-            if refusal is not None:
-                return refusal
-            try:
-                return self._load_events(connection, key)
-            except InvalidLifecycleStateError:
-                return self._append_refusal(
-                    connection,
-                    key,
-                    AdvanceFailureReason.INVALID_DURABLE_STATE,
-                    recorded_at,
-                )
-
-        return self._write(operation)
-
     def start(
         self,
         request: AdvanceRequest,
@@ -190,8 +188,15 @@ class SQLiteLifecycleLedger:
         recorded_at: datetime,
     ) -> StartResult:
         def operation(connection: sqlite3.Connection) -> StartResult:
-            existing = self._load(connection, request.idempotency_key)
+            existing = self._resolve_matching_progress(
+                connection,
+                request,
+                identity,
+                recorded_at,
+            )
             if existing is not None:
+                if isinstance(existing, LifecycleProgress):
+                    return CheckpointResult(existing, CheckpointWrite.OBSERVED)
                 return existing
             stream_row = connection.execute(_STREAM_EXISTS_SQL, (request.stream_id,)).fetchone()
             if stream_row is not None:
@@ -215,20 +220,26 @@ class SQLiteLifecycleLedger:
                     _timestamp(recorded_at),
                 ),
             )
-            return LifecycleProgress(request, identity, None, 0)
+            return CheckpointResult(
+                LifecycleProgress(request, identity, None, 0),
+                CheckpointWrite.APPENDED,
+            )
 
         return self._write(operation)
 
     def complete_reconciliation(
         self, key: IdempotencyKey, recorded_at: datetime
-    ) -> LifecycleProgress | AdvanceReceipt:
-        def operation(connection: sqlite3.Connection) -> LifecycleProgress | AdvanceReceipt:
-            progress = self._required_progress(connection, key)
-            receipt = progress.receipt
-            if receipt is not None:
-                return receipt
-            if progress.completed_phase is LifecyclePhase.RECONCILE_PRIOR_STATE:
-                return progress
+    ) -> CheckpointResult | AdvanceReceipt:
+        def operation(connection: sqlite3.Connection) -> CheckpointResult | AdvanceReceipt:
+            state = self._required_progress(connection, key, recorded_at)
+            if isinstance(state, AdvanceReceipt):
+                return state
+            progress = state
+            if (
+                progress.is_complete
+                or progress.completed_phase is LifecyclePhase.RECONCILE_PRIOR_STATE
+            ):
+                return CheckpointResult(progress, CheckpointWrite.OBSERVED)
             connection.execute(
                 """
                 INSERT INTO lifecycle_events (
@@ -239,21 +250,28 @@ class SQLiteLifecycleLedger:
                 """,
                 self._event_values(progress, recorded_at),
             )
-            return LifecycleProgress(
-                progress.request,
-                progress.pinned_run_identity,
-                LifecyclePhase.RECONCILE_PRIOR_STATE,
-                1,
+            return CheckpointResult(
+                LifecycleProgress(
+                    progress.request,
+                    progress.pinned_run_identity,
+                    LifecyclePhase.RECONCILE_PRIOR_STATE,
+                    1,
+                ),
+                CheckpointWrite.APPENDED,
             )
 
         return self._write(operation)
 
-    def pin_run_inputs(self, key: IdempotencyKey, recorded_at: datetime) -> AdvanceReceipt:
-        def operation(connection: sqlite3.Connection) -> AdvanceReceipt:
-            progress = self._required_progress(connection, key)
-            receipt = progress.receipt
-            if receipt is not None:
-                return receipt
+    def pin_run_inputs(
+        self, key: IdempotencyKey, recorded_at: datetime
+    ) -> CheckpointResult | AdvanceReceipt:
+        def operation(connection: sqlite3.Connection) -> CheckpointResult | AdvanceReceipt:
+            state = self._required_progress(connection, key, recorded_at)
+            if isinstance(state, AdvanceReceipt):
+                return state
+            progress = state
+            if progress.is_complete:
+                return CheckpointResult(progress, CheckpointWrite.OBSERVED)
             if progress.completed_phase is not LifecyclePhase.RECONCILE_PRIOR_STATE:
                 raise LifecyclePersistenceError(_PIN_REQUIRES_RECONCILIATION)
             connection.execute(
@@ -266,11 +284,14 @@ class SQLiteLifecycleLedger:
                 """,
                 self._event_values(progress, recorded_at),
             )
-            return AdvanceReceipt(
-                disposition=AdvanceDisposition.ADVANCED,
-                completed_phase=LifecyclePhase.PIN_RUN_INPUTS,
-                pinned_run_identity=progress.pinned_run_identity,
-                failure_reason=None,
+            return CheckpointResult(
+                LifecycleProgress(
+                    progress.request,
+                    progress.pinned_run_identity,
+                    LifecyclePhase.PIN_RUN_INPUTS,
+                    2,
+                ),
+                CheckpointWrite.APPENDED,
             )
 
         return self._write(operation)
@@ -288,18 +309,74 @@ class SQLiteLifecycleLedger:
                 if existing is not None:
                     return existing
             else:
-                existing = self._load_refusal(connection, key)
-                if existing is not None:
-                    return existing
-                progress = self._load_events(connection, key)
+                history = self._load_request_history(connection, key, recorded_at)
+                if isinstance(history, AdvanceReceipt):
+                    return history
+                progress = history.progress
                 if progress is not None:
-                    receipt = progress.receipt
-                    if receipt is not None:
-                        return receipt
+                    if progress.is_complete:
+                        if history.conflict is not None:
+                            return history.conflict
+                        return self._append_completed_conflict(connection, key, recorded_at)
                     resolved_reason = AdvanceFailureReason.IDEMPOTENCY_KEY_CONFLICT
             return self._append_refusal(connection, key, resolved_reason, recorded_at)
 
         return self._write(operation)
+
+    def _resolve_matching_progress(
+        self,
+        connection: sqlite3.Connection,
+        request: AdvanceRequest,
+        identity: PinnedRunIdentity,
+        recorded_at: datetime,
+    ) -> LifecycleProgress | AdvanceReceipt | None:
+        key = request.idempotency_key
+        history = self._load_request_history(connection, key, recorded_at)
+        if isinstance(history, AdvanceReceipt):
+            return history
+        progress = history.progress
+        if progress is None:
+            return None
+        if progress.request == request and progress.pinned_run_identity == identity:
+            return progress
+        if progress.is_complete:
+            if history.conflict is not None:
+                return history.conflict
+            return self._append_completed_conflict(connection, key, recorded_at)
+        return self._append_refusal(
+            connection,
+            key,
+            AdvanceFailureReason.IDEMPOTENCY_KEY_CONFLICT,
+            recorded_at,
+        )
+
+    def _load_request_history(
+        self,
+        connection: sqlite3.Connection,
+        key: IdempotencyKey,
+        recorded_at: datetime,
+    ) -> _RequestHistory | AdvanceReceipt:
+        refusal = self._load_refusal(connection, key)
+        if refusal is not None:
+            return refusal
+        try:
+            progress = self._load_events(connection, key)
+            conflict = self._load_conflict(connection, key)
+        except InvalidLifecycleStateError:
+            return self._append_refusal(
+                connection,
+                key,
+                AdvanceFailureReason.INVALID_DURABLE_STATE,
+                recorded_at,
+            )
+        if conflict is not None and (progress is None or not progress.is_complete):
+            return self._append_refusal(
+                connection,
+                key,
+                AdvanceFailureReason.INVALID_DURABLE_STATE,
+                recorded_at,
+            )
+        return _RequestHistory(progress, conflict)
 
     def _load(
         self, connection: sqlite3.Connection, key: IdempotencyKey
@@ -308,9 +385,10 @@ class SQLiteLifecycleLedger:
         if refusal is not None:
             return refusal
         progress = self._load_events(connection, key)
-        if progress is not None:
-            return progress
-        return None
+        conflict = self._load_conflict(connection, key)
+        if conflict is not None and (progress is None or not progress.is_complete):
+            raise InvalidLifecycleStateError(_CONFLICT_WITHOUT_COMPLETION)
+        return progress
 
     @staticmethod
     def _append_refusal(
@@ -331,6 +409,22 @@ class SQLiteLifecycleLedger:
             ),
         )
         return AdvanceReceipt.failed_closed(reason_code)
+
+    @staticmethod
+    def _append_completed_conflict(
+        connection: sqlite3.Connection,
+        key: IdempotencyKey,
+        recorded_at: datetime,
+    ) -> AdvanceReceipt:
+        reason = AdvanceFailureReason.IDEMPOTENCY_KEY_CONFLICT
+        connection.execute(
+            """
+            INSERT INTO advance_conflicts (idempotency_key, reason_code, recorded_at)
+            VALUES (?, ?, ?)
+            """,
+            (key.value, reason.value, _timestamp(recorded_at)),
+        )
+        return AdvanceReceipt.failed_closed(reason)
 
     @staticmethod
     def _load_events(
@@ -370,13 +464,32 @@ class SQLiteLifecycleLedger:
         _aware_timestamp(row[1])
         return AdvanceReceipt.failed_closed(reason)
 
+    @staticmethod
+    def _load_conflict(
+        connection: sqlite3.Connection,
+        key: IdempotencyKey,
+    ) -> AdvanceReceipt | None:
+        row = connection.execute(_LOAD_CONFLICT_SQL, (key.value,)).fetchone()
+        if row is None:
+            return None
+        reason = _failure_reason(row[0])
+        if reason is not AdvanceFailureReason.IDEMPOTENCY_KEY_CONFLICT:
+            raise InvalidLifecycleStateError(_UNKNOWN_REASON_CODE)
+        _aware_timestamp(row[1])
+        return AdvanceReceipt.failed_closed(reason)
+
     def _required_progress(
-        self, connection: sqlite3.Connection, key: IdempotencyKey
-    ) -> LifecycleProgress:
-        state = self._load(connection, key)
-        if not isinstance(state, LifecycleProgress):
+        self,
+        connection: sqlite3.Connection,
+        key: IdempotencyKey,
+        recorded_at: datetime,
+    ) -> LifecycleProgress | AdvanceReceipt:
+        state = self._load_request_history(connection, key, recorded_at)
+        if isinstance(state, AdvanceReceipt):
+            return state
+        if state.progress is None:
             raise LifecyclePersistenceError(_REQUIRED_STREAM_MISSING)
-        return state
+        return state.progress
 
     @staticmethod
     def _event_values(progress: LifecycleProgress, recorded_at: datetime) -> tuple[object, ...]:

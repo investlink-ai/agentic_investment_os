@@ -87,7 +87,8 @@ credentials.
 Normal production callers see five capabilities:
 
 - **Advance** resolves or resumes a market session and returns a receipt containing its disposition,
-  completed phase, pinned inputs, published artifact identifiers, and fail-closed reason.
+  completed phase, pinned inputs, published artifact identifiers, fail-closed reason, and whether the
+  call advanced fresh work, resumed committed progress, or replayed prior completion.
 - **Record** appends due market, forecast, thesis, and execution observations without changing the
   original decision.
 - **Govern** schedules a signed, operator-approved Constitution, champion, or controlled-policy
@@ -228,7 +229,7 @@ captured evidence -> validated research -> HouseView -> deterministic portfolio
 | Beliefs | Bitemporal Belief Ledger | Append transitions and corrections |
 | Decisions | Decision Journal | Freeze ex-ante record; append later observations |
 | Order intent and receipts | Executor ledger | Persist intent before effect; append observations |
-| Lifecycle checkpoints | Lifecycle event ledger | Append transitions under stable idempotency keys |
+| Lifecycle checkpoints and refusals | Lifecycle event ledger | Append transitions and bounded conflict or refusal records under stable idempotency keys |
 | Graphs, reports, indexes | Projection stores | Replace only by deterministic rebuild |
 | Executable packets | Atomic packet store | Publish complete validated artifacts only |
 

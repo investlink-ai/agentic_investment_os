@@ -14,10 +14,14 @@ from agentic_investment_os.domain.lifecycle import (
     AdvanceDisposition,
     AdvanceFailureReason,
     AdvanceReceipt,
+    AdvanceRecovery,
     AdvanceRequest,
+    CheckpointResult,
+    CheckpointWrite,
     IdempotencyKey,
     InputRefusal,
     InputRefusalCode,
+    InvalidLifecycleStateError,
     LifecyclePhase,
     LifecycleProgress,
     PinnedRunIdentity,
@@ -59,15 +63,22 @@ class ConcurrentCompletionLedger:
     completion_point: str
     receipt: AdvanceReceipt
 
+    def _progress(
+        self,
+        phase: LifecyclePhase | None,
+        sequence: int,
+    ) -> LifecycleProgress:
+        assert self.receipt.pinned_run_identity is not None
+        request = AdvanceRequest.parse(
+            session="2026-08-21",
+            mode="champion",
+            idempotency_key="concurrent-request",
+        )
+        assert isinstance(request, AdvanceRequest)
+        return LifecycleProgress(request, self.receipt.pinned_run_identity, phase, sequence)
+
     def load_by_idempotency_key(
         self, _key: IdempotencyKey
-    ) -> LifecycleProgress | AdvanceReceipt | None:
-        return None
-
-    def resolve_for_advance(
-        self,
-        _key: IdempotencyKey,
-        _recorded_at: datetime,
     ) -> LifecycleProgress | AdvanceReceipt | None:
         return None
 
@@ -78,15 +89,42 @@ class ConcurrentCompletionLedger:
         _recorded_at: datetime,
     ) -> StartResult:
         if self.completion_point == "start":
-            return self.receipt
-        return LifecycleProgress(request, identity, None, 0)
+            return CheckpointResult(
+                self._progress(LifecyclePhase.PIN_RUN_INPUTS, 2),
+                CheckpointWrite.OBSERVED,
+            )
+        return CheckpointResult(
+            LifecycleProgress(request, identity, None, 0),
+            CheckpointWrite.APPENDED,
+        )
 
     def complete_reconciliation(
         self, _key: IdempotencyKey, _recorded_at: datetime
-    ) -> LifecycleProgress | AdvanceReceipt:
-        return self.receipt
+    ) -> CheckpointResult | AdvanceReceipt:
+        if self.completion_point == "reconcile_failure":
+            return AdvanceReceipt.failed_closed(AdvanceFailureReason.INVALID_DURABLE_STATE)
+        if self.completion_point == "incomplete_reconcile":
+            return CheckpointResult(self._progress(None, 0), CheckpointWrite.OBSERVED)
+        if self.completion_point in {"pin_failure", "pin_observed"}:
+            return CheckpointResult(
+                self._progress(LifecyclePhase.RECONCILE_PRIOR_STATE, 1),
+                CheckpointWrite.APPENDED,
+            )
+        return CheckpointResult(
+            self._progress(LifecyclePhase.PIN_RUN_INPUTS, 2),
+            CheckpointWrite.OBSERVED,
+        )
 
-    def pin_run_inputs(self, _key: IdempotencyKey, _recorded_at: datetime) -> AdvanceReceipt:
+    def pin_run_inputs(
+        self, _key: IdempotencyKey, _recorded_at: datetime
+    ) -> CheckpointResult | AdvanceReceipt:
+        if self.completion_point == "pin_failure":
+            return AdvanceReceipt.failed_closed(AdvanceFailureReason.INVALID_DURABLE_STATE)
+        if self.completion_point == "pin_observed":
+            return CheckpointResult(
+                self._progress(LifecyclePhase.PIN_RUN_INPUTS, 2),
+                CheckpointWrite.OBSERVED,
+            )
         message = "concurrent completion must return before pinning"
         raise AssertionError(message)
 
@@ -146,6 +184,49 @@ def test_advance_request_validates_the_complete_boundary() -> None:
         refusal = AdvanceRequest.parse(**values)
         assert isinstance(refusal, InputRefusal)
         assert refusal.code is expected_code
+
+
+def test_advance_receipt_rejects_incomplete_success_and_failure_shapes() -> None:
+    identity = PinnedRunIdentity(
+        run_id="b" * SHA256_HEX_LENGTH,
+        configuration_version=1,
+        configuration_hash="a" * SHA256_HEX_LENGTH,
+    )
+
+    with pytest.raises(ValueError, match="advanced receipt requires completed recovery facts"):
+        AdvanceReceipt(
+            AdvanceDisposition.ADVANCED,
+            LifecyclePhase.PIN_RUN_INPUTS,
+            identity,
+            None,
+        )
+    with pytest.raises(ValueError, match="advanced receipt requires completed recovery facts"):
+        AdvanceReceipt(
+            AdvanceDisposition.ADVANCED,
+            None,
+            identity,
+            None,
+            AdvanceRecovery.FRESH,
+        )
+    with pytest.raises(ValueError, match="failed receipt requires one bounded reason"):
+        AdvanceReceipt(
+            AdvanceDisposition.FAILED_CLOSED,
+            None,
+            None,
+            None,
+        )
+    with pytest.raises(ValueError, match="failed receipt requires one bounded reason"):
+        AdvanceReceipt(
+            AdvanceDisposition.FAILED_CLOSED,
+            None,
+            None,
+            AdvanceFailureReason.INVALID_DURABLE_STATE,
+            AdvanceRecovery.RESUMED,
+        )
+
+    assert (
+        AdvanceReceipt.advanced(identity, AdvanceRecovery.FRESH).recovery is AdvanceRecovery.FRESH
+    )
 
 
 def test_runtime_configuration_is_complete_immutable_and_deterministically_hashed(
@@ -538,6 +619,7 @@ def test_advance_returns_a_concurrent_checkpoint_receipt(completion_point: str) 
             configuration_hash="a" * SHA256_HEX_LENGTH,
         ),
         failure_reason=None,
+        recovery=AdvanceRecovery.PREVIOUSLY_COMPLETED,
     )
     capability = Advance(
         ledger=ConcurrentCompletionLedger(completion_point, receipt),
@@ -552,4 +634,88 @@ def test_advance_returns_a_concurrent_checkpoint_receipt(completion_point: str) 
         idempotency_key="concurrent-request",
     )
 
-    assert observed is receipt
+    assert observed.disposition is receipt.disposition
+    assert observed.completed_phase is receipt.completed_phase
+    assert observed.pinned_run_identity is receipt.pinned_run_identity
+    assert observed.recovery is AdvanceRecovery.PREVIOUSLY_COMPLETED
+
+
+@pytest.mark.parametrize("failure_point", ["reconcile_failure", "pin_failure"])
+def test_advance_returns_a_durable_checkpoint_failure(failure_point: str) -> None:
+    identity = PinnedRunIdentity(
+        run_id="b" * SHA256_HEX_LENGTH,
+        configuration_version=1,
+        configuration_hash="a" * SHA256_HEX_LENGTH,
+    )
+    capability = Advance(
+        ledger=ConcurrentCompletionLedger(
+            failure_point,
+            AdvanceReceipt.advanced(identity, AdvanceRecovery.PREVIOUSLY_COMPLETED),
+        ),
+        configuration_version=1,
+        configuration_hash="a" * SHA256_HEX_LENGTH,
+        clock=FixedClock(),
+    )
+
+    observed = capability(
+        session="2026-08-21",
+        mode="champion",
+        idempotency_key="concurrent-request",
+    )
+
+    assert observed == AdvanceReceipt.failed_closed(AdvanceFailureReason.INVALID_DURABLE_STATE)
+
+
+def test_advance_reports_a_checkpoint_completed_during_pinning() -> None:
+    identity = PinnedRunIdentity(
+        run_id="b" * SHA256_HEX_LENGTH,
+        configuration_version=1,
+        configuration_hash="a" * SHA256_HEX_LENGTH,
+    )
+    capability = Advance(
+        ledger=ConcurrentCompletionLedger(
+            "pin_observed",
+            AdvanceReceipt.advanced(identity, AdvanceRecovery.PREVIOUSLY_COMPLETED),
+        ),
+        configuration_version=1,
+        configuration_hash="a" * SHA256_HEX_LENGTH,
+        clock=FixedClock(),
+    )
+
+    observed = capability(
+        session="2026-08-21",
+        mode="champion",
+        idempotency_key="concurrent-request",
+    )
+
+    assert observed == AdvanceReceipt.advanced(
+        identity,
+        AdvanceRecovery.PREVIOUSLY_COMPLETED,
+    )
+
+
+def test_advance_rejects_an_incomplete_checkpoint_result() -> None:
+    identity = PinnedRunIdentity(
+        run_id="b" * SHA256_HEX_LENGTH,
+        configuration_version=1,
+        configuration_hash="a" * SHA256_HEX_LENGTH,
+    )
+    capability = Advance(
+        ledger=ConcurrentCompletionLedger(
+            "incomplete_reconcile",
+            AdvanceReceipt.advanced(identity, AdvanceRecovery.PREVIOUSLY_COMPLETED),
+        ),
+        configuration_version=1,
+        configuration_hash="a" * SHA256_HEX_LENGTH,
+        clock=FixedClock(),
+    )
+
+    with pytest.raises(
+        InvalidLifecycleStateError,
+        match="lifecycle ledger returned an incomplete checkpoint result",
+    ):
+        capability(
+            session="2026-08-21",
+            mode="champion",
+            idempotency_key="concurrent-request",
+        )
