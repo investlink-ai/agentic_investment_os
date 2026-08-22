@@ -1,0 +1,19 @@
+{
+  "_fixture": {
+    "source_type": "synthetic agent-workflow boundary state",
+    "synthetic": true,
+    "timestamps": "not applicable",
+    "entitlement": "not applicable",
+    "redactions": "none"
+  },
+  "review": {
+    "base_commit": "1111111111111111111111111111111111111111",
+    "head_commit": "2222222222222222222222222222222222222222",
+    "changed_paths": [
+      ".agents/skills/code-review/SKILL.md",
+      ".agents/skills/create-pull-request/SKILL.md"
+    ],
+    "trusted_base_contract_available": false,
+    "trusted_external_reviewer_available": false
+  }
+}

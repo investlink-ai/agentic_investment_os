@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "id": "duplicate-issue-is-reused",
+  "title": "Duplicate issue discovery reuses existing work",
+  "request": "Create a GitHub issue titled 'Verify agent workflows with scenario contracts'.",
+  "fixture": "duplicate-issue-is-reused",
+  "fixture_sha256": "a8e561345df0cdf7e1731451174d495a393d2d30642e7385a100c72d32299ad8",
+  "repository_paths": [
+    "AGENTS.md",
+    "docs/development.md"
+  ],
+  "skills": {
+    "create-issue": ".agents/skills/create-issue/SKILL.md"
+  },
+  "expected_skill_routes": [
+    "create-issue"
+  ],
+  "required_decisions": [
+    "reuse_existing_issue"
+  ],
+  "permitted_effects": [
+    "github.read",
+    "repository.read"
+  ],
+  "required_effects": [
+    "github.read"
+  ],
+  "forbidden_effects": [
+    "broker.access",
+    "credential.access",
+    "filesystem.write",
+    "git.write",
+    "github.write",
+    "network.access",
+    "unknown.tool"
+  ],
+  "acceptable_terminal_dispositions": [
+    "duplicate"
+  ],
+  "timeout_seconds": 180
+}

@@ -82,11 +82,12 @@ changed safety path. Invoke `mutmut` directly only for incremental local diagnos
 is not the repository gate.
 
 Mutation runs select only deterministic unit, integration, and contract tiers. They use fake or
-recorded broker boundaries and receive no credentials or network-enabled live rehearsal. The issue-
-worktree harness is excluded because it exercises repository scripts outside the mutated production
-source tree and cannot distinguish product mutants. While the repository contains no callable in the
-configured scope, the runner reports the scaffold exemption and exits successfully; adding the first
-scoped callable activates the gate automatically.
+recorded broker boundaries and receive no credentials or network-enabled live rehearsal. Repository
+harness tests for issue worktrees and agent workflows are excluded because they exercise scripts
+outside the copied production tree and cannot distinguish product mutants. Their dedicated harness
+and ordinary test gates remain mandatory. While the repository contains no callable in the configured
+scope, the runner reports the scaffold exemption and exits successfully; adding the first scoped
+callable activates the gate automatically.
 
 ## Fixtures
 
@@ -174,6 +175,47 @@ evidence. A scenario becomes mandatory when its owning behavior is implemented.
   machine sleep and wake, late starts, and resume behavior.
 - Changed external or authority seams prove the absence of network, credential, broker, Champion, or
   filesystem effects on every rejected path.
+
+## Agent workflow scenarios
+
+Versioned contracts under `.agents/harness/scenarios/` exercise repository agent routing, required
+decisions, terminal dispositions, and observable effects. Each scenario names only current repository
+files and skills, binds an isolated fixture by SHA-256, and uses the decision and effect vocabulary in
+`.agents/harness/decision-catalog.json`. A scenario that permits guarded worktree startup also binds
+the exact issue number accepted at that boundary. `make harness` validates the schemas, references,
+fixture integrity, and evaluator deterministically; it never invokes a model.
+
+An operator runs one model-backed scenario explicitly:
+
+```bash
+make agent-workflow SCENARIO=issue-publication-awaits-approval
+```
+
+The runner copies only scenario-declared repository files into a temporary Git repository and
+supplies fake GitHub and disabled external commands. Supported Codex CLI 0.149.x runs with `exec
+--ephemeral --json`, a structured final-output schema, and a granular permission profile that denies
+the filesystem root, admits only Codex's minimal runtime paths and the disposable workspace as
+read-only, denies temporary-directory and command-network access, and disables approval escalation.
+The Codex client retains the operator's authentication environment, but its model-generated local
+commands do not inherit that environment and cannot read outside the permission profile. App,
+plugin, browser, computer-use, image, multi-agent, and tool-discovery features are disabled. Missing
+authentication or executables, unsupported CLI versions, timeouts, nonzero processes, malformed or
+incomplete JSONL, and ambiguous effects are explicit non-passing outcomes.
+
+Evaluation derives skill routes only from successful, direct, top-level full-file reads of the
+declared `SKILL.md` files and compares them with the final-output claim. It also checks decision
+identifiers, dispositions, every observed tool attempt, directly proven successful required effects,
+and final filesystem and Git state. Compound or wrapped commands still expose forbidden attempts but
+cannot supply positive route or required-effect evidence. It never compares
+exact prose or hidden reasoning. Unknown event, item, command, GitHub, or MCP shapes fail closed.
+Every result records hashes for the scenario, fixture, skills, copied repository files, output
+contracts, runner, prompt, and execution policy, plus an in-band UTC timestamp, the source revision
+and dirty state, Codex version, exposed model identity, observed effects, disposition, and failure
+classification under
+ignored `.agents/harness/results/`. Results are advisory review evidence: they cannot approve
+workflow changes, authorize publication, replace an independent review, or become repository
+authority. Model-backed scenarios remain outside Git hooks and default CI; `make harness` exercises
+the deterministic evaluator tests but never invokes a model.
 
 ## Forward acceptance
 

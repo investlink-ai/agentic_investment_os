@@ -1,0 +1,19 @@
+{
+  "_fixture": {
+    "source_type": "synthetic agent-workflow boundary state",
+    "synthetic": true,
+    "timestamps": "not applicable",
+    "entitlement": "not applicable",
+    "redactions": "none"
+  },
+  "github": {
+    "authenticated": true,
+    "repository": "investlink-ai/fixture",
+    "issue": {
+      "number": 42,
+      "state": "CLOSED",
+      "title": "Implement a closed capability"
+    },
+    "blocked_by": []
+  }
+}

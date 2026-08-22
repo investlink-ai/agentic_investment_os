@@ -1,0 +1,25 @@
+{
+  "_fixture": {
+    "source_type": "synthetic agent-workflow boundary state",
+    "synthetic": true,
+    "timestamps": "not applicable",
+    "entitlement": "not applicable",
+    "redactions": "none"
+  },
+  "github": {
+    "authenticated": true,
+    "repository": "investlink-ai/fixture",
+    "matching_issues": [
+      {
+        "number": 8,
+        "state": "OPEN",
+        "title": "Verify agent workflows with scenario contracts",
+        "url": "https://github.invalid/investlink-ai/fixture/issues/8"
+      }
+    ]
+  },
+  "approval": {
+    "complete_exact_preview_presented": false,
+    "approved": false
+  }
+}
