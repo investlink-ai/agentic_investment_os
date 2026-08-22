@@ -9,7 +9,8 @@ fixtures, and live rehearsal policy. Tests prove `product-requirements.md` and
 - **Unit — `tests/unit/`:** pure domain and policy behavior with no filesystem, network, wall clock,
   subprocess, or database. Exercise edge cases, invalid states, and deterministic calculations.
 - **Integration — `tests/integration/`:** SQLite/filesystem persistence, composition roots,
-  checkpoints, projections, and recorded adapter behavior. Temporary resources remain isolated.
+  checkpoints, projections, and recorded adapter behavior. Deterministic system journeys live under
+  `tests/integration/system/` as a named subset. Temporary resources remain isolated.
 - **Contract — `tests/contract/`:** hostile model/parser input and recorded SEC, Alpaca, Codex, and
   other external representations. Prove both accepted and rejected forms at the boundary.
 - **Live rehearsal:** explicitly selected tests against paper or public services. They require operator
@@ -20,6 +21,30 @@ before the suite runs. Each diagnostic identifies the test or module scope and t
 The guard permits value-only use of `Path`, timezone-aware timestamps, immutable dataclasses, and
 injected clocks; its bounded syntax check supports but does not replace tier review or behavioral
 evidence.
+
+## Deterministic system journeys
+
+A deterministic system journey proves that project-owned components cooperate through one compact
+product path. It enters through production composition, invokes public capabilities, uses real local
+persistence, and, when the implemented slice includes an authority seam, crosses it through the same
+serialized artifact used in production. External providers remain behind their owned ports and use
+scripted or recorded adapters.
+When the architecture requires process isolation, the journey uses separate processes with explicit
+environments. Assertions cover public receipts, authoritative state, rebuildable outputs, observed
+external state, and the absence of forbidden effects.
+
+System journeys remain under `tests/integration/system/` while they share the integration tier's
+runtime, ownership, environment, and `make check` cadence. Introduce a top-level `tests/e2e/` tier only
+after a measured difference in one of those properties makes separate ownership clearer, and update
+pytest discovery, Make targets, CI, and this policy together. Directory naming alone never creates a
+new acceptance gate.
+
+Keep each journey smaller than the focused tests that support it. A journey covers cross-component
+assembly and one representative recovery or refusal; unit, contract, integration, state-machine,
+corruption, and mutation tests retain their narrower exhaustive evidence. Add a journey only when its
+owning vertical slice exists. Live model, public-source, and Alpaca paper rehearsals remain explicit
+operator actions outside deterministic CI and do not certify deterministic correctness or investment
+validity.
 
 ## Selection
 
