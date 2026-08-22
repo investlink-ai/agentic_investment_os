@@ -1,4 +1,4 @@
-"""Compose the uncredentialed Stage 1 Advance capability."""
+"""Compose uncredentialed Stage 1 lifecycle capabilities."""
 
 from __future__ import annotations
 
@@ -9,9 +9,10 @@ from typing import TYPE_CHECKING
 from agentic_investment_os.adapters.sqlite_lifecycle import (
     RuntimeRootRefusal,
     SQLiteLifecycleLedger,
+    open_runtime_database,
     prepare_runtime_database,
 )
-from agentic_investment_os.application.lifecycle import Advance
+from agentic_investment_os.application.lifecycle import Advance, Status
 from agentic_investment_os.entrypoints.configuration import (
     ConfigurationRefusal,
     ConfigurationRefusalCode,
@@ -51,8 +52,26 @@ def configure_advance(
             fields=("state_root",),
         )
     return Advance(
-        ledger=SQLiteLifecycleLedger(database),
+        ledger=SQLiteLifecycleLedger(database.path),
         configuration_version=resolution.schema_version,
         configuration_hash=resolution.fingerprint,
         clock=clock if clock is not None else SystemClock(),
     )
+
+
+def configure_status(
+    sources: Sequence[ConfigurationSource],
+    *,
+    repository_root: Path,
+) -> Status | ConfigurationRefusal:
+    """Validate configuration and compose rebuildable lifecycle status."""
+    resolution = resolve_runtime_configuration(sources, repository_root=repository_root)
+    if isinstance(resolution, ConfigurationRefusal):
+        return resolution
+    database = open_runtime_database(resolution.state_root)
+    if isinstance(database, RuntimeRootRefusal):
+        return ConfigurationRefusal(
+            code=ConfigurationRefusalCode.INVALID_STATE_ROOT,
+            fields=("state_root",),
+        )
+    return Status(SQLiteLifecycleLedger(database.path, initialize_schema=database.created))

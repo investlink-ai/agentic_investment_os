@@ -10,10 +10,11 @@ isolated Research Lab.
 
 ## Status
 
-Stage 1 implements `Advance` through the durable `PinRunInputs` checkpoint with validated runtime
-configuration and an append-only SQLite lifecycle ledger. Research, portfolio, execution, evaluation,
-and later lifecycle phases remain scaffolds. Active repository documentation owns implementation
-authority and the runtime has no dependency on the design's Second Brain origin.
+Stage 1 implements `Advance` through the durable `PinRunInputs` checkpoint and rebuildable operator
+`Status` over validated append-only SQLite lifecycle history. The status projection is disposable and
+never substitutes for invalid authoritative records. Research, portfolio, execution, evaluation, and
+later lifecycle phases remain scaffolds. Active repository documentation owns implementation authority
+and the runtime has no dependency on the design's Second Brain origin.
 
 ## Setup
 

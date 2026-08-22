@@ -29,7 +29,7 @@ flowchart LR
     operator[Operator / Scheduler]
 
     subgraph uncredentialed["Investment Operating System — no broker credentials"]
-        lifecycle["Lifecycle interface<br/>Advance · Record · Govern"]
+        lifecycle["Lifecycle interface<br/>Advance · Status · Record · Govern"]
         evidence[Evidence]
         memory[Memory]
         research[Codex Research]
@@ -84,11 +84,14 @@ credentials.
 
 ## Public lifecycle interfaces
 
-Normal production callers see five capabilities:
+Normal production callers see six capabilities:
 
 - **Advance** resolves or resumes a market session and returns a receipt containing its disposition,
   completed phase, pinned inputs, published artifact identifiers, fail-closed reason, and whether the
   call advanced fresh work, resumed committed progress, or replayed prior completion.
+- **Status** validates authoritative lifecycle history, replaces its disposable projection, and returns
+  the active phase, last completed Market Session, pinned run identity, lifecycle liveness, and any
+  available durable terminal reason.
 - **Record** appends due market, forecast, thesis, and execution observations without changing the
   original decision.
 - **Govern** schedules a signed, operator-approved Constitution, champion, or controlled-policy
@@ -145,6 +148,14 @@ continue. Neither state publishes a new discretionary order. A later LangGraph a
 the transition implementation but must preserve this interface, state meaning, checkpoints, and
 idempotency behavior.
 
+Lifecycle status is derived only from the append-only event, refusal, and conflict ledgers. Rebuilding
+validates the complete authoritative history before atomically replacing the projection; missing or
+malformed projection state is discarded, while malformed authoritative history fails closed. A
+completed phase does not imply a completed Market Session: `last_completed_session` advances only
+from a durable `Complete` event. Status liveness describes whether the recorded lifecycle is not
+started, active, or failed closed; scheduler heartbeat and schedule health are separate operational
+concerns.
+
 ## Safe execution handoff
 
 ```mermaid
@@ -185,7 +196,7 @@ client order identity; it never guesses or repeats exposure blindly.
 | Module | Owns | Interface presented to callers |
 | --- | --- | --- |
 | `domain` | Framework-free values, events, identifiers, and invariants | Immutable domain contracts |
-| `application` | Lifecycle transitions and use-case orchestration | `Advance`, `Record`, `Govern` |
+| `application` | Lifecycle transitions and use-case orchestration | `Advance`, `Status`, `Record`, `Govern` |
 | `evidence` | Content-addressed artifacts, assertions, as-of provenance | Evidence capture and lookup |
 | `memory` | Belief ledger, graph projection, decision journal | Append and as-of retrieval |
 | `research` | Typed Codex roles and evidence-bound workflow | Validated research artifacts |

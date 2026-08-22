@@ -14,6 +14,9 @@ _IDEMPOTENCY_KEY = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\Z")
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 _INVALID_ADVANCED_RECEIPT = "advanced receipt requires completed recovery facts"
 _INVALID_FAILED_RECEIPT = "failed receipt requires one bounded reason"
+_CHANGED_PINNED_FACTS = "lifecycle stream changed pinned request facts"
+_INVALID_REFUSAL_ASSOCIATION = "lifecycle stream has invalid refusal association"
+_INVALID_CONFLICT_ASSOCIATION = "lifecycle stream has invalid conflict association"
 
 
 class LifecyclePersistenceError(RuntimeError):
@@ -35,6 +38,14 @@ class LifecyclePhase(StrEnum):
 
     RECONCILE_PRIOR_STATE = "ReconcilePriorState"
     PIN_RUN_INPUTS = "PinRunInputs"
+
+
+class LifecycleLiveness(StrEnum):
+    """Classify whether authoritative history can continue safely."""
+
+    NOT_STARTED = "not_started"
+    ACTIVE = "active"
+    FAILED_CLOSED = "failed_closed"
 
 
 class AdvanceDisposition(StrEnum):
@@ -93,6 +104,13 @@ class IdempotencyKey:
     """Carry a validated stable key for one operator request."""
 
     value: str
+
+    @classmethod
+    def parse(cls, value: object) -> IdempotencyKey | None:
+        """Validate an untrusted stable request key without retaining invalid input."""
+        if not isinstance(value, str) or _IDEMPOTENCY_KEY.fullmatch(value) is None:
+            return None
+        return cls(value)
 
 
 @dataclass(frozen=True, slots=True)
@@ -247,6 +265,133 @@ LifecycleState = LifecycleProgress | AdvanceReceipt | None
 StartResult = CheckpointResult | AdvanceReceipt | StreamConflict
 
 
+@dataclass(frozen=True, slots=True)
+class LifecycleStatus:
+    """Report operator-visible facts rebuilt only from authoritative lifecycle history."""
+
+    active_phase: LifecyclePhase | None
+    last_completed_session: MarketSession | None
+    pinned_run_identity: PinnedRunIdentity | None
+    liveness: LifecycleLiveness
+    durable_reason: AdvanceFailureReason | None
+
+    @classmethod
+    def not_started(cls) -> LifecycleStatus:
+        return cls(None, None, None, LifecycleLiveness.NOT_STARTED, None)
+
+
+@dataclass(frozen=True, slots=True)
+class DurableAdvanceRefusal:
+    """Represent one validated refusal reconstructed in durable append order."""
+
+    idempotency_key: IdempotencyKey | None
+    reason: AdvanceFailureReason
+
+
+@dataclass(frozen=True, slots=True)
+class DurableAdvanceConflict:
+    """Represent one validated conflict against a completed request stream."""
+
+    idempotency_key: IdempotencyKey
+    reason: AdvanceFailureReason
+
+
+def derive_lifecycle_status(
+    progresses: tuple[LifecycleProgress, ...],
+    refusals: tuple[DurableAdvanceRefusal, ...],
+    conflicts: tuple[DurableAdvanceConflict, ...],
+) -> LifecycleStatus:
+    """Derive operator status from fully validated authoritative facts."""
+    progress_by_key: dict[str, LifecycleProgress] = {}
+    for progress in progresses:
+        key = progress.request.idempotency_key.value
+        if key in progress_by_key:
+            raise InvalidLifecycleStateError(_CHANGED_PINNED_FACTS)
+        progress_by_key[key] = progress
+
+    for refusal in refusals:
+        if refusal.idempotency_key is None:
+            continue
+        associated_progress = progress_by_key.get(refusal.idempotency_key.value)
+        if associated_progress is None and refusal.reason in (
+            AdvanceFailureReason.IDEMPOTENCY_KEY_CONFLICT,
+            AdvanceFailureReason.INVALID_DURABLE_STATE,
+        ):
+            raise InvalidLifecycleStateError(_INVALID_REFUSAL_ASSOCIATION)
+        if associated_progress is not None and (
+            associated_progress.is_complete
+            or refusal.reason is not AdvanceFailureReason.IDEMPOTENCY_KEY_CONFLICT
+        ):
+            raise InvalidLifecycleStateError(_INVALID_REFUSAL_ASSOCIATION)
+
+    for conflict in conflicts:
+        associated_progress = progress_by_key.get(conflict.idempotency_key.value)
+        if (
+            conflict.reason is not AdvanceFailureReason.IDEMPOTENCY_KEY_CONFLICT
+            or associated_progress is None
+            or not associated_progress.is_complete
+        ):
+            raise InvalidLifecycleStateError(_INVALID_CONFLICT_ASSOCIATION)
+
+    if not progress_by_key:
+        if not refusals and not conflicts:
+            return LifecycleStatus.not_started()
+        return LifecycleStatus(
+            active_phase=None,
+            last_completed_session=None,
+            pinned_run_identity=None,
+            liveness=LifecycleLiveness.FAILED_CLOSED,
+            durable_reason=refusals[-1].reason,
+        )
+
+    current = max(
+        progress_by_key.values(),
+        key=lambda progress: progress.request.session.trading_date,
+    )
+    matching_refusal = next(
+        (
+            refusal
+            for refusal in reversed(refusals)
+            if refusal.idempotency_key == current.request.idempotency_key
+        ),
+        None,
+    )
+    if matching_refusal is not None:
+        return LifecycleStatus(
+            active_phase=None,
+            last_completed_session=None,
+            pinned_run_identity=current.pinned_run_identity,
+            liveness=LifecycleLiveness.FAILED_CLOSED,
+            durable_reason=matching_refusal.reason,
+        )
+
+    active_phase = {
+        None: LifecyclePhase.RECONCILE_PRIOR_STATE,
+        LifecyclePhase.RECONCILE_PRIOR_STATE: LifecyclePhase.PIN_RUN_INPUTS,
+        LifecyclePhase.PIN_RUN_INPUTS: None,
+    }[current.completed_phase]
+    return LifecycleStatus(
+        active_phase=active_phase,
+        last_completed_session=None,
+        pinned_run_identity=current.pinned_run_identity,
+        liveness=LifecycleLiveness.ACTIVE,
+        durable_reason=_reported_reason(
+            refusals=refusals,
+            conflicts=conflicts,
+        ),
+    )
+
+
+def _reported_reason(
+    *,
+    refusals: tuple[DurableAdvanceRefusal, ...],
+    conflicts: tuple[DurableAdvanceConflict, ...],
+) -> AdvanceFailureReason | None:
+    if refusals:
+        return refusals[-1].reason
+    return conflicts[-1].reason if conflicts else None
+
+
 class LifecycleLedger(Protocol):
     """Append and reconstruct Stage 1 lifecycle checkpoints."""
 
@@ -275,14 +420,18 @@ class LifecycleLedger(Protocol):
     ) -> AdvanceReceipt: ...
 
 
+class LifecycleStatusProjection(Protocol):
+    """Rebuild the disposable operator projection from authoritative history."""
+
+    def rebuild_status(self) -> LifecycleStatus: ...
+
+
 def is_sha256(value: object) -> TypeGuard[str]:
     return isinstance(value, str) and _SHA256.fullmatch(value) is not None
 
 
 def _parse_idempotency_key(value: object) -> IdempotencyKey | None:
-    if not isinstance(value, str) or _IDEMPOTENCY_KEY.fullmatch(value) is None:
-        return None
-    return IdempotencyKey(value)
+    return IdempotencyKey.parse(value)
 
 
 def _parse_market_session(value: object) -> MarketSession | None:
