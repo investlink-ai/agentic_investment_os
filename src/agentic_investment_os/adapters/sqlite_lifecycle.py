@@ -8,7 +8,8 @@ import stat
 from contextlib import closing
 from dataclasses import dataclass
 from datetime import datetime
-from typing import TYPE_CHECKING, TypeVar
+from enum import StrEnum
+from typing import TYPE_CHECKING, Self, TypeVar
 
 from agentic_investment_os.domain.lifecycle import (
     AdvanceAttempt,
@@ -54,7 +55,22 @@ _DROP_PROJECTION_SQL = (
     "DROP TABLE IF EXISTS lifecycle_status_projection"  # pragma: no mutate
     # SQLite keywords and identifiers are case-insensitive, so case-only mutants are equivalent.
 )
+_USER_VERSION_SQL = "PRAGMA user_version"
+_USER_SCHEMA_OBJECT_EXISTS_SQL = """
+SELECT EXISTS (
+    SELECT 1 FROM sqlite_schema
+    WHERE name NOT LIKE 'sqlite!_%' ESCAPE '!'
+)
+"""
+_INTEGRITY_CHECK_SQL = "PRAGMA integrity_check"
+_INTEGRITY_SAVEPOINT_SQL = "SAVEPOINT validate_without_projection"
+_ROLLBACK_INTEGRITY_SAVEPOINT_SQL = "ROLLBACK TO validate_without_projection"
+_RELEASE_INTEGRITY_SAVEPOINT_SQL = "RELEASE validate_without_projection"
 _CHECKPOINT_FAILED = "SQLite lifecycle checkpoint failed"
+_DATABASE_INITIALIZATION_FAILED = "SQLite database initialization failed"
+_UNSUPPORTED_DATABASE_VERSION = "unsupported SQLite database version"
+_SCHEMA_VERSION_MISMATCH = "SQLite schema does not match database version"
+_DATABASE_INTEGRITY_FAILED = "SQLite database integrity check failed"
 _INVALID_REQUEST = "invalid request values in lifecycle ledger"
 _INVALID_RECORDED_AT = "invalid recorded_at in lifecycle ledger"
 _UNKNOWN_REASON_CODE = "unknown reason_code in lifecycle ledger"
@@ -64,8 +80,9 @@ _RECORDED_AT_NOT_AWARE = "recorded_at must be timezone-aware"
 _CLOCK_NOT_AWARE = "lifecycle clock must return a timezone-aware timestamp"
 _INVALID_CHECKPOINT_ORDER = "lifecycle stream checkpoint order is invalid"
 
-_SCHEMA = """
-CREATE TABLE IF NOT EXISTS lifecycle_events (
+_CURRENT_SCHEMA = (
+    """
+CREATE TABLE lifecycle_events (
     stream_id TEXT NOT NULL,
     sequence INTEGER NOT NULL,
     idempotency_key TEXT NOT NULL,
@@ -84,13 +101,15 @@ CREATE TABLE IF NOT EXISTS lifecycle_events (
     recorded_at TEXT NOT NULL,
     PRIMARY KEY (stream_id, sequence),
     UNIQUE (idempotency_key, sequence)
-) STRICT;
-
-CREATE UNIQUE INDEX IF NOT EXISTS one_initial_event_per_stream
+) STRICT
+""",
+    """
+CREATE UNIQUE INDEX one_initial_event_per_stream
 ON lifecycle_events(stream_id)
-WHERE event_kind = 'advance_requested';
-
-CREATE TABLE IF NOT EXISTS advance_refusals (
+WHERE event_kind = 'advance_requested'
+""",
+    """
+CREATE TABLE advance_refusals (
     refusal_id INTEGER PRIMARY KEY,
     idempotency_key TEXT UNIQUE,
     reason_code TEXT NOT NULL CHECK (
@@ -101,31 +120,54 @@ CREATE TABLE IF NOT EXISTS advance_refusals (
         )
     ),
     recorded_at TEXT NOT NULL
-) STRICT;
-
-CREATE UNIQUE INDEX IF NOT EXISTS one_unkeyed_refusal_per_reason
+) STRICT
+""",
+    """
+CREATE UNIQUE INDEX one_unkeyed_refusal_per_reason
 ON advance_refusals(reason_code)
-WHERE idempotency_key IS NULL;
-
-CREATE TABLE IF NOT EXISTS advance_conflicts (
+WHERE idempotency_key IS NULL
+""",
+    """
+CREATE TRIGGER lifecycle_events_are_append_only_update
+BEFORE UPDATE ON lifecycle_events BEGIN SELECT RAISE(ABORT, 'append-only lifecycle ledger'); END
+""",
+    """
+CREATE TRIGGER lifecycle_events_are_append_only_delete
+BEFORE DELETE ON lifecycle_events BEGIN SELECT RAISE(ABORT, 'append-only lifecycle ledger'); END
+""",
+    """
+CREATE TRIGGER advance_refusals_are_append_only_update
+BEFORE UPDATE ON advance_refusals BEGIN SELECT RAISE(ABORT, 'append-only refusal ledger'); END
+    """,
+    """
+CREATE TRIGGER advance_refusals_are_append_only_delete
+BEFORE DELETE ON advance_refusals BEGIN SELECT RAISE(ABORT, 'append-only refusal ledger'); END
+""",
+    """
+CREATE TABLE advance_conflicts (
     idempotency_key TEXT PRIMARY KEY,
     reason_code TEXT NOT NULL CHECK (reason_code = 'idempotency_key_conflict'),
     recorded_at TEXT NOT NULL
-) STRICT;
+) STRICT
+""",
+    """
+CREATE TRIGGER advance_conflicts_are_append_only_update
+BEFORE UPDATE ON advance_conflicts BEGIN SELECT RAISE(ABORT, 'append-only conflict ledger'); END
+""",
+    """
+CREATE TRIGGER advance_conflicts_are_append_only_delete
+BEFORE DELETE ON advance_conflicts BEGIN SELECT RAISE(ABORT, 'append-only conflict ledger'); END
+""",
+)
 
-CREATE TRIGGER IF NOT EXISTS lifecycle_events_are_append_only_update
-BEFORE UPDATE ON lifecycle_events BEGIN SELECT RAISE(ABORT, 'append-only lifecycle ledger'); END;
-CREATE TRIGGER IF NOT EXISTS lifecycle_events_are_append_only_delete
-BEFORE DELETE ON lifecycle_events BEGIN SELECT RAISE(ABORT, 'append-only lifecycle ledger'); END;
-CREATE TRIGGER IF NOT EXISTS advance_refusals_are_append_only_update
-BEFORE UPDATE ON advance_refusals BEGIN SELECT RAISE(ABORT, 'append-only refusal ledger'); END;
-CREATE TRIGGER IF NOT EXISTS advance_refusals_are_append_only_delete
-BEFORE DELETE ON advance_refusals BEGIN SELECT RAISE(ABORT, 'append-only refusal ledger'); END;
-CREATE TRIGGER IF NOT EXISTS advance_conflicts_are_append_only_update
-BEFORE UPDATE ON advance_conflicts BEGIN SELECT RAISE(ABORT, 'append-only conflict ledger'); END;
-CREATE TRIGGER IF NOT EXISTS advance_conflicts_are_append_only_delete
-BEFORE DELETE ON advance_conflicts BEGIN SELECT RAISE(ABORT, 'append-only conflict ledger'); END;
-"""
+
+class _DatabaseOpenMode(StrEnum):
+    CREATE_IF_MISSING = "rwc"
+    EXISTING_ONLY = "rw"
+
+
+_CURRENT_DATABASE_VERSION = 1
+_CURRENT_SCHEMA_SIGNATURE = frozenset(" ".join(statement.split()) for statement in _CURRENT_SCHEMA)
 
 _PROJECTION_SCHEMA = """
 CREATE TABLE lifecycle_status_projection (
@@ -221,13 +263,111 @@ def _invalid_root() -> RuntimeRootRefusal:
     return RuntimeRootRefusal()
 
 
-class SQLiteLifecycleLedger:
-    """Validate durable rows and atomically append domain-selected records."""
+def _prepare_database(database: Path, *, mode: _DatabaseOpenMode) -> None:
+    try:
+        with closing(_connect_database(database, mode=mode)) as connection:
+            _initialize_or_validate_database(connection)
+    except sqlite3.Error as error:
+        raise LifecyclePersistenceError(_DATABASE_INITIALIZATION_FAILED) from error
 
-    def __init__(self, database: Path, *, initialize_schema: bool = True) -> None:
+
+def _initialize_or_validate_database(connection: sqlite3.Connection) -> None:
+    with connection:
+        connection.execute(_BEGIN_IMMEDIATE_SQL)
+        recorded_version = _database_version(connection)
+        is_fresh = recorded_version == 0 and not _user_schema_has_objects(connection)
+        if is_fresh:
+            for statement in _CURRENT_SCHEMA:
+                connection.execute(statement)
+            _set_current_database_version(connection)
+        elif recorded_version != _CURRENT_DATABASE_VERSION:
+            raise LifecyclePersistenceError(_UNSUPPORTED_DATABASE_VERSION)
+        _validate_current_database(connection, _schema_signature(connection))
+        if is_fresh:
+            connection.commit()
+        else:
+            connection.rollback()
+
+
+def _database_version(connection: sqlite3.Connection) -> int:
+    value = connection.execute(_USER_VERSION_SQL).fetchall()[0][0]
+    return _integer(value, "database_version")
+
+
+def _set_current_database_version(connection: sqlite3.Connection) -> None:
+    connection.execute(f"PRAGMA user_version = {_CURRENT_DATABASE_VERSION}")
+
+
+def _user_schema_has_objects(connection: sqlite3.Connection) -> bool:
+    row: tuple[object, ...] | None = connection.execute(_USER_SCHEMA_OBJECT_EXISTS_SQL).fetchone()
+    return row == (1,)
+
+
+def _schema_signature(connection: sqlite3.Connection) -> frozenset[str]:
+    rows = connection.execute(
+        """
+        SELECT sql FROM sqlite_schema
+        WHERE name NOT LIKE 'sqlite!_%' ESCAPE '!'
+          AND NOT (
+              type IN ('table', 'index', 'trigger')
+              AND tbl_name = 'lifecycle_status_projection'
+          )
+          AND sql IS NOT NULL
+        """
+    ).fetchall()
+    return frozenset(" ".join(str(row[0]).split()) for row in rows)
+
+
+def _validate_current_database(
+    connection: sqlite3.Connection,
+    schema: frozenset[str],
+) -> None:
+    if schema != _CURRENT_SCHEMA_SIGNATURE:
+        raise LifecyclePersistenceError(_SCHEMA_VERSION_MISMATCH)
+    _validate_database_integrity(connection)
+
+
+def _validate_database_integrity(connection: sqlite3.Connection) -> None:
+    connection.execute(_INTEGRITY_SAVEPOINT_SQL)
+    try:
+        # The projection is disposable, so exclude its b-trees while retaining a full
+        # database check for authoritative objects and global SQLite consistency.
+        connection.execute(_DROP_PROJECTION_SQL)
+        rows = connection.execute(_INTEGRITY_CHECK_SQL).fetchall()
+    finally:
+        connection.execute(_ROLLBACK_INTEGRITY_SAVEPOINT_SQL)
+        connection.execute(_RELEASE_INTEGRITY_SAVEPOINT_SQL)
+    if rows != [("ok",)]:
+        raise LifecyclePersistenceError(_DATABASE_INTEGRITY_FAILED)
+
+
+def _connect_database(database: Path, *, mode: _DatabaseOpenMode) -> sqlite3.Connection:
+    connection = sqlite3.connect(f"{database.as_uri()}?mode={mode}", uri=True)
+    connection.execute(_ENABLE_FOREIGN_KEYS_SQL)
+    connection.execute(_BUSY_TIMEOUT_SQL)
+    return connection
+
+
+class SQLiteLifecycleLedger:
+    """Initialize or validate current storage, then append domain-selected records.
+
+    Construction fails with ``LifecyclePersistenceError`` when the physical database
+    version, schema, or integrity cannot be trusted. Capability operations validate the
+    authoritative rows within their owning request or global reconstruction scope.
+    """
+
+    def __init__(self, database: Path) -> None:
         self._database = database
-        if initialize_schema:
-            self._write(lambda connection: connection.executescript(_SCHEMA))
+        _prepare_database(database, mode=_DatabaseOpenMode.CREATE_IF_MISSING)
+
+    @classmethod
+    def open_existing(cls, database: Path) -> Self:
+        """Validate existing current storage without recreating a missing database."""
+        instance = cls.__new__(cls)
+        instance._database = database
+        if database.exists():
+            _prepare_database(database, mode=_DatabaseOpenMode.EXISTING_ONLY)
+        return instance
 
     def advance_step(
         self,
@@ -281,10 +421,7 @@ class SQLiteLifecycleLedger:
         return self._write(operation)
 
     def _connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(f"{self._database.as_uri()}?mode=rw", uri=True)
-        connection.execute(_ENABLE_FOREIGN_KEYS_SQL)
-        connection.execute(_BUSY_TIMEOUT_SQL)
-        return connection
+        return _connect_database(self._database, mode=_DatabaseOpenMode.EXISTING_ONLY)
 
     def _write(self, operation: Callable[[sqlite3.Connection], _T]) -> _T:
         try:
@@ -545,8 +682,8 @@ def _optional_text(value: object) -> str | None:
 
 
 def _integer(value: object, field: str) -> int:
+    message = f"invalid {field} in lifecycle ledger"
     if not isinstance(value, int) or isinstance(value, bool):
-        message = f"invalid {field} in lifecycle ledger"
         raise InvalidLifecycleStateError(message)
     return value
 

@@ -11,12 +11,12 @@ isolated Research Lab.
 ## Status
 
 Stage 1 implements `Advance` through the durable `PinRunInputs` checkpoint and rebuildable operator
-`Status` over validated append-only SQLite lifecycle history. The status projection is disposable and
-never substitutes for invalid authoritative records. A pure domain kernel owns reconstruction and
-transition decisions while SQLite validates representations and atomically appends the selected
-record. Research, portfolio, execution, evaluation, and later lifecycle phases remain scaffolds.
-Active repository documentation owns implementation authority, and the runtime has no dependency on
-the design's Second Brain origin.
+`Status` over validated append-only SQLite lifecycle history. The lifecycle ledger accepts one current
+database-wide schema, while the status projection is disposable and never substitutes for invalid
+authoritative records. A pure domain kernel owns reconstruction and transition decisions while SQLite
+validates representations and atomically appends the selected record. Research, portfolio, execution,
+evaluation, and later lifecycle phases remain scaffolds. Active repository documentation owns
+implementation authority, and the runtime has no dependency on the design's Second Brain origin.
 
 ## Setup
 

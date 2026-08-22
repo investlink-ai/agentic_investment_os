@@ -236,7 +236,7 @@ class MissingAggregateRowLedger(SQLiteLifecycleLedger):
 
     def __init__(self, database: Path) -> None:
         self.database = database
-        super().__init__(database, initialize_schema=False)
+        super().__init__(database)
 
     @override
     def _connect(self) -> sqlite3.Connection:
@@ -279,7 +279,7 @@ class InvalidAggregateRowLedger(SQLiteLifecycleLedger):
 
     def __init__(self, database: Path) -> None:
         self.database = database
-        super().__init__(database, initialize_schema=False)
+        super().__init__(database)
 
     @override
     def _connect(self) -> sqlite3.Connection:
@@ -1883,6 +1883,30 @@ def test_unrelated_corrupt_history_does_not_change_a_fresh_request(tmp_path: Pat
             ("fresh-beside-corruption",),
         ).fetchone() == (PINNED_EVENT_COUNT,)
         assert connection.execute("SELECT COUNT(*) FROM advance_refusals").fetchone() == (1,)
+
+
+def test_restart_does_not_globally_validate_unrelated_history(tmp_path: Path) -> None:
+    state_root = tmp_path / "runtime"
+    _configure(state_root)
+    database = state_root / "lifecycle.sqlite3"
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            """
+            INSERT INTO advance_conflicts (idempotency_key, reason_code, recorded_at)
+            VALUES ('unrelated-orphan', 'idempotency_key_conflict', ?)
+            """,
+            (datetime(2026, 8, 21, 10, tzinfo=UTC).isoformat(),),
+        )
+
+    restarted = _configure(state_root)
+    receipt = restarted(
+        session="2026-08-22",
+        mode="champion",
+        idempotency_key="fresh-after-restart",
+    )
+
+    assert receipt.disposition is AdvanceDisposition.ADVANCED
+    assert receipt.recovery is AdvanceRecovery.FRESH
 
 
 def test_invalid_key_replays_without_reading_corrupt_unrelated_history(tmp_path: Path) -> None:

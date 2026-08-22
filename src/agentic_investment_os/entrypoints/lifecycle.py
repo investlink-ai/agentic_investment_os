@@ -41,7 +41,11 @@ def configure_advance(
     repository_root: Path,
     clock: Clock | None = None,
 ) -> Advance | ConfigurationRefusal:
-    """Validate configuration and compose Advance without credentials or network access."""
+    """Validate configuration and compose Advance without credentials or network access.
+
+    Opening storage initializes or validates the current schema before returning and raises
+    ``LifecyclePersistenceError`` when durable state fails startup validation.
+    """
     resolution = resolve_runtime_configuration(sources, repository_root=repository_root)
     if isinstance(resolution, ConfigurationRefusal):
         return resolution
@@ -64,7 +68,12 @@ def configure_status(
     *,
     repository_root: Path,
 ) -> Status | ConfigurationRefusal:
-    """Validate configuration and compose rebuildable lifecycle status."""
+    """Validate configuration and compose rebuildable lifecycle status.
+
+    Existing storage is validated against the current schema before returning and raises
+    ``LifecyclePersistenceError`` when durable state fails startup validation; missing authoritative
+    storage is never recreated.
+    """
     resolution = resolve_runtime_configuration(sources, repository_root=repository_root)
     if isinstance(resolution, ConfigurationRefusal):
         return resolution
@@ -74,4 +83,4 @@ def configure_status(
             code=ConfigurationRefusalCode.INVALID_STATE_ROOT,
             fields=("state_root",),
         )
-    return Status(SQLiteLifecycleLedger(database.path, initialize_schema=database.created))
+    return Status(SQLiteLifecycleLedger.open_existing(database.path))

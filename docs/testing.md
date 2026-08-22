@@ -111,6 +111,10 @@ evidence. A scenario becomes mandatory when its owning behavior is implemented.
 - Repeated Record calls do not duplicate Outcome Observations.
 - Constitution, model, prompt, tool, policy, data, and source hashes remain pinned within a run.
 - Corrupted projections rebuild deterministically; corrupted authoritative ledgers fail closed.
+- SQLite startup atomically initializes the one current schema or validates that exact current shape.
+  Failed initialization returns to an empty unversioned database; every other non-empty version or
+  shape and index inconsistency fails closed. Advance validates request-relevant history, while Status
+  fails closed on contradictory global cross-ledger history.
 - Persistence handles disk-full, transaction rollback, interrupted writes, duplicate event delivery,
   and projection corruption without publishing partial executable state.
 

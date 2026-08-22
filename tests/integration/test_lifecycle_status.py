@@ -134,9 +134,8 @@ def test_database_preparation_refuses_a_database_create_failure(
 
 def test_status_reports_empty_incomplete_and_pinned_stage_one_history(tmp_path: Path) -> None:
     state_root = tmp_path / "runtime"
-
-    assert _status(state_root)() == LifecycleStatus.not_started()
-
+    status = _status(state_root)
+    assert status() == LifecycleStatus.not_started()
     advance = _advance(state_root)
     database = state_root / "lifecycle.sqlite3"
     with sqlite3.connect(database) as connection:
@@ -158,7 +157,7 @@ def test_status_reports_empty_incomplete_and_pinned_stage_one_history(tmp_path: 
             idempotency_key="status-session",
         )
 
-    incomplete = _status(state_root)()
+    incomplete = status()
     assert incomplete.liveness is LifecycleLiveness.ACTIVE
     assert incomplete.active_phase is LifecyclePhase.RECONCILE_PRIOR_STATE
     assert incomplete.last_completed_session is None
@@ -178,25 +177,25 @@ def test_status_reports_empty_incomplete_and_pinned_stage_one_history(tmp_path: 
             """
         )
     with pytest.raises(LifecyclePersistenceError, match="SQLite lifecycle checkpoint failed"):
-        _advance(state_root)(
+        advance(
             session="2026-08-21",
             mode="champion",
             idempotency_key="status-session",
         )
 
-    reconciled = _status(state_root)()
+    reconciled = status()
     assert reconciled.liveness is LifecycleLiveness.ACTIVE
     assert reconciled.active_phase is LifecyclePhase.PIN_RUN_INPUTS
 
     with sqlite3.connect(database) as connection:
         connection.execute("DROP TRIGGER stop_before_pin")
-    receipt = _advance(state_root)(
+    receipt = advance(
         session="2026-08-21",
         mode="champion",
         idempotency_key="status-session",
     )
 
-    pinned = _status(state_root)()
+    pinned = status()
     assert pinned.liveness is LifecycleLiveness.ACTIVE
     assert pinned.active_phase is None
     assert pinned.last_completed_session is None
@@ -246,6 +245,9 @@ def test_status_exposes_a_durable_fail_closed_reason(tmp_path: Path) -> None:
 def test_status_retains_pinned_identity_for_a_terminal_partial_stream(tmp_path: Path) -> None:
     state_root = tmp_path / "runtime"
     advance = _advance_at(state_root, datetime(2026, 8, 21, 23, 0, tzinfo=UTC))
+    refusal = _advance_at(state_root, datetime(2026, 8, 21, 22, 0, tzinfo=UTC))
+    invalid_key = _advance_at(state_root, datetime(2026, 8, 21, 23, 30, tzinfo=UTC))
+    status_capability = _status(state_root)
     database = state_root / "lifecycle.sqlite3"
     with sqlite3.connect(database) as connection:
         connection.execute(
@@ -264,18 +266,18 @@ def test_status_retains_pinned_identity_for_a_terminal_partial_stream(tmp_path: 
             mode="champion",
             idempotency_key="terminal-partial",
         )
-    _advance_at(state_root, datetime(2026, 8, 21, 22, 0, tzinfo=UTC))(
+    refusal(
         session="invalid",
         mode="champion",
         idempotency_key="terminal-partial",
     )
-    _advance_at(state_root, datetime(2026, 8, 21, 23, 30, tzinfo=UTC))(
+    invalid_key(
         session="2026-08-21",
         mode="champion",
         idempotency_key="not valid",
     )
 
-    status = _status(state_root)()
+    status = status_capability()
 
     assert status.liveness is LifecycleLiveness.FAILED_CLOSED
     assert status.active_phase is None
@@ -459,6 +461,7 @@ def test_status_rejects_one_idempotency_key_across_multiple_streams(tmp_path: Pa
         mode="champion",
         idempotency_key="second-stream",
     )
+    status = _status(state_root)
     database = state_root / "lifecycle.sqlite3"
     _replace_event_table(
         database,
@@ -466,7 +469,7 @@ def test_status_rejects_one_idempotency_key_across_multiple_streams(tmp_path: Pa
     )
 
     with pytest.raises(InvalidLifecycleStateError, match="changed pinned request facts"):
-        _status(state_root)()
+        status()
 
 
 def test_status_rejects_a_refusal_for_a_completed_stream(tmp_path: Path) -> None:
@@ -498,6 +501,7 @@ def test_status_rejects_a_refusal_for_a_completed_stream(tmp_path: Path) -> None
 def test_status_rejects_an_invalid_refusal_reason_for_a_partial_stream(tmp_path: Path) -> None:
     state_root = tmp_path / "runtime"
     advance = _advance(state_root)
+    status = _status(state_root)
     database = state_root / "lifecycle.sqlite3"
     with sqlite3.connect(database) as connection:
         connection.execute(
@@ -529,7 +533,7 @@ def test_status_rejects_an_invalid_refusal_reason_for_a_partial_stream(tmp_path:
         )
 
     with pytest.raises(InvalidLifecycleStateError, match="invalid refusal association"):
-        _status(state_root)()
+        status()
 
 
 @pytest.mark.parametrize(
@@ -580,6 +584,7 @@ def test_status_rejects_corrupt_refusal_history(
         mode="champion",
         idempotency_key="corrupt-status-refusal",
     )
+    status = _status(state_root)
     database = state_root / "lifecycle.sqlite3"
     with sqlite3.connect(database) as connection:
         rows = connection.execute(
@@ -593,7 +598,7 @@ def test_status_rejects_corrupt_refusal_history(
         connection.execute(corruption)
 
     with pytest.raises(InvalidLifecycleStateError, match=expected_message):
-        _status(state_root)()
+        status()
 
 
 def test_status_rejects_duplicate_unkeyed_refusal_authority(tmp_path: Path) -> None:
@@ -603,6 +608,7 @@ def test_status_rejects_duplicate_unkeyed_refusal_authority(tmp_path: Path) -> N
         mode="champion",
         idempotency_key="not valid",
     )
+    status = _status(state_root)
     database = state_root / "lifecycle.sqlite3"
     with sqlite3.connect(database) as connection:
         rows = connection.execute(
@@ -621,7 +627,7 @@ def test_status_rejects_duplicate_unkeyed_refusal_authority(tmp_path: Path) -> N
         )
 
     with pytest.raises(InvalidLifecycleStateError, match="refusal uniqueness is invalid"):
-        _status(state_root)()
+        status()
 
 
 @pytest.mark.parametrize(
@@ -673,6 +679,7 @@ def test_status_rejects_corrupt_conflict_history(
         mode="champion",
         idempotency_key="corrupt-status-conflict",
     )
+    status = _status(state_root)
     database = state_root / "lifecycle.sqlite3"
     with sqlite3.connect(database) as connection:
         rows = connection.execute(
@@ -686,7 +693,7 @@ def test_status_rejects_corrupt_conflict_history(
         connection.execute(corruption)
 
     with pytest.raises(InvalidLifecycleStateError, match=expected_message):
-        _status(state_root)()
+        status()
 
 
 def test_status_configuration_refuses_invalid_configuration_and_runtime_root(
@@ -719,6 +726,7 @@ def test_status_does_not_recreate_missing_authoritative_tables(tmp_path: Path) -
         mode="champion",
         idempotency_key="missing-authoritative-history",
     )
+    status = _status(state_root)
     database = state_root / "lifecycle.sqlite3"
     with sqlite3.connect(database) as connection:
         connection.execute("DROP TABLE lifecycle_events")
@@ -726,7 +734,7 @@ def test_status_does_not_recreate_missing_authoritative_tables(tmp_path: Path) -
         connection.execute("DROP TABLE advance_conflicts")
 
     with pytest.raises(LifecyclePersistenceError, match="SQLite lifecycle checkpoint failed"):
-        _status(state_root)()
+        status()
 
     with sqlite3.connect(database) as connection:
         tables = {
@@ -763,11 +771,12 @@ def test_status_bounds_an_invalid_stream_identifier_diagnostic(tmp_path: Path) -
         mode="champion",
         idempotency_key="invalid-stream-id",
     )
+    status = _status(state_root)
     database = state_root / "lifecycle.sqlite3"
     _replace_event_table(database, "UPDATE lifecycle_events SET stream_id = 3")
 
     with pytest.raises(InvalidLifecycleStateError, match="invalid stream_id in lifecycle ledger"):
-        _status(state_root)()
+        status()
 
 
 def _replace_event_table(database: Path, statement: str) -> None:

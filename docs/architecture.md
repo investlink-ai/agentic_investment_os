@@ -259,6 +259,18 @@ SQLite is the initial event and checkpoint store, while the filesystem holds con
 artifacts and atomic publications. Runtime state uses ignored, configurable roots such as `var/`,
 `data/`, and `artifacts/`; source directories never serve as runtime storage.
 
+The SQLite database carries one database-wide physical schema version independent of run
+configuration and durable-record schema versions. The adapter owns one current schema definition. It
+atomically initializes an empty, unversioned database or validates a database already carrying the
+current version and exact schema; every other non-empty shape or version fails before lifecycle
+writes. The disposable lifecycle-status projection table and its indexes or triggers are outside the
+authoritative schema signature and remain replaceable by Status from validated ledgers; views and
+same-named objects attached to authoritative tables remain inside the signature.
+Startup runs the full SQLite integrity check with a recognized projection temporarily removed under
+a rolled-back savepoint, so projection-only corruption remains rebuildable without masking damage to
+authoritative or global database structures.
+Current-schema ownership is recorded in [ADR 0004](adr/0004-require-current-sqlite-schema.md).
+
 ## Configuration and deployment
 
 Entrypoints resolve typed configuration, explicit defaults, paths, and secret references before
