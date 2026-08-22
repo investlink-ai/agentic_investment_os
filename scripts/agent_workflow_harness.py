@@ -1158,7 +1158,7 @@ def _classify_compound(
 
 def _classify_command(command: str, *, guarded_worktree_issue: int | None) -> Effect:
     detail = _redact_detail(command)
-    if _contains_nested_shell_execution(command):
+    if _contains_nested_shell_execution(command) or _has_input_redirection(command):
         return Effect("unknown.tool", detail)
     if _has_material_output_redirection(command):
         return Effect("filesystem.write", detail)
@@ -1245,6 +1245,7 @@ def _has_out_of_workspace_argument(words: tuple[str, ...], *, executable: str) -
         )
         option_prefixes = {
             "awk": ("-f",),
+            "find": ("-f",),
             "grep": ("-f", "--exclude-from=", "--file="),
             "jq": ("-L", "-f", "--from-file="),
             "rg": ("-f", "--file=", "--ignore-file="),
@@ -1315,6 +1316,16 @@ def _has_shell_redirection(command: str) -> bool:
     except ValueError:
         return True
     return any(token and set(token) <= {"<", ">"} for token in tokens)
+
+
+def _has_input_redirection(command: str) -> bool:
+    lexer = shlex.shlex(command, posix=True, punctuation_chars="<>")
+    lexer.whitespace_split = True
+    try:
+        tokens = tuple(lexer)
+    except ValueError:
+        return True
+    return any("<" in token for token in tokens)
 
 
 def _has_material_output_redirection(command: str) -> bool:

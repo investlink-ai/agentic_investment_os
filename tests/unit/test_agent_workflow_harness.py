@@ -244,8 +244,19 @@ def test_trace_evaluation_observes_newlines_without_accepting_compound_positive_
     ]
 
 
-@pytest.mark.parametrize("redirection", [">/dev/null", "2>/dev/null", "<state.json"])
-def test_trace_evaluation_rejects_redirected_required_effect_evidence(redirection: str) -> None:
+@pytest.mark.parametrize(
+    ("redirection", "failure_classification", "diagnostic"),
+    [
+        (">/dev/null", FailureClassification.CONTRACT_MISMATCH, "required effects missing"),
+        ("2>/dev/null", FailureClassification.CONTRACT_MISMATCH, "required effects missing"),
+        ("<state.json", FailureClassification.UNPERMITTED_EFFECT, "unpermitted effects observed"),
+    ],
+)
+def test_trace_evaluation_rejects_redirected_required_effect_evidence(
+    redirection: str,
+    failure_classification: FailureClassification,
+    diagnostic: str,
+) -> None:
     scenario = parse_scenario(_scenario_data(), source="scenario.json")
     trace = _trace(
         {"type": "thread.started", "thread_id": "thread-1"},
@@ -267,8 +278,8 @@ def test_trace_evaluation_rejects_redirected_required_effect_evidence(redirectio
     evaluation = evaluate_trace(scenario, trace)
 
     assert evaluation.outcome is Outcome.FAILED
-    assert evaluation.failure_classification is FailureClassification.CONTRACT_MISMATCH
-    assert "required effects missing" in evaluation.diagnostics[0]
+    assert evaluation.failure_classification is failure_classification
+    assert diagnostic in evaluation.diagnostics[0]
 
 
 @pytest.mark.parametrize(
@@ -419,11 +430,31 @@ def test_trace_evaluation_rejects_forbidden_effect_even_when_output_matches() ->
             "unknown.tool",
         ),
         (
+            {"type": "command_execution", "command": "cat 0</etc/passwd"},
+            "unknown.tool",
+        ),
+        (
+            {"type": "command_execution", "command": "grep x 0</etc/passwd"},
+            "unknown.tool",
+        ),
+        (
             {"type": "command_execution", "command": "grep -f/etc/passwd x state.json"},
             "unknown.tool",
         ),
         (
             {"type": "command_execution", "command": "jq -f/etc/passwd state.json"},
+            "unknown.tool",
+        ),
+        (
+            {"type": "command_execution", "command": "find -f/etc"},
+            "unknown.tool",
+        ),
+        (
+            {"type": "command_execution", "command": "find -f../outside"},
+            "unknown.tool",
+        ),
+        (
+            {"type": "command_execution", "command": "find '-f$HOST_ROOT'"},
             "unknown.tool",
         ),
         (
