@@ -4,15 +4,13 @@ import sqlite3
 import stat
 import subprocess
 import sys
-from dataclasses import dataclass
-from datetime import UTC, datetime
+from dataclasses import dataclass, field
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, TypeVar
+from random import Random
+from typing import override
 
 import pytest
-
-if TYPE_CHECKING:
-    from collections.abc import Callable
 
 from agentic_investment_os.adapters.sqlite_lifecycle import (
     RuntimeRootRefusal,
@@ -21,19 +19,25 @@ from agentic_investment_os.adapters.sqlite_lifecycle import (
 )
 from agentic_investment_os.application.lifecycle import Advance
 from agentic_investment_os.domain.lifecycle import (
+    AdvanceAttempt,
+    AdvanceCommand,
     AdvanceDisposition,
     AdvanceFailureReason,
     AdvanceReceipt,
     AdvanceRecovery,
     AdvanceRequest,
-    CheckpointResult,
-    CheckpointWrite,
-    IdempotencyKey,
+    AppendLifecycleRecord,
+    AppendTerminalLifecycleRecord,
+    DurableAdvanceConflict,
+    DurableAdvanceRefusal,
+    InputRefusal,
+    InvalidLifecycleStateError,
+    LifecycleCommand,
+    LifecycleDecision,
+    LifecycleEvent,
     LifecyclePersistenceError,
     LifecyclePhase,
-    LifecycleProgress,
     PinnedRunIdentity,
-    StartResult,
 )
 from agentic_investment_os.entrypoints.configuration import (
     ConfigurationRefusal,
@@ -48,7 +52,7 @@ PRIVATE_DIRECTORY_MODE = 0o700
 PRIVATE_FILE_MODE = 0o600
 PINNED_EVENT_COUNT = 3
 RECEIPT_FIELD_COUNT = 4
-_T = TypeVar("_T")
+SQLiteValue = str | bytes | int | float | None
 CORRUPTIONS = {
     "invalid_request": (
         ("UPDATE lifecycle_events SET mode = 'invalid'",),
@@ -135,6 +139,14 @@ CORRUPTIONS = {
         ("UPDATE lifecycle_events SET event_kind = 3 WHERE sequence = 1",),
         "invalid event_kind in lifecycle ledger",
     ),
+    "unknown_event_kind": (
+        ("UPDATE lifecycle_events SET event_kind = 'unknown' WHERE sequence = 1",),
+        "lifecycle stream checkpoint order is invalid",
+    ),
+    "unknown_phase": (
+        ("UPDATE lifecycle_events SET completed_phase = 'Unknown' WHERE sequence = 1",),
+        "lifecycle stream checkpoint order is invalid",
+    ),
     "non_text_timestamp": (
         ("UPDATE lifecycle_events SET recorded_at = 3",),
         "invalid recorded_at in lifecycle ledger",
@@ -192,108 +204,296 @@ class SimulatedInterruptionError(RuntimeError):
     """Stop one Advance call at an exact ledger write boundary."""
 
 
+class MissingAggregateRowCursor(sqlite3.Cursor):
+    """Simulate a hostile driver violating SQLite aggregate-row guarantees."""
+
+    @override
+    def fetchone(self) -> tuple[object, ...] | None:
+        return None
+
+
+class MissingAggregateRowConnection(sqlite3.Connection):
+    """Return no row only for the refusal-sequence aggregate query."""
+
+    @override
+    def execute(
+        self,
+        sql: str,
+        # The adapter passes positional SQLite scalars; typeshed's private parameter alias cannot be
+        # named in this hostile-driver test override.
+        parameters: tuple[SQLiteValue, ...] = (),  # type: ignore[override]
+        /,
+    ) -> sqlite3.Cursor:
+        if "MAX(refusal_id)" in sql:
+            cursor = self.cursor(factory=MissingAggregateRowCursor)
+            cursor.execute(sql, parameters)
+            return cursor
+        return super().execute(sql, parameters)
+
+
+class MissingAggregateRowLedger(SQLiteLifecycleLedger):
+    """Open the test database through the hostile aggregate-row connection."""
+
+    def __init__(self, database: Path) -> None:
+        self.database = database
+        super().__init__(database, initialize_schema=False)
+
+    @override
+    def _connect(self) -> sqlite3.Connection:
+        return sqlite3.connect(
+            f"{self.database.as_uri()}?mode=rw",
+            uri=True,
+            factory=MissingAggregateRowConnection,
+        )
+
+
+class InvalidAggregateRowCursor(sqlite3.Cursor):
+    """Simulate a hostile driver returning a non-integer aggregate."""
+
+    @override
+    def fetchone(self) -> tuple[object, ...] | None:
+        return ("invalid",)
+
+
+class InvalidAggregateRowConnection(sqlite3.Connection):
+    """Return a non-integer row only for the refusal-sequence aggregate query."""
+
+    @override
+    def execute(
+        self,
+        sql: str,
+        # The adapter passes positional SQLite scalars; typeshed's private parameter alias cannot be
+        # named in this hostile-driver test override.
+        parameters: tuple[SQLiteValue, ...] = (),  # type: ignore[override]
+        /,
+    ) -> sqlite3.Cursor:
+        if "MAX(refusal_id)" in sql:
+            cursor = self.cursor(factory=InvalidAggregateRowCursor)
+            cursor.execute(sql, parameters)
+            return cursor
+        return super().execute(sql, parameters)
+
+
+class InvalidAggregateRowLedger(SQLiteLifecycleLedger):
+    """Open the test database through the invalid aggregate-row connection."""
+
+    def __init__(self, database: Path) -> None:
+        self.database = database
+        super().__init__(database, initialize_schema=False)
+
+    @override
+    def _connect(self) -> sqlite3.Connection:
+        return sqlite3.connect(
+            f"{self.database.as_uri()}?mode=rw",
+            uri=True,
+            factory=InvalidAggregateRowConnection,
+        )
+
+
 @dataclass(frozen=True)
 class InterruptingLedger:
     delegate: SQLiteLifecycleLedger
     operation: str
     timing: str
 
-    def load_by_idempotency_key(
-        self, key: IdempotencyKey
-    ) -> LifecycleProgress | AdvanceReceipt | None:
-        return self.delegate.load_by_idempotency_key(key)
-
-    def start(
+    def advance_step(
         self,
-        request: AdvanceRequest,
-        identity: PinnedRunIdentity,
+        command: LifecycleCommand,
+        attempt: AdvanceAttempt,
         recorded_at: datetime,
-    ) -> StartResult:
-        return self._around(
-            "start",
-            lambda: self.delegate.start(request, identity, recorded_at),
-        )
-
-    def complete_reconciliation(
-        self,
-        key: IdempotencyKey,
-        recorded_at: datetime,
-    ) -> CheckpointResult | AdvanceReceipt:
-        return self._around(
-            "reconcile",
-            lambda: self.delegate.complete_reconciliation(key, recorded_at),
-        )
-
-    def pin_run_inputs(
-        self, key: IdempotencyKey, recorded_at: datetime
-    ) -> CheckpointResult | AdvanceReceipt:
-        return self._around(
-            "pin",
-            lambda: self.delegate.pin_run_inputs(key, recorded_at),
-        )
-
-    def record_refusal(
-        self,
-        key: IdempotencyKey | None,
-        reason_code: AdvanceFailureReason,
-        recorded_at: datetime,
-    ) -> AdvanceReceipt:
-        return self._around(
-            "refuse",
-            lambda: self.delegate.record_refusal(key, reason_code, recorded_at),
-        )
-
-    def _around(self, operation: str, action: Callable[[], _T]) -> _T:
-        if self.operation == operation and self.timing == "before":
+    ) -> LifecycleDecision:
+        expected_operation = _attempt_operation(command, attempt)
+        if self.operation == expected_operation and self.timing == "before":
             raise SimulatedInterruptionError
-        result = action()
-        if self.operation == operation and self.timing == "after":
+        result = self.delegate.advance_step(command, attempt, recorded_at)
+        actual_operation = _decision_operation(result, expected_operation)
+        if self.operation == actual_operation and self.timing == "after":
             raise SimulatedInterruptionError
         return result
 
 
-@dataclass(frozen=True)
+@dataclass
 class RacingStartLedger:
     delegate: SQLiteLifecycleLedger
     winner_phase: LifecyclePhase | None
+    raced: bool = False
 
-    def load_by_idempotency_key(
-        self, key: IdempotencyKey
-    ) -> LifecycleProgress | AdvanceReceipt | None:
-        return self.delegate.load_by_idempotency_key(key)
-
-    def start(
+    def advance_step(
         self,
-        request: AdvanceRequest,
-        identity: PinnedRunIdentity,
+        command: LifecycleCommand,
+        attempt: AdvanceAttempt,
         recorded_at: datetime,
-    ) -> StartResult:
-        winner = self.delegate.start(request, identity, recorded_at)
-        assert isinstance(winner, CheckpointResult)
-        if self.winner_phase is LifecyclePhase.RECONCILE_PRIOR_STATE:
-            reconciled = self.delegate.complete_reconciliation(request.idempotency_key, recorded_at)
-            assert isinstance(reconciled, CheckpointResult)
-        return self.delegate.start(request, identity, recorded_at)
+    ) -> LifecycleDecision:
+        if not self.raced:
+            winner = self.delegate.advance_step(command, AdvanceAttempt(), recorded_at)
+            assert isinstance(winner, AppendLifecycleRecord)
+            if self.winner_phase is LifecyclePhase.RECONCILE_PRIOR_STATE:
+                reconciled = self.delegate.advance_step(command, winner.attempt, recorded_at)
+                assert isinstance(reconciled, AppendLifecycleRecord)
+            self.raced = True
+        return self.delegate.advance_step(command, attempt, recorded_at)
 
-    def complete_reconciliation(
+
+def _attempt_operation(command: LifecycleCommand, attempt: AdvanceAttempt) -> str:
+    if isinstance(command, InputRefusal):
+        return "refuse"
+    return {None: "start", 0: "reconcile", 1: "pin"}.get(
+        attempt.last_sequence,
+        "pin",
+    )
+
+
+def _decision_operation(decision: LifecycleDecision, fallback: str) -> str:
+    if not isinstance(decision, AppendLifecycleRecord):
+        return fallback
+    if isinstance(decision.record, DurableAdvanceRefusal):
+        return "refuse"
+    if isinstance(decision.record, DurableAdvanceConflict):
+        return "start"
+    assert isinstance(decision.record, LifecycleEvent)
+    return {0: "start", 1: "reconcile", 2: "pin"}[decision.record.sequence]
+
+
+@dataclass
+class _ReferenceStream:
+    session: str
+    events: int
+
+
+@dataclass
+class _LifecycleReferenceModel:
+    streams: dict[str, _ReferenceStream] = field(default_factory=dict)
+    sessions: dict[str, str] = field(default_factory=dict)
+    refusals: dict[str, AdvanceFailureReason] = field(default_factory=dict)
+    conflicts: set[str] = field(default_factory=set)
+    has_unkeyed_refusal: bool = False
+
+    def advance(
         self,
-        key: IdempotencyKey,
-        recorded_at: datetime,
-    ) -> CheckpointResult | AdvanceReceipt:
-        return self.delegate.complete_reconciliation(key, recorded_at)
+        *,
+        session: str,
+        mode: str,
+        key: str,
+    ) -> tuple[AdvanceDisposition, AdvanceRecovery | None, AdvanceFailureReason | None]:
+        if " " in key:
+            self.has_unkeyed_refusal = True
+            return self._failed(AdvanceFailureReason.INVALID_IDEMPOTENCY_KEY)
+        invalid_reason = (
+            AdvanceFailureReason.INVALID_SESSION
+            if session == "invalid"
+            else AdvanceFailureReason.INVALID_MODE
+            if mode != "champion"
+            else None
+        )
+        if key in self.refusals:
+            return self._failed(self.refusals[key])
+        stream = self.streams.get(key)
+        if invalid_reason is not None:
+            return self._advance_invalid(key, stream, invalid_reason)
+        return self._advance_valid(session, key, stream)
 
-    def pin_run_inputs(
-        self, key: IdempotencyKey, recorded_at: datetime
-    ) -> CheckpointResult | AdvanceReceipt:
-        return self.delegate.pin_run_inputs(key, recorded_at)
-
-    def record_refusal(
+    def _advance_valid(
         self,
-        key: IdempotencyKey | None,
-        reason_code: AdvanceFailureReason,
-        recorded_at: datetime,
-    ) -> AdvanceReceipt:
-        return self.delegate.record_refusal(key, reason_code, recorded_at)
+        session: str,
+        key: str,
+        stream: _ReferenceStream | None,
+    ) -> tuple[AdvanceDisposition, AdvanceRecovery | None, AdvanceFailureReason | None]:
+        if stream is not None:
+            if stream.session != session:
+                return self._record_idempotency_conflict(key, stream)
+            recovery = (
+                AdvanceRecovery.PREVIOUSLY_COMPLETED
+                if stream.events == PINNED_EVENT_COUNT
+                else AdvanceRecovery.RESUMED
+            )
+            stream.events = PINNED_EVENT_COUNT
+            return AdvanceDisposition.ADVANCED, recovery, None
+        if session in self.sessions:
+            self.refusals[key] = AdvanceFailureReason.SESSION_STREAM_CONFLICT
+            return self._failed(AdvanceFailureReason.SESSION_STREAM_CONFLICT)
+        self.streams[key] = _ReferenceStream(session, PINNED_EVENT_COUNT)
+        self.sessions[session] = key
+        return AdvanceDisposition.ADVANCED, AdvanceRecovery.FRESH, None
+
+    def _advance_invalid(
+        self,
+        key: str,
+        stream: _ReferenceStream | None,
+        reason: AdvanceFailureReason,
+    ) -> tuple[AdvanceDisposition, None, AdvanceFailureReason]:
+        if stream is not None:
+            return self._record_idempotency_conflict(key, stream)
+        self.refusals[key] = reason
+        return self._failed(reason)
+
+    def interrupt(self, *, session: str, key: str, committed_events: int) -> None:
+        self.streams[key] = _ReferenceStream(session, committed_events)
+        self.sessions[session] = key
+
+    def counts(self) -> tuple[int, int, int]:
+        return (
+            sum(stream.events for stream in self.streams.values()),
+            len(self.refusals) + int(self.has_unkeyed_refusal),
+            len(self.conflicts),
+        )
+
+    def _record_idempotency_conflict(
+        self,
+        key: str,
+        stream: _ReferenceStream,
+    ) -> tuple[AdvanceDisposition, None, AdvanceFailureReason]:
+        if stream.events == PINNED_EVENT_COUNT:
+            self.conflicts.add(key)
+        else:
+            self.refusals[key] = AdvanceFailureReason.IDEMPOTENCY_KEY_CONFLICT
+        return self._failed(AdvanceFailureReason.IDEMPOTENCY_KEY_CONFLICT)
+
+    @staticmethod
+    def _failed(
+        reason: AdvanceFailureReason,
+    ) -> tuple[AdvanceDisposition, None, AdvanceFailureReason]:
+        return AdvanceDisposition.FAILED_CLOSED, None, reason
+
+
+def _receipt_facts(
+    receipt: AdvanceReceipt,
+) -> tuple[AdvanceDisposition, AdvanceRecovery | None, AdvanceFailureReason | None]:
+    return receipt.disposition, receipt.recovery, receipt.failure_reason
+
+
+def _interrupt_and_resume_generated_request(
+    capability: Advance,
+    reference: _LifecycleReferenceModel,
+    random: Random,
+    *,
+    state_root: Path,
+    request: tuple[str, str],
+) -> tuple[
+    tuple[AdvanceDisposition, AdvanceRecovery | None, AdvanceFailureReason | None],
+    AdvanceReceipt,
+]:
+    session, key = request
+    operation, committed_events = random.choice(
+        (("start", 1), ("reconcile", 2), ("pin", PINNED_EVENT_COUNT))
+    )
+    ledger = capability.ledger
+    assert isinstance(ledger, SQLiteLifecycleLedger)
+    interrupted = Advance(
+        InterruptingLedger(ledger, operation, "after"),
+        capability.configuration_version,
+        capability.configuration_hash,
+        capability.clock,
+    )
+    with pytest.raises(SimulatedInterruptionError):
+        interrupted(session=session, mode="champion", idempotency_key=key)
+    reference.interrupt(session=session, key=key, committed_events=committed_events)
+    expected = reference.advance(session=session, mode="champion", key=key)
+    observed = _configure(state_root)(
+        session=session,
+        mode="champion",
+        idempotency_key=key,
+    )
+    return expected, observed
 
 
 def _configure(state_root: Path) -> Advance:
@@ -317,6 +517,17 @@ def _events(database: Path) -> list[tuple[str, str | None]]:
             "SELECT event_kind, completed_phase FROM lifecycle_events ORDER BY sequence"
         ).fetchall()
     return [(str(kind), None if phase is None else str(phase)) for kind, phase in rows]
+
+
+def _authoritative_counts(database: Path) -> tuple[int, int, int]:
+    with sqlite3.connect(database) as connection:
+        event_count = connection.execute("SELECT COUNT(*) FROM lifecycle_events").fetchone()
+        refusal_count = connection.execute("SELECT COUNT(*) FROM advance_refusals").fetchone()
+        conflict_count = connection.execute("SELECT COUNT(*) FROM advance_conflicts").fetchone()
+    assert event_count is not None
+    assert refusal_count is not None
+    assert conflict_count is not None
+    return int(event_count[0]), int(refusal_count[0]), int(conflict_count[0])
 
 
 def _advance_in_fresh_process(
@@ -569,6 +780,86 @@ def test_duplicate_delivery_reports_progress_committed_by_the_winner_as_resumed(
     assert len(_events(state_root / "lifecycle.sqlite3")) == PINNED_EVENT_COUNT
 
 
+def test_generated_advance_sequences_match_an_independent_reopened_reference_model(
+    tmp_path: Path,
+) -> None:
+    state_root = tmp_path / "runtime"
+    reference = _LifecycleReferenceModel()
+    random = Random(14)  # noqa: S311 - deterministic scenario generation is not security-sensitive.
+    next_identity = 0
+    actions = (
+        "new",
+        "replay",
+        "key_conflict",
+        "session_conflict",
+        "invalid",
+        "invalid_key",
+        "interrupt",
+    )
+
+    def new_request() -> tuple[str, str]:
+        nonlocal next_identity
+        next_identity += 1
+        session = date(2026, 9, 1) + timedelta(days=next_identity)
+        return session.isoformat(), f"generated-{next_identity}"
+
+    for step in range(70):
+        capability = _configure(state_root)
+        streams = tuple(reference.streams)
+        action = actions[step % len(actions)]
+        if action == "new" or not streams:
+            session, key = new_request()
+            expected = reference.advance(session=session, mode="champion", key=key)
+            observed = capability(session=session, mode="champion", idempotency_key=key)
+        elif action == "replay":
+            key = random.choice(streams)
+            session = reference.streams[key].session
+            expected = reference.advance(session=session, mode="champion", key=key)
+            observed = capability(session=session, mode="champion", idempotency_key=key)
+        elif action == "key_conflict":
+            key = random.choice(streams)
+            session, _ = new_request()
+            expected = reference.advance(session=session, mode="champion", key=key)
+            observed = capability(session=session, mode="champion", idempotency_key=key)
+        elif action == "session_conflict":
+            existing = reference.streams[random.choice(streams)]
+            _, key = new_request()
+            expected = reference.advance(session=existing.session, mode="champion", key=key)
+            observed = capability(
+                session=existing.session,
+                mode="champion",
+                idempotency_key=key,
+            )
+        elif action == "invalid":
+            key = random.choice(streams)
+            expected = reference.advance(session="invalid", mode="champion", key=key)
+            observed = capability(session="invalid", mode="champion", idempotency_key=key)
+        elif action == "invalid_key":
+            invalid_key = f"not valid {step}"
+            expected = reference.advance(
+                session="2026-08-21",
+                mode="champion",
+                key=invalid_key,
+            )
+            observed = capability(
+                session="2026-08-21",
+                mode="champion",
+                idempotency_key=invalid_key,
+            )
+        else:
+            session, key = new_request()
+            expected, observed = _interrupt_and_resume_generated_request(
+                capability,
+                reference,
+                random,
+                state_root=state_root,
+                request=(session, key),
+            )
+
+        assert _receipt_facts(observed) == expected
+        assert _authoritative_counts(state_root / "lifecycle.sqlite3") == reference.counts()
+
+
 def test_conflicting_valid_idempotency_reuse_fails_without_shadowing_completed_work(
     tmp_path: Path,
 ) -> None:
@@ -783,19 +1074,18 @@ def test_terminal_conflict_refusal_prevents_partial_stream_resumption(tmp_path: 
     capability = _configure(state_root)
     ledger = capability.ledger
     assert isinstance(ledger, SQLiteLifecycleLedger)
-    parsed = AdvanceRequest.parse(
-        session="2026-08-21",
-        mode="champion",
-        idempotency_key="partial-conflict",
+    interrupted = Advance(
+        InterruptingLedger(ledger, "start", "after"),
+        capability.configuration_version,
+        capability.configuration_hash,
+        capability.clock,
     )
-    assert isinstance(parsed, AdvanceRequest)
-    identity = PinnedRunIdentity.create(
-        parsed,
-        configuration_version=1,
-        configuration_hash="a" * SHA256_HEX_LENGTH,
-    )
-    now = datetime(2026, 8, 21, 22, 0, tzinfo=UTC)
-    ledger.start(parsed, identity, now)
+    with pytest.raises(SimulatedInterruptionError):
+        interrupted(
+            session="2026-08-21",
+            mode="champion",
+            idempotency_key="partial-conflict",
+        )
 
     refused = capability(
         session="2026-08-22",
@@ -1038,7 +1328,7 @@ def test_default_clock_is_aware() -> None:
     assert instant.tzinfo is UTC
 
 
-def test_lifecycle_ledger_operations_are_individually_idempotent(tmp_path: Path) -> None:
+def test_lifecycle_ledger_applies_domain_steps_idempotently(tmp_path: Path) -> None:
     state_root = tmp_path / "runtime"
     capability = _configure(state_root)
     ledger = capability.ledger
@@ -1056,49 +1346,42 @@ def test_lifecycle_ledger_operations_are_individually_idempotent(tmp_path: Path)
     )
     now = datetime(2026, 8, 22, 22, 0, tzinfo=UTC)
 
-    started = ledger.start(parsed, identity, now)
-    assert isinstance(started, CheckpointResult)
-    assert started.write is CheckpointWrite.APPENDED
-    partial_conflict = ledger.record_refusal(
-        parsed.idempotency_key, AdvanceFailureReason.INVALID_SESSION, now
-    )
-    assert partial_conflict.failure_reason == "idempotency_key_conflict"
-    assert ledger.start(parsed, identity, now) == partial_conflict
-    assert (
-        ledger.record_refusal(parsed.idempotency_key, AdvanceFailureReason.INVALID_SESSION, now)
-        == partial_conflict
-    )
-    assert ledger.complete_reconciliation(parsed.idempotency_key, now) == partial_conflict
-    assert ledger.pin_run_inputs(parsed.idempotency_key, now) == partial_conflict
-    assert ledger.load_by_idempotency_key(parsed.idempotency_key) == partial_conflict
+    command = AdvanceCommand(parsed, identity)
+    started = ledger.advance_step(command, AdvanceAttempt(), now)
+    assert isinstance(started, AppendLifecycleRecord)
+    assert isinstance(started.record, LifecycleEvent)
+    assert started.record.sequence == 0
 
-    missing = IdempotencyKey("missing-stream")
-    assert ledger.load_by_idempotency_key(missing) is None
-    with pytest.raises(
-        LifecyclePersistenceError, match="required lifecycle stream is missing or terminal"
-    ):
-        ledger.complete_reconciliation(missing, now)
-
-    second = AdvanceRequest.parse(
+    conflicting = AdvanceRequest.parse(
         session="2026-08-25",
         mode="champion",
-        idempotency_key="pin-too-soon",
+        idempotency_key="adapter-idempotency",
     )
-    assert isinstance(second, AdvanceRequest)
-    second_identity = PinnedRunIdentity.create(
-        second,
-        configuration_version=1,
-        configuration_hash="b" * SHA256_HEX_LENGTH,
+    assert isinstance(conflicting, AdvanceRequest)
+    conflict_command = AdvanceCommand(
+        conflicting,
+        PinnedRunIdentity.create(
+            conflicting,
+            configuration_version=1,
+            configuration_hash="a" * SHA256_HEX_LENGTH,
+        ),
     )
-    ledger.start(second, second_identity, now)
-    with pytest.raises(
-        LifecyclePersistenceError,
-        match="PinRunInputs requires the ReconcilePriorState checkpoint",
-    ):
-        ledger.pin_run_inputs(second.idempotency_key, now)
+    partial_conflict = ledger.advance_step(conflict_command, AdvanceAttempt(), now)
+    assert isinstance(partial_conflict, AppendTerminalLifecycleRecord)
+    assert isinstance(partial_conflict.record, DurableAdvanceRefusal)
+    assert partial_conflict.receipt == AdvanceReceipt.failed_closed(
+        AdvanceFailureReason.IDEMPOTENCY_KEY_CONFLICT
+    )
+    replay = ledger.advance_step(conflict_command, AdvanceAttempt(), now)
+    assert replay == partial_conflict.receipt
+    assert ledger.advance_step(command, AdvanceAttempt(), now) == partial_conflict.receipt
+    assert not hasattr(ledger, "start")
+    assert not hasattr(ledger, "complete_reconciliation")
+    assert not hasattr(ledger, "pin_run_inputs")
+    assert not hasattr(ledger, "record_refusal")
 
 
-def test_lifecycle_checkpoints_report_appended_and_observed_writes(tmp_path: Path) -> None:
+def test_lifecycle_ledger_appends_generic_checkpoint_records(tmp_path: Path) -> None:
     capability = _configure(tmp_path / "runtime")
     ledger = capability.ledger
     assert isinstance(ledger, SQLiteLifecycleLedger)
@@ -1115,46 +1398,48 @@ def test_lifecycle_checkpoints_report_appended_and_observed_writes(tmp_path: Pat
     )
     now = datetime(2026, 8, 22, 22, 0, tzinfo=UTC)
 
-    started = ledger.start(request, identity, now)
-    assert isinstance(started, CheckpointResult)
-    assert started.write is CheckpointWrite.APPENDED
-    resumed_start = ledger.start(request, identity, now)
-    assert isinstance(resumed_start, CheckpointResult)
-    assert resumed_start.progress == started.progress
-    assert resumed_start.write is CheckpointWrite.OBSERVED
-
-    reconciled = ledger.complete_reconciliation(request.idempotency_key, now)
-    assert isinstance(reconciled, CheckpointResult)
-    assert reconciled.write is CheckpointWrite.APPENDED
-    resumed_reconciliation = ledger.complete_reconciliation(request.idempotency_key, now)
-    assert isinstance(resumed_reconciliation, CheckpointResult)
-    assert resumed_reconciliation.progress == reconciled.progress
-    assert resumed_reconciliation.write is CheckpointWrite.OBSERVED
-
-    pinned = ledger.pin_run_inputs(request.idempotency_key, now)
-    assert isinstance(pinned, CheckpointResult)
-    assert pinned.write is CheckpointWrite.APPENDED
-    pinned_replay = ledger.pin_run_inputs(request.idempotency_key, now)
-    reconciliation_replay = ledger.complete_reconciliation(request.idempotency_key, now)
-    assert isinstance(pinned_replay, CheckpointResult)
-    assert pinned_replay.progress == pinned.progress
-    assert pinned_replay.write is CheckpointWrite.OBSERVED
-    assert reconciliation_replay == pinned_replay
+    command = AdvanceCommand(request, identity)
+    attempt = AdvanceAttempt()
+    terminal: AppendTerminalLifecycleRecord | None = None
+    for expected_sequence in range(PINNED_EVENT_COUNT):
+        decision = ledger.advance_step(command, attempt, now)
+        assert not isinstance(decision, AdvanceReceipt)
+        assert isinstance(decision.record, LifecycleEvent)
+        assert decision.record.sequence == expected_sequence
+        if isinstance(decision, AppendTerminalLifecycleRecord):
+            terminal = decision
+        else:
+            attempt = decision.attempt
+    assert terminal is not None
+    assert terminal.receipt == AdvanceReceipt.advanced(identity, AdvanceRecovery.FRESH)
+    assert ledger.advance_step(command, AdvanceAttempt(), now) == AdvanceReceipt.advanced(
+        identity,
+        AdvanceRecovery.PREVIOUSLY_COMPLETED,
+    )
 
     conflicting_identity = PinnedRunIdentity.create(
         request,
         configuration_version=1,
         configuration_hash="d" * SHA256_HEX_LENGTH,
     )
-    concurrent_conflict = ledger.start(request, conflicting_identity, now)
-    assert concurrent_conflict == AdvanceReceipt.failed_closed(
+    concurrent_conflict = ledger.advance_step(
+        AdvanceCommand(request, conflicting_identity),
+        AdvanceAttempt(),
+        now,
+    )
+    assert isinstance(concurrent_conflict, AppendTerminalLifecycleRecord)
+    assert isinstance(concurrent_conflict.record, DurableAdvanceConflict)
+    assert concurrent_conflict.receipt == AdvanceReceipt.failed_closed(
         AdvanceFailureReason.IDEMPOTENCY_KEY_CONFLICT
     )
     assert (
-        ledger.record_refusal(request.idempotency_key, AdvanceFailureReason.INVALID_MODE, now)
-        == concurrent_conflict
+        ledger.advance_step(
+            AdvanceCommand(request, conflicting_identity),
+            AdvanceAttempt(),
+            now,
+        )
+        == concurrent_conflict.receipt
     )
-    assert ledger.load_by_idempotency_key(request.idempotency_key) == pinned.progress
 
 
 def test_naive_clock_cannot_create_a_checkpoint(tmp_path: Path) -> None:
@@ -1214,7 +1499,7 @@ def test_append_only_tables_reject_rewrites(tmp_path: Path) -> None:
             connection.execute(statement)
 
 
-def test_sqlite_read_failures_are_translated(tmp_path: Path) -> None:
+def test_sqlite_status_read_failures_are_translated(tmp_path: Path) -> None:
     state_root = tmp_path / "runtime"
     capability = _configure(state_root)
     ledger = capability.ledger
@@ -1223,8 +1508,8 @@ def test_sqlite_read_failures_are_translated(tmp_path: Path) -> None:
     with sqlite3.connect(database) as connection:
         connection.execute("DROP TABLE lifecycle_events")
 
-    with pytest.raises(LifecyclePersistenceError, match="read failed"):
-        ledger.load_by_idempotency_key(IdempotencyKey("missing-after-drop"))
+    with pytest.raises(LifecyclePersistenceError, match="checkpoint failed"):
+        ledger.rebuild_status()
 
 
 def test_operational_read_failure_does_not_create_a_terminal_refusal(tmp_path: Path) -> None:
@@ -1243,6 +1528,71 @@ def test_operational_read_failure_does_not_create_a_terminal_refusal(tmp_path: P
 
     with sqlite3.connect(database) as connection:
         assert connection.execute("SELECT COUNT(*) FROM advance_refusals").fetchone() == (0,)
+
+
+def test_missing_refusal_sequence_row_fails_closed(tmp_path: Path) -> None:
+    state_root = tmp_path / "runtime"
+    capability = _configure(state_root)
+    hostile = Advance(
+        ledger=MissingAggregateRowLedger(state_root / "lifecycle.sqlite3"),
+        configuration_version=capability.configuration_version,
+        configuration_hash=capability.configuration_hash,
+        clock=capability.clock,
+    )
+
+    with pytest.raises(
+        InvalidLifecycleStateError,
+        match="invalid idempotency_key in lifecycle refusal ledger",
+    ):
+        hostile(
+            session="2026-08-21",
+            mode="champion",
+            idempotency_key="missing-aggregate-row",
+        )
+
+
+def test_invalid_refusal_sequence_row_has_a_bounded_diagnostic(tmp_path: Path) -> None:
+    state_root = tmp_path / "runtime"
+    capability = _configure(state_root)
+    hostile = Advance(
+        ledger=InvalidAggregateRowLedger(state_root / "lifecycle.sqlite3"),
+        configuration_version=capability.configuration_version,
+        configuration_hash=capability.configuration_hash,
+        clock=capability.clock,
+    )
+
+    with pytest.raises(
+        InvalidLifecycleStateError,
+        match="invalid refusal_id in lifecycle ledger",
+    ):
+        hostile(
+            session="2026-08-21",
+            mode="champion",
+            idempotency_key="invalid-aggregate-row",
+        )
+
+
+def test_terminal_refusal_replays_without_reading_unrelated_missing_history(
+    tmp_path: Path,
+) -> None:
+    state_root = tmp_path / "runtime"
+    capability = _configure(state_root)
+    refused = capability(
+        session="invalid",
+        mode="champion",
+        idempotency_key="terminal-before-missing-history",
+    )
+    database = state_root / "lifecycle.sqlite3"
+    with sqlite3.connect(database) as connection:
+        connection.execute("DROP TABLE lifecycle_events")
+
+    replay = capability(
+        session="invalid",
+        mode="champion",
+        idempotency_key="terminal-before-missing-history",
+    )
+
+    assert replay == refused
 
 
 @pytest.mark.parametrize(
@@ -1293,7 +1643,7 @@ def test_corrupt_refusal_rows_fail_closed_with_a_bounded_diagnostic(
         (
             "invalid_session",
             "2026-08-21T22:00:00+00:00",
-            "unknown reason_code in lifecycle ledger",
+            "invalid conflict association",
         ),
         (
             "idempotency_key_conflict",
@@ -1331,8 +1681,10 @@ def test_corrupt_completed_conflict_rows_append_a_durable_invalid_state_refusal(
             ("corrupt-conflict", reason_code, recorded_at),
         )
 
+    ledger = capability.ledger
+    assert isinstance(ledger, SQLiteLifecycleLedger)
     with pytest.raises(LifecyclePersistenceError, match=expected_message):
-        capability.ledger.load_by_idempotency_key(IdempotencyKey("corrupt-conflict"))
+        ledger.rebuild_status()
 
     original_replay = capability(
         session="2026-08-21",
@@ -1369,11 +1721,13 @@ def test_orphan_completed_conflict_refuses_before_starting_a_stream(tmp_path: Pa
             ),
         )
 
+    ledger = capability.ledger
+    assert isinstance(ledger, SQLiteLifecycleLedger)
     with pytest.raises(
         LifecyclePersistenceError,
-        match="lifecycle conflict does not belong to a completed stream",
+        match="invalid conflict association",
     ):
-        capability.ledger.load_by_idempotency_key(IdempotencyKey("orphan-conflict"))
+        ledger.rebuild_status()
 
     refused = capability(
         session="2026-08-21",
@@ -1411,22 +1765,26 @@ def test_corrupt_checkpoint_history_uses_the_call_timestamp_for_its_refusal(
     )
     started_at = datetime(2026, 8, 21, 22, 0, tzinfo=UTC)
     refused_at = datetime(2026, 8, 22, 23, 30, tzinfo=UTC)
-    ledger.start(request, identity, started_at)
+    command = AdvanceCommand(request, identity)
+    started = ledger.advance_step(command, AdvanceAttempt(), started_at)
+    assert isinstance(started, AppendLifecycleRecord)
     if operation == "pin":
-        ledger.complete_reconciliation(request.idempotency_key, started_at)
+        reconciled = ledger.advance_step(command, started.attempt, started_at)
+        assert isinstance(reconciled, AppendLifecycleRecord)
     database = tmp_path / "runtime" / "lifecycle.sqlite3"
     _replace_with_corrupt_events(database, (("UPDATE lifecycle_events SET mode = 'invalid'",)))
 
-    if operation == "reconcile":
-        receipt = ledger.complete_reconciliation(request.idempotency_key, refused_at)
-    elif operation == "pin":
-        receipt = ledger.pin_run_inputs(request.idempotency_key, refused_at)
-    else:
-        receipt = ledger.record_refusal(
-            request.idempotency_key,
-            AdvanceFailureReason.INVALID_MODE,
-            refused_at,
-        )
+    refused = Advance(
+        ledger,
+        configuration_version=1,
+        configuration_hash="a" * SHA256_HEX_LENGTH,
+        clock=FixedClock(refused_at),
+    )
+    receipt = refused(
+        session=request.session.isoformat(),
+        mode="research-lab" if operation == "refuse" else request.mode.value,
+        idempotency_key=request.idempotency_key.value,
+    )
 
     assert receipt == AdvanceReceipt.failed_closed(AdvanceFailureReason.INVALID_DURABLE_STATE)
     with sqlite3.connect(database) as connection:
@@ -1457,8 +1815,10 @@ def test_advance_fails_closed_on_corrupt_durable_rows(
     statements, expected_message = CORRUPTIONS[corruption]
     _replace_with_corrupt_events(database, statements)
 
+    ledger = capability.ledger
+    assert isinstance(ledger, SQLiteLifecycleLedger)
     with pytest.raises(LifecyclePersistenceError, match=expected_message):
-        capability.ledger.load_by_idempotency_key(IdempotencyKey("corrupt-stream"))
+        ledger.rebuild_status()
 
     refused = capability(
         session="2026-08-21",
@@ -1478,6 +1838,136 @@ def test_advance_fails_closed_on_corrupt_durable_rows(
             "SELECT reason_code FROM advance_refusals WHERE idempotency_key = ?",
             ("corrupt-stream",),
         ).fetchall() == [("invalid_durable_state",)]
+
+
+def test_unrelated_corrupt_history_does_not_change_a_fresh_request(tmp_path: Path) -> None:
+    state_root = tmp_path / "runtime"
+    capability = _configure(state_root)
+    capability(
+        session="2026-08-21",
+        mode="champion",
+        idempotency_key="unrelated-corrupt-stream",
+    )
+    capability(
+        session="invalid",
+        mode="champion",
+        idempotency_key="unrelated-corrupt-refusal",
+    )
+    database = state_root / "lifecycle.sqlite3"
+    _replace_with_corrupt_events(database, ("UPDATE lifecycle_events SET mode = 'invalid'",))
+    with sqlite3.connect(database) as connection:
+        row = connection.execute(
+            "SELECT refusal_id, idempotency_key, reason_code, recorded_at FROM advance_refusals"
+        ).fetchone()
+        connection.execute("DROP TABLE advance_refusals")
+        connection.execute(
+            "CREATE TABLE advance_refusals (refusal_id, idempotency_key, reason_code, recorded_at)"
+        )
+        assert row is not None
+        connection.execute(
+            "INSERT INTO advance_refusals VALUES (?, ?, ?, ?)",
+            (row[0], row[1], "unknown", row[3]),
+        )
+
+    receipt = capability(
+        session="2026-08-22",
+        mode="champion",
+        idempotency_key="fresh-beside-corruption",
+    )
+
+    assert receipt.disposition is AdvanceDisposition.ADVANCED
+    assert receipt.recovery is AdvanceRecovery.FRESH
+    with sqlite3.connect(database) as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM lifecycle_events WHERE idempotency_key = ?",
+            ("fresh-beside-corruption",),
+        ).fetchone() == (PINNED_EVENT_COUNT,)
+        assert connection.execute("SELECT COUNT(*) FROM advance_refusals").fetchone() == (1,)
+
+
+def test_invalid_key_replays_without_reading_corrupt_unrelated_history(tmp_path: Path) -> None:
+    state_root = tmp_path / "runtime"
+    capability = _configure(state_root)
+    capability(
+        session="2026-08-21",
+        mode="champion",
+        idempotency_key="corrupt-before-invalid-key",
+    )
+    database = state_root / "lifecycle.sqlite3"
+    _replace_with_corrupt_events(database, ("UPDATE lifecycle_events SET mode = 'invalid'",))
+
+    refused = capability(
+        session="2026-08-22",
+        mode="champion",
+        idempotency_key="not valid",
+    )
+    replay = capability(
+        session="2026-08-22",
+        mode="champion",
+        idempotency_key="not valid",
+    )
+
+    expected = AdvanceReceipt.failed_closed(AdvanceFailureReason.INVALID_IDEMPOTENCY_KEY)
+    assert refused == expected
+    assert replay == expected
+    with sqlite3.connect(database) as connection:
+        assert connection.execute(
+            "SELECT idempotency_key, reason_code FROM advance_refusals"
+        ).fetchall() == [(None, AdvanceFailureReason.INVALID_IDEMPOTENCY_KEY.value)]
+
+
+def test_invalid_key_refuses_when_unrelated_history_tables_are_missing(tmp_path: Path) -> None:
+    state_root = tmp_path / "runtime"
+    capability = _configure(state_root)
+    database = state_root / "lifecycle.sqlite3"
+    with sqlite3.connect(database) as connection:
+        connection.execute("DROP TABLE lifecycle_events")
+        connection.execute("DROP TABLE advance_conflicts")
+
+    refused = capability(
+        session="2026-08-22",
+        mode="champion",
+        idempotency_key="not valid",
+    )
+
+    assert refused == AdvanceReceipt.failed_closed(AdvanceFailureReason.INVALID_IDEMPOTENCY_KEY)
+    with sqlite3.connect(database) as connection:
+        assert connection.execute(
+            "SELECT idempotency_key, reason_code FROM advance_refusals"
+        ).fetchall() == [(None, AdvanceFailureReason.INVALID_IDEMPOTENCY_KEY.value)]
+
+
+def test_corrupt_request_appends_after_unrelated_refusal_sequence(tmp_path: Path) -> None:
+    state_root = tmp_path / "runtime"
+    capability = _configure(state_root)
+    capability(
+        session="invalid",
+        mode="champion",
+        idempotency_key="earlier-unrelated-refusal",
+    )
+    capability(
+        session="2026-08-21",
+        mode="champion",
+        idempotency_key="corrupt-after-refusal",
+    )
+    database = state_root / "lifecycle.sqlite3"
+    _replace_with_corrupt_events(database, ("UPDATE lifecycle_events SET mode = 'invalid'",))
+
+    refused = capability(
+        session="2026-08-21",
+        mode="champion",
+        idempotency_key="corrupt-after-refusal",
+    )
+
+    assert refused == AdvanceReceipt.failed_closed(AdvanceFailureReason.INVALID_DURABLE_STATE)
+    with sqlite3.connect(database) as connection:
+        assert connection.execute(
+            "SELECT refusal_id, idempotency_key, reason_code FROM advance_refusals "
+            "ORDER BY refusal_id"
+        ).fetchall() == [
+            (1, "earlier-unrelated-refusal", AdvanceFailureReason.INVALID_SESSION.value),
+            (2, "corrupt-after-refusal", AdvanceFailureReason.INVALID_DURABLE_STATE.value),
+        ]
 
 
 def _replace_with_corrupt_events(database: Path, statements: tuple[str, ...]) -> None:

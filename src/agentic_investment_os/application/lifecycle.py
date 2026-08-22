@@ -6,25 +6,22 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol
 
 from agentic_investment_os.domain.lifecycle import (
-    AdvanceFailureReason,
+    AdvanceAttempt,
+    AdvanceCommand,
     AdvanceReceipt,
-    AdvanceRecovery,
     AdvanceRequest,
-    CheckpointResult,
-    CheckpointWrite,
+    AppendTerminalLifecycleRecord,
     InputRefusal,
     InvalidLifecycleStateError,
     LifecycleLedger,
-    LifecyclePhase,
-    LifecycleProgress,
     LifecycleStatus,
     LifecycleStatusProjection,
     PinnedRunIdentity,
-    StreamConflict,
 )
 
 if TYPE_CHECKING:
     from datetime import datetime
+
 
 _INCOMPLETE_CHECKPOINT_RESULT = "lifecycle ledger returned an incomplete checkpoint result"
 
@@ -56,74 +53,31 @@ class Advance:
             mode=mode,
             idempotency_key=idempotency_key,
         )
-        if isinstance(parsed, InputRefusal):
-            return self.ledger.record_refusal(
-                parsed.idempotency_key,
-                AdvanceFailureReason(parsed.code.value),
-                self.clock.now(),
+        command = (
+            parsed
+            if isinstance(parsed, InputRefusal)
+            else AdvanceCommand(
+                parsed,
+                PinnedRunIdentity.create(
+                    parsed,
+                    configuration_version=self.configuration_version,
+                    configuration_hash=self.configuration_hash,
+                ),
             )
-        return self._advance_valid_request(parsed)
-
-    def _advance_valid_request(self, parsed: AdvanceRequest) -> AdvanceReceipt:
-        identity = PinnedRunIdentity.create(
-            parsed,
-            configuration_version=self.configuration_version,
-            configuration_hash=self.configuration_hash,
         )
-        started = self._start_or_load(parsed, identity)
-        if isinstance(started, AdvanceReceipt):
-            return started
-        progress = started.progress
-        recovery = (
-            AdvanceRecovery.FRESH
-            if started.write is CheckpointWrite.APPENDED
-            else AdvanceRecovery.RESUMED
-        )
-        if progress.is_complete:
-            return _completed_receipt(progress, AdvanceRecovery.PREVIOUSLY_COMPLETED)
-        if progress.completed_phase is None:
-            reconciled = self.ledger.complete_reconciliation(
-                parsed.idempotency_key, self.clock.now()
-            )
-            if isinstance(reconciled, AdvanceReceipt):
-                return reconciled
-            progress = reconciled.progress
-            if reconciled.write is CheckpointWrite.OBSERVED:
-                recovery = AdvanceRecovery.RESUMED
-            if progress.is_complete:
-                return _completed_receipt(progress, AdvanceRecovery.PREVIOUSLY_COMPLETED)
-        if progress.completed_phase is LifecyclePhase.RECONCILE_PRIOR_STATE:
-            pinned = self.ledger.pin_run_inputs(parsed.idempotency_key, self.clock.now())
-            if isinstance(pinned, AdvanceReceipt):
-                return pinned
-            progress = pinned.progress
-            if pinned.write is CheckpointWrite.OBSERVED:
-                recovery = AdvanceRecovery.PREVIOUSLY_COMPLETED
-        return _completed_receipt(progress, recovery)
-
-    def _start_or_load(
-        self,
-        request: AdvanceRequest,
-        identity: PinnedRunIdentity,
-    ) -> CheckpointResult | AdvanceReceipt:
-        started = self.ledger.start(request, identity, self.clock.now())
-        if isinstance(started, StreamConflict):
-            return self.ledger.record_refusal(
-                request.idempotency_key,
-                AdvanceFailureReason.SESSION_STREAM_CONFLICT,
-                self.clock.now(),
-            )
-        return started
-
-
-def _completed_receipt(
-    progress: LifecycleProgress,
-    recovery: AdvanceRecovery,
-) -> AdvanceReceipt:
-    receipt = progress.receipt(recovery)
-    if receipt is None:
-        raise InvalidLifecycleStateError(_INCOMPLETE_CHECKPOINT_RESULT)
-    return receipt
+        attempt = AdvanceAttempt()
+        while True:
+            decision = self.ledger.advance_step(command, attempt, self.clock.now())
+            if isinstance(decision, AdvanceReceipt):
+                return decision
+            if isinstance(decision, AppendTerminalLifecycleRecord):
+                return decision.receipt
+            if decision.attempt.last_sequence is None or (
+                attempt.last_sequence is not None
+                and decision.attempt.last_sequence <= attempt.last_sequence
+            ):
+                raise InvalidLifecycleStateError(_INCOMPLETE_CHECKPOINT_RESULT)
+            attempt = decision.attempt
 
 
 @dataclass(frozen=True, slots=True)

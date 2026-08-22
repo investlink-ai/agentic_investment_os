@@ -35,6 +35,9 @@ make check
   explicit evidence cutoffs.
 - Exercise the real entry path for the tested tier. A unit may call a domain capability directly; an
   integration test boots the relevant composition with recorded adapters.
+- Test lifecycle transition policy as a pure state machine. Exercise generated command, interruption,
+  replay, conflict, and reopen sequences against an independent reference model at the persistence
+  tier.
 - Verify the world after an operation: persisted rows, emitted receipts, filesystem state, packet
   acceptance, broker simulation, and absence of forbidden effects.
 - Cover refusal and recovery paths before the happy-path change is complete: stale input, malformed

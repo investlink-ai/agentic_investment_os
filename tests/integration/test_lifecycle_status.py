@@ -632,6 +632,10 @@ def test_status_rejects_duplicate_unkeyed_refusal_authority(tmp_path: Path) -> N
             "invalid idempotency_key in lifecycle conflict ledger",
         ),
         (
+            "UPDATE advance_conflicts SET idempotency_key = NULL",
+            "invalid idempotency_key in lifecycle conflict ledger",
+        ),
+        (
             "UPDATE advance_conflicts SET idempotency_key = 'orphan-conflict'",
             "invalid conflict association",
         ),

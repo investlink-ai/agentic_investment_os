@@ -17,6 +17,15 @@ _INVALID_FAILED_RECEIPT = "failed receipt requires one bounded reason"
 _CHANGED_PINNED_FACTS = "lifecycle stream changed pinned request facts"
 _INVALID_REFUSAL_ASSOCIATION = "lifecycle stream has invalid refusal association"
 _INVALID_CONFLICT_ASSOCIATION = "lifecycle stream has invalid conflict association"
+_INVALID_REFUSAL_ORDER = "lifecycle refusal order is invalid"
+_INVALID_REFUSAL_UNIQUENESS = "lifecycle refusal uniqueness is invalid"
+_INVALID_UNKEYED_REASON = "unkeyed lifecycle refusal reason is invalid"
+_INVALID_CONFLICT_UNIQUENESS = "lifecycle conflict uniqueness is invalid"
+_UNSUPPORTED_CONFIGURATION_VERSION = "unsupported configuration_version in lifecycle ledger"
+_INVALID_DERIVED_IDENTITY = "lifecycle stream derived identity is invalid"
+_UNSUPPORTED_LATER_PHASES = "lifecycle stream contains unsupported later phases"
+_NONCONTIGUOUS_SEQUENCE = "lifecycle stream sequence is not contiguous"
+_INVALID_CHECKPOINT_ORDER = "lifecycle stream checkpoint order is invalid"
 
 
 class LifecyclePersistenceError(RuntimeError):
@@ -40,6 +49,14 @@ class LifecyclePhase(StrEnum):
     PIN_RUN_INPUTS = "PinRunInputs"
 
 
+class LifecycleEventKind(StrEnum):
+    """Preserve the durable Stage 1 event representation."""
+
+    ADVANCE_REQUESTED = "advance_requested"
+    PHASE_COMPLETED = "phase_completed"
+    RUN_INPUTS_PINNED = "run_inputs_pinned"
+
+
 class LifecycleLiveness(StrEnum):
     """Classify whether authoritative history can continue safely."""
 
@@ -61,13 +78,6 @@ class AdvanceRecovery(StrEnum):
     FRESH = "fresh"
     RESUMED = "resumed"
     PREVIOUSLY_COMPLETED = "previously_completed"
-
-
-class CheckpointWrite(StrEnum):
-    """Distinguish a checkpoint appended by this call from committed progress it observed."""
-
-    APPENDED = "appended"
-    OBSERVED = "observed"
 
 
 class InputRefusalCode(StrEnum):
@@ -242,27 +252,33 @@ class LifecycleProgress:
     def is_complete(self) -> bool:
         return self.completed_phase is LifecyclePhase.PIN_RUN_INPUTS
 
-    def receipt(self, recovery: AdvanceRecovery) -> AdvanceReceipt | None:
-        if not self.is_complete:
-            return None
-        return AdvanceReceipt.advanced(self.pinned_run_identity, recovery)
+
+@dataclass(frozen=True, slots=True)
+class LifecycleEvent:
+    """Carry one typed append-only lifecycle checkpoint."""
+
+    stream_id: str
+    sequence: int
+    request: AdvanceRequest
+    pinned_run_identity: PinnedRunIdentity
+    event_kind: LifecycleEventKind
+    completed_phase: LifecyclePhase | None
 
 
 @dataclass(frozen=True, slots=True)
-class CheckpointResult:
-    """Return committed progress and whether this operation appended its checkpoint."""
+class AdvanceCommand:
+    """Request one deterministic lifecycle transition for validated inputs."""
 
-    progress: LifecycleProgress
-    write: CheckpointWrite
+    request: AdvanceRequest
+    pinned_run_identity: PinnedRunIdentity
 
 
 @dataclass(frozen=True, slots=True)
-class StreamConflict:
-    """Signal that a session already has a different authoritative request stream."""
+class AdvanceAttempt:
+    """Track only progress observed or appended during one Advance call."""
 
-
-LifecycleState = LifecycleProgress | AdvanceReceipt | None
-StartResult = CheckpointResult | AdvanceReceipt | StreamConflict
+    recovery: AdvanceRecovery | None = None
+    last_sequence: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -284,6 +300,7 @@ class LifecycleStatus:
 class DurableAdvanceRefusal:
     """Represent one validated refusal reconstructed in durable append order."""
 
+    sequence: int
     idempotency_key: IdempotencyKey | None
     reason: AdvanceFailureReason
 
@@ -296,12 +313,157 @@ class DurableAdvanceConflict:
     reason: AdvanceFailureReason
 
 
-def derive_lifecycle_status(
-    progresses: tuple[LifecycleProgress, ...],
+LifecycleRecord = LifecycleEvent | DurableAdvanceRefusal | DurableAdvanceConflict
+LifecycleCommand = AdvanceCommand | InputRefusal
+
+
+@dataclass(frozen=True, slots=True)
+class LifecycleHistory:
+    """Contain typed authoritative records in their durable append order."""
+
+    events: tuple[LifecycleEvent, ...] = ()
+    refusals: tuple[DurableAdvanceRefusal, ...] = ()
+    conflicts: tuple[DurableAdvanceConflict, ...] = ()
+    occupied_stream_ids: frozenset[str] = frozenset()
+    next_refusal_sequence: int | None = None
+
+    def append(self, record: LifecycleRecord) -> LifecycleHistory:
+        """Return history with one record appended to its owning ledger."""
+        if isinstance(record, LifecycleEvent):
+            return LifecycleHistory(
+                events=(*self.events, record),
+                refusals=self.refusals,
+                conflicts=self.conflicts,
+                occupied_stream_ids=self.occupied_stream_ids | {record.stream_id},
+                next_refusal_sequence=self.next_refusal_sequence,
+            )
+        if isinstance(record, DurableAdvanceRefusal):
+            return LifecycleHistory(
+                events=self.events,
+                refusals=(*self.refusals, record),
+                conflicts=self.conflicts,
+                occupied_stream_ids=self.occupied_stream_ids,
+                next_refusal_sequence=record.sequence + 1,
+            )
+        return LifecycleHistory(
+            events=self.events,
+            refusals=self.refusals,
+            conflicts=(*self.conflicts, record),
+            occupied_stream_ids=self.occupied_stream_ids,
+            next_refusal_sequence=self.next_refusal_sequence,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class AppendLifecycleRecord:
+    """Direct persistence to append one record before the next transition decision."""
+
+    record: LifecycleRecord
+    attempt: AdvanceAttempt
+
+
+@dataclass(frozen=True, slots=True)
+class AppendTerminalLifecycleRecord:
+    """Direct persistence to append one record and return its terminal receipt."""
+
+    record: LifecycleRecord
+    receipt: AdvanceReceipt
+
+
+LifecycleDecision = AppendLifecycleRecord | AppendTerminalLifecycleRecord | AdvanceReceipt
+
+
+_EVENT_SEQUENCE = (
+    (LifecycleEventKind.ADVANCE_REQUESTED, None),
+    (LifecycleEventKind.PHASE_COMPLETED, LifecyclePhase.RECONCILE_PRIOR_STATE),
+    (LifecycleEventKind.RUN_INPUTS_PINNED, LifecyclePhase.PIN_RUN_INPUTS),
+)
+
+
+def decide_advance(
+    history: LifecycleHistory,
+    command: LifecycleCommand,
+    attempt: AdvanceAttempt,
+) -> LifecycleDecision:
+    """Reconstruct authoritative history and choose one durable transition or receipt."""
+    terminal = decide_terminal_refusal(history.refusals, command)
+    if terminal is not None:
+        return terminal
+    try:
+        progresses = reconstruct_lifecycle(history)
+    except InvalidLifecycleStateError:
+        return _invalid_history_decision(history, command)
+
+    progress_by_key = {progress.request.idempotency_key.value: progress for progress in progresses}
+    if isinstance(command, InputRefusal):
+        return _decide_input_refusal(history, progress_by_key, command)
+    return _decide_valid_advance(history, progresses, progress_by_key, command, attempt)
+
+
+def decide_terminal_refusal(
     refusals: tuple[DurableAdvanceRefusal, ...],
-    conflicts: tuple[DurableAdvanceConflict, ...],
-) -> LifecycleStatus:
-    """Derive operator status from fully validated authoritative facts."""
+    command: LifecycleCommand,
+) -> AdvanceReceipt | None:
+    """Return a previously durable terminal refusal without reading unrelated history."""
+    if not isinstance(command, InputRefusal):
+        request_key = command.request.idempotency_key
+        refusal = next(
+            (item for item in refusals if item.idempotency_key == request_key),
+            None,
+        )
+        return None if refusal is None else AdvanceReceipt.failed_closed(refusal.reason)
+    refusal_key = command.idempotency_key
+    if refusal_key is not None:
+        refusal = next(
+            (item for item in refusals if item.idempotency_key == refusal_key),
+            None,
+        )
+        return None if refusal is None else AdvanceReceipt.failed_closed(refusal.reason)
+    reason = AdvanceFailureReason.INVALID_IDEMPOTENCY_KEY
+    refusal = next(
+        (item for item in refusals if item.idempotency_key is None and item.reason is reason),
+        None,
+    )
+    return None if refusal is None else AdvanceReceipt.failed_closed(refusal.reason)
+
+
+def decide_invalid_history(
+    refusals: tuple[DurableAdvanceRefusal, ...],
+    command: LifecycleCommand,
+    *,
+    next_refusal_sequence: int | None = None,
+) -> LifecycleDecision:
+    """Fail closed after boundary validation cannot produce typed authoritative history."""
+    terminal = decide_terminal_refusal(refusals, command)
+    if terminal is not None:
+        return terminal
+    if isinstance(command, InputRefusal) and command.idempotency_key is None:
+        history = LifecycleHistory(next_refusal_sequence=next_refusal_sequence)
+        return _append_refusal(
+            history,
+            None,
+            AdvanceFailureReason.INVALID_IDEMPOTENCY_KEY,
+        )
+    key = (
+        command.idempotency_key
+        if isinstance(command, InputRefusal)
+        else command.request.idempotency_key
+    )
+    history = LifecycleHistory(next_refusal_sequence=next_refusal_sequence)
+    return _append_refusal(
+        history,
+        key,
+        AdvanceFailureReason.INVALID_DURABLE_STATE,
+    )
+
+
+def reconstruct_lifecycle(history: LifecycleHistory) -> tuple[LifecycleProgress, ...]:
+    """Validate typed lifecycle history and rebuild every request stream."""
+    streams: dict[str, list[LifecycleEvent]] = {}
+    for event in history.events:
+        streams.setdefault(event.stream_id, []).append(event)
+
+    progresses = tuple(_reconstruct_stream(tuple(events)) for events in streams.values())
     progress_by_key: dict[str, LifecycleProgress] = {}
     for progress in progresses:
         key = progress.request.idempotency_key.value
@@ -309,10 +471,32 @@ def derive_lifecycle_status(
             raise InvalidLifecycleStateError(_CHANGED_PINNED_FACTS)
         progress_by_key[key] = progress
 
-    for refusal in refusals:
-        if refusal.idempotency_key is None:
+    _validate_refusals(history.refusals, progress_by_key)
+    _validate_conflicts(history.conflicts, progress_by_key)
+    return progresses
+
+
+def _validate_refusals(
+    refusals: tuple[DurableAdvanceRefusal, ...],
+    progress_by_key: dict[str, LifecycleProgress],
+) -> None:
+    keyed_refusals: set[str] = set()
+    unkeyed_reasons: set[AdvanceFailureReason] = set()
+    for expected_sequence, refusal in enumerate(refusals, start=1):
+        if refusal.sequence != expected_sequence:
+            raise InvalidLifecycleStateError(_INVALID_REFUSAL_ORDER)
+        key = refusal.idempotency_key
+        if (key is None) != (refusal.reason is AdvanceFailureReason.INVALID_IDEMPOTENCY_KEY):
+            raise InvalidLifecycleStateError(_INVALID_UNKEYED_REASON)
+        if key is None:
+            if refusal.reason in unkeyed_reasons:
+                raise InvalidLifecycleStateError(_INVALID_REFUSAL_UNIQUENESS)
+            unkeyed_reasons.add(refusal.reason)
             continue
-        associated_progress = progress_by_key.get(refusal.idempotency_key.value)
+        if key.value in keyed_refusals:
+            raise InvalidLifecycleStateError(_INVALID_REFUSAL_UNIQUENESS)
+        keyed_refusals.add(key.value)
+        associated_progress = progress_by_key.get(key.value)
         if associated_progress is None and refusal.reason in (
             AdvanceFailureReason.IDEMPOTENCY_KEY_CONFLICT,
             AdvanceFailureReason.INVALID_DURABLE_STATE,
@@ -324,34 +508,236 @@ def derive_lifecycle_status(
         ):
             raise InvalidLifecycleStateError(_INVALID_REFUSAL_ASSOCIATION)
 
+
+def _validate_conflicts(
+    conflicts: tuple[DurableAdvanceConflict, ...],
+    progress_by_key: dict[str, LifecycleProgress],
+) -> None:
+    conflict_keys: set[str] = set()
     for conflict in conflicts:
-        associated_progress = progress_by_key.get(conflict.idempotency_key.value)
+        key = conflict.idempotency_key.value
+        if key in conflict_keys:
+            raise InvalidLifecycleStateError(_INVALID_CONFLICT_UNIQUENESS)
+        associated_progress = progress_by_key.get(key)
         if (
             conflict.reason is not AdvanceFailureReason.IDEMPOTENCY_KEY_CONFLICT
             or associated_progress is None
             or not associated_progress.is_complete
         ):
             raise InvalidLifecycleStateError(_INVALID_CONFLICT_ASSOCIATION)
+        conflict_keys.add(key)
 
-    if not progress_by_key:
-        if not refusals and not conflicts:
+
+def _reconstruct_stream(events: tuple[LifecycleEvent, ...]) -> LifecycleProgress:
+    first = events[0]
+    request = first.request
+    identity = first.pinned_run_identity
+    expected_identity = PinnedRunIdentity.create(
+        request,
+        configuration_version=identity.configuration_version,
+        configuration_hash=identity.configuration_hash,
+    )
+    if identity.configuration_version != 1:
+        raise InvalidLifecycleStateError(_UNSUPPORTED_CONFIGURATION_VERSION)
+    if first.stream_id != request.stream_id or identity != expected_identity:
+        raise InvalidLifecycleStateError(_INVALID_DERIVED_IDENTITY)
+    if len(events) > len(_EVENT_SEQUENCE):
+        raise InvalidLifecycleStateError(_UNSUPPORTED_LATER_PHASES)
+    for sequence, event in enumerate(events):
+        if event.sequence != sequence:
+            raise InvalidLifecycleStateError(_NONCONTIGUOUS_SEQUENCE)
+        if (
+            event.stream_id != first.stream_id
+            or event.request != request
+            or event.pinned_run_identity != identity
+        ):
+            raise InvalidLifecycleStateError(_CHANGED_PINNED_FACTS)
+        if (event.event_kind, event.completed_phase) != _EVENT_SEQUENCE[sequence]:
+            raise InvalidLifecycleStateError(_INVALID_CHECKPOINT_ORDER)
+    return LifecycleProgress(request, identity, events[-1].completed_phase, len(events) - 1)
+
+
+def _decide_valid_advance(
+    history: LifecycleHistory,
+    progresses: tuple[LifecycleProgress, ...],
+    progress_by_key: dict[str, LifecycleProgress],
+    command: AdvanceCommand,
+    attempt: AdvanceAttempt,
+) -> LifecycleDecision:
+    request = command.request
+    key = request.idempotency_key
+    progress = progress_by_key.get(key.value)
+    if progress is None:
+        return _decide_new_stream(history, progresses, command, attempt)
+    if progress.request != request or progress.pinned_run_identity != command.pinned_run_identity:
+        return _decide_idempotency_conflict(history, progress, key)
+    recovery = _recovery_for_progress(progress, attempt)
+    if progress.is_complete:
+        return AdvanceReceipt.advanced(
+            progress.pinned_run_identity,
+            AdvanceRecovery.PREVIOUSLY_COMPLETED
+            if progress.sequence != attempt.last_sequence
+            else recovery,
+        )
+    return _append_next_event(progress, command, recovery)
+
+
+def _decide_new_stream(
+    history: LifecycleHistory,
+    progresses: tuple[LifecycleProgress, ...],
+    command: AdvanceCommand,
+    attempt: AdvanceAttempt,
+) -> LifecycleDecision:
+    request = command.request
+    key = request.idempotency_key
+    if attempt.recovery is not None:
+        return _append_refusal(
+            history,
+            key,
+            AdvanceFailureReason.INVALID_DURABLE_STATE,
+        )
+    if request.stream_id in history.occupied_stream_ids or any(
+        existing.request.stream_id == request.stream_id for existing in progresses
+    ):
+        return _append_refusal(
+            history,
+            key,
+            AdvanceFailureReason.SESSION_STREAM_CONFLICT,
+        )
+    record = LifecycleEvent(
+        stream_id=request.stream_id,
+        sequence=0,
+        request=request,
+        pinned_run_identity=command.pinned_run_identity,
+        event_kind=LifecycleEventKind.ADVANCE_REQUESTED,
+        completed_phase=None,
+    )
+    return AppendLifecycleRecord(
+        record,
+        AdvanceAttempt(AdvanceRecovery.FRESH, record.sequence),
+    )
+
+
+def _decide_input_refusal(
+    history: LifecycleHistory,
+    progress_by_key: dict[str, LifecycleProgress],
+    refusal: InputRefusal,
+) -> LifecycleDecision:
+    key = refusal.idempotency_key
+    reason = AdvanceFailureReason(refusal.code.value)
+    if key is None:
+        return _append_refusal(history, None, reason)
+    progress = progress_by_key.get(key.value)
+    if progress is None:
+        return _append_refusal(history, key, reason)
+    return _decide_idempotency_conflict(history, progress, key)
+
+
+def _decide_idempotency_conflict(
+    history: LifecycleHistory,
+    progress: LifecycleProgress,
+    key: IdempotencyKey,
+) -> LifecycleDecision:
+    reason = AdvanceFailureReason.IDEMPOTENCY_KEY_CONFLICT
+    if not progress.is_complete:
+        return _append_refusal(history, key, reason)
+    conflict = next(
+        (item for item in history.conflicts if item.idempotency_key == key),
+        None,
+    )
+    if conflict is not None:
+        return AdvanceReceipt.failed_closed(conflict.reason)
+    return AppendTerminalLifecycleRecord(
+        DurableAdvanceConflict(key, reason),
+        AdvanceReceipt.failed_closed(reason),
+    )
+
+
+def _append_next_event(
+    progress: LifecycleProgress,
+    command: AdvanceCommand,
+    recovery: AdvanceRecovery,
+) -> AppendLifecycleRecord | AppendTerminalLifecycleRecord:
+    sequence = progress.sequence + 1
+    event_kind, phase = _EVENT_SEQUENCE[sequence]
+    event = LifecycleEvent(
+        stream_id=command.request.stream_id,
+        sequence=sequence,
+        request=command.request,
+        pinned_run_identity=command.pinned_run_identity,
+        event_kind=event_kind,
+        completed_phase=phase,
+    )
+    next_attempt = AdvanceAttempt(recovery, sequence)
+    if phase is LifecyclePhase.PIN_RUN_INPUTS:
+        return AppendTerminalLifecycleRecord(
+            event,
+            AdvanceReceipt.advanced(command.pinned_run_identity, recovery),
+        )
+    return AppendLifecycleRecord(event, next_attempt)
+
+
+def _append_refusal(
+    history: LifecycleHistory,
+    key: IdempotencyKey | None,
+    reason: AdvanceFailureReason,
+) -> AppendTerminalLifecycleRecord:
+    receipt = AdvanceReceipt.failed_closed(reason)
+    sequence = (
+        len(history.refusals) + 1
+        if history.next_refusal_sequence is None
+        else history.next_refusal_sequence
+    )
+    return AppendTerminalLifecycleRecord(
+        DurableAdvanceRefusal(sequence, key, reason),
+        receipt,
+    )
+
+
+def _invalid_history_decision(
+    history: LifecycleHistory,
+    command: LifecycleCommand,
+) -> LifecycleDecision:
+    return decide_invalid_history(
+        history.refusals,
+        command,
+        next_refusal_sequence=history.next_refusal_sequence,
+    )
+
+
+def _recovery_for_progress(
+    progress: LifecycleProgress,
+    attempt: AdvanceAttempt,
+) -> AdvanceRecovery:
+    if attempt.recovery is None:
+        return AdvanceRecovery.RESUMED
+    if attempt.last_sequence is None or progress.sequence > attempt.last_sequence:
+        return AdvanceRecovery.RESUMED
+    return attempt.recovery
+
+
+def derive_lifecycle_status(history: LifecycleHistory) -> LifecycleStatus:
+    """Validate authoritative history and derive its operator projection."""
+    progresses = reconstruct_lifecycle(history)
+    if not progresses:
+        if not history.refusals and not history.conflicts:
             return LifecycleStatus.not_started()
         return LifecycleStatus(
             active_phase=None,
             last_completed_session=None,
             pinned_run_identity=None,
             liveness=LifecycleLiveness.FAILED_CLOSED,
-            durable_reason=refusals[-1].reason,
+            durable_reason=history.refusals[-1].reason,
         )
 
     current = max(
-        progress_by_key.values(),
+        progresses,
         key=lambda progress: progress.request.session.trading_date,
     )
     matching_refusal = next(
         (
             refusal
-            for refusal in reversed(refusals)
+            for refusal in reversed(history.refusals)
             if refusal.idempotency_key == current.request.idempotency_key
         ),
         None,
@@ -365,19 +751,15 @@ def derive_lifecycle_status(
             durable_reason=matching_refusal.reason,
         )
 
-    active_phase = {
-        None: LifecyclePhase.RECONCILE_PRIOR_STATE,
-        LifecyclePhase.RECONCILE_PRIOR_STATE: LifecyclePhase.PIN_RUN_INPUTS,
-        LifecyclePhase.PIN_RUN_INPUTS: None,
-    }[current.completed_phase]
+    active_phase = None if current.is_complete else _EVENT_SEQUENCE[current.sequence + 1][1]
     return LifecycleStatus(
         active_phase=active_phase,
         last_completed_session=None,
         pinned_run_identity=current.pinned_run_identity,
         liveness=LifecycleLiveness.ACTIVE,
         durable_reason=_reported_reason(
-            refusals=refusals,
-            conflicts=conflicts,
+            refusals=history.refusals,
+            conflicts=history.conflicts,
         ),
     )
 
@@ -393,31 +775,14 @@ def _reported_reason(
 
 
 class LifecycleLedger(Protocol):
-    """Append and reconstruct Stage 1 lifecycle checkpoints."""
+    """Apply one domain-selected lifecycle step in an atomic append transaction."""
 
-    def load_by_idempotency_key(self, key: IdempotencyKey) -> LifecycleState: ...
-
-    def start(
+    def advance_step(
         self,
-        request: AdvanceRequest,
-        identity: PinnedRunIdentity,
+        command: LifecycleCommand,
+        attempt: AdvanceAttempt,
         recorded_at: datetime,
-    ) -> StartResult: ...
-
-    def complete_reconciliation(
-        self, key: IdempotencyKey, recorded_at: datetime
-    ) -> CheckpointResult | AdvanceReceipt: ...
-
-    def pin_run_inputs(
-        self, key: IdempotencyKey, recorded_at: datetime
-    ) -> CheckpointResult | AdvanceReceipt: ...
-
-    def record_refusal(
-        self,
-        key: IdempotencyKey | None,
-        reason_code: AdvanceFailureReason,
-        recorded_at: datetime,
-    ) -> AdvanceReceipt: ...
+    ) -> LifecycleDecision: ...
 
 
 class LifecycleStatusProjection(Protocol):

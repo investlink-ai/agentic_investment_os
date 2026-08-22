@@ -110,6 +110,13 @@ The operating system is a checkpointed state machine over append-only records. E
 persists intent before work and appends its observed result before advancing. Repeating a request
 returns its prior disposition or resumes from the last safe checkpoint.
 
+A framework-free lifecycle kernel reconstructs typed authoritative history and selects the next
+event, refusal, conflict, or receipt. Application code repeats that operation until it receives a
+terminal receipt. Persistence adapters validate hostile representations, invoke the kernel inside an
+atomic transaction, and append only the selected typed record; they do not encode phase ordering or
+recovery policy. [ADR 0002](adr/0002-lifecycle-policy-in-domain-kernel.md) records this ownership and
+the request-scoped compatibility boundary.
+
 ```mermaid
 stateDiagram-v2
     [*] --> ReconcilePriorState
@@ -195,8 +202,8 @@ client order identity; it never guesses or repeats exposure blindly.
 
 | Module | Owns | Interface presented to callers |
 | --- | --- | --- |
-| `domain` | Framework-free values, events, identifiers, and invariants | Immutable domain contracts |
-| `application` | Lifecycle transitions and use-case orchestration | `Advance`, `Status`, `Record`, `Govern` |
+| `domain` | Framework-free values, lifecycle transition policy, events, identifiers, and invariants | Immutable domain contracts and lifecycle decisions |
+| `application` | Lifecycle use-case orchestration | `Advance`, `Status`, `Record`, `Govern` |
 | `evidence` | Content-addressed artifacts, assertions, as-of provenance | Evidence capture and lookup |
 | `memory` | Belief ledger, graph projection, decision journal | Append and as-of retrieval |
 | `research` | Typed Codex roles and evidence-bound workflow | Validated research artifacts |
