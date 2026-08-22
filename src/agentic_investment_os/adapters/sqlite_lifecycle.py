@@ -9,11 +9,13 @@ from contextlib import closing
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
-from typing import TYPE_CHECKING, Self, TypeVar
+from typing import TYPE_CHECKING, Self, TypeVar, assert_never
 
 from agentic_investment_os.domain.lifecycle import (
     AdvanceAttempt,
+    AdvanceCommand,
     AdvanceFailureReason,
+    AdvanceReceipt,
     AdvanceRequest,
     AppendLifecycleRecord,
     AppendTerminalLifecycleRecord,
@@ -208,9 +210,12 @@ def prepare_runtime_database(state_root: Path) -> PreparedRuntimeDatabase | Runt
     location = _locate_runtime_database(state_root)
     if isinstance(location, RuntimeRootRefusal):
         return location
-    if location.database_exists:
-        return PreparedRuntimeDatabase(path=location.path, created=False)
-    return _create_runtime_database(location.path)
+    if isinstance(location, _RuntimeDatabaseLocation):
+        if location.database_exists:
+            return PreparedRuntimeDatabase(path=location.path, created=False)
+        return _create_runtime_database(location.path)
+    # Strict mypy proves this line unreachable; removing it is runtime-equivalent.
+    assert_never(location)  # pragma: no cover  # pragma: no mutate
 
 
 def open_runtime_database(state_root: Path) -> PreparedRuntimeDatabase | RuntimeRootRefusal:
@@ -218,11 +223,14 @@ def open_runtime_database(state_root: Path) -> PreparedRuntimeDatabase | Runtime
     location = _locate_runtime_database(state_root)
     if isinstance(location, RuntimeRootRefusal):
         return location
-    if location.database_exists:
+    if isinstance(location, _RuntimeDatabaseLocation):
+        if location.database_exists:
+            return PreparedRuntimeDatabase(path=location.path, created=False)
+        if location.root_created:
+            return _create_runtime_database(location.path)
         return PreparedRuntimeDatabase(path=location.path, created=False)
-    if location.root_created:
-        return _create_runtime_database(location.path)
-    return PreparedRuntimeDatabase(path=location.path, created=False)
+    # Strict mypy proves this line unreachable; removing it is runtime-equivalent.
+    assert_never(location)  # pragma: no cover  # pragma: no mutate
 
 
 def _locate_runtime_database(
@@ -401,7 +409,11 @@ class SQLiteLifecycleLedger:
                 decision = decide_advance(history, command, attempt)
             if isinstance(decision, (AppendLifecycleRecord, AppendTerminalLifecycleRecord)):
                 _append_record(connection, decision.record, recorded_at)
-            return decision
+                return decision
+            if isinstance(decision, AdvanceReceipt):
+                return decision
+            # Strict mypy proves this line unreachable; removing it is runtime-equivalent.
+            assert_never(decision)  # pragma: no cover  # pragma: no mutate
 
         return self._write(operation)
 
@@ -461,6 +473,9 @@ def _load_events(
         request = AdvanceRequest.parse(session=row[3], mode=row[4], idempotency_key=row[2])
         if isinstance(request, InputRefusal):
             raise InvalidLifecycleStateError(_INVALID_REQUEST)
+        if not isinstance(request, AdvanceRequest):
+            # Strict mypy proves this line unreachable; removing it is runtime-equivalent.
+            assert_never(request)  # pragma: no cover  # pragma: no mutate
         stream_id = _text(row[0], "stream_id")
         sequence = _integer(row[1], "sequence")
         version = _integer(row[5], "configuration_version")
@@ -562,7 +577,10 @@ def _load_conflicts(
 def _command_key(command: LifecycleCommand) -> IdempotencyKey | None:
     if isinstance(command, InputRefusal):
         return command.idempotency_key
-    return command.request.idempotency_key
+    if isinstance(command, AdvanceCommand):
+        return command.request.idempotency_key
+    # Strict mypy proves this line unreachable; removing it is runtime-equivalent.
+    assert_never(command)  # pragma: no cover  # pragma: no mutate
 
 
 def _occupied_stream_ids(
@@ -571,9 +589,12 @@ def _occupied_stream_ids(
 ) -> frozenset[str]:
     if isinstance(command, InputRefusal):
         return frozenset()
-    stream_id = command.request.stream_id
-    row = connection.execute(_STREAM_EXISTS_SQL, (stream_id,)).fetchone()
-    return frozenset() if row is None else frozenset((stream_id,))
+    if isinstance(command, AdvanceCommand):
+        stream_id = command.request.stream_id
+        row = connection.execute(_STREAM_EXISTS_SQL, (stream_id,)).fetchone()
+        return frozenset() if row is None else frozenset((stream_id,))
+    # Strict mypy proves this line unreachable; removing it is runtime-equivalent.
+    assert_never(command)  # pragma: no cover  # pragma: no mutate
 
 
 def _next_refusal_sequence(connection: sqlite3.Connection) -> int:
@@ -614,7 +635,8 @@ def _append_record(
                 timestamp,
             ),
         )
-    elif isinstance(record, DurableAdvanceRefusal):
+        return
+    if isinstance(record, DurableAdvanceRefusal):
         connection.execute(
             """
             INSERT INTO advance_refusals (
@@ -628,7 +650,8 @@ def _append_record(
                 timestamp,
             ),
         )
-    else:
+        return
+    if isinstance(record, DurableAdvanceConflict):
         connection.execute(
             """
             INSERT INTO advance_conflicts (idempotency_key, reason_code, recorded_at)
@@ -636,6 +659,9 @@ def _append_record(
             """,
             (record.idempotency_key.value, record.reason.value, timestamp),
         )
+        return
+    # Strict mypy proves this line unreachable; removing it is runtime-equivalent.
+    assert_never(record)  # pragma: no cover  # pragma: no mutate
 
 
 def _replace_status_projection(

@@ -8,7 +8,7 @@ import re
 from dataclasses import dataclass
 from datetime import date, datetime
 from enum import StrEnum
-from typing import Protocol, TypeGuard
+from typing import Protocol, TypeGuard, assert_never
 
 _IDEMPOTENCY_KEY = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\Z")
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
@@ -212,13 +212,17 @@ class AdvanceReceipt:
             ):
                 raise ValueError(_INVALID_ADVANCED_RECEIPT)
             return
-        if (
-            self.completed_phase is not None
-            or self.pinned_run_identity is not None
-            or self.failure_reason is None
-            or self.recovery is not None
-        ):
-            raise ValueError(_INVALID_FAILED_RECEIPT)
+        if self.disposition is AdvanceDisposition.FAILED_CLOSED:
+            if (
+                self.completed_phase is not None
+                or self.pinned_run_identity is not None
+                or self.failure_reason is None
+                or self.recovery is not None
+            ):
+                raise ValueError(_INVALID_FAILED_RECEIPT)
+            return
+        # Strict mypy proves this line unreachable; removing it is runtime-equivalent.
+        assert_never(self.disposition)  # pragma: no cover  # pragma: no mutate
 
     @classmethod
     def advanced(
@@ -250,7 +254,15 @@ class LifecycleProgress:
 
     @property
     def is_complete(self) -> bool:
-        return self.completed_phase is LifecyclePhase.PIN_RUN_INPUTS
+        phase = self.completed_phase
+        if phase is None:
+            return False
+        if phase is LifecyclePhase.RECONCILE_PRIOR_STATE:
+            return False
+        if phase is LifecyclePhase.PIN_RUN_INPUTS:
+            return True
+        # Strict mypy proves this line unreachable; removing it is runtime-equivalent.
+        assert_never(phase)  # pragma: no cover  # pragma: no mutate
 
 
 @dataclass(frozen=True, slots=True)
@@ -345,13 +357,16 @@ class LifecycleHistory:
                 occupied_stream_ids=self.occupied_stream_ids,
                 next_refusal_sequence=record.sequence + 1,
             )
-        return LifecycleHistory(
-            events=self.events,
-            refusals=self.refusals,
-            conflicts=(*self.conflicts, record),
-            occupied_stream_ids=self.occupied_stream_ids,
-            next_refusal_sequence=self.next_refusal_sequence,
-        )
+        if isinstance(record, DurableAdvanceConflict):
+            return LifecycleHistory(
+                events=self.events,
+                refusals=self.refusals,
+                conflicts=(*self.conflicts, record),
+                occupied_stream_ids=self.occupied_stream_ids,
+                next_refusal_sequence=self.next_refusal_sequence,
+            )
+        # Strict mypy proves this line unreachable; removing it is runtime-equivalent.
+        assert_never(record)  # pragma: no cover  # pragma: no mutate
 
 
 @dataclass(frozen=True, slots=True)
@@ -397,7 +412,10 @@ def decide_advance(
     progress_by_key = {progress.request.idempotency_key.value: progress for progress in progresses}
     if isinstance(command, InputRefusal):
         return _decide_input_refusal(history, progress_by_key, command)
-    return _decide_valid_advance(history, progresses, progress_by_key, command, attempt)
+    if isinstance(command, AdvanceCommand):
+        return _decide_valid_advance(history, progresses, progress_by_key, command, attempt)
+    # Strict mypy proves this line unreachable; removing it is runtime-equivalent.
+    assert_never(command)  # pragma: no cover  # pragma: no mutate
 
 
 def decide_terminal_refusal(
@@ -405,26 +423,29 @@ def decide_terminal_refusal(
     command: LifecycleCommand,
 ) -> AdvanceReceipt | None:
     """Return a previously durable terminal refusal without reading unrelated history."""
-    if not isinstance(command, InputRefusal):
+    if isinstance(command, AdvanceCommand):
         request_key = command.request.idempotency_key
         refusal = next(
             (item for item in refusals if item.idempotency_key == request_key),
             None,
         )
         return None if refusal is None else AdvanceReceipt.failed_closed(refusal.reason)
-    refusal_key = command.idempotency_key
-    if refusal_key is not None:
+    if isinstance(command, InputRefusal):
+        refusal_key = command.idempotency_key
+        if refusal_key is not None:
+            refusal = next(
+                (item for item in refusals if item.idempotency_key == refusal_key),
+                None,
+            )
+            return None if refusal is None else AdvanceReceipt.failed_closed(refusal.reason)
+        reason = AdvanceFailureReason.INVALID_IDEMPOTENCY_KEY
         refusal = next(
-            (item for item in refusals if item.idempotency_key == refusal_key),
+            (item for item in refusals if item.idempotency_key is None and item.reason is reason),
             None,
         )
         return None if refusal is None else AdvanceReceipt.failed_closed(refusal.reason)
-    reason = AdvanceFailureReason.INVALID_IDEMPOTENCY_KEY
-    refusal = next(
-        (item for item in refusals if item.idempotency_key is None and item.reason is reason),
-        None,
-    )
-    return None if refusal is None else AdvanceReceipt.failed_closed(refusal.reason)
+    # Strict mypy proves this line unreachable; removing it is runtime-equivalent.
+    assert_never(command)  # pragma: no cover  # pragma: no mutate
 
 
 def decide_invalid_history(
@@ -437,24 +458,27 @@ def decide_invalid_history(
     terminal = decide_terminal_refusal(refusals, command)
     if terminal is not None:
         return terminal
-    if isinstance(command, InputRefusal) and command.idempotency_key is None:
-        history = LifecycleHistory(next_refusal_sequence=next_refusal_sequence)
+    history = LifecycleHistory(next_refusal_sequence=next_refusal_sequence)
+    if isinstance(command, InputRefusal):
+        if command.idempotency_key is None:
+            return _append_refusal(
+                history,
+                None,
+                AdvanceFailureReason.INVALID_IDEMPOTENCY_KEY,
+            )
         return _append_refusal(
             history,
-            None,
-            AdvanceFailureReason.INVALID_IDEMPOTENCY_KEY,
+            command.idempotency_key,
+            AdvanceFailureReason.INVALID_DURABLE_STATE,
         )
-    key = (
-        command.idempotency_key
-        if isinstance(command, InputRefusal)
-        else command.request.idempotency_key
-    )
-    history = LifecycleHistory(next_refusal_sequence=next_refusal_sequence)
-    return _append_refusal(
-        history,
-        key,
-        AdvanceFailureReason.INVALID_DURABLE_STATE,
-    )
+    if isinstance(command, AdvanceCommand):
+        return _append_refusal(
+            history,
+            command.request.idempotency_key,
+            AdvanceFailureReason.INVALID_DURABLE_STATE,
+        )
+    # Strict mypy proves this line unreachable; removing it is runtime-equivalent.
+    assert_never(command)  # pragma: no cover  # pragma: no mutate
 
 
 def reconstruct_lifecycle(history: LifecycleHistory) -> tuple[LifecycleProgress, ...]:
@@ -669,12 +693,18 @@ def _append_next_event(
         completed_phase=phase,
     )
     next_attempt = AdvanceAttempt(recovery, sequence)
+    # Existing progress contains event zero, so its next phase cannot be absent.
+    if phase is None:  # pragma: no cover
+        return AppendLifecycleRecord(event, next_attempt)  # pragma: no mutate
+    if phase is LifecyclePhase.RECONCILE_PRIOR_STATE:
+        return AppendLifecycleRecord(event, next_attempt)
     if phase is LifecyclePhase.PIN_RUN_INPUTS:
         return AppendTerminalLifecycleRecord(
             event,
             AdvanceReceipt.advanced(command.pinned_run_identity, recovery),
         )
-    return AppendLifecycleRecord(event, next_attempt)
+    # Strict mypy proves this line unreachable; removing it is runtime-equivalent.
+    assert_never(phase)  # pragma: no cover  # pragma: no mutate
 
 
 def _append_refusal(

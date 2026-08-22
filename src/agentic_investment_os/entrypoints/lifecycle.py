@@ -4,9 +4,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, assert_never
 
 from agentic_investment_os.adapters.sqlite_lifecycle import (
+    PreparedRuntimeDatabase,
     RuntimeRootRefusal,
     SQLiteLifecycleLedger,
     open_runtime_database,
@@ -17,6 +18,7 @@ from agentic_investment_os.entrypoints.configuration import (
     ConfigurationRefusal,
     ConfigurationRefusalCode,
     ConfigurationSource,
+    RuntimeConfiguration,
     resolve_runtime_configuration,
 )
 
@@ -49,18 +51,24 @@ def configure_advance(
     resolution = resolve_runtime_configuration(sources, repository_root=repository_root)
     if isinstance(resolution, ConfigurationRefusal):
         return resolution
+    if not isinstance(resolution, RuntimeConfiguration):
+        # Strict mypy proves this line unreachable; removing it is runtime-equivalent.
+        assert_never(resolution)  # pragma: no cover  # pragma: no mutate
     database = prepare_runtime_database(resolution.state_root)
     if isinstance(database, RuntimeRootRefusal):
         return ConfigurationRefusal(
             code=ConfigurationRefusalCode.INVALID_STATE_ROOT,
             fields=("state_root",),
         )
-    return Advance(
-        ledger=SQLiteLifecycleLedger(database.path),
-        configuration_version=resolution.schema_version,
-        configuration_hash=resolution.fingerprint,
-        clock=clock if clock is not None else SystemClock(),
-    )
+    if isinstance(database, PreparedRuntimeDatabase):
+        return Advance(
+            ledger=SQLiteLifecycleLedger(database.path),
+            configuration_version=resolution.schema_version,
+            configuration_hash=resolution.fingerprint,
+            clock=clock if clock is not None else SystemClock(),
+        )
+    # Strict mypy proves this line unreachable; removing it is runtime-equivalent.
+    assert_never(database)  # pragma: no cover  # pragma: no mutate
 
 
 def configure_status(
@@ -77,10 +85,16 @@ def configure_status(
     resolution = resolve_runtime_configuration(sources, repository_root=repository_root)
     if isinstance(resolution, ConfigurationRefusal):
         return resolution
+    if not isinstance(resolution, RuntimeConfiguration):
+        # Strict mypy proves this line unreachable; removing it is runtime-equivalent.
+        assert_never(resolution)  # pragma: no cover  # pragma: no mutate
     database = open_runtime_database(resolution.state_root)
     if isinstance(database, RuntimeRootRefusal):
         return ConfigurationRefusal(
             code=ConfigurationRefusalCode.INVALID_STATE_ROOT,
             fields=("state_root",),
         )
-    return Status(SQLiteLifecycleLedger.open_existing(database.path))
+    if isinstance(database, PreparedRuntimeDatabase):
+        return Status(SQLiteLifecycleLedger.open_existing(database.path))
+    # Strict mypy proves this line unreachable; removing it is runtime-equivalent.
+    assert_never(database)  # pragma: no cover  # pragma: no mutate
