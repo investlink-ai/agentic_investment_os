@@ -246,9 +246,10 @@ V0 execution permits:
 - at most one bounded cancel-and-reprice inside the original price and risk envelope; and
 - a more aggressive but still bounded limit for authorized risk exits.
 
-Partial fills are reconciled before replacement. A stable client order identifier binds packet,
-symbol, side, and attempt. Market, stop, stop-limit, trailing-stop, bracket, extended-hours, auction,
-IOC, and FOK orders are outside V0.
+Partial fills are reconciled before replacement. A stable client order identifier binds packet
+identity, canonical Instrument Identity, effect kind, side, and attempt; a display symbol never
+contributes to that identifier. Market, stop, stop-limit, trailing-stop, bracket, extended-hours,
+auction, IOC, and FOK orders are outside V0.
 
 Stale, missing, halted, contradictory, unauthorized, expired, or unreconciled state produces a
 durable no-action or fail-closed outcome before any new discretionary order.
