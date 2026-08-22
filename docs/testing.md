@@ -112,7 +112,8 @@ evidence. A scenario becomes mandatory when its owning behavior is implemented.
 - Constitution, model, prompt, tool, policy, data, and source hashes remain pinned within a run.
 - Corrupted projections rebuild deterministically; corrupted authoritative ledgers fail closed.
 - SQLite startup upgrades exact supported schemas in order, preserves authoritative rows, and rolls
-  back an interrupted or failed migration without advancing its physical schema version.
+  back an interrupted or failed migration without advancing its physical schema version. It rejects
+  ambiguous unversioned checkpoints, index inconsistency, and contradictory cross-ledger history.
 - Persistence handles disk-full, transaction rollback, interrupted writes, duplicate event delivery,
   and projection corruption without publishing partial executable state.
 

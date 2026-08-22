@@ -8,7 +8,8 @@ import stat
 from contextlib import closing
 from dataclasses import dataclass
 from datetime import datetime
-from typing import TYPE_CHECKING, TypeVar
+from enum import StrEnum
+from typing import TYPE_CHECKING, Self, TypeVar
 
 from agentic_investment_os.domain.lifecycle import (
     AdvanceAttempt,
@@ -55,17 +56,18 @@ _DROP_PROJECTION_SQL = (
     # SQLite keywords and identifiers are case-insensitive, so case-only mutants are equivalent.
 )
 _USER_VERSION_SQL = "PRAGMA user_version"
-_QUICK_CHECK_SQL = "PRAGMA quick_check"
-_LOAD_EVENT_KEYS_SQL = "SELECT DISTINCT idempotency_key FROM lifecycle_events"
+_INTEGRITY_CHECK_SQL = "PRAGMA integrity_check"
+_INTEGRITY_SAVEPOINT_SQL = "SAVEPOINT validate_without_projection"
+_ROLLBACK_INTEGRITY_SAVEPOINT_SQL = "ROLLBACK TO validate_without_projection"
+_RELEASE_INTEGRITY_SAVEPOINT_SQL = "RELEASE validate_without_projection"
 _LOAD_REFUSALS_FOR_VALIDATION_SQL = (
-    "SELECT idempotency_key, reason_code, recorded_at FROM advance_refusals"
+    "SELECT refusal_id, idempotency_key, reason_code, recorded_at "
+    "FROM advance_refusals ORDER BY refusal_id"
 )
 _LOAD_CONFLICTS_FOR_VALIDATION_SQL = (
-    "SELECT idempotency_key, reason_code, recorded_at FROM advance_conflicts"
+    "SELECT idempotency_key, reason_code, recorded_at "
+    "FROM advance_conflicts ORDER BY idempotency_key"
 )
-_CURRENT_DATABASE_VERSION = 3
-_MAX_MIGRATION_ATTEMPTS = 4
-_CONFLICT_SCHEMA_VERSIONS = frozenset({2, 3})
 _PIN_REQUIRES_RECONCILIATION = "PinRunInputs requires the ReconcilePriorState checkpoint"
 _REQUIRED_STREAM_MISSING = "required lifecycle stream is missing or terminal"
 _READ_FAILED = "SQLite lifecycle read failed"
@@ -74,11 +76,8 @@ _MIGRATION_FAILED = "SQLite database migration failed"
 _UNSUPPORTED_DATABASE_VERSION = "unsupported SQLite database version"
 _UNRECOGNIZED_UNVERSIONED_SCHEMA = "unrecognized unversioned SQLite schema"
 _SCHEMA_VERSION_MISMATCH = "SQLite schema does not match database version"
-_MISSING_MIGRATION_STEP = "missing SQLite database migration step"
-_MIGRATION_STALLED = "SQLite database migration did not reach the current version"
 _DATABASE_INTEGRITY_FAILED = "SQLite database integrity check failed"
 _INVALID_REQUEST = "invalid request values in lifecycle ledger"
-_INVALID_IDEMPOTENCY_KEY = "invalid idempotency_key in lifecycle ledger"
 _UNSUPPORTED_CONFIGURATION_VERSION = "unsupported configuration_version in lifecycle ledger"
 _INVALID_DERIVED_IDENTITY = "lifecycle stream derived identity is invalid"
 _UNSUPPORTED_LATER_PHASES = "lifecycle stream contains unsupported later phases"
@@ -174,20 +173,53 @@ CREATE TRIGGER advance_conflicts_are_append_only_delete
 BEFORE DELETE ON advance_conflicts BEGIN SELECT RAISE(ABORT, 'append-only conflict ledger'); END
 """,
 )
-_SCHEMA_BY_VERSION = {
-    1: _LEGACY_SCHEMA,
-    2: (*_LEGACY_SCHEMA, _CREATE_CONFLICT_TABLE),
-    3: (*_LEGACY_SCHEMA, _CREATE_CONFLICT_TABLE, *_CREATE_CONFLICT_TRIGGERS),
-}
-_SCHEMA_SIGNATURES = {
-    version: frozenset(" ".join(statement.split()) for statement in statements)
-    for version, statements in _SCHEMA_BY_VERSION.items()
-}
-_MIGRATIONS = {
-    0: _LEGACY_SCHEMA,
-    1: (_CREATE_CONFLICT_TABLE,),
-    2: _CREATE_CONFLICT_TRIGGERS,
-}
+
+
+@dataclass(frozen=True, slots=True)
+class _MigrationStep:
+    statements: tuple[str, ...]
+    accepts_unversioned_schema: bool
+    validates_conflicts: bool
+
+
+class _IntegerField(StrEnum):
+    DATABASE_VERSION = "database_version"
+    CONFIGURATION_VERSION = "configuration_version"
+    REFUSAL_ID = "refusal_id"
+    SEQUENCE = "sequence"
+
+
+class _DatabaseOpenMode(StrEnum):
+    CREATE_IF_MISSING = "rwc"
+    EXISTING_ONLY = "rw"
+
+
+_MIGRATION_STEPS = (
+    _MigrationStep(
+        statements=_LEGACY_SCHEMA,
+        accepts_unversioned_schema=True,
+        validates_conflicts=False,
+    ),
+    _MigrationStep(
+        statements=(_CREATE_CONFLICT_TABLE,),
+        accepts_unversioned_schema=False,
+        validates_conflicts=True,
+    ),
+    _MigrationStep(
+        statements=_CREATE_CONFLICT_TRIGGERS,
+        accepts_unversioned_schema=True,
+        validates_conflicts=True,
+    ),
+)
+_CURRENT_DATABASE_VERSION = len(_MIGRATION_STEPS)
+_schema_statements: tuple[str, ...] = ()
+_schema_signatures: list[frozenset[str]] = []
+for _migration_step in _MIGRATION_STEPS:
+    _schema_statements = (*_schema_statements, *_migration_step.statements)
+    _schema_signatures.append(
+        frozenset(" ".join(statement.split()) for statement in _schema_statements)
+    )
+_SCHEMA_SIGNATURES = tuple(_schema_signatures)
 
 _PROJECTION_SCHEMA = """
 CREATE TABLE lifecycle_status_projection (
@@ -283,38 +315,38 @@ def _invalid_root() -> RuntimeRootRefusal:
     return RuntimeRootRefusal()
 
 
-def _prepare_database(database: Path) -> None:
+def _prepare_database(database: Path, *, mode: _DatabaseOpenMode) -> None:
     try:
-        with closing(_connect_database(database)) as connection:
+        with closing(_connect_database(database, mode=mode)) as connection:
             _migrate_to_current(connection)
     except sqlite3.Error as error:
         raise LifecyclePersistenceError(_MIGRATION_FAILED) from error
 
 
 def _migrate_to_current(connection: sqlite3.Connection) -> None:
-    for _ in range(_MAX_MIGRATION_ATTEMPTS):
+    # Every non-returning iteration commits exactly one next step, so exhausting this
+    # descriptor-derived bound means the database has reached the current version.
+    for _ in range(_CURRENT_DATABASE_VERSION):
         with connection:
             connection.execute(_BEGIN_IMMEDIATE_SQL)
             recorded_version = _database_version(connection)
-            if recorded_version > _CURRENT_DATABASE_VERSION:
+            if not 0 <= recorded_version <= _CURRENT_DATABASE_VERSION:
                 raise LifecyclePersistenceError(_UNSUPPORTED_DATABASE_VERSION)
             schema = _schema_signature(connection)
             version = (
                 _identify_unversioned_schema(schema) if recorded_version == 0 else recorded_version
             )
-            _require_migration_path(version)
-            if version in _SCHEMA_SIGNATURES:
+            if version > 0:
                 _validate_versioned_database(connection, version, schema)
             if recorded_version == 0 and version == _CURRENT_DATABASE_VERSION:
                 _set_database_version(connection, version)
-                _require_database_version(connection, version)
                 connection.commit()
                 return
             if version == _CURRENT_DATABASE_VERSION:
                 connection.rollback()
                 return
             next_version = version + 1
-            for statement in _MIGRATIONS[version]:
+            for statement in _MIGRATION_STEPS[version].statements:
                 connection.execute(statement)
             _validate_versioned_database(
                 connection,
@@ -322,25 +354,16 @@ def _migrate_to_current(connection: sqlite3.Connection) -> None:
                 _schema_signature(connection),
             )
             _set_database_version(connection, next_version)
-            _require_database_version(connection, next_version)
             connection.commit()
-    raise LifecyclePersistenceError(_MIGRATION_STALLED)
 
 
 def _database_version(connection: sqlite3.Connection) -> int:
     value = connection.execute(_USER_VERSION_SQL).fetchall()[0][0]
-    if not isinstance(value, int):
-        raise LifecyclePersistenceError(_UNSUPPORTED_DATABASE_VERSION)
-    return value
+    return _integer(value, _IntegerField.DATABASE_VERSION)
 
 
 def _set_database_version(connection: sqlite3.Connection, version: int) -> None:
     connection.execute(f"PRAGMA user_version = {version}")
-
-
-def _require_database_version(connection: sqlite3.Connection, expected: int) -> None:
-    if _database_version(connection) != expected:
-        raise LifecyclePersistenceError(_MIGRATION_STALLED)
 
 
 def _schema_signature(connection: sqlite3.Connection) -> frozenset[str]:
@@ -348,7 +371,10 @@ def _schema_signature(connection: sqlite3.Connection) -> frozenset[str]:
         """
         SELECT sql FROM sqlite_schema
         WHERE name NOT LIKE 'sqlite_%'
-          AND name != 'lifecycle_status_projection'
+          AND NOT (
+              type IN ('table', 'index', 'trigger')
+              AND tbl_name = 'lifecycle_status_projection'
+          )
           AND sql IS NOT NULL
         """
     ).fetchall()
@@ -358,15 +384,14 @@ def _schema_signature(connection: sqlite3.Connection) -> frozenset[str]:
 def _identify_unversioned_schema(schema: frozenset[str]) -> int:
     if not schema:
         return 0
-    matches = [version for version, expected in _SCHEMA_SIGNATURES.items() if schema == expected]
+    matches = [
+        version
+        for version, step in enumerate(_MIGRATION_STEPS, start=1)
+        if step.accepts_unversioned_schema and schema == _SCHEMA_SIGNATURES[version - 1]
+    ]
     if len(matches) != 1:
         raise LifecyclePersistenceError(_UNRECOGNIZED_UNVERSIONED_SCHEMA)
     return matches[0]
-
-
-def _require_migration_path(version: int) -> None:
-    if any(step not in _MIGRATIONS for step in range(version, _CURRENT_DATABASE_VERSION)):
-        raise LifecyclePersistenceError(_MISSING_MIGRATION_STEP)
 
 
 def _validate_versioned_database(
@@ -374,83 +399,72 @@ def _validate_versioned_database(
     version: int,
     schema: frozenset[str],
 ) -> None:
-    if schema != _SCHEMA_SIGNATURES[version]:
+    if schema != _SCHEMA_SIGNATURES[version - 1]:
         raise LifecyclePersistenceError(_SCHEMA_VERSION_MISMATCH)
     _validate_database_integrity(connection)
     _validate_authoritative_rows(connection, version)
 
 
 def _validate_database_integrity(connection: sqlite3.Connection) -> None:
-    rows = connection.execute(_QUICK_CHECK_SQL).fetchall()
+    connection.execute(_INTEGRITY_SAVEPOINT_SQL)
+    try:
+        # The projection is disposable, so exclude its b-trees while retaining a full
+        # database check for authoritative objects and global SQLite consistency.
+        connection.execute(_DROP_PROJECTION_SQL)
+        rows = connection.execute(_INTEGRITY_CHECK_SQL).fetchall()
+    finally:
+        connection.execute(_ROLLBACK_INTEGRITY_SAVEPOINT_SQL)
+        connection.execute(_RELEASE_INTEGRITY_SAVEPOINT_SQL)
     if rows != [("ok",)]:
         raise LifecyclePersistenceError(_DATABASE_INTEGRITY_FAILED)
 
 
 def _validate_authoritative_rows(connection: sqlite3.Connection, version: int) -> None:
-    keys = connection.execute(_LOAD_EVENT_KEYS_SQL).fetchall()
-    for row in keys:
-        key = _validated_idempotency_key(row[0])
-        events = connection.execute(
-            """
-            SELECT stream_id, sequence, idempotency_key, session, mode,
-                   configuration_version, configuration_hash, run_id,
-                   event_kind, completed_phase, recorded_at
-            FROM lifecycle_events WHERE idempotency_key = ? ORDER BY sequence
-            """,
-            (key.value,),
-        ).fetchall()
-        _reconstruct_progress(events)
-    refusals = connection.execute(_LOAD_REFUSALS_FOR_VALIDATION_SQL).fetchall()
-    for key_value, reason_code, recorded_at in refusals:
-        if key_value is not None:
-            _validated_idempotency_key(key_value)
-        _failure_reason(reason_code)
-        _aware_timestamp(recorded_at)
-    if version not in _CONFLICT_SCHEMA_VERSIONS:
-        return
-    conflicts = connection.execute(_LOAD_CONFLICTS_FOR_VALIDATION_SQL).fetchall()
-    for key_value, reason_code, recorded_at in conflicts:
-        key = _validated_idempotency_key(key_value)
-        _failure_reason(reason_code)
-        _aware_timestamp(recorded_at)
-        events = connection.execute(
-            """
-            SELECT stream_id, sequence, idempotency_key, session, mode,
-                   configuration_version, configuration_hash, run_id,
-                   event_kind, completed_phase, recorded_at
-            FROM lifecycle_events WHERE idempotency_key = ? ORDER BY sequence
-            """,
-            (key.value,),
-        ).fetchall()
-        if not events or not _reconstruct_progress(events).is_complete:
-            raise InvalidLifecycleStateError(_CONFLICT_WITHOUT_COMPLETION)
-
-
-def _validated_idempotency_key(value: object) -> IdempotencyKey:
-    parsed = AdvanceRequest.parse(
-        session="2000-01-01",
-        mode="champion",
-        idempotency_key=value,
+    conflict_rows = (
+        connection.execute(_LOAD_CONFLICTS_FOR_VALIDATION_SQL).fetchall()
+        if _MIGRATION_STEPS[version - 1].validates_conflicts
+        else []
     )
-    if isinstance(parsed, InputRefusal):
-        raise InvalidLifecycleStateError(_INVALID_IDEMPOTENCY_KEY)
-    return parsed.idempotency_key
+    _reconstruct_status(
+        connection.execute(
+            """
+            SELECT stream_id, sequence, idempotency_key, session, mode,
+                   configuration_version, configuration_hash, run_id,
+                   event_kind, completed_phase, recorded_at
+            FROM lifecycle_events ORDER BY stream_id, sequence
+            """
+        ).fetchall(),
+        connection.execute(_LOAD_REFUSALS_FOR_VALIDATION_SQL).fetchall(),
+        conflict_rows,
+    )
 
 
-def _connect_database(database: Path) -> sqlite3.Connection:
-    connection = sqlite3.connect(f"{database.as_uri()}?mode=rw", uri=True)
+def _connect_database(database: Path, *, mode: _DatabaseOpenMode) -> sqlite3.Connection:
+    connection = sqlite3.connect(f"{database.as_uri()}?mode={mode}", uri=True)
     connection.execute(_ENABLE_FOREIGN_KEYS_SQL)
     connection.execute(_BUSY_TIMEOUT_SQL)
     return connection
 
 
 class SQLiteLifecycleLedger:
-    """Validate durable rows and atomically append domain-selected records."""
+    """Validate storage, then atomically append domain-selected records.
 
-    def __init__(self, database: Path, *, initialize_schema: bool = True) -> None:
+    Construction fails with ``LifecyclePersistenceError`` when the physical database
+    version, schema, integrity, or authoritative rows cannot be trusted.
+    """
+
+    def __init__(self, database: Path) -> None:
         self._database = database
-        if initialize_schema or database.exists():
-            _prepare_database(database)
+        _prepare_database(database, mode=_DatabaseOpenMode.CREATE_IF_MISSING)
+
+    @classmethod
+    def open_existing(cls, database: Path) -> Self:
+        """Open and migrate existing storage without recreating a missing database."""
+        instance = cls.__new__(cls)
+        instance._database = database
+        if database.exists():
+            _prepare_database(database, mode=_DatabaseOpenMode.EXISTING_ONLY)
+        return instance
 
     def advance_step(
         self,
@@ -504,7 +518,7 @@ class SQLiteLifecycleLedger:
         return self._write(operation)
 
     def _connect(self) -> sqlite3.Connection:
-        return _connect_database(self._database)
+        return _connect_database(self._database, mode=_DatabaseOpenMode.EXISTING_ONLY)
 
     def _write(self, operation: Callable[[sqlite3.Connection], _T]) -> _T:
         try:
@@ -764,9 +778,9 @@ def _optional_text(value: object) -> str | None:
     return _text(value, "completed_phase")
 
 
-def _integer(value: object, field: str) -> int:
+def _integer(value: object, field: _IntegerField) -> int:
+    message = f"invalid {field.value} in lifecycle ledger"
     if not isinstance(value, int) or isinstance(value, bool):
-        message = f"invalid {field} in lifecycle ledger"
         raise InvalidLifecycleStateError(message)
     return value
 

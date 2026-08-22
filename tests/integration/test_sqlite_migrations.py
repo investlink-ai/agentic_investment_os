@@ -10,9 +10,8 @@ import pytest
 if TYPE_CHECKING:
     from pathlib import Path
 
-from agentic_investment_os.adapters import sqlite_lifecycle
 from agentic_investment_os.adapters.sqlite_lifecycle import SQLiteLifecycleLedger
-from agentic_investment_os.application.lifecycle import Advance
+from agentic_investment_os.application.lifecycle import Advance, Status
 from agentic_investment_os.domain.lifecycle import (
     AdvanceDisposition,
     AdvanceFailureReason,
@@ -23,6 +22,8 @@ from agentic_investment_os.domain.lifecycle import (
     LifecyclePhase,
     PinnedRunIdentity,
 )
+from agentic_investment_os.entrypoints.configuration import ConfigurationSource
+from agentic_investment_os.entrypoints.lifecycle import configure_status
 
 CURRENT_DATABASE_VERSION = 3
 LEGACY_DATABASE_VERSION = 1
@@ -212,7 +213,7 @@ def _populate_legacy_history(database: Path) -> tuple[AdvanceRequest, PinnedRunI
         connection.execute(
             """
             INSERT INTO advance_refusals (idempotency_key, reason_code, recorded_at)
-            VALUES (NULL, 'invalid_mode', ?)
+            VALUES (NULL, 'invalid_idempotency_key', ?)
             """,
             (RECORDED_AT,),
         )
@@ -228,6 +229,27 @@ def _authoritative_rows(database: Path) -> tuple[list[tuple[object, ...]], ...]:
             "SELECT * FROM advance_refusals ORDER BY refusal_id"
         ).fetchall()
     return events, refusals
+
+
+def _swap_index_roots(database: Path, first: str, second: str) -> None:
+    with sqlite3.connect(database) as connection:
+        roots = dict(
+            connection.execute(
+                "SELECT name, rootpage FROM sqlite_schema WHERE name IN (?, ?)",
+                (first, second),
+            ).fetchall()
+        )
+        assert set(roots) == {first, second}
+        connection.execute("PRAGMA writable_schema = ON")
+        connection.execute(
+            "UPDATE sqlite_schema SET rootpage = ? WHERE name = ?",
+            (roots[second], first),
+        )
+        connection.execute(
+            "UPDATE sqlite_schema SET rootpage = ? WHERE name = ?",
+            (roots[first], second),
+        )
+        connection.execute("PRAGMA writable_schema = OFF")
 
 
 def test_fresh_database_records_its_physical_schema_version(tmp_path: Path) -> None:
@@ -271,6 +293,16 @@ def test_populated_pre_conflict_database_upgrades_without_rewriting_history(
         mode=request.mode.value,
         idempotency_key=request.idempotency_key.value,
     )
+    keyed_refusal = ledger.record_refusal(
+        IdempotencyKey("legacy-refusal"),
+        AdvanceFailureReason.INVALID_SESSION,
+        datetime(2026, 8, 23, 22, 0, tzinfo=UTC),
+    )
+    unkeyed_refusal = ledger.record_refusal(
+        None,
+        AdvanceFailureReason.INVALID_IDEMPOTENCY_KEY,
+        datetime(2026, 8, 23, 22, 0, tzinfo=UTC),
+    )
     conflict = capability(
         session="2026-08-22",
         mode=request.mode.value,
@@ -282,6 +314,8 @@ def test_populated_pre_conflict_database_upgrades_without_rewriting_history(
     assert replay.disposition is AdvanceDisposition.ADVANCED
     assert replay.recovery is AdvanceRecovery.PREVIOUSLY_COMPLETED
     assert replay.pinned_run_identity == identity
+    assert keyed_refusal.failure_reason is AdvanceFailureReason.INVALID_SESSION
+    assert unkeyed_refusal.failure_reason is AdvanceFailureReason.INVALID_IDEMPOTENCY_KEY
     assert conflict.failure_reason is AdvanceFailureReason.IDEMPOTENCY_KEY_CONFLICT
     with sqlite3.connect(database) as connection:
         assert connection.execute("SELECT * FROM advance_conflicts").fetchall() == [
@@ -322,6 +356,48 @@ def test_unversioned_post_conflict_database_is_recognized_exactly(tmp_path: Path
     assert _schema(database) == before
 
 
+def test_status_open_migrates_a_populated_legacy_database(tmp_path: Path) -> None:
+    state_root = tmp_path / "runtime"
+    state_root.mkdir(mode=0o700)
+    database = state_root / "lifecycle.sqlite3"
+    _create_database(database, _LEGACY_SCHEMA)
+    database.chmod(0o600)
+    _, identity = _populate_legacy_history(database)
+
+    capability = configure_status(
+        (
+            ConfigurationSource(
+                "test",
+                {"schema_version": 1, "state_root": str(state_root)},
+            ),
+        ),
+        repository_root=tmp_path / "repository",
+    )
+
+    assert isinstance(capability, Status)
+    status = capability()
+    assert _database_version(database) == CURRENT_DATABASE_VERSION
+    assert status.pinned_run_identity == identity
+    assert status.pinned_run_identity is not None
+    assert status.pinned_run_identity.run_id == identity.run_id
+
+
+def test_unversioned_internal_migration_shape_is_not_treated_as_a_legacy_release(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "unversioned-intermediate.sqlite3"
+    _create_database(database, (*_LEGACY_SCHEMA, _CONFLICT_TABLE))
+    before = database.read_bytes()
+
+    with pytest.raises(
+        LifecyclePersistenceError,
+        match="unrecognized unversioned SQLite schema",
+    ):
+        SQLiteLifecycleLedger(database)
+
+    assert database.read_bytes() == before
+
+
 def test_opening_a_current_database_is_a_no_op(tmp_path: Path) -> None:
     database = tmp_path / "current.sqlite3"
     SQLiteLifecycleLedger(database)
@@ -332,13 +408,76 @@ def test_opening_a_current_database_is_a_no_op(tmp_path: Path) -> None:
     assert database.read_bytes() == before
 
 
-def test_unknown_newer_database_version_fails_before_schema_or_history_changes(
+def test_projection_owned_table_and_index_are_outside_the_authoritative_signature(
     tmp_path: Path,
 ) -> None:
-    database = tmp_path / "newer.sqlite3"
+    database = tmp_path / "projection-owned-objects.sqlite3"
     SQLiteLifecycleLedger(database)
     with sqlite3.connect(database) as connection:
-        connection.execute(f"PRAGMA user_version = {CURRENT_DATABASE_VERSION + 1}")
+        connection.execute("CREATE TABLE lifecycle_status_projection (payload TEXT)")
+        connection.execute(
+            """
+            CREATE INDEX lifecycle_status_projection_payload
+            ON lifecycle_status_projection(payload)
+            """
+        )
+    before = _schema(database)
+
+    SQLiteLifecycleLedger(database)
+
+    assert _database_version(database) == CURRENT_DATABASE_VERSION
+    assert _schema(database) == before
+
+
+def test_projection_only_index_corruption_is_ignored_then_rebuilt(tmp_path: Path) -> None:
+    database = tmp_path / "corrupt-projection-index.sqlite3"
+    SQLiteLifecycleLedger(database)
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            """
+            CREATE TABLE lifecycle_status_projection (
+                singleton INTEGER PRIMARY KEY,
+                first_payload TEXT,
+                second_payload TEXT
+            ) STRICT
+            """
+        )
+        connection.execute(
+            """
+            CREATE UNIQUE INDEX projection_first_payload
+            ON lifecycle_status_projection(first_payload)
+            """
+        )
+        connection.execute(
+            """
+            CREATE UNIQUE INDEX projection_second_payload
+            ON lifecycle_status_projection(second_payload)
+            """
+        )
+        connection.execute("INSERT INTO lifecycle_status_projection VALUES (1, 'first', 'second')")
+    _swap_index_roots(database, "projection_first_payload", "projection_second_payload")
+    with sqlite3.connect(database) as connection:
+        assert connection.execute("PRAGMA quick_check").fetchall() == [("ok",)]
+        assert connection.execute("PRAGMA integrity_check").fetchall() != [("ok",)]
+    before = database.read_bytes()
+
+    ledger = SQLiteLifecycleLedger(database)
+
+    assert database.read_bytes() == before
+    ledger.rebuild_status()
+    with sqlite3.connect(database) as connection:
+        assert connection.execute("PRAGMA integrity_check").fetchall() == [("ok",)]
+
+
+@pytest.mark.parametrize("unsupported_version", [-1, CURRENT_DATABASE_VERSION + 1])
+def test_unsupported_database_version_fails_before_schema_or_history_changes(
+    tmp_path: Path,
+    unsupported_version: int,
+) -> None:
+    database = tmp_path / "unsupported-version.sqlite3"
+    SQLiteLifecycleLedger(database)
+    with sqlite3.connect(database) as connection:
+        connection.execute(f"PRAGMA user_version = {unsupported_version}")
     before = _schema(database)
 
     with pytest.raises(
@@ -347,24 +486,8 @@ def test_unknown_newer_database_version_fails_before_schema_or_history_changes(
     ):
         SQLiteLifecycleLedger(database)
 
-    assert _database_version(database) == CURRENT_DATABASE_VERSION + 1
+    assert _database_version(database) == unsupported_version
     assert _schema(database) == before
-
-
-def test_invalid_database_version_representation_fails_before_writes(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    database = tmp_path / "invalid-version.sqlite3"
-    monkeypatch.setattr(sqlite_lifecycle, "_USER_VERSION_SQL", "SELECT 'invalid'")
-
-    with pytest.raises(
-        LifecyclePersistenceError,
-        match="unsupported SQLite database version",
-    ):
-        SQLiteLifecycleLedger(database)
-
-    assert database.stat().st_size == 0
 
 
 def test_unrecognized_unversioned_schema_fails_without_guessing(tmp_path: Path) -> None:
@@ -382,11 +505,60 @@ def test_unrecognized_unversioned_schema_fails_without_guessing(tmp_path: Path) 
     assert _schema(database) == before
 
 
+def test_projection_name_does_not_hide_an_object_owned_by_authoritative_state(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "projection-name-collision.sqlite3"
+    _create_database(database, _LEGACY_SCHEMA)
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            """
+            CREATE TRIGGER lifecycle_status_projection
+            BEFORE INSERT ON lifecycle_events
+            BEGIN SELECT RAISE(ABORT, 'unexpected authoritative trigger'); END
+            """
+        )
+    before = _schema(database)
+
+    with pytest.raises(
+        LifecyclePersistenceError,
+        match="unrecognized unversioned SQLite schema",
+    ):
+        SQLiteLifecycleLedger(database)
+
+    assert _database_version(database) == 0
+    assert _schema(database) == before
+
+
+def test_projection_name_does_not_hide_a_view_that_status_cannot_replace(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "projection-view-collision.sqlite3"
+    _create_database(database, _LEGACY_SCHEMA)
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            """
+            CREATE VIEW lifecycle_status_projection AS
+            SELECT stream_id FROM lifecycle_events
+            """
+        )
+    before = _schema(database)
+
+    with pytest.raises(
+        LifecyclePersistenceError,
+        match="unrecognized unversioned SQLite schema",
+    ):
+        SQLiteLifecycleLedger(database)
+
+    assert _database_version(database) == 0
+    assert _schema(database) == before
+
+
 def test_versioned_schema_mismatch_fails_before_migration(tmp_path: Path) -> None:
     database = tmp_path / "corrupt-input.sqlite3"
     _create_database(
         database,
-        (*_LEGACY_SCHEMA, "CREATE TABLE unexpected_record (value TEXT) STRICT"),
+        (*_LEGACY_SCHEMA, "CREATE TABLE advance_conflicts (unexpected TEXT) STRICT"),
         version=LEGACY_DATABASE_VERSION,
     )
     before = _schema(database)
@@ -425,6 +597,30 @@ def test_corrupt_migration_rows_fail_before_schema_or_version_changes(tmp_path: 
     assert _schema(database) == before
 
 
+def test_index_content_corruption_fails_before_lifecycle_writes_resume(tmp_path: Path) -> None:
+    database = tmp_path / "corrupt-index.sqlite3"
+    _create_database(database, _LEGACY_SCHEMA, version=LEGACY_DATABASE_VERSION)
+    _populate_legacy_history(database)
+    before = _authoritative_rows(database)
+    _swap_index_roots(
+        database,
+        "one_unkeyed_refusal_per_reason",
+        "one_initial_event_per_stream",
+    )
+    with sqlite3.connect(database) as connection:
+        assert connection.execute("PRAGMA quick_check").fetchall() == [("ok",)]
+        assert connection.execute("PRAGMA integrity_check").fetchall() != [("ok",)]
+
+    with pytest.raises(
+        LifecyclePersistenceError,
+        match="SQLite database integrity check failed",
+    ):
+        SQLiteLifecycleLedger(database)
+
+    assert _database_version(database) == LEGACY_DATABASE_VERSION
+    assert _authoritative_rows(database) == before
+
+
 def test_invalid_durable_key_fails_before_migration(tmp_path: Path) -> None:
     database = tmp_path / "invalid-key.sqlite3"
     _create_database(database, _LEGACY_SCHEMA, version=LEGACY_DATABASE_VERSION)
@@ -439,7 +635,7 @@ def test_invalid_durable_key_fails_before_migration(tmp_path: Path) -> None:
 
     with pytest.raises(
         LifecyclePersistenceError,
-        match="invalid idempotency_key in lifecycle ledger",
+        match="invalid idempotency_key in lifecycle refusal ledger",
     ):
         SQLiteLifecycleLedger(database)
 
@@ -460,113 +656,105 @@ def test_orphan_conflict_fails_on_current_database_reopen(tmp_path: Path) -> Non
 
     with pytest.raises(
         LifecyclePersistenceError,
-        match="lifecycle conflict does not belong to a completed stream",
+        match="invalid conflict association",
     ):
         SQLiteLifecycleLedger(database)
 
     assert _database_version(database) == CURRENT_DATABASE_VERSION
 
 
-def test_missing_migration_step_fails_before_any_database_change(
+def test_refusal_that_overlaps_a_completed_stream_fails_before_migration(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    database = tmp_path / "missing-step.sqlite3"
+    database = tmp_path / "overlapping-refusal.sqlite3"
     _create_database(database, _LEGACY_SCHEMA, version=LEGACY_DATABASE_VERSION)
-    before = database.read_bytes()
-    incomplete = dict(sqlite_lifecycle._MIGRATIONS)
-    del incomplete[LEGACY_DATABASE_VERSION]
-    monkeypatch.setattr(sqlite_lifecycle, "_MIGRATIONS", incomplete)
+    request, _ = _populate_legacy_history(database)
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            """
+            INSERT INTO advance_refusals (idempotency_key, reason_code, recorded_at)
+            VALUES (?, 'invalid_session', ?)
+            """,
+            (request.idempotency_key.value, RECORDED_AT),
+        )
+    before = _authoritative_rows(database)
 
     with pytest.raises(
         LifecyclePersistenceError,
-        match="missing SQLite database migration step",
-    ):
-        SQLiteLifecycleLedger(database)
-
-    assert database.read_bytes() == before
-
-
-def test_current_database_does_not_require_obsolete_migration_steps(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    database = tmp_path / "current-without-obsolete-steps.sqlite3"
-    SQLiteLifecycleLedger(database)
-    current_only = dict(sqlite_lifecycle._MIGRATIONS)
-    del current_only[0]
-    del current_only[LEGACY_DATABASE_VERSION]
-    monkeypatch.setattr(sqlite_lifecycle, "_MIGRATIONS", current_only)
-
-    SQLiteLifecycleLedger(database)
-
-    assert _database_version(database) == CURRENT_DATABASE_VERSION
-
-
-def test_failed_migration_rolls_back_and_a_retry_reaches_current(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    database = tmp_path / "retry.sqlite3"
-    _create_database(database, _LEGACY_SCHEMA, version=LEGACY_DATABASE_VERSION)
-    before_schema = _schema(database)
-    migrations = dict(sqlite_lifecycle._MIGRATIONS)
-    original = migrations[LEGACY_DATABASE_VERSION]
-    migrations[LEGACY_DATABASE_VERSION] = (
-        *original,
-        "invalid migration statement",
-    )
-    monkeypatch.setattr(sqlite_lifecycle, "_MIGRATIONS", migrations)
-
-    with pytest.raises(
-        LifecyclePersistenceError,
-        match="SQLite database migration failed",
+        match="invalid refusal association",
     ):
         SQLiteLifecycleLedger(database)
 
     assert _database_version(database) == LEGACY_DATABASE_VERSION
+    assert _authoritative_rows(database) == before
+
+
+def test_failed_migration_rolls_back_and_a_retry_reaches_current(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "retry.sqlite3"
+    _create_database(database, _LEGACY_SCHEMA, version=LEGACY_DATABASE_VERSION)
+    before_schema = _schema(database)
+    database.chmod(0o400)
+    try:
+        with pytest.raises(
+            LifecyclePersistenceError,
+            match="SQLite database migration failed",
+        ):
+            SQLiteLifecycleLedger(database)
+    finally:
+        database.chmod(0o600)
+
+    assert _database_version(database) == LEGACY_DATABASE_VERSION
     assert _schema(database) == before_schema
 
-    migrations[LEGACY_DATABASE_VERSION] = original
     SQLiteLifecycleLedger(database)
 
     assert _database_version(database) == CURRENT_DATABASE_VERSION
 
 
-def test_version_marker_write_is_verified_before_migration_commit(
+def test_failure_after_partial_migration_ddl_rolls_back_the_complete_step(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    database = tmp_path / "marker-write.sqlite3"
+    database = tmp_path / "partial-ddl-failure.sqlite3"
+    _create_database(
+        database,
+        (*_LEGACY_SCHEMA, _CONFLICT_TABLE),
+        version=INTERMEDIATE_DATABASE_VERSION,
+    )
+    before_schema = _schema(database)
+    connect = sqlite3.connect
 
-    def do_not_set_version(connection: sqlite3.Connection, version: int) -> None:
-        del connection, version
+    def reject_delete_trigger(
+        action: int,
+        object_name: str | None,
+        _table_name: str | None,
+        _database_name: str | None,
+        _trigger_name: str | None,
+    ) -> int:
+        if (
+            action == sqlite3.SQLITE_CREATE_TRIGGER
+            and object_name == "advance_conflicts_are_append_only_delete"
+        ):
+            return sqlite3.SQLITE_DENY
+        return sqlite3.SQLITE_OK
 
-    monkeypatch.setattr(sqlite_lifecycle, "_set_database_version", do_not_set_version)
+    def connect_with_authorizer(database_uri: str, *, uri: bool) -> sqlite3.Connection:
+        connection = connect(database_uri, uri=uri)
+        connection.set_authorizer(reject_delete_trigger)
+        return connection
 
-    with pytest.raises(
-        LifecyclePersistenceError,
-        match="SQLite database migration did not reach the current version",
-    ):
-        SQLiteLifecycleLedger(database)
-
-    assert _database_version(database) == 0
-    assert _schema(database) == []
-
-
-def test_nonadvancing_migration_is_bounded_and_recoverable(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    database = tmp_path / "bounded-stall.sqlite3"
-
-    with monkeypatch.context() as stalled:
-        stalled.setattr(sqlite_lifecycle, "_MAX_MIGRATION_ATTEMPTS", 0)
+    with monkeypatch.context() as fault:
+        fault.setattr(sqlite3, "connect", connect_with_authorizer)
         with pytest.raises(
             LifecyclePersistenceError,
-            match="SQLite database migration did not reach the current version",
+            match="SQLite database migration failed",
         ):
             SQLiteLifecycleLedger(database)
+
+    assert _database_version(database) == INTERMEDIATE_DATABASE_VERSION
+    assert _schema(database) == before_schema
 
     SQLiteLifecycleLedger(database)
 

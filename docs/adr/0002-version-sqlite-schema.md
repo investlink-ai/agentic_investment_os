@@ -22,12 +22,26 @@ lifecycle appends new history.
 Use SQLite `PRAGMA user_version` as the single database-wide physical schema version. Keep it
 independent of run-configuration and durable-record schema versions. The SQLite adapter owns a
 private, contiguous migration sequence and an exact schema signature for every supported version;
-this is not a cross-database migration framework.
+this is not a cross-database migration framework. One ordered descriptor owns the statements,
+expected cumulative schema, legacy eligibility, and authoritative-ledger validation for each step.
 
 An empty database advances through the same ordered migrations as an older database. An unversioned
-non-empty database is assigned a version only when its complete schema exactly matches a pinned
-supported signature. Before any change, startup verifies that the complete remaining migration path
-exists and that the recorded version, schema, SQLite integrity check, and authoritative rows agree.
+non-empty database is assigned a version only when its complete schema exactly matches one of the two
+known deployed shapes: the pre-conflict schema or the post-conflict schema with both append-only
+triggers. The table-only intermediate migration shape is resumable only when its committed physical
+version is present; without that marker it is ambiguous and refused. Before any change, startup
+verifies that the complete remaining migration path exists and that the recorded version, schema,
+SQLite `integrity_check`, and cross-ledger authoritative-row invariants agree. The full integrity
+check is required because the faster `quick_check` omits uniqueness and index-content consistency.
+The exact version signature covers authoritative lifecycle tables, indexes, constraints, and
+append-only triggers. Only the lifecycle-status projection table and its owned indexes or triggers
+are excluded because that projection is disposable, may be absent or malformed between rebuilds,
+and is replaced only by the Status capability; a view or an object with the projection's name but a
+different owner remains part of the signature. The projection never substitutes for versioned
+authoritative state. Integrity validation temporarily drops a recognized projection under a
+savepoint, runs the full database check, and rolls back that temporary change. Corruption confined to
+projection b-trees therefore remains rebuildable, while corruption shared with authoritative or
+global SQLite structures still fails startup.
 
 Each migration executes under `BEGIN IMMEDIATE`. Its schema statements and next `user_version` value
 commit in the same transaction after post-migration validation. An exception or interruption rolls

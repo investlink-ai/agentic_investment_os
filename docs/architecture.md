@@ -263,8 +263,15 @@ The SQLite database carries one database-wide physical schema version independen
 configuration and durable-record schema versions. Opening the store validates its complete schema
 and authoritative rows, then applies every supported migration in order as a separate atomic
 transaction. An unversioned store is accepted only when it is empty or exactly matches a pinned
-legacy schema. Unknown versions, missing migration steps, malformed schemas, and invalid migration
-input fail before lifecycle writes; authoritative rows are never rewritten to perform an upgrade.
+deployed legacy schema; internal migration checkpoints require their committed physical version.
+Unknown versions, missing migration steps, malformed schemas, index inconsistency, and contradictory
+cross-ledger history fail before lifecycle writes; authoritative rows are never rewritten to perform
+an upgrade. The disposable lifecycle-status projection table and its indexes or triggers are outside
+the authoritative schema signature and remain replaceable by Status from the validated versioned
+ledgers; views and same-named objects attached to authoritative tables remain inside the signature.
+Startup runs the full SQLite integrity check with a recognized projection temporarily removed under
+a rolled-back savepoint, so projection-only corruption remains rebuildable without masking damage to
+authoritative or global database structures.
 The migration transaction model is recorded in [ADR 0002](adr/0002-version-sqlite-schema.md).
 
 ## Configuration and deployment
