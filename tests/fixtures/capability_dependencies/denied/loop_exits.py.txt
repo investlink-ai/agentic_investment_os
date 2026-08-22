@@ -1,0 +1,63 @@
+import random
+from pathlib import Path
+
+
+Factory = int
+for item in (random.Random,):
+    Factory = item
+    break
+    Factory = int
+Factory()
+
+root = object()
+for item in (Path("state"),):
+    root = item
+    continue
+    root = object()
+root.read_text()
+
+NestedFactory = int
+for item in (random.Random,):
+    if True:
+        NestedFactory = item
+        break
+        NestedFactory = int
+NestedFactory()
+
+FinallyFactory = int
+for item in (random.Random,):
+    try:
+        break
+    finally:
+        FinallyFactory = item
+    FinallyFactory = int
+else:
+    FinallyFactory = int
+FinallyFactory()
+
+ContinueFactory = int
+for item in (random.Random,):
+    try:
+        continue
+    finally:
+        ContinueFactory = item
+    ContinueFactory = int
+ContinueFactory()
+
+RaiseFactory = int
+for item in (random.Random,):
+    try:
+        raise RuntimeError((RaiseFactory := item))
+    finally:
+        break
+RaiseFactory()
+
+
+def draw_after_cancelled_return() -> random.Random:
+    ReturnFactory = int
+    for item in (random.Random,):
+        try:
+            return (ReturnFactory := item)
+        finally:
+            continue
+    return ReturnFactory()

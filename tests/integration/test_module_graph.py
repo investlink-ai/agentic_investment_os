@@ -26,6 +26,7 @@ MUTATING_ALL_METHODS = frozenset(
     }
 )
 ALLOWED_EDGES = {
+    PACKAGE_NAME: set(),
     "entrypoints": {"application", "domain", "execution", "adapters"},
     "application": {"evidence", "memory", "research", "portfolio", "evaluation", "domain"},
     "evidence": {"domain"},
@@ -112,6 +113,36 @@ def test_disallowed_capability_direction_is_rejected() -> None:
     assert "domain -> application" in violations[0].problem
 
 
+def test_package_root_cannot_reexport_an_effect_zone(tmp_path: Path) -> None:
+    package_root = tmp_path / PACKAGE_NAME
+    package_root.mkdir()
+    (package_root / "adapters").mkdir()
+    (package_root / "adapters" / "__init__.py").touch()
+    (package_root / "__init__.py").write_text(
+        "from agentic_investment_os import adapters\n",
+        encoding="utf-8",
+    )
+
+    violations = _production_import_violations(package_root)
+
+    assert len(violations) == 1
+    assert f"{PACKAGE_NAME} -> adapters" in violations[0].problem
+
+
+def test_capability_cannot_import_package_root_as_a_module_object(tmp_path: Path) -> None:
+    package_root = tmp_path / PACKAGE_NAME
+    (package_root / "domain").mkdir(parents=True)
+    (package_root / "domain" / "consumer.py").write_text(
+        "import agentic_investment_os\nadapter = agentic_investment_os.adapters.sqlite_lifecycle\n",
+        encoding="utf-8",
+    )
+
+    violations = _production_import_violations(package_root)
+
+    assert len(violations) == 1
+    assert "package-root module object" in violations[0].problem
+
+
 def test_violation_diagnostics_are_bounded_and_actionable() -> None:
     violations = tuple(
         ImportViolation(source=Path(f"module_{index}.py"), line=index + 1, problem="problem")
@@ -130,9 +161,7 @@ def _production_import_violations(package_root: Path) -> tuple[ImportViolation, 
     violations: list[ImportViolation] = []
     for source_file in _python_sources(package_root):
         relative_source = source_file.relative_to(package_root)
-        owner = relative_source.parts[0]
-        if owner.endswith(".py"):
-            continue
+        owner = _owner(relative_source)
         tree = ast.parse(source_file.read_text(encoding="utf-8"), filename=str(source_file))
         current_package = _current_package(relative_source)
         for node in ast.walk(tree):
@@ -157,6 +186,15 @@ def _cross_module_violations(
     imported: ImportReference,
     declarations: dict[str, frozenset[str] | None],
 ) -> tuple[ImportViolation, ...]:
+    if imported.module == PACKAGE_NAME and owner != PACKAGE_NAME:
+        return (
+            _violation(
+                source,
+                imported,
+                "production import uses the package-root module object; import a declared symbol "
+                "from its owning capability instead",
+            ),
+        )
     target = _capability(imported.module)
     if target is None or target == owner:
         return ()
@@ -302,6 +340,11 @@ def _current_package(relative_source: Path) -> str:
     module_parts = list(relative_source.with_suffix("").parts)
     module_parts.pop()
     return ".".join((PACKAGE_NAME, *module_parts))
+
+
+def _owner(relative_source: Path) -> str:
+    first_part = relative_source.parts[0]
+    return PACKAGE_NAME if first_part.endswith(".py") else first_part
 
 
 def _declared_symbols(package_root: Path, module: str) -> frozenset[str] | None:

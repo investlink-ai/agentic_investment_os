@@ -185,6 +185,73 @@ is supporting evidence, not proof that the owning semantic contract is complete 
 add brittle checks merely to mechanize prose, and do not let a changed review or publication gate
 approve itself.
 
+## Capability effect boundaries
+
+All production Python under `src/agentic_investment_os/` is deterministic capability code except
+`adapters/` and `entrypoints/`. Capability code receives time, identifiers, configuration,
+randomness, storage, and external observations as typed values or through a narrow port owned by the
+capability. Adapters implement those ports; entrypoints resolve configuration and construct the
+implementations. A new top-level production package is protected automatically. Exempting another
+path changes an authority boundary and requires architecture review rather than a local suppression.
+
+The static capability-dependency gate rejects these mechanically identifiable forms:
+
+- `CAP001`: ambient clock reads from `datetime` or `time`;
+- `CAP002`: module-global random calls, OS or `secrets` randomness, and `random.Random` construction
+  or reseeding without an explicit non-null seed;
+- `CAP003`: time-, host-, or randomness-derived UUID generation;
+- `CAP004`: direct process-environment access or mutation and host-local timezone conversions;
+- `CAP005`: concrete network transport dependencies;
+- `CAP006`: concrete model-client dependencies;
+- `CAP007`: concrete broker-client dependencies;
+- `CAP008`: concrete SQLite dependencies;
+- `CAP009`: direct filesystem observations and effects through built-ins and standard-library file,
+  path, archive, compression, logging, and persistence APIs; and
+- `CAP010`: external process creation that could bypass the typed network, broker, model, or storage
+  boundaries.
+
+Unreadable or syntactically invalid protected source fails closed as `CAP000` without reproducing
+the source or parser message. Wildcard imports from effect-bearing standard-library modules are
+rejected under the corresponding effect rule because they erase the qualified name the gate needs
+to evaluate calls safely.
+
+Immutable `datetime` and `UUID` values, injected ports, typed configuration, and a locally
+constructed or explicitly reseeded `random.Random` with a non-null seed remain available to
+capability code. The location-based permission for adapters and entrypoints is not reusable
+authority: the [module graph](module-graph.md) separately prevents capabilities from importing those
+implementations and remains the only hand-written owner of allowed Python dependency directions.
+[ADR 0006](adr/0006-enforce-capability-effect-boundaries.md) records this authority boundary and its
+trade-offs.
+
+`scripts/check_capability_dependencies.py` parses protected source without importing it. It follows
+ordinary import aliases, direct local re-exports through imported names or module objects, simple
+and destructuring assignments, named type aliases, conservative ordinary control-flow joins, and
+typed `Path`, `datetime`, random-generator, event-loop, configuration-parser,
+network-handler/stream/transport/server, process-executor/subprocess-handle,
+file-handler/raw-I/O/audio/package-resource, archive/compression, import-loader/finder,
+directory-entry/comparison/temporary-directory, and user-defined class-field receivers.
+Subscription, iteration—including unpacking and materialization—membership, buffer, truth-value,
+and context-manager protocols on tracked concrete effect receivers are effect use too. Known truth
+consumers are checked against literal or structurally retained iterable members.
+Comprehension targets are bound in an isolated scope before their filters and result expressions,
+while comprehension assignment expressions retain Python's binding to the containing scope.
+Literal nested destructuring and match structures retain their shape through aliases and
+control-flow joins so each pattern aligns with its corresponding value before receiver protocols
+are checked. Class patterns use explicit or dataclass-generated positional fields. The same
+conservative joins preserve conditional module exports used by postponed annotations. A potentially
+naive `datetime` cannot invoke an operation that would consult the host timezone.
+Diagnostics contain only a repository-relative production file, source position, fixed prohibited
+dependency or call, and this governing section; they never echo source text, environment values,
+credentials, or runtime-state paths. Static syntax cannot prove behavior hidden behind reflection,
+arbitrary interprocedural propagation, or a port, so human review still judges whether an interface
+launders authority or an effect is indirect.
+
+When an adapter adopts another concrete transport, model client, broker client, or store, extend the
+gate's fixed dependency catalog and its negative fixture before the dependency enters production.
+When Python adds another ambient clock, random generator, identifier generator, or filesystem API,
+extend the corresponding call catalog and fixture. Do not add capability-path allowlists or local
+suppressions; pass the observation through a typed value or owner-defined port.
+
 ## System topology
 
 ```mermaid

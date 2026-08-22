@@ -1,0 +1,42 @@
+import gzip
+import shelve
+from dataclasses import dataclass, field
+
+
+class Store:
+    __match_args__ = ("archive",)
+    archive: gzip.GzipFile
+    shelf: shelve.Shelf[str]
+
+
+def inspect(store: Store) -> None:
+    match store:
+        case Store((head, *tail)):
+            pass
+    match store:
+        case Store(shelf={"decision": value}):
+            pass
+
+
+@dataclass
+class GeneratedStore:
+    shelf: shelve.Shelf[str]
+
+
+def inspect_generated(store: GeneratedStore) -> None:
+    match store:
+        case GeneratedStore({"decision": value}):
+            pass
+
+
+@dataclass
+class ConfiguredStore:
+    ignored: shelve.Shelf[str] = field(init=False)
+    keyword_only: shelve.Shelf[str] = field(kw_only=True)
+    archive: gzip.GzipFile = field()
+
+
+def inspect_configured(store: ConfiguredStore) -> None:
+    match store:
+        case ConfiguredStore((head, *tail)):
+            pass

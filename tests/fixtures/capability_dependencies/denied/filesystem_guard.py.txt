@@ -1,0 +1,9 @@
+from pathlib import Path
+
+
+def write(enabled: bool) -> None:
+    if enabled:
+        path = Path("decision.json")
+    else:
+        raise ValueError
+    path.write_text("unsafe")

@@ -1,0 +1,22 @@
+import asyncio
+import random
+from pathlib import Path
+
+
+for root in (Path("state"),):
+    root.read_text()
+
+for Generator in (random.Random,):
+    Generator()
+
+for runner in (asyncio.Runner(),):
+    runner.get_loop().time()
+
+for root, Generator in ((Path("state"), random.Random),):
+    root.read_text()
+    Generator()
+
+Factory = int
+for item in (random.Random, int):
+    Factory()
+    Factory = item

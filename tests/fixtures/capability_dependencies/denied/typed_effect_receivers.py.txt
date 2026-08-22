@@ -1,0 +1,30 @@
+import filecmp
+import importlib.machinery
+import logging.handlers
+import zipimport
+
+
+def publish_smtp(handler: logging.handlers.SMTPHandler, record: object) -> None:
+    handler.emit(record)
+
+
+class Publisher:
+    handler: logging.handlers.DatagramHandler
+
+    def publish(self, record: object) -> None:
+        self.handler.emit(record)
+
+
+def load_archive(loader: zipimport.zipimporter) -> bytes:
+    return loader.get_data("decision.py")
+
+
+def compare_names(comparison: filecmp.dircmp) -> list[str]:
+    return comparison.left_list
+
+
+def load_source(loader: importlib.machinery.SourceFileLoader) -> bytes:
+    return loader.get_data("decision.py")
+
+
+importlib.machinery.SourceFileLoader("decision", "decision.py").get_data("decision.py")

@@ -1,0 +1,36 @@
+import random
+from pathlib import Path
+
+
+try:
+    root = Path("state")
+    raise RuntimeError
+    root = object()
+except RuntimeError:
+    root.read_text()
+
+try:
+    Generator = random.Random
+    raise RuntimeError
+    Generator = int
+except RuntimeError:
+    Generator()
+
+
+def read_nested_exception() -> None:
+    try:
+        if True:
+            nested_root = Path("state")
+            raise RuntimeError
+            nested_root = object()
+    except RuntimeError:
+        nested_root.read_text()
+
+
+def read_during_finally() -> None:
+    try:
+        final_root = Path("state")
+        raise RuntimeError
+        final_root = object()
+    finally:
+        final_root.read_text()

@@ -75,6 +75,7 @@ docs/                       Product, architecture, investment, engineering polic
 make bootstrap              Create the environment and enable repository hooks
 make format                 Apply Ruff formatting and safe lint fixes
 make harness                Verify shared agent instructions and required engineering docs
+make architecture           Reject ambient effects in deterministic capability modules
 make agent-workflow SCENARIO=<id>  Run one explicit model-backed agent workflow scenario
 make check                  Run formatting, lint, strict mypy, and deterministic tests
 make mutation               Verify tests reject mutations in deterministic safety behavior

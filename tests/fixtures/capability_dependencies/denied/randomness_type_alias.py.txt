@@ -1,0 +1,10 @@
+import random
+from typing import TypeAlias
+
+
+LegacySeed: TypeAlias = int | None
+type Seed = LegacySeed
+
+
+def build(seed: Seed) -> random.Random:
+    return random.Random(seed)

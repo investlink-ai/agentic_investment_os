@@ -1,0 +1,30 @@
+import gzip
+
+archive: gzip.GzipFile
+match {"archive": archive}:
+    case {"archive": captured}:
+        captured.read()
+match {"outer": {"archive": archive}}:
+    case {"outer": {"archive": nested_captured}}:
+        nested_captured.read()
+match ({"archive": archive},):
+    case ({"archive": sequence_captured},):
+        sequence_captured.read()
+
+subject = {"archive": archive}
+match subject:
+    case {"archive": aliased_captured}:
+        aliased_captured.read()
+
+match (named_subject := {"archive": archive}):
+    case {"archive": named_captured}:
+        named_captured.read()
+
+condition = True
+if condition:
+    branch_subject = {"archive": archive}
+else:
+    branch_subject = {}
+match branch_subject:
+    case {"archive": branch_captured}:
+        branch_captured.read()

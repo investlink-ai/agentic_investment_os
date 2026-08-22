@@ -1,0 +1,5 @@
+from asyncio import subprocess
+
+
+async def run() -> None:
+    await subprocess.create_subprocess_exec("worker")

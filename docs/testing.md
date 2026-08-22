@@ -64,6 +64,30 @@ and printed replay blobs. Generated tests remain credential-free and network-fre
 and shrink a failure to a reproducible counterexample; neither Hypothesis shrinking nor replay may
 turn a failure into a passing retry.
 
+## Static architecture gates
+
+`make architecture` runs the capability-effect check owned by
+[`architecture.md`](architecture.md#capability-effect-boundaries), and `make check` includes it. The
+check scans the production package without importing code and protects every path except the
+effect-owning adapter and entrypoint paths. The target runs the checker's positive and negative
+fixtures and `tests/integration/test_module_graph.py`, which independently remains the executable
+owner of allowed cross-module import directions, including relative imports.
+
+Synthetic snippets under `tests/fixtures/capability_dependencies/` exercise the check as data rather
+than importable test modules. Positive fixtures cover typed values, owner-defined ports, locally
+seeded randomness, and a deterministic fallback for a nullable seed. Negative fixtures cover every
+prohibited category, nullable inputs through named aliases and conditional branches, host-local
+timezone use through bound and unbound methods, ambient reseeding, typed event-loop receivers, and
+filesystem calls through typed parameters and class-level fields. Control-flow fixtures cover
+conditionals, pattern matching, exception handling, loops, and a terminating guard branch.
+Integration tests also prove that ordinary aliases and direct local re-exports through imported
+names or module objects retain effect identity, effect-zone permissions remain location-bound, new
+capability paths are protected automatically, and diagnostics do not echo hostile source values or
+temporary filesystem roots. The checker discovers and reads source trees, so its tests live in the
+integration tier. Every negative fixture asserts the exact source position, rule, and fixed subject
+for each prohibited syntax form, preventing another line with the same rule from masking a
+regression. Add or change a fixture with every change to the fixed dependency or call catalog.
+
 ## Test contracts
 
 Use the earliest stable enforcement layer defined by the

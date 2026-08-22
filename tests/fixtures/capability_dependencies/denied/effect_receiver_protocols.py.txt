@@ -1,0 +1,127 @@
+import fileinput
+import gzip
+import mmap
+import shelve
+import zipfile
+
+shelf: shelve.Shelf
+value = shelf["decision"]
+shelf["decision"] = value
+mapped: mmap.mmap
+byte = mapped[0]
+file_input: fileinput.FileInput
+for line in file_input:
+    pass
+gzip_file: gzip.GzipFile
+next(gzip_file)
+iter(gzip_file)
+lines = [line for line in gzip_file]
+zip_archive: zipfile.ZipFile
+with zip_archive:
+    pass
+
+head, *tail = gzip_file
+spread = [*gzip_file]
+
+
+def sink(*values: object) -> None:
+    pass
+
+
+sink(*gzip_file)
+
+
+def stream_lines() -> object:
+    yield from gzip_file
+
+
+materialized = list(gzip_file)
+keys = tuple(shelf)
+present = "decision" in shelf
+mapping = {**shelf}
+sink(**shelf)
+view = memoryview(mapped)
+
+import asyncio
+
+
+async def receive(stream_reader: asyncio.StreamReader) -> None:
+    aiter(stream_reader)
+    await anext(stream_reader)
+
+
+for first, *rest in [gzip_file]:
+    pass
+unpacked = [first for first, *rest in [gzip_file]]
+match shelf:
+    case {"decision": decision}:
+        pass
+
+(nested_first, *nested_rest), marker = (gzip_file, 0)
+for (nested_first, *nested_rest), marker in [(gzip_file, 0)]:
+    pass
+nested_unpack = [
+    nested_first for (nested_first, *nested_rest), marker in [(gzip_file, 0)]
+]
+match (shelf,):
+    case ({"decision": nested_decision},):
+        pass
+match (gzip_file,):
+    case ((nested_first, *nested_rest),):
+        pass
+match {"store": shelf}:
+    case {"store": {"decision": nested_decision}}:
+        pass
+match {"file": gzip_file}:
+    case {"file": (nested_first, *nested_rest)}:
+        pass
+((dict_first, *dict_rest), (dict_second, *dict_second_rest)) = {
+    gzip_file: 1,
+    file_input: 2,
+}
+((set_first, *set_rest),) = {gzip_file}
+match {True: shelf}:
+    case {1: {"decision": equivalent_decision}}:
+        pass
+match {1.0: shelf}:
+    case {1: {"decision": numeric_decision}}:
+        pass
+if shelf:
+    pass
+while shelf:
+    break
+assert shelf
+choice = "present" if shelf else "absent"
+selected = shelf and "present"
+negated = not shelf
+guarded = [value for value in [1] if shelf]
+match 1:
+    case _ if shelf:
+        pass
+
+import operator
+
+any([shelf])
+all((shelf,))
+list(filter(None, [shelf]))
+operator.truth(shelf)
+truth_values = [shelf]
+any(truth_values)
+
+loop_flag: object = True
+while loop_flag:
+    loop_flag = shelf
+
+case_value: object = True
+match 1:
+    case 1 if (case_value := shelf) is None:
+        pass
+    case _ if case_value:
+        pass
+
+comprehension_state: object = True
+looped = [
+    (comprehension_state := shelf)
+    for _ in [1, 2]
+    if comprehension_state
+]

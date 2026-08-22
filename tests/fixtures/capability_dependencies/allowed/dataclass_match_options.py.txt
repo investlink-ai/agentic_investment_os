@@ -1,0 +1,36 @@
+import shelve
+from dataclasses import dataclass, field
+
+
+@dataclass(match_args=False)
+class DisabledMatchArgs:
+    shelf: shelve.Shelf[str]
+
+
+@dataclass(kw_only=True)
+class KeywordOnly:
+    shelf: shelve.Shelf[str]
+
+
+@dataclass
+class ExcludedFields:
+    without_init: shelve.Shelf[str] = field(init=False)
+    keyword_only: shelve.Shelf[str] = field(kw_only=True)
+
+
+def inspect_disabled(value: DisabledMatchArgs) -> None:
+    match value:
+        case DisabledMatchArgs({"decision": decision}):
+            pass
+
+
+def inspect_keyword_only(value: KeywordOnly) -> None:
+    match value:
+        case KeywordOnly({"decision": decision}):
+            pass
+
+
+def inspect_excluded(value: ExcludedFields) -> None:
+    match value:
+        case ExcludedFields({"decision": decision}):
+            pass

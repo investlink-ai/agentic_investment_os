@@ -1,0 +1,4 @@
+from tempfile import *
+
+
+directory = TemporaryDirectory()

@@ -1,0 +1,6 @@
+import urllib
+from urllib import request
+
+
+request.urlopen("https://example.invalid")
+urllib.request.urlopen("https://example.invalid")

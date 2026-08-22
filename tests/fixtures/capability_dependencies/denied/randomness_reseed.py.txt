@@ -1,0 +1,6 @@
+import random
+
+
+generator = random.Random(1)
+generator.seed()
+generator.random()

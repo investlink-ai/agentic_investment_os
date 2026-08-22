@@ -1,0 +1,10 @@
+import asyncio
+
+
+class LoopStore:
+    def read(self) -> float:
+        return self.loop.time()
+
+    def __init__(self) -> None:
+        with asyncio.Runner() as runner:
+            self.loop = runner.get_loop()

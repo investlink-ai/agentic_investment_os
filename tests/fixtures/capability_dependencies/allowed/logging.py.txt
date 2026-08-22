@@ -1,0 +1,8 @@
+import logging
+
+
+def configure_console_logging() -> None:
+    logging.basicConfig(level=logging.INFO)
+    logging.basicConfig(filename="")
+    logging.basicConfig(**{"filename": ""})
+    logging.basicConfig(**{"level": logging.INFO})

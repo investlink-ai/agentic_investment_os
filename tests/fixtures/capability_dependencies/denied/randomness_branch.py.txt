@@ -1,0 +1,9 @@
+import random
+
+
+def build(seed: int | None, use_default: bool) -> random.Random:
+    if use_default:
+        seed = None
+    else:
+        seed = 1
+    return random.Random(seed)

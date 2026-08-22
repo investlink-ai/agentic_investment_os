@@ -1,0 +1,153 @@
+from dataclasses import dataclass
+from pathlib import Path
+
+
+@dataclass(frozen=True)
+class Store:
+    root: Path
+
+    def read(self) -> str:
+        return self.root.read_text()
+
+
+def read(store: Store) -> str:
+    return store.root.read_text()
+
+
+class ConstructorStore:
+    def read(self) -> str:
+        return self.root.read_text()
+
+    def __init__(self, root: Path) -> None:
+        self.root = root
+
+
+class BaseStore:
+    root: Path
+
+
+class ChildStore(BaseStore):
+    pass
+
+
+def read_child(store: ChildStore) -> str:
+    return store.root.read_text()
+
+
+class PairStore:
+    def read(self) -> str:
+        return self.root.read_text()
+
+    def __init__(self, root: Path, other: Path) -> None:
+        self.root, self.other = root, other
+
+
+class ValueStore:
+    root = Path("state")
+
+    def read(self) -> str:
+        return self.root.read_text()
+
+
+class ConditionalValueStore:
+    if True:
+        root = Path("state")
+
+    def read(self) -> str:
+        return self.root.read_text()
+
+
+class SequentialValueStore:
+    base = Path("state")
+    root = base
+
+    def read(self) -> str:
+        return self.root.read_text()
+
+
+class LocalAliasStore:
+    def read(self) -> str:
+        return self.root.read_text()
+
+    def __init__(self) -> None:
+        root = Path("state")
+        self.root = root
+
+
+class InjectedStore:
+    root: Path
+
+
+class UserFieldStore:
+    def read(self) -> str:
+        return self.root.read_text()
+
+    def __init__(self, injected: InjectedStore) -> None:
+        self.root = injected.root
+
+
+from typing import ClassVar
+
+
+class ClassVariableStore:
+    root: ClassVar[Path]
+
+
+class ConcreteClassVariableStore(ClassVariableStore):
+    root = Path("state")
+
+
+def read_class_variable(store: ClassVariableStore) -> str:
+    return store.root.read_text()
+
+
+class WalrusLocalStore:
+    def read(self) -> str:
+        return self.root.read_text()
+
+    def __init__(self) -> None:
+        if root := Path("state"):
+            self.root = root
+
+
+class ClassImportStore:
+    from pathlib import Path as ImportedPath
+
+    root = ImportedPath("state")
+
+    def read(self) -> str:
+        return self.root.read_text()
+
+
+class MethodImportStore:
+    def read(self) -> str:
+        return self.root.read_text()
+
+    def __init__(self) -> None:
+        from pathlib import Path as ImportedPath
+
+        self.root = ImportedPath("state")
+
+
+class MethodTryStore:
+    def read(self) -> str:
+        return self.root.read_text()
+
+    def __init__(self) -> None:
+        try:
+            base = Path("state")
+        finally:
+            self.root = base
+
+
+class MethodTryPrefixStore:
+    def read(self) -> str:
+        return self.root.read_text()
+
+    def __init__(self) -> None:
+        try:
+            base = Path("state")
+            raise RuntimeError
+            base = object()
+        except RuntimeError:
+            self.root = base

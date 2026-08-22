@@ -1,0 +1,7 @@
+from pathlib import Path
+
+
+(path,) = (Path("state"),)
+path.read_text()
+starred_path, *rest = (Path("starred"),)
+starred_path.read_text()

@@ -1,0 +1,44 @@
+import asyncio
+import random
+from datetime import datetime
+from pathlib import Path
+
+
+class PathStore:
+    factory = Path
+
+    def read(self) -> str:
+        return self.root.read_text()
+
+    def __init__(self) -> None:
+        self.root = self.factory("state")
+
+
+class LoopStore:
+    runner = asyncio.Runner()
+
+    def read(self) -> float:
+        return self.loop.time()
+
+    def __init__(self) -> None:
+        self.loop = self.runner.get_loop()
+
+
+class GeneratorStore:
+    factory = random.Random
+
+    def reseed(self) -> None:
+        self.generator.seed()
+
+    def __init__(self) -> None:
+        self.generator = self.factory(7)
+
+
+class TimeStore:
+    factory = datetime
+
+    def observed_at(self) -> float:
+        return self.value.timestamp()
+
+    def __init__(self) -> None:
+        self.value = self.factory(2026, 8, 23)

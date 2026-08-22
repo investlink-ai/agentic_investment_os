@@ -1,0 +1,15 @@
+from datetime import datetime, timezone
+import time
+
+
+def render(
+    timestamp: float,
+    time_tuple: time.struct_time,
+) -> tuple[time.struct_time, str, datetime, float]:
+    observed_at = datetime.fromtimestamp(timestamp, **{"tz": timezone.utc})
+    return (
+        time.gmtime(timestamp),
+        time.strftime("%Y", time_tuple),
+        observed_at.astimezone(timezone.utc),
+        observed_at.timestamp(),
+    )

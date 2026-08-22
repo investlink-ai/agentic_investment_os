@@ -1,0 +1,15 @@
+import random
+
+
+class Generator(random.Random):
+    pass
+
+
+Generator().random()
+
+
+def build_local() -> random.Random:
+    class LocalGenerator(random.Random):
+        pass
+
+    return LocalGenerator()

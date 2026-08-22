@@ -1,0 +1,136 @@
+import aifc
+import bz2
+import codecs
+import dbm
+import gzip
+import linecache
+import logging
+import logging.handlers
+import lzma
+import shelve
+import sndhdr
+import sunau
+import tarfile
+import tokenize
+import wave
+import xml.dom.minidom
+import xml.etree.ElementTree
+import xml.sax
+import zipfile
+
+aifc.open("state")
+bz2.open("state")
+codecs.open("state")
+dbm.open("state")
+gzip.open("state")
+linecache.getline("state", 1)
+logging.FileHandler("state")
+logging.handlers.WatchedFileHandler("state")
+logging.handlers.RotatingFileHandler("state")
+logging.handlers.TimedRotatingFileHandler("state")
+lzma.open("state")
+shelve.open("state")
+sndhdr.what("state")
+sunau.open("state")
+tarfile.TarFile("state")
+tarfile.open("state")
+tokenize.open("state")
+wave.open("state")
+xml.dom.minidom.parse("state")
+xml.etree.ElementTree.parse("state")
+xml.sax.parse("state", object())
+zipfile.PyZipFile("state")
+zipfile.ZipFile("state")
+
+import dbm.dumb
+import dbm.gnu
+import dbm.ndbm
+import filecmp
+import fileinput
+import logging.config
+import mailbox
+
+bz2.BZ2File("state")
+dbm.dumb.open("state")
+fileinput.FileInput("state")
+gzip.GzipFile("state")
+logging.basicConfig(filename="state")
+logging.config.fileConfig("state")
+lzma.LZMAFile("state")
+mailbox.Babyl("state")
+mailbox.Maildir("state")
+mailbox.MH("state")
+mailbox.MMDF("state")
+mailbox.mbox("state")
+xml.etree.ElementTree.iterparse("state")
+shelve.DbfilenameShelf("state")
+dbm.gnu.open("state")
+dbm.ndbm.open("state")
+filecmp.cmp("left", "right")
+logging.basicConfig(**{"filename": "state"})
+
+nullable_filename: str | None = "state"
+logging.basicConfig(filename=nullable_filename)
+logging.basicConfig(filename="state" if nullable_filename is not None else None)
+logging_options: dict[str, object] = {}
+logging.basicConfig(**logging_options)
+
+import configparser
+import pkgutil
+import runpy
+import zipimport
+
+dbm.whichdb("state")
+filecmp.cmpfiles("left", "right", ["position.json"])
+filecmp.dircmp("left", "right")
+configparser.ConfigParser().read("config.ini")
+configparser.RawConfigParser().read("config.ini")
+runpy.run_path("script.py")
+zipimport.zipimporter("archive.zip")
+pkgutil.iter_modules(["state"])
+pkgutil.walk_packages(["state"])
+pkgutil.get_data("package", "resource")
+pkgutil.extend_path(["state"], "package")
+pkgutil.get_importer("state")
+pkgutil.iter_importers("package").__next__()
+pkgutil.get_loader("package")
+pkgutil.find_loader("package")
+
+import io
+
+io.FileIO("state")
+io.open_code("state")
+aifc.Aifc_read("state")
+aifc.Aifc_write("state")
+sunau.Au_read("state")
+sunau.Au_write("state")
+wave.Wave_read("state")
+wave.Wave_write("state")
+zipfile.Path("archive.zip")
+
+import importlib.resources
+
+importlib.resources.as_file(object())
+importlib.resources.contents("package")
+importlib.resources.files("package").joinpath("decision.txt").read_bytes()
+importlib.resources.is_resource("package", "decision.txt")
+importlib.resources.open_binary("package", "decision.bin")
+importlib.resources.open_text("package", "decision.txt")
+importlib.resources.path("package", "decision.txt")
+importlib.resources.read_binary("package", "decision.bin")
+importlib.resources.read_text("package", "decision.txt")
+
+linecache.getlines("state")
+linecache.checkcache("state")
+tarfile.is_tarfile("state")
+zipfile.is_zipfile("state")
+
+from linecache import checkcache as refresh_cache
+from linecache import getlines as cached_lines
+from tarfile import is_tarfile as archive_is_tar
+from zipfile import is_zipfile as archive_is_zip
+
+cached_lines("state")
+refresh_cache("state")
+archive_is_tar("state")
+archive_is_zip("state")

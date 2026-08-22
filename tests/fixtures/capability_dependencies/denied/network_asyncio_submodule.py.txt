@@ -1,0 +1,5 @@
+from asyncio import streams
+
+
+async def connect() -> None:
+    await streams.open_connection("example.invalid", 443)

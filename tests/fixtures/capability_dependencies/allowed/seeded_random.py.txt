@@ -1,0 +1,19 @@
+import random
+
+
+class Generator(random.Random):
+    pass
+
+
+def draw(seed: int) -> float:
+    generator = random.Random(seed)
+    generator.seed(seed + 1)
+    generator.seed(*(seed + 2,))
+    generator.seed(**{"a": seed + 3})
+    return (
+        generator.random()
+        + random.Random(seed).random()
+        + random.Random(*(seed,)).random()
+        + random.Random(**{"x": seed}).random()
+        + Generator(seed).random()
+    )

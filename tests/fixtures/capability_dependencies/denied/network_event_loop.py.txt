@@ -1,0 +1,16 @@
+import asyncio
+from asyncio import base_events
+from asyncio import events
+
+
+async def connect() -> None:
+    loop = asyncio.get_running_loop()
+    await loop.create_connection(protocol_factory, "localhost", 80)
+
+
+async def connect_from_defining_type(loop: base_events.BaseEventLoop) -> None:
+    await loop.create_connection(protocol_factory, "localhost", 80)
+
+
+async def connect_from_abstract_type(loop: events.AbstractEventLoop) -> None:
+    await loop.create_connection(protocol_factory, "localhost", 80)

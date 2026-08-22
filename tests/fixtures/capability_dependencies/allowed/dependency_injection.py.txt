@@ -1,0 +1,12 @@
+from __future__ import annotations
+
+from datetime import datetime
+from typing import Protocol
+
+
+class ObservationPort(Protocol):
+    def observed_at(self) -> datetime: ...
+
+
+def observe(port: ObservationPort) -> datetime:
+    return port.observed_at()

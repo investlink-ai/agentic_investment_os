@@ -1,0 +1,32 @@
+import asyncio
+
+
+asyncio.SelectorEventLoop().time()
+asyncio.SelectorEventLoop().create_connection(None, "localhost", 80)
+asyncio.SelectorEventLoop().subprocess_exec(None, "true")
+asyncio.ProactorEventLoop().time()
+
+policy = asyncio.get_event_loop_policy()
+policy.new_event_loop().time()
+
+runner = asyncio.Runner()
+runner.get_loop().time()
+
+with asyncio.Runner() as managed_runner:
+    managed_runner.get_loop().time()
+
+asyncio.base_events.BaseEventLoop().time()
+asyncio.DefaultEventLoopPolicy().new_event_loop().time()
+asyncio.WindowsProactorEventLoopPolicy().new_event_loop().time()
+asyncio.get_event_loop_policy().get_event_loop().time()
+asyncio.events.get_event_loop().time()
+asyncio.events.get_running_loop().time()
+asyncio.events.new_event_loop().time()
+asyncio.events.get_event_loop_policy().get_event_loop().time()
+asyncio.unix_events.SelectorEventLoop().time()
+asyncio.unix_events.DefaultEventLoopPolicy().new_event_loop().time()
+asyncio.windows_events.SelectorEventLoop().time()
+asyncio.windows_events.ProactorEventLoop().time()
+asyncio.windows_events.DefaultEventLoopPolicy().new_event_loop().time()
+asyncio.unix_events.SelectorEventLoop().create_connection(None, "localhost", 80)
+asyncio.windows_events.ProactorEventLoop().subprocess_exec(None, "true")

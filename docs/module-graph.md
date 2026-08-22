@@ -45,6 +45,7 @@ the dependency. Prefer passing typed values and ports over adding an edge.
 ## Rules
 
 - `domain` imports only the Python standard library and other files inside `domain`.
+- Package-root modules do not re-export internal capabilities or effect-zone implementations.
 - Capability modules never import `adapters` or `entrypoints`.
 - `application` orchestrates public capability APIs; it does not reach into their private stages.
 - Adapters implement ports owned by `domain` or the capability they serve. They do not own domain
@@ -91,9 +92,11 @@ capability dependency only when the relationship is stable and materially simple
 A source module used across top-level module boundaries declares its intentional interface in one
 static, literal module-level `__all__`. Cross-module production imports name those declared symbols
 directly with `from ... import ...`; module-style and wildcard imports cannot prove the consumed
-interface and are rejected. A leading underscore remains private even if it is mistakenly listed.
-Imports between files under the same top-level module may use implementation details without an
-`__all__`, and standard-library or third-party imports are outside this repository interface policy.
+interface and are rejected. Importing the package-root module object is also rejected outside the
+package root because attributes loaded elsewhere could expose an undeclared capability or effect
+zone. A leading underscore remains private even if it is mistakenly listed. Imports between files
+under the same top-level module may use implementation details without an `__all__`, and
+standard-library or third-party imports are outside this repository interface policy.
 
 Treat `__all__` changes as module-interface changes. Add only contracts justified by an allowed
 consumer and the owning architecture; do not export every visible name, add pass-through re-exports,

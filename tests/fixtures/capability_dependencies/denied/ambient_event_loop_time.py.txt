@@ -1,0 +1,5 @@
+import asyncio
+
+
+def observed_at(loop: asyncio.AbstractEventLoop) -> float:
+    return loop.time()

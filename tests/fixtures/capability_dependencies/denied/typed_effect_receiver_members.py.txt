@@ -1,0 +1,110 @@
+import bz2
+import filecmp
+import gzip
+import importlib.machinery
+import logging
+import logging.handlers
+import lzma
+import tarfile
+import zipfile
+import zipimport
+
+datagram: logging.handlers.DatagramHandler
+datagram.handle(object())
+http: logging.handlers.HTTPHandler
+http.handle(object())
+smtp: logging.handlers.SMTPHandler
+smtp.handle(object())
+socket_handler: logging.handlers.SocketHandler
+socket_handler.handle(object())
+syslog: logging.handlers.SysLogHandler
+syslog.handle(object())
+socket_handler.close()
+http.getConnection("localhost", False)
+
+file_handler: logging.FileHandler
+file_handler.emit(object())
+zip_archive: zipfile.ZipFile
+zip_archive.read("decision.py")
+tar_archive: tarfile.TarFile
+tar_archive.extractfile("decision.py")
+gzip_file: gzip.GzipFile
+gzip_file.read()
+bz2_file: bz2.BZ2File
+bz2_file.read()
+lzma_file: lzma.LZMAFile
+lzma_file.read()
+archive_loader: zipimport.zipimporter
+archive_loader.invalidate_caches()
+extension_loader: importlib.machinery.ExtensionFileLoader
+extension_loader.create_module(object())
+comparison: filecmp.dircmp
+comparison.phase0()
+finder: importlib.machinery.FileFinder
+finder.find_spec("decision")
+importlib.machinery.PathFinder.find_spec("decision", ["state"])
+
+import aifc
+import asyncio
+import concurrent.futures
+import importlib.resources.abc
+import io
+import os
+import sunau
+import tempfile
+import wave
+
+file_io: io.FileIO
+file_io.read()
+zip_path: zipfile.Path
+zip_path.read_bytes()
+zip_entry: zipfile.ZipExtFile
+zip_entry.read()
+tar_entry: tarfile.ExFileObject
+tar_entry.read()
+aifc_reader: aifc.Aifc_read
+aifc_reader.readframes(1)
+aifc_writer: aifc.Aifc_write
+aifc_writer.writeframes(b"frame")
+sunau_reader: sunau.Au_read
+sunau_reader.readframes(1)
+sunau_writer: sunau.Au_write
+sunau_writer.writeframes(b"frame")
+wave_reader: wave.Wave_read
+wave_reader.readframes(1)
+wave_writer: wave.Wave_write
+wave_writer.writeframes(b"frame")
+stream_writer: asyncio.StreamWriter
+stream_writer.write(b"order")
+datagram_transport: asyncio.DatagramTransport
+datagram_transport.sendto(b"order")
+process_pool: concurrent.futures.ProcessPoolExecutor
+process_pool.submit(int, "1")
+server: asyncio.Server
+server.serve_forever()
+base_server: asyncio.base_events.Server
+base_server.close()
+process: asyncio.subprocess.Process
+process.communicate()
+subprocess_transport: asyncio.SubprocessTransport
+subprocess_transport.kill()
+defining_subprocess_transport: asyncio.transports.SubprocessTransport
+defining_subprocess_transport.kill()
+directory_entry: os.DirEntry[str]
+directory_entry.stat()
+temporary_directory: tempfile.TemporaryDirectory[str]
+temporary_directory.cleanup()
+resource: importlib.resources.abc.Traversable
+resource.read_bytes()
+abstract_server: asyncio.AbstractServer
+abstract_server.close()
+event_abstract_server: asyncio.events.AbstractServer
+event_abstract_server.serve_forever()
+
+
+class ListeningServer(asyncio.AbstractServer):
+    pass
+
+
+listening_server = ListeningServer()
+listening_server.close()

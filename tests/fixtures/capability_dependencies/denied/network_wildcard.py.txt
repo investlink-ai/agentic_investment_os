@@ -1,0 +1,4 @@
+from asyncio import *
+
+
+connection = open_connection("example.invalid", 443)

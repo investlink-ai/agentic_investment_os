@@ -1,0 +1,14 @@
+import random
+from pathlib import Path
+
+
+class Outer:
+    class Generator(random.Random):
+        pass
+
+    class Store:
+        root = Path("state")
+
+
+Outer.Generator()
+Outer.Store.root.read_text()

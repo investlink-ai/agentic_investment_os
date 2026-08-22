@@ -1,0 +1,4 @@
+from datetime import datetime, timezone
+
+observed_at = datetime.now()
+localized_now = datetime.now(**{"tz": timezone.utc})

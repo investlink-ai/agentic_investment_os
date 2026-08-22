@@ -1,0 +1,15 @@
+from datetime import date, datetime
+import time
+
+
+local_tuple = time.localtime(0)
+text = time.ctime(0)
+timestamp = time.mktime(local_tuple)
+local_date = date.fromtimestamp(0)
+local_datetime = datetime.fromtimestamp(0)
+localized = local_datetime.astimezone()
+timezone = None
+nullable = datetime.fromtimestamp(0, timezone)
+literal_null = datetime.fromtimestamp(0, **{"tz": None})
+time_options: dict[str, object] = {}
+unknown_timezone = datetime.fromtimestamp(0, **time_options)

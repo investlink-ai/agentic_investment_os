@@ -1,0 +1,37 @@
+import asyncio
+import random
+from datetime import date, datetime
+from pathlib import Path
+
+
+class Clock(datetime):
+    pass
+
+
+class Generator(random.Random):
+    pass
+
+
+class StoredPath(Path):
+    pass
+
+
+class Loop(asyncio.SelectorEventLoop):
+    pass
+
+
+Clock.now()
+Clock(2026, 1, 1).timestamp()
+Generator()
+StoredPath("state").write_text("value")
+Loop().time()
+Loop().create_connection(None, "localhost", 80)
+Loop().subprocess_exec(None, "true")
+
+
+class TradingDate(date):
+    pass
+
+
+TradingDate.today()
+TradingDate.fromtimestamp(0)

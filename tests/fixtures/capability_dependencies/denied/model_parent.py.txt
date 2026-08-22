@@ -1,0 +1,6 @@
+import google
+from google import genai
+
+
+client = genai.Client()
+other_client = google.genai.Client()

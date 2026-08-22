@@ -1,0 +1,11 @@
+import random
+
+
+seed = None
+generator = random.Random(seed or 0)
+
+
+def build(optional_seed: int | None) -> random.Random:
+    if optional_seed is None:
+        optional_seed = 0
+    return random.Random(optional_seed)

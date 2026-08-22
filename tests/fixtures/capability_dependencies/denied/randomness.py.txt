@@ -1,0 +1,8 @@
+import random
+
+value = random.random()
+sample = random.binomialvariate(10, 0.5)
+random.seed(1)
+state = random.getstate()
+random.setstate(state)
+generator = random.Random()

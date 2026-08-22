@@ -1,0 +1,30 @@
+import random
+
+
+def from_match(flag: bool) -> random.Random:
+    seed: int | None
+    match flag:
+        case True:
+            seed = None
+        case _:
+            seed = 1
+    return random.Random(seed)
+
+
+def from_try() -> random.Random:
+    seed: int | None
+    try:
+        seed = None
+    except ValueError:
+        seed = 1
+    return random.Random(seed)
+
+
+def from_loop(flags: list[bool]) -> random.Random:
+    seed: int | None = 1
+    for flag in flags:
+        if flag:
+            seed = None
+        else:
+            seed = 1
+    return random.Random(seed)

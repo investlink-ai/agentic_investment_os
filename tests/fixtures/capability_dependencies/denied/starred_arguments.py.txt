@@ -1,0 +1,9 @@
+import random
+from datetime import UTC, datetime
+
+
+random.Random(*())
+generator = random.Random(1)
+generator.seed(*())
+datetime.fromtimestamp(0, *()).timestamp()
+datetime(2026, 1, 1, tzinfo=UTC).astimezone(*())

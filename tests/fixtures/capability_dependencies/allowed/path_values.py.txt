@@ -1,0 +1,5 @@
+from pathlib import Path
+
+
+def storage_key(root: Path) -> str:
+    return (root / "session").name

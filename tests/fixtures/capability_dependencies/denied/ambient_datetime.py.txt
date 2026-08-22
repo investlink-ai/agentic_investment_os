@@ -1,0 +1,12 @@
+from datetime import UTC, datetime, timedelta
+
+
+naive = datetime(2026, 8, 23, 9)
+observed_at = naive.astimezone(UTC)
+timestamp = naive.timestamp()
+unbound_observed_at = datetime.astimezone(naive, UTC)
+unbound_timestamp = datetime.timestamp(naive)
+calendar_timestamp = datetime.fromisocalendar(2026, 34, 7).timestamp()
+arithmetic_timestamp = (naive + timedelta(days=1)).timestamp()
+minimum_timestamp = datetime.min.replace(year=2026).timestamp()
+resolution_timestamp = (datetime.min + datetime.resolution).timestamp()

@@ -1,0 +1,14 @@
+import random
+
+
+seed = None
+generator = random.Random(seed)
+
+
+def draw(optional_seed: int | None) -> random.Random:
+    return random.Random(optional_seed)
+
+
+literal_null = random.Random(**{"x": None})
+random_options: dict[str, object] = {}
+unknown_seed = random.Random(**random_options)

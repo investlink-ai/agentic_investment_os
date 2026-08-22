@@ -1,0 +1,10 @@
+import logging.config
+import logging.handlers
+
+
+logging.handlers.SocketHandler("localhost", 9000)
+logging.handlers.HTTPHandler("localhost", "/events")
+logging.handlers.DatagramHandler("localhost", 9000)
+logging.handlers.SysLogHandler()
+logging.handlers.SMTPHandler(("localhost", 25), "from", ["to"], "subject")
+logging.config.listen(9030).start()

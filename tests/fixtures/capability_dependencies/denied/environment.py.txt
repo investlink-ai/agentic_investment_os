@@ -1,0 +1,17 @@
+import os
+
+token = os.getenv("HOSTILE_SECRET_VALUE")
+os.putenv("HTTPS_PROXY", "https://proxy.invalid")
+os.unsetenv("HTTPS_PROXY")
+os.environ["TOKEN"] = "value"
+del os.environ["TOKEN"]
+list(filter(os.getenv, ["TOKEN"]))
+from functools import partial
+list(filter(partial(os.getenv), ["TOKEN"]))
+partial(os.getenv).func("TOKEN")
+for os.environ["LOOP_TARGET"] in ["value"]:
+    pass
+
+from contextlib import nullcontext
+with nullcontext("value") as os.environ["WITH_TARGET"]:
+    pass

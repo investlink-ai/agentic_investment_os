@@ -1,0 +1,52 @@
+import asyncio
+import random
+from pathlib import Path
+
+
+match Path("state"):
+    case root:
+        root.read_text()
+
+match random.Random:
+    case Generator:
+        Generator()
+
+match asyncio.Runner():
+    case runner:
+        runner.get_loop().time()
+
+match (Path("state"),):
+    case (root,):
+        root.read_text()
+
+
+class Store:
+    root = Path("state")
+
+
+match Store():
+    case Store(root=root):
+        root.read_text()
+
+
+class PositionalStore:
+    __match_args__ = ("root",)
+    root = Path("state")
+
+
+match PositionalStore():
+    case PositionalStore(root):
+        root.read_text()
+
+
+MATCH_ARGS = ("root",)
+
+
+class AliasedPositionalStore:
+    __match_args__ = MATCH_ARGS
+    root = Path("state")
+
+
+match AliasedPositionalStore():
+    case AliasedPositionalStore(root):
+        root.read_text()

@@ -1,0 +1,24 @@
+import random
+from pathlib import Path
+
+path_reads = [path.read_text() for path in [Path("state")]]
+generators = [factory() for factory in [random.Random]]
+path_set = {path.read_text() for path in [Path("state")]}
+path_map = {path.name: path.read_text() for path in [Path("state")]}
+path_generator = (path.read_text() for path in [Path("state")])
+
+list_factory = int
+[(list_factory := random.Random) for _ in [0]]
+list_factory()
+set_factory = int
+{(set_factory := random.Random) for _ in [0]}
+set_factory()
+dict_factory = int
+{_: (dict_factory := random.Random) for _ in [0]}
+dict_factory()
+generator_factory = int
+list((generator_factory := random.Random) for _ in [0])
+generator_factory()
+filter_factory = int
+[None for _ in [0] if (filter_factory := random.Random)]
+filter_factory()
