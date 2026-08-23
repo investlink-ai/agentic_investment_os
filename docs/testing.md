@@ -56,13 +56,32 @@ uv run pytest <path-to-test.py>::<test-name>
 make check
 ```
 
-`make check` is the handoff gate: formatting, lint, strict mypy, and the deterministic pytest suite.
+`make check` is the handoff gate: harness and architecture checks, formatting, lint, strict mypy, and
+the deterministic pytest suite.
 
 The default Hypothesis profile in `tests/conftest.py` uses derandomized generation, no example
 database or wall-clock deadline, bounded example and state-machine step counts, one reported failure,
 and printed replay blobs. Generated tests remain credential-free and network-free, inject any clock,
 and shrink a failure to a reproducible counterexample; neither Hypothesis shrinking nor replay may
 turn a failure into a passing retry.
+
+## Static architecture gates
+
+`make architecture` verifies both the production import graph and the bounded
+[capability effect boundary](architecture.md#capability-effect-boundaries). The effect gate protects
+all production capabilities except the adapter and entrypoint effect owners, ignores inline lint
+suppressions, and fails closed when protected source cannot be parsed or its fixed lint engine cannot
+run. A passing result is supporting evidence for explicit dependency injection, not a substitute for
+semantic review or observable-behavior tests.
+
+Each contextual rule and prohibited category has compact allowed and denied source fixtures under
+`tests/fixtures/capability_dependencies/`. These fixtures end in `.py.txt` because they are inert
+source data: pytest, Ruff, mypy, package discovery, and editors must not treat deliberately forbidden
+examples as repository Python. The integration test copies selected fixtures to temporary `.py`
+production paths before invoking the real gate. An independently maintained catalog fixture must
+exactly match the configured APIs and categories; the test synthesizes one denied access from each
+fixture entry. Add an entry only with that executable negative evidence and a neighboring allowed seam
+that prevents the rule from expanding into general type or control-flow analysis.
 
 ## Test contracts
 
@@ -136,11 +155,12 @@ is not the repository gate.
 
 Mutation runs select only deterministic unit, integration, and contract tiers. They use fake or
 recorded broker boundaries and receive no credentials or network-enabled live rehearsal. Repository
-harness tests for issue worktrees, agent workflows, and unit-tier enforcement are excluded because
-they exercise scripts outside the copied production tree and cannot distinguish product mutants.
-Their dedicated harness and ordinary test gates remain mandatory. While the repository contains no
-callable in the configured scope, the runner reports the scaffold exemption and exits successfully;
-adding the first scoped callable activates the gate automatically.
+harness tests for issue worktrees, agent workflows, capability dependencies, and unit-tier
+enforcement are excluded because they exercise scripts outside the copied production tree and cannot
+distinguish product mutants. Their dedicated harness, architecture, and ordinary test gates remain
+mandatory. While the repository contains no callable in the configured scope, the runner reports the
+scaffold exemption and exits successfully; adding the first scoped callable activates the gate
+automatically.
 
 ## Fixtures
 

@@ -1,4 +1,4 @@
-.PHONY: agent-workflow bootstrap check format harness lint mutation sync test typecheck
+.PHONY: agent-workflow architecture bootstrap check format harness lint mutation sync test typecheck
 
 bootstrap: sync
 	git config core.hooksPath .githooks
@@ -35,6 +35,7 @@ harness:
 	test -f .github/workflows/mutation.yml
 	test -f scripts/__init__.py
 	test -f scripts/agent_workflow_harness.py
+	test -f scripts/check_capability_dependencies.py
 	test -f scripts/check_unit_test_tier.py
 	test -f scripts/run_mutation.py
 	test -x scripts/start-issue.sh
@@ -63,6 +64,11 @@ agent-workflow:
 	}
 	uv run python -m scripts.agent_workflow_harness --root . run "$(SCENARIO)"
 
+architecture:
+	uv run python -m scripts.check_capability_dependencies --root .
+	uv run pytest -o 'addopts=--strict-config --strict-markers -ra' \
+		tests/integration/test_capability_dependencies.py tests/integration/test_module_graph.py
+
 lint:
 	uv run ruff format --check .
 	uv run ruff check .
@@ -76,4 +82,4 @@ test:
 mutation:
 	uv run python scripts/run_mutation.py
 
-check: harness lint typecheck test
+check: harness architecture lint typecheck test

@@ -1,0 +1,27 @@
+from datetime import UTC, datetime
+from pathlib import Path
+from random import Random
+from typing import Protocol
+
+
+class Clock(Protocol):
+    def now(self) -> datetime: ...
+
+
+def deterministic_inputs(
+    clock: Clock,
+    path: Path,
+    seed: int,
+    timestamp: float,
+    value: datetime,
+) -> tuple[datetime, datetime, Random, Path]:
+    return (
+        clock.now(),
+        datetime.fromtimestamp(timestamp, UTC),
+        Random(seed),
+        path,
+    )
+
+
+def normalize(value: datetime) -> datetime:
+    return value.astimezone(UTC)

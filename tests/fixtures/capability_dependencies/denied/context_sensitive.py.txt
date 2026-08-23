@@ -1,0 +1,39 @@
+import datetime as dt
+import pathlib
+import random
+from pathlib import Path
+
+Path("state.json").read_text()
+path: Path
+path.write_text("state")
+open("state.json")
+
+make_rng = random.Random
+rng = make_rng()
+rng.seed(None)
+
+parse_local_time = dt.datetime.fromtimestamp
+parse_local_time(0)
+value: dt.datetime
+value.astimezone()
+
+path_factory = pathlib.Path
+other_path = path_factory("other.json")
+other_path.unlink()
+other_path.absolute()
+other_path.expanduser()
+
+
+class Box:
+    pass
+
+
+box = Box()
+box.make_rng = random.Random
+box.make_rng()
+box.make_path = pathlib.Path
+box.make_path("attribute.json").read_text()
+box.parse_time = dt.datetime.fromtimestamp
+box.parse_time(0)
+box.path = pathlib.Path("stored.json")
+box.path.exists()
