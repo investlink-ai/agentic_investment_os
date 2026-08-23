@@ -111,15 +111,16 @@ It is a separate, slower gate: `make check`, pre-commit, and pre-push do not run
 change its source, tests, configuration, or runner execute the same Make target in a keyless job; a
 weekly run detects drift outside those path filters.
 
-The active scope is every callable under `domain/`, `portfolio/`, and `execution/`, together with the
-implemented Stage 1 configuration resolution, `Advance` orchestration, SQLite lifecycle persistence,
-and lifecycle composition. This includes decision-packet validation, deterministic sizing and limits,
-target bands, order planning, executor authorization, effect-local idempotency, execution state
-transitions, reconciliation, pinned run-input integrity, and lifecycle receipt reconstruction as those
-capabilities are implemented. Add semantic Alpaca request mapping, response parsing, and status
-normalization to the configured scope with their implementation; keep raw transport and process
-wiring under contract and integration tests. Add evidence cutoff, staleness, and append-only research
-transition logic when those behaviors become executable safety decisions.
+The active scope is every callable under `domain/`, `portfolio/`, and `execution/`, together with
+implemented configuration resolution, `Advance` orchestration, SQLite lifecycle persistence, and
+lifecycle composition. This includes eligible-universe policy and snapshot integrity, decision-packet
+validation, deterministic sizing and limits, target bands, order planning, executor authorization,
+effect-local idempotency, execution state transitions, reconciliation, pinned run-input integrity, and
+lifecycle receipt reconstruction as those capabilities are implemented. Add semantic Alpaca request
+mapping, response parsing, and status normalization to the configured scope with their implementation;
+keep raw transport and process wiring under contract and integration tests. Add Evidence Vault cutoff,
+staleness, and append-only research transition logic when those behaviors become executable safety
+decisions.
 
 The gate accepts only killed mutants and narrowly skipped equivalent mutations. It fails on surviving,
 uncovered, timed-out, suspicious, interrupted, or crashing mutants; it does not reduce those outcomes
@@ -161,6 +162,9 @@ evidence. A scenario becomes mandatory when its owning behavior is implemented.
 - One Market Session has exactly one Champion Decision Record and at most one active packet.
 - Repeated Record calls do not duplicate Outcome Observations.
 - Constitution, model, prompt, tool, policy, data, and source hashes remain pinned within a run.
+- Universe snapshots retain every current position by canonical instrument identity, apply the
+  versioned structural and threshold policy at the pinned cutoff, and fail closed on partial, stale,
+  contradictory, mixed-variant, or changed retry inputs.
 - Corrupted projections rebuild deterministically; corrupted authoritative ledgers fail closed.
 - SQLite startup atomically initializes the one current schema or validates that exact current shape.
   Failed initialization returns to an empty unversioned database; every other non-empty version or
@@ -172,16 +176,34 @@ evidence. A scenario becomes mandatory when its owning behavior is implemented.
 ### Asset extension seams
 
 - The public `DecisionCycleIdentity` accepts its equity `MarketSession` variant and unwraps it into the
-  current Market-Session-specific kernel. A disabled variant is rejected before dispatch, and a later
-  concrete lifecycle cannot add an asset-class branch to that kernel.
-- Durable events and `Status.last_completed_cycle` preserve the cycle discriminator across retry,
-  reopen, and projection rebuild; the field advances only from a validated `Complete` event.
+  current Market-Session-specific kernel. A disabled or malformed variant is rejected before the
+  clock, adapter, ledger, or state preparation, and a later concrete lifecycle cannot add an
+  asset-class branch to that kernel. A valid cycle remains exact in later durable refusal receipts.
+- Common receipt, checkpoint, and durable-event envelopes preserve their schema versions, payload
+  discriminator, exact cycle where available, authority scope, relevant times, material fingerprints,
+  and content hash across retry and reopen. Successful receipt times are the actual recording time,
+  not the earlier Evidence Cutoff. A recognized disabled cycle returns a typed receipt before any
+  authoritative lifecycle row changes, and an equity success envelope rejects a crypto cycle even
+  when every hash is internally consistent.
+  `Status.universe_snapshot_cycle` preserves the cycle discriminator and advances atomically with the
+  exact eligible-universe snapshot identifier, while `last_completed_cycle` remains unset until a
+  durable `Complete` event exists.
 - V0 configuration accepts exactly the equity asset-class set. Crypto, options, unknown classes,
   duplicate activation, provider entitlement alone, and class/policy mismatch fail before runtime
   state, research, portfolio, packet, credential, network, or broker effects.
 - Universe and position snapshots retain canonical instrument identities and aliases separately,
-  reject unresolved references, and preserve a disabled-class holding as an explicit portfolio
-  mismatch rather than dropping or activating it.
+  require globally one-to-one alias and provider-catalog mappings under the adapter's
+  provider-and-environment namespace, reject unresolved references, and preserve a disabled-class
+  holding as an explicit portfolio mismatch rather than dropping or activating it.
+- Snapshot and durable-record readers select the closed variant from its discriminator before
+  validating exact payload fields. Instrument and position snapshots preserve observed and available
+  times, Data Regime, authority scope, source fingerprint, and their own content hash; position
+  variants preserve signed quantity, unit, and valuation amount, currency, and source. Retry, reopen,
+  and projection rebuild rederive canonical cycle, instrument-snapshot, position-snapshot, and policy
+  hashes rather than trusting stored summaries.
+- `PinRunInputs` persists the first full normalized universe provenance once. Interruption followed
+  by an alias-only adapter change must publish that prepared snapshot, while material changes still
+  conflict and completed retry remains idempotent.
 - Asset payload unions reject missing or unknown discriminators, unsupported schema versions,
   unrelated optional fields, mixed equity/crypto/option fields, implicit units, and implicit currency
   or multipliers.

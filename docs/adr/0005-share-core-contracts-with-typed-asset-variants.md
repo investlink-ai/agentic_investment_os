@@ -32,6 +32,11 @@ contracts. Display symbols remain aliases rather than durable keys. Composition 
 closed set of supported asset classes; V0 accepts only US equities, regardless of observed provider
 entitlements, and rejects disabled or unknown variants before research or effects.
 
+Entrypoints may therefore depend directly on public immutable `domain` contracts to validate
+configuration and select the closed composition. This intentional `entrypoints -> domain` edge keeps
+variant activation at the composition root; it does not permit domain code to depend on entrypoints,
+adapters, credentials, or provider representations.
+
 ## Alternatives considered
 
 - A generic phase protocol before a second lifecycle exists was rejected because it would freeze the

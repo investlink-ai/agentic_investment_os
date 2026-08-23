@@ -4,7 +4,7 @@ import shutil
 import subprocess
 from dataclasses import FrozenInstanceError
 from pathlib import Path
-from typing import Never
+from typing import Never, override
 
 import pytest
 
@@ -15,8 +15,50 @@ from agentic_investment_os.entrypoints.configuration import (
     RuntimeConfiguration,
     resolve_runtime_configuration,
 )
+from tests._universe import universe_policy
 
 SHA256_HEX_LENGTH = 64
+
+
+class _PolicyMap(dict[str, object]):
+    pass
+
+
+class _PolicyList(list[object]):
+    pass
+
+
+class _EqualityBomb:
+    @override
+    def __eq__(self, other: object) -> bool:
+        raise RuntimeError
+
+    @override
+    def __hash__(self) -> int:
+        return id(self)
+
+
+class _IntegerSubclass(int):
+    pass
+
+
+class _StringSubclass(str):
+    __slots__ = ()
+
+
+def _with_policy(values: dict[str, object]) -> dict[str, object]:
+    return {
+        **values,
+        "enabled_asset_classes": ["us_equity"],
+        "universe_policy": universe_policy(),
+    }
+
+
+def _policy_with_non_text_key() -> dict[object, object]:
+    policy: dict[object, object] = {}
+    policy.update(universe_policy())
+    policy[1] = "non-text-key"
+    return policy
 
 
 def _initialize_git_repository(repository: Path) -> None:
@@ -39,15 +81,44 @@ def test_runtime_configuration_is_complete_immutable_and_deterministically_hashe
     state_root = tmp_path / "state"
     first = resolve_runtime_configuration(
         (
-            ConfigurationSource("file", {"schema_version": 1}),
-            ConfigurationSource("operator", {"schema_version": 1, "state_root": str(state_root)}),
+            ConfigurationSource(
+                "file",
+                {
+                    "schema_version": 1,
+                    "enabled_asset_classes": ["us_equity"],
+                    "universe_policy": universe_policy(),
+                },
+            ),
+            ConfigurationSource(
+                "operator",
+                {
+                    "schema_version": 1,
+                    "state_root": str(state_root),
+                    "enabled_asset_classes": ["us_equity"],
+                    "universe_policy": universe_policy(),
+                },
+            ),
         ),
         repository_root=Path(__file__).resolve().parents[2],
     )
     second = resolve_runtime_configuration(
         (
-            ConfigurationSource("operator", {"state_root": str(state_root)}),
-            ConfigurationSource("file", {"schema_version": 1}),
+            ConfigurationSource(
+                "operator",
+                {
+                    "state_root": str(state_root),
+                    "enabled_asset_classes": ["us_equity"],
+                    "universe_policy": universe_policy(),
+                },
+            ),
+            ConfigurationSource(
+                "file",
+                {
+                    "schema_version": 1,
+                    "enabled_asset_classes": ["us_equity"],
+                    "universe_policy": universe_policy(),
+                },
+            ),
         ),
         repository_root=Path(__file__).resolve().parents[2],
     )
@@ -62,20 +133,28 @@ def test_runtime_configuration_is_complete_immutable_and_deterministically_hashe
         setattr(first, immutable_field, 2)
 
     fixed = resolve_runtime_configuration(
-        (ConfigurationSource("fixed", {"schema_version": 1, "state_root": "/runtime/state"}),),
+        (
+            ConfigurationSource(
+                "fixed", _with_policy({"schema_version": 1, "state_root": "/runtime/state"})
+            ),
+        ),
         repository_root=Path(__file__).resolve().parents[2],
     )
     assert isinstance(fixed, RuntimeConfiguration)
-    assert fixed.fingerprint == "970663be9297f29b85127d33893ea5dcc439d299ae3d939dc9cd1d0ff05d1aeb"
+    assert fixed.fingerprint == "cb7fb3025a8ff2ff847705e9489e0ab44386af25ef1e36fb5e64931a8395f065"
 
     unicode_path = resolve_runtime_configuration(
-        (ConfigurationSource("unicode", {"schema_version": 1, "state_root": "/runtime/état"}),),
+        (
+            ConfigurationSource(
+                "unicode", _with_policy({"schema_version": 1, "state_root": "/runtime/état"})
+            ),
+        ),
         repository_root=Path(__file__).resolve().parents[2],
     )
     assert isinstance(unicode_path, RuntimeConfiguration)
     assert (
         unicode_path.fingerprint
-        == "78cd37a94fb428c1b9ac707fcee5c55e742974cc6fabc64813ec9552e46bfd49"
+        == "a800fd75cfd9e8bb37df2a558884fe713bf99b787cdcc818a48e1916a34c8a8c"
     )
 
 
@@ -83,32 +162,109 @@ def test_runtime_configuration_is_complete_immutable_and_deterministically_hashe
     ("sources", "expected_refusal"),
     [
         (
-            (ConfigurationSource("file", {"schema_version": 1}),),
+            (
+                ConfigurationSource(
+                    "file",
+                    {
+                        "schema_version": 1,
+                        "enabled_asset_classes": ["us_equity"],
+                        "universe_policy": universe_policy(),
+                    },
+                ),
+            ),
             ConfigurationRefusal(ConfigurationRefusalCode.MISSING_FIELD, ("state_root",)),
         ),
         (
             (
                 ConfigurationSource(
                     "file",
-                    {"schema_version": 1, "state_root": "/runtime/state", "extra": True},
+                    {
+                        "schema_version": 1,
+                        "state_root": "/runtime/state",
+                        "enabled_asset_classes": ["us_equity"],
+                    },
+                ),
+            ),
+            ConfigurationRefusal(
+                ConfigurationRefusalCode.MISSING_FIELD,
+                ("universe_policy",),
+            ),
+        ),
+        (
+            (
+                ConfigurationSource(
+                    "file",
+                    _with_policy(
+                        {"schema_version": 1, "state_root": "/runtime/state", "extra": True}
+                    ),
                 ),
             ),
             ConfigurationRefusal(ConfigurationRefusalCode.UNKNOWN_FIELD),
         ),
         (
-            (ConfigurationSource("file", {"schema_version": 2, "state_root": "/runtime/state"}),),
+            (
+                ConfigurationSource(
+                    "file", _with_policy({"schema_version": 2, "state_root": "/runtime/state"})
+                ),
+            ),
             ConfigurationRefusal(ConfigurationRefusalCode.UNSUPPORTED_VERSION, ("schema_version",)),
         ),
         (
-            (ConfigurationSource("file", {"schema_version": 1, "state_root": "relative/state"}),),
+            (
+                ConfigurationSource(
+                    "file", _with_policy({"schema_version": 1, "state_root": "relative/state"})
+                ),
+            ),
             ConfigurationRefusal(ConfigurationRefusalCode.INVALID_STATE_ROOT, ("state_root",)),
         ),
         (
             (
-                ConfigurationSource("file", {"schema_version": 1, "state_root": "/runtime/one"}),
+                ConfigurationSource(
+                    "file", _with_policy({"schema_version": 1, "state_root": "/runtime/one"})
+                ),
                 ConfigurationSource("operator", {"state_root": "/runtime/two"}),
             ),
             ConfigurationRefusal(ConfigurationRefusalCode.CONFLICTING_FIELD, ("state_root",)),
+        ),
+        (
+            (
+                ConfigurationSource(
+                    "file", _with_policy({"schema_version": 1, "state_root": "/runtime/state"})
+                ),
+                ConfigurationSource(
+                    "operator",
+                    {
+                        "universe_policy": {
+                            **universe_policy(),
+                            "minimum_price": "10",
+                        }
+                    },
+                ),
+            ),
+            ConfigurationRefusal(
+                ConfigurationRefusalCode.CONFLICTING_FIELD,
+                ("universe_policy",),
+            ),
+        ),
+        (
+            (
+                ConfigurationSource(
+                    "file",
+                    {
+                        "schema_version": 1,
+                        "state_root": "/runtime/state",
+                        "enabled_asset_classes": ["us_equity"],
+                        "universe_policy": {
+                            **universe_policy(),
+                            "approved_exchanges": ["NASDAQ", "OTC"],
+                        },
+                    },
+                ),
+            ),
+            ConfigurationRefusal(
+                ConfigurationRefusalCode.INVALID_UNIVERSE_POLICY,
+                ("universe_policy",),
+            ),
         ),
     ],
 )
@@ -135,6 +291,8 @@ def test_rejected_configuration_does_not_disclose_unknown_values(tmp_path: Path)
                 {
                     "schema_version": 1,
                     "state_root": str(tmp_path / "state"),
+                    "enabled_asset_classes": ["us_equity"],
+                    "universe_policy": universe_policy(),
                     hostile_field: sentinel,
                 },
             ),
@@ -147,18 +305,46 @@ def test_rejected_configuration_does_not_disclose_unknown_values(tmp_path: Path)
     assert len(repr(resolution)) < max_bounded_refusal_length
 
 
+def test_runtime_configuration_refuses_a_top_level_mapping_subclass() -> None:
+    resolution = resolve_runtime_configuration(
+        (
+            ConfigurationSource(
+                "hostile",
+                _PolicyMap(
+                    {
+                        "schema_version": 1,
+                        "state_root": "/runtime/state",
+                        "enabled_asset_classes": ["us_equity"],
+                        "universe_policy": universe_policy(),
+                    }
+                ),
+            ),
+        ),
+        repository_root=Path(__file__).resolve().parents[2],
+    )
+
+    assert resolution == ConfigurationRefusal(ConfigurationRefusalCode.UNKNOWN_FIELD)
+
+
 @pytest.mark.parametrize(
     "sources",
     [
         (
-            ConfigurationSource("integer", {"schema_version": 1}),
             ConfigurationSource(
-                "boolean", {"schema_version": True, "state_root": "/runtime/state"}
+                "integer", {"schema_version": 1, "universe_policy": universe_policy()}
+            ),
+            ConfigurationSource(
+                "boolean",
+                _with_policy({"schema_version": True, "state_root": "/runtime/state"}),
             ),
         ),
         (
-            ConfigurationSource("boolean", {"schema_version": True}),
-            ConfigurationSource("integer", {"schema_version": 1, "state_root": "/runtime/state"}),
+            ConfigurationSource(
+                "boolean", {"schema_version": True, "universe_policy": universe_policy()}
+            ),
+            ConfigurationSource(
+                "integer", _with_policy({"schema_version": 1, "state_root": "/runtime/state"})
+            ),
         ),
     ],
 )
@@ -172,6 +358,203 @@ def test_runtime_configuration_treats_equal_values_of_different_types_as_conflic
 
     assert resolution == ConfigurationRefusal(
         ConfigurationRefusalCode.CONFLICTING_FIELD, ("schema_version",)
+    )
+
+
+@pytest.mark.parametrize(
+    "conflicting_policy",
+    [
+        {**universe_policy(), "schema_version": 1.0},
+        {**universe_policy(), "minimum_history_days": True},
+        {**universe_policy(), "maximum_snapshot_age_seconds": 7200.0},
+        {**universe_policy(), "approved_exchanges": ["ARCA", "NASDAQ"]},
+        {key: value for key, value in universe_policy().items() if key != "etf_allowlist"},
+        _policy_with_non_text_key(),
+        _PolicyMap(universe_policy()),
+        {
+            **universe_policy(),
+            "approved_exchanges": _PolicyList(["ARCA", "NASDAQ", "NYSE"]),
+        },
+    ],
+    ids=[
+        "nested_integer_float",
+        "nested_integer_boolean",
+        "nested_duration_float",
+        "nested_list",
+        "nested_keys",
+        "nested_non_text_key",
+        "nested_mapping_subclass",
+        "nested_list_subclass",
+    ],
+)
+@pytest.mark.parametrize("order", ["canonical_first", "conflict_first"])
+def test_runtime_configuration_refuses_nested_policy_conflicts_in_either_source_order(
+    conflicting_policy: object,
+    order: str,
+) -> None:
+    canonical = ConfigurationSource(
+        "canonical",
+        {"schema_version": 1, "universe_policy": universe_policy()},
+    )
+    conflicting = ConfigurationSource(
+        "conflicting",
+        {"state_root": "/runtime/state", "universe_policy": conflicting_policy},
+    )
+    sources = (conflicting, canonical) if order == "conflict_first" else (canonical, conflicting)
+
+    resolution = resolve_runtime_configuration(
+        sources,
+        repository_root=Path(__file__).resolve().parents[2],
+    )
+
+    assert resolution == ConfigurationRefusal(
+        ConfigurationRefusalCode.CONFLICTING_FIELD,
+        ("universe_policy",),
+    )
+
+
+def test_runtime_configuration_refuses_recursive_duplicate_values() -> None:
+    recursive: list[object] = []
+    recursive.append(recursive)
+
+    resolution = resolve_runtime_configuration(
+        (
+            ConfigurationSource("first", {"universe_policy": recursive}),
+            ConfigurationSource(
+                "second",
+                {
+                    "schema_version": 1,
+                    "state_root": "/runtime/state",
+                    "universe_policy": recursive,
+                },
+            ),
+        ),
+        repository_root=Path(__file__).resolve().parents[2],
+    )
+
+    assert resolution == ConfigurationRefusal(
+        ConfigurationRefusalCode.CONFLICTING_FIELD,
+        ("universe_policy",),
+    )
+
+
+def test_runtime_configuration_refuses_unsupported_values_without_invoking_equality() -> None:
+    hostile_policy = {**universe_policy(), "minimum_price": _EqualityBomb()}
+
+    resolution = resolve_runtime_configuration(
+        (
+            ConfigurationSource("first", {"universe_policy": hostile_policy}),
+            ConfigurationSource(
+                "second",
+                {
+                    "schema_version": 1,
+                    "state_root": "/runtime/state",
+                    "universe_policy": hostile_policy,
+                },
+            ),
+        ),
+        repository_root=Path(__file__).resolve().parents[2],
+    )
+
+    assert resolution == ConfigurationRefusal(
+        ConfigurationRefusalCode.CONFLICTING_FIELD,
+        ("universe_policy",),
+    )
+
+
+@pytest.mark.parametrize(
+    "hostile_policy",
+    [
+        _PolicyMap(universe_policy()),
+        {
+            **universe_policy(),
+            "approved_exchanges": _PolicyList(["ARCA", "NASDAQ", "NYSE"]),
+        },
+    ],
+    ids=["mapping_subclass", "list_subclass"],
+)
+def test_runtime_configuration_refuses_duplicate_container_subclasses(
+    hostile_policy: object,
+) -> None:
+    resolution = resolve_runtime_configuration(
+        (
+            ConfigurationSource("first", {"universe_policy": hostile_policy}),
+            ConfigurationSource(
+                "second",
+                {
+                    "schema_version": 1,
+                    "state_root": "/runtime/state",
+                    "universe_policy": hostile_policy,
+                },
+            ),
+        ),
+        repository_root=Path(__file__).resolve().parents[2],
+    )
+
+    assert resolution == ConfigurationRefusal(
+        ConfigurationRefusalCode.CONFLICTING_FIELD,
+        ("universe_policy",),
+    )
+
+
+def test_runtime_configuration_validates_duplicate_supported_invalid_scalars() -> None:
+    invalid_policy = {**universe_policy(), "minimum_price": None}
+
+    resolution = resolve_runtime_configuration(
+        (
+            ConfigurationSource("first", {"universe_policy": invalid_policy}),
+            ConfigurationSource(
+                "second",
+                {
+                    "schema_version": 1,
+                    "state_root": "/runtime/state",
+                    "enabled_asset_classes": ["us_equity"],
+                    "universe_policy": invalid_policy,
+                },
+            ),
+        ),
+        repository_root=Path(__file__).resolve().parents[2],
+    )
+
+    assert resolution == ConfigurationRefusal(
+        ConfigurationRefusalCode.INVALID_UNIVERSE_POLICY,
+        ("universe_policy",),
+    )
+
+
+@pytest.mark.parametrize(
+    "enabled_asset_classes",
+    [[], ["crypto_spot"], ["listed_option"], ["us_equity", "crypto_spot"], ["us_equity"] * 2],
+)
+def test_runtime_configuration_requires_the_exact_v0_asset_activation_set(
+    enabled_asset_classes: list[str],
+) -> None:
+    values = _with_policy({"schema_version": 1, "state_root": "/runtime/state"})
+    values["enabled_asset_classes"] = enabled_asset_classes
+
+    resolution = resolve_runtime_configuration(
+        (ConfigurationSource("test", values),),
+        repository_root=Path(__file__).resolve().parents[2],
+    )
+
+    assert resolution == ConfigurationRefusal(
+        ConfigurationRefusalCode.INVALID_ENABLED_ASSET_CLASSES,
+        ("enabled_asset_classes",),
+    )
+
+
+def test_runtime_configuration_refuses_hostile_asset_activation_without_comparing_it() -> None:
+    values = _with_policy({"schema_version": 1, "state_root": "/runtime/state"})
+    values["enabled_asset_classes"] = [_EqualityBomb()]
+
+    resolution = resolve_runtime_configuration(
+        (ConfigurationSource("test", values),),
+        repository_root=Path(__file__).resolve().parents[2],
+    )
+
+    assert resolution == ConfigurationRefusal(
+        ConfigurationRefusalCode.INVALID_ENABLED_ASSET_CLASSES,
+        ("enabled_asset_classes",),
     )
 
 
@@ -189,20 +572,46 @@ def test_runtime_configuration_rejects_noncanonical_values_and_unignored_roots(
     )
     invalid_values = (
         (
-            {"schema_version": "1", "state_root": str(tmp_path / "string-version")},
+            _with_policy({"schema_version": "1", "state_root": str(tmp_path / "string-version")}),
             unsupported_version,
         ),
         (
-            {"schema_version": True, "state_root": str(tmp_path / "boolean-version")},
+            _with_policy({"schema_version": True, "state_root": str(tmp_path / "boolean-version")}),
             unsupported_version,
         ),
-        ({"schema_version": 1, "state_root": tmp_path / "path-object"}, invalid_state_root),
         (
-            {"schema_version": 1, "state_root": str(tmp_path / "safe" / ".." / "state")},
+            _with_policy(
+                {
+                    "schema_version": _IntegerSubclass(1),
+                    "state_root": str(tmp_path / "integer-subclass-version"),
+                }
+            ),
+            unsupported_version,
+        ),
+        (
+            _with_policy({"schema_version": 1, "state_root": tmp_path / "path-object"}),
             invalid_state_root,
         ),
-        ({"schema_version": 1, "state_root": str(repository)}, invalid_state_root),
-        ({"schema_version": 1, "state_root": str(repository / "var")}, invalid_state_root),
+        (
+            _with_policy(
+                {
+                    "schema_version": 1,
+                    "state_root": _StringSubclass(str(tmp_path / "string-subclass-root")),
+                }
+            ),
+            invalid_state_root,
+        ),
+        (
+            _with_policy(
+                {"schema_version": 1, "state_root": str(tmp_path / "safe" / ".." / "state")}
+            ),
+            invalid_state_root,
+        ),
+        (_with_policy({"schema_version": 1, "state_root": str(repository)}), invalid_state_root),
+        (
+            _with_policy({"schema_version": 1, "state_root": str(repository / "var")}),
+            invalid_state_root,
+        ),
     )
 
     for values, expected_refusal in invalid_values:
@@ -217,7 +626,7 @@ def test_runtime_configuration_rejects_noncanonical_values_and_unignored_roots(
         (
             ConfigurationSource(
                 "test",
-                {"schema_version": 1, "state_root": str(repository / "var")},
+                _with_policy({"schema_version": 1, "state_root": str(repository / "var")}),
             ),
         ),
         repository_root=repository,
@@ -247,7 +656,7 @@ def test_runtime_configuration_rejects_unignored_database_paths(
         (
             ConfigurationSource(
                 "test",
-                {"schema_version": 1, "state_root": str(repository / "var")},
+                _with_policy({"schema_version": 1, "state_root": str(repository / "var")}),
             ),
         ),
         repository_root=repository,
@@ -304,7 +713,7 @@ def test_runtime_configuration_checks_the_database_with_clean_git_context(
         (
             ConfigurationSource(
                 "test",
-                {"schema_version": 1, "state_root": str(repository / "var")},
+                _with_policy({"schema_version": 1, "state_root": str(repository / "var")}),
             ),
         ),
         repository_root=repository,
@@ -340,7 +749,7 @@ def test_runtime_configuration_rejects_a_tracked_database_path(tmp_path: Path) -
         (
             ConfigurationSource(
                 "test",
-                {"schema_version": 1, "state_root": str(runtime_root)},
+                _with_policy({"schema_version": 1, "state_root": str(runtime_root)}),
             ),
         ),
         repository_root=repository,
@@ -362,7 +771,7 @@ def test_runtime_configuration_fails_closed_when_git_is_unavailable(
     source = (
         ConfigurationSource(
             "test",
-            {"schema_version": 1, "state_root": str(repository / "var")},
+            _with_policy({"schema_version": 1, "state_root": str(repository / "var")}),
         ),
     )
 
@@ -404,7 +813,11 @@ def test_runtime_configuration_rejects_nul_and_intermediate_symlinks(tmp_path: P
     hostile_roots = (f"{tmp_path}/nul\0state", str(linked_parent / "state"))
     for state_root in hostile_roots:
         resolution = resolve_runtime_configuration(
-            (ConfigurationSource("hostile", {"schema_version": 1, "state_root": state_root}),),
+            (
+                ConfigurationSource(
+                    "hostile", _with_policy({"schema_version": 1, "state_root": state_root})
+                ),
+            ),
             repository_root=repository,
         )
         assert resolution == ConfigurationRefusal(

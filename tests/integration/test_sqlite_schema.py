@@ -12,21 +12,22 @@ if TYPE_CHECKING:
 from agentic_investment_os.adapters.sqlite_lifecycle import SQLiteLifecycleLedger
 from agentic_investment_os.domain.lifecycle import (
     AdvanceAttempt,
-    AdvanceCommand,
     AdvanceRequest,
     AppendLifecycleRecord,
+    AppendTerminalLifecycleRecord,
     InvalidLifecycleStateError,
     LifecycleEvent,
     LifecyclePersistenceError,
-    LifecyclePhase,
     PinnedRunIdentity,
 )
+from tests._universe import advance_command
 
-CURRENT_DATABASE_VERSION = 1
+CURRENT_DATABASE_VERSION = 5
 CONFIGURATION_HASH = "a" * 64
 RECORDED_AT = "2026-08-21T22:00:00+00:00"
 MAX_DIAGNOSTIC_LENGTH = 100
 SQLiteValue = str | bytes | int | float | None
+SNAPSHOT_EVENT_SEQUENCE = 3
 
 
 class InvalidDatabaseVersionCursor(sqlite3.Cursor):
@@ -80,40 +81,22 @@ def _populate_current_history(database: Path) -> tuple[AdvanceRequest, PinnedRun
         idempotency_key="current-complete",
     )
     assert isinstance(request, AdvanceRequest)
-    identity = PinnedRunIdentity.create(
+    command = advance_command(
         request,
-        configuration_version=1,
         configuration_hash=CONFIGURATION_HASH,
     )
-    rows = (
-        (0, "advance_requested", None),
-        (1, "phase_completed", LifecyclePhase.RECONCILE_PRIOR_STATE.value),
-        (2, "run_inputs_pinned", LifecyclePhase.PIN_RUN_INPUTS.value),
-    )
+    identity = command.pinned_run_identity
+    ledger = SQLiteLifecycleLedger(database)
+    attempt = AdvanceAttempt()
+    recorded_at = datetime.fromisoformat(RECORDED_AT)
+    for expected_sequence in range(4):
+        decision = ledger.advance_step(command, attempt, recorded_at)
+        if expected_sequence < SNAPSHOT_EVENT_SEQUENCE:
+            assert isinstance(decision, AppendLifecycleRecord)
+            attempt = decision.attempt
+        else:
+            assert isinstance(decision, AppendTerminalLifecycleRecord)
     with sqlite3.connect(database) as connection:
-        for sequence, event_kind, completed_phase in rows:
-            connection.execute(
-                """
-                INSERT INTO lifecycle_events (
-                    stream_id, sequence, idempotency_key, session, mode,
-                    configuration_version, configuration_hash, run_id,
-                    event_kind, completed_phase, recorded_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    request.stream_id,
-                    sequence,
-                    request.idempotency_key.value,
-                    request.session.isoformat(),
-                    request.mode.value,
-                    identity.configuration_version,
-                    identity.configuration_hash,
-                    identity.run_id,
-                    event_kind,
-                    completed_phase,
-                    RECORDED_AT,
-                ),
-            )
         connection.execute(
             """
             INSERT INTO advance_refusals (idempotency_key, reason_code, recorded_at)
@@ -180,7 +163,7 @@ def test_fresh_database_records_its_physical_schema_version(tmp_path: Path) -> N
         "lifecycle_events_are_append_only_delete",
         "lifecycle_events_are_append_only_update",
         "one_initial_event_per_stream",
-        "one_unkeyed_refusal_per_reason",
+        "one_unkeyed_refusal_per_reason_and_cycle",
     }
 
 
@@ -313,7 +296,7 @@ def test_projection_only_index_corruption_is_ignored_then_rebuilt(tmp_path: Path
         assert connection.execute("PRAGMA integrity_check").fetchall() == [("ok",)]
 
 
-@pytest.mark.parametrize("unsupported_version", [2, 99])
+@pytest.mark.parametrize("unsupported_version", [1, 99])
 def test_unsupported_database_version_fails_before_schema_or_history_changes(
     tmp_path: Path,
     unsupported_version: int,
@@ -446,7 +429,7 @@ def test_index_content_corruption_fails_before_lifecycle_writes_resume(tmp_path:
     before = _authoritative_rows(database)
     _swap_index_roots(
         database,
-        "one_unkeyed_refusal_per_reason",
+        "one_unkeyed_refusal_per_reason_and_cycle",
         "one_initial_event_per_stream",
     )
     with sqlite3.connect(database) as connection:
@@ -627,12 +610,10 @@ def test_current_ledger_remains_usable_after_startup_validation(tmp_path: Path) 
         idempotency_key="usable-ledger",
     )
     assert isinstance(request, AdvanceRequest)
-    identity = PinnedRunIdentity.create(
+    command = advance_command(
         request,
-        configuration_version=1,
         configuration_hash=CONFIGURATION_HASH,
     )
-    command = AdvanceCommand(request, identity)
     started = ledger.advance_step(
         command,
         AdvanceAttempt(),

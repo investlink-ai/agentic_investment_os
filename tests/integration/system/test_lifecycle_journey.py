@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import sqlite3
 import subprocess
@@ -15,7 +16,7 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
 PROCESS_MODULE = "tests.integration.system._lifecycle_process"
 INTERRUPTED_EXIT_CODE = 75
 ADVANCE_FIELD_COUNT = 8
-STATUS_FIELD_COUNT = 9
+STATUS_FIELD_COUNT = 11
 SHA256_HEX_LENGTH = 64
 AUTHORITY_SENTINEL_NAMES = frozenset(
     {
@@ -40,12 +41,14 @@ class AdvanceObservation:
 @dataclass(frozen=True, slots=True)
 class StatusObservation:
     active_phase: str
-    last_completed_session: str
+    last_completed_cycle: str
+    universe_snapshot_cycle: str
     liveness: str
     durable_reason: str
     run_id: str
     configuration_version: int
     configuration_hash: str
+    universe_snapshot_id: str
     ambient_authority_absent: bool
 
 
@@ -91,13 +94,15 @@ def _status_observation(completed: subprocess.CompletedProcess[str]) -> StatusOb
     assert fields[0] == "status"
     return StatusObservation(
         active_phase=fields[1],
-        last_completed_session=fields[2],
-        liveness=fields[3],
-        durable_reason=fields[4],
-        run_id=fields[5],
-        configuration_version=int(fields[6]),
-        configuration_hash=fields[7],
-        ambient_authority_absent=fields[8] == "true",
+        last_completed_cycle=fields[2],
+        universe_snapshot_cycle=fields[3],
+        liveness=fields[4],
+        durable_reason=fields[5],
+        run_id=fields[6],
+        configuration_version=int(fields[7]),
+        configuration_hash=fields[8],
+        universe_snapshot_id=fields[9],
+        ambient_authority_absent=fields[10] == "true",
     )
 
 
@@ -111,6 +116,19 @@ def _authoritative_history(database: Path) -> list[tuple[object, ...]]:
         ).fetchall()
 
 
+def _phase_name(value: object) -> str | None:
+    if value is None:
+        return None
+    assert isinstance(value, str)
+    checkpoint = json.loads(value)
+    assert isinstance(checkpoint, dict)
+    payload = checkpoint["payload"]
+    assert isinstance(payload, dict)
+    phase = payload["phase"]
+    assert isinstance(phase, str)
+    return phase
+
+
 def _non_event_counts(database: Path) -> tuple[int, int]:
     with sqlite3.connect(database) as connection:
         refusals = connection.execute("SELECT COUNT(*) FROM advance_refusals").fetchone()
@@ -118,6 +136,18 @@ def _non_event_counts(database: Path) -> tuple[int, int]:
     assert refusals is not None
     assert conflicts is not None
     return int(refusals[0]), int(conflicts[0])
+
+
+def _snapshot_id(database: Path) -> str:
+    with sqlite3.connect(database) as connection:
+        row = connection.execute(
+            "SELECT universe_snapshot_id FROM lifecycle_events "
+            "WHERE universe_snapshot_id IS NOT NULL"
+        ).fetchone()
+    assert row is not None
+    snapshot_id = row[0]
+    assert isinstance(snapshot_id, str)
+    return snapshot_id
 
 
 def test_lifecycle_journey_resumes_replays_and_rebuilds_status_across_processes(
@@ -136,7 +166,7 @@ def test_lifecycle_journey_resumes_replays_and_rebuilds_status_across_processes(
     assert interrupted.stderr == ""
     database = state_root / "lifecycle.sqlite3"
     partial_history = _authoritative_history(database)
-    assert [(row[0], row[1], row[2]) for row in partial_history] == [
+    assert [(row[0], row[1], _phase_name(row[2])) for row in partial_history] == [
         (0, "advance_requested", None),
         (1, "phase_completed", "ReconcilePriorState"),
     ]
@@ -144,17 +174,18 @@ def test_lifecycle_journey_resumes_replays_and_rebuilds_status_across_processes(
     resumed = _advance_observation(_run_process("advance", state_root))
 
     assert resumed.disposition == "advanced"
-    assert resumed.completed_phase == "PinRunInputs"
+    assert resumed.completed_phase == "SnapshotUniverse"
     assert resumed.recovery == "resumed"
     assert resumed.configuration_version == 1
     assert len(resumed.run_id) == SHA256_HEX_LENGTH
     assert len(resumed.configuration_hash) == SHA256_HEX_LENGTH
     assert resumed.ambient_authority_absent is True
     completed_history = _authoritative_history(database)
-    assert [(row[0], row[1], row[2]) for row in completed_history] == [
+    assert [(row[0], row[1], _phase_name(row[2])) for row in completed_history] == [
         (0, "advance_requested", None),
         (1, "phase_completed", "ReconcilePriorState"),
         (2, "run_inputs_pinned", "PinRunInputs"),
+        (3, "universe_snapshotted", "SnapshotUniverse"),
     ]
     assert {str(row[3]) for row in completed_history} == {resumed.run_id}
     assert {str(row[4]) for row in completed_history} == {resumed.configuration_hash}
@@ -163,12 +194,18 @@ def test_lifecycle_journey_resumes_replays_and_rebuilds_status_across_processes(
 
     assert expected_status == StatusObservation(
         active_phase="",
-        last_completed_session="",
+        last_completed_cycle="",
+        universe_snapshot_cycle=(
+            '{"asset_class":"us_equity","cycle_type":"market_session",'
+            '"payload":{"trading_date":"2026-08-21"},'
+            '"payload_schema_version":1,"schema_version":1}'
+        ),
         liveness="active",
         durable_reason="",
         run_id=resumed.run_id,
         configuration_version=resumed.configuration_version,
         configuration_hash=resumed.configuration_hash,
+        universe_snapshot_id=_snapshot_id(database),
         ambient_authority_absent=True,
     )
     with sqlite3.connect(database) as connection:

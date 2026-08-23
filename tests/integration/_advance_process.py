@@ -1,15 +1,17 @@
-"""Run one Stage 1 Advance call in an isolated Python process for recovery tests."""
+"""Run one universe-snapshot Advance call in an isolated process for recovery tests."""
 
 from __future__ import annotations
 
 import sys
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 from agentic_investment_os.application.lifecycle import Advance
+from agentic_investment_os.domain.identity import MarketSession
 from agentic_investment_os.entrypoints.configuration import ConfigurationSource
 from agentic_investment_os.entrypoints.lifecycle import configure_advance
+from tests._universe import recorded_universe, runtime_configuration
 
 _ARGUMENT_ERROR = "expected state root, session, mode, and idempotency key"
 _ARGUMENT_COUNT = 5
@@ -32,16 +34,21 @@ def main() -> None:
         (
             ConfigurationSource(
                 "fresh-process-test",
-                {"schema_version": 1, "state_root": state_root},
+                runtime_configuration(Path(state_root)),
             ),
         ),
         repository_root=repository_root,
+        recorded_universe=recorded_universe(),
         clock=FixedClock(),
     )
     if not isinstance(configured, Advance):
         raise RuntimeError(_CONFIGURATION_ERROR)
     receipt = configured(
-        session=session,
+        cycle=(
+            MarketSession(date.fromisoformat(session)).to_payload()
+            if session != "invalid"
+            else session
+        ),
         mode=mode,
         idempotency_key=idempotency_key,
     )
@@ -53,7 +60,7 @@ def main() -> None:
         result = receipt.pinned_run_identity.run_id
     fields = (
         receipt.disposition.value,
-        "" if receipt.completed_phase is None else receipt.completed_phase.value,
+        "" if receipt.completed_phase is None else receipt.completed_phase.phase.value,
         "" if receipt.recovery is None else receipt.recovery.value,
         result,
     )
