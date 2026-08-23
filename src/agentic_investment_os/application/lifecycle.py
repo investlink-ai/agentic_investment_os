@@ -16,10 +16,12 @@ from agentic_investment_os.domain.lifecycle import (
     InvalidLifecycleStateError,
     LifecycleCommand,
     LifecycleLedger,
+    LifecyclePersistenceError,
     LifecycleStatus,
     LifecycleStatusProjection,
     PinnedRunIdentity,
 )
+from agentic_investment_os.domain.temporal import InvalidUtcInstantError, UtcInstant
 
 if TYPE_CHECKING:
     from datetime import datetime
@@ -28,6 +30,7 @@ __all__ = ("Advance", "Clock", "Status")
 
 
 _INCOMPLETE_CHECKPOINT_RESULT = "lifecycle ledger returned an incomplete checkpoint result"
+_CLOCK_INVALID = "lifecycle clock must return a timezone-aware instant representable in UTC"
 
 
 class Clock(Protocol):
@@ -74,7 +77,11 @@ class Advance:
             assert_never(parsed)  # pragma: no cover  # pragma: no mutate
         attempt = AdvanceAttempt()
         while True:
-            decision = self.ledger.advance_step(command, attempt, self.clock.now())
+            try:
+                recorded_at = UtcInstant.from_datetime(self.clock.now())
+            except InvalidUtcInstantError as error:
+                raise LifecyclePersistenceError(_CLOCK_INVALID) from error
+            decision = self.ledger.advance_step(command, attempt, recorded_at)
             if isinstance(decision, AdvanceReceipt):
                 return decision
             if isinstance(decision, AppendTerminalLifecycleRecord):

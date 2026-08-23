@@ -6,9 +6,12 @@ import hashlib
 import json
 import re
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date
 from enum import StrEnum
-from typing import Protocol, TypeGuard, assert_never
+from typing import TYPE_CHECKING, Protocol, TypeGuard, assert_never
+
+if TYPE_CHECKING:
+    from agentic_investment_os.domain.temporal import UtcInstant
 
 __all__ = (
     "AdvanceAttempt",
@@ -843,7 +846,7 @@ class LifecycleLedger(Protocol):
         self,
         command: LifecycleCommand,
         attempt: AdvanceAttempt,
-        recorded_at: datetime,
+        recorded_at: UtcInstant,
     ) -> LifecycleDecision: ...
 
 

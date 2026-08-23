@@ -53,9 +53,9 @@ the dependency. Prefer passing typed values and ports over adding an edge.
 - `execution` never imports `research`, a model client, or a Codex adapter.
 - `portfolio` consumes validated typed research outcomes and deterministic market/risk inputs; it does
   not invoke a model.
-- `domain` owns the asset-neutral `InstrumentIdentity`, `DecisionCycleIdentity`, durable-envelope, and
-  receipt contracts. A capability owns its asset-class policy and payload variants; adding a variant
-  does not add a reverse dependency or a top-level asset plugin module.
+- `domain` owns the asset-neutral `UtcInstant`, `InstrumentIdentity`, `DecisionCycleIdentity`,
+  durable-envelope, and receipt contracts. A capability owns its asset-class policy and payload
+  variants; adding a variant does not add a reverse dependency or a top-level asset plugin module.
 - The current `domain.lifecycle` kernel remains specific to `MarketSession`. `application` validates
   the `DecisionCycleIdentity` boundary and, in V0, passes only its `MarketSession` variant to that
   kernel. A later second lifecycle may justify extracting proven shared transition machinery; no

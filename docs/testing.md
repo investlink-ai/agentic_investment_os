@@ -73,8 +73,10 @@ passing suite remains supporting evidence rather than proof of complete semantic
 
 - Assert public receipts, durable events, stored artifacts, projections, packets, and observable world
   state. Avoid private methods and mock call choreography.
-- Use fixed timezone-aware clocks, deterministic identifiers, exchange calendars, content hashes, and
-  explicit evidence cutoffs.
+- Use fixed timezone-aware clocks, canonical UTC Absolute Instants, deterministic identifiers,
+  exchange calendars, content hashes, and explicit evidence cutoffs.
+- Prove that equivalent aware offsets normalize identically, while naive, malformed, over-precise,
+  and noncanonical durable timestamps fail before authoritative state or downstream effects.
 - Exercise the real entry path for the tested tier. A unit may call a domain capability directly; an
   integration test boots the relevant composition with recorded adapters.
 - Test lifecycle transition policy as a pure state machine. Exercise generated command, interruption,
@@ -162,6 +164,8 @@ evidence. A scenario becomes mandatory when its owning behavior is implemented.
 - Repeated Record calls do not duplicate Outcome Observations.
 - Constitution, model, prompt, tool, policy, data, and source hashes remain pinned within a run.
 - Corrupted projections rebuild deterministically; corrupted authoritative ledgers fail closed.
+- Lifecycle records persist one fixed-width UTC timestamp representation; retry, reopen, and
+  reconstruction preserve it independently of the clock's supplied offset or the host timezone.
 - SQLite startup atomically initializes the one current schema or validates that exact current shape.
   Failed initialization returns to an empty unversioned database; every other non-empty version or
   shape and index inconsistency fails closed. Advance validates request-relevant history, while Status

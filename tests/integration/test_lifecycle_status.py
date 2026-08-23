@@ -490,7 +490,11 @@ def test_status_rejects_a_refusal_for_a_completed_stream(tmp_path: Path) -> None
         connection.execute(
             """
             INSERT INTO advance_refusals (idempotency_key, reason_code, recorded_at)
-            VALUES ('completed-with-refusal', 'invalid_session', '2026-08-21T22:00:00+00:00')
+            VALUES (
+                'completed-with-refusal',
+                'invalid_session',
+                '2026-08-21T22:00:00.000000+00:00'
+            )
             """
         )
 
@@ -527,7 +531,7 @@ def test_status_rejects_an_invalid_refusal_reason_for_a_partial_stream(tmp_path:
             VALUES (
                 'partial-with-invalid-refusal',
                 'invalid_session',
-                '2026-08-21T22:00:00+00:00'
+                '2026-08-21T22:00:00.000000+00:00'
             )
             """
         )
@@ -651,7 +655,7 @@ def test_status_rejects_duplicate_unkeyed_refusal_authority(tmp_path: Path) -> N
         ),
         (
             "UPDATE advance_conflicts SET recorded_at = 'not-a-timestamp'",
-            "invalid recorded_at in lifecycle ledger",
+            "recorded_at must use canonical UTC format",
         ),
         (
             """

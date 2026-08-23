@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from typing import TYPE_CHECKING
 
 import pytest
 
@@ -26,6 +27,9 @@ from agentic_investment_os.domain.lifecycle import (
     PinnedRunIdentity,
 )
 
+if TYPE_CHECKING:
+    from agentic_investment_os.domain.temporal import UtcInstant
+
 SHA256_HEX_LENGTH = 64
 PINNED_SEQUENCE = 2
 
@@ -46,7 +50,7 @@ class ConcurrentCompletionLedger:
         self,
         command: LifecycleCommand,
         attempt: AdvanceAttempt,
-        _recorded_at: datetime,
+        _recorded_at: UtcInstant,
     ) -> LifecycleDecision:
         assert isinstance(command, AdvanceCommand)
         if self.completion_point == "start" and self.steps == 0:

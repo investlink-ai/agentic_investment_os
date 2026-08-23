@@ -105,8 +105,8 @@ Use `pyproject.toml` and `uv.lock` only; never create `requirements.txt` files.
   before control flow; keep protocol constants and safety invariants fixed.
 - Keep external calls between durable checkpoints. Persist intent before a side effect and append its
   observed result before advancing the lifecycle.
-- Use timezone-aware market timestamps, injected clocks, deterministic identifiers, and explicit
-  as-of cutoffs. Wall-clock access belongs in adapters or composition roots.
+- Use canonical UTC Absolute Instants, explicit exchange calendars, injected clocks, deterministic
+  identifiers, and explicit as-of cutoffs. Wall-clock access belongs in adapters or composition roots.
 - Keep projections rebuildable from authoritative append-only records. A projection or report never
   becomes a second source of truth.
 - Catch exceptions only where they can be translated into a typed failure, compensated, or allowed to

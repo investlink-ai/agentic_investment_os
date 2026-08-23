@@ -5,6 +5,8 @@ not implementation structure, field schemas, or configurable values.
 
 ## Time and evidence
 
+- **Absolute Instant:** one unambiguous point on the shared timeline used to order lifecycle,
+  evidence, decision, execution, and observation facts.
 - **Decision Cycle:** one asset-class-relative interval whose schedule, cutoff, and required activities
   delimit a deterministic operating-system run.
 - **Decision Cycle Identity:** the versioned, asset-class-discriminated durable identity of a Decision
