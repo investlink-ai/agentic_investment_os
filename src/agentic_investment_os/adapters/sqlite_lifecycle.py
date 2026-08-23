@@ -26,6 +26,8 @@ from agentic_investment_os.domain.lifecycle import (
     AppendTerminalLifecycleRecord,
     DurableAdvanceConflict,
     DurableAdvanceRefusal,
+    EvidenceCaptureCheckpoint,
+    EvidenceCaptureReference,
     IdempotencyKey,
     InputRefusal,
     InvalidLifecycleStateError,
@@ -38,13 +40,16 @@ from agentic_investment_os.domain.lifecycle import (
     LifecyclePersistenceError,
     LifecycleRecord,
     LifecycleStatus,
+    PerformEvidenceCapture,
     PinnedRunIdentity,
     decide_advance,
+    decide_evidence_refusal_replay,
     decide_invalid_history,
     decide_terminal_refusal,
     derive_lifecycle_status,
     is_sha256,
     parse_lifecycle_checkpoint,
+    reconstruct_evidence_checkpoints,
 )
 from agentic_investment_os.domain.temporal import InvalidUtcInstantError, UtcInstant
 from agentic_investment_os.domain.universe import (
@@ -121,7 +126,7 @@ CREATE TABLE lifecycle_events (
     event_kind TEXT NOT NULL CHECK (
         event_kind IN (
             'advance_requested', 'phase_completed', 'run_inputs_pinned',
-            'universe_snapshotted'
+            'universe_snapshotted', 'evidence_captured'
         )
     ),
     completed_phase TEXT,
@@ -129,18 +134,40 @@ CREATE TABLE lifecycle_events (
         universe_snapshot_id IS NULL OR length(universe_snapshot_id) = 64
     ),
     universe_snapshot TEXT,
+    evidence_policy_id TEXT CHECK (
+        evidence_policy_id IS NULL OR length(evidence_policy_id) = 64
+    ),
+    evidence_artifact_ids TEXT,
+    evidence_refusal_ids TEXT,
     event_envelope TEXT NOT NULL,
     recorded_at TEXT NOT NULL,
     CHECK (
         (event_kind = 'run_inputs_pinned'
             AND universe_snapshot_id IS NOT NULL
-            AND universe_snapshot IS NOT NULL)
+            AND universe_snapshot IS NOT NULL
+            AND evidence_policy_id IS NULL
+            AND evidence_artifact_ids IS NULL
+            AND evidence_refusal_ids IS NULL)
         OR (event_kind = 'universe_snapshotted'
             AND universe_snapshot_id IS NOT NULL
-            AND universe_snapshot IS NULL)
-        OR (event_kind NOT IN ('run_inputs_pinned', 'universe_snapshotted')
+            AND universe_snapshot IS NULL
+            AND evidence_policy_id IS NULL
+            AND evidence_artifact_ids IS NULL
+            AND evidence_refusal_ids IS NULL)
+        OR (event_kind = 'evidence_captured'
             AND universe_snapshot_id IS NULL
-            AND universe_snapshot IS NULL)
+            AND universe_snapshot IS NULL
+            AND evidence_policy_id IS NOT NULL
+            AND evidence_artifact_ids IS NOT NULL
+            AND evidence_refusal_ids = '[]')
+        OR (event_kind NOT IN (
+                'run_inputs_pinned', 'universe_snapshotted', 'evidence_captured'
+            )
+            AND universe_snapshot_id IS NULL
+            AND universe_snapshot IS NULL
+            AND evidence_policy_id IS NULL
+            AND evidence_artifact_ids IS NULL
+            AND evidence_refusal_ids IS NULL)
     ),
     PRIMARY KEY (stream_id, sequence),
     UNIQUE (idempotency_key, sequence)
@@ -162,10 +189,26 @@ CREATE TABLE advance_refusals (
             'missing_universe_input', 'invalid_universe_input',
             'stale_universe_input', 'contradictory_universe_input',
             'session_stream_conflict', 'idempotency_key_conflict',
-            'invalid_durable_state'
+            'invalid_durable_state', 'evidence_capture_failed'
         )
     ),
-    recorded_at TEXT NOT NULL
+    evidence_policy_id TEXT CHECK (
+        evidence_policy_id IS NULL OR length(evidence_policy_id) = 64
+    ),
+    evidence_artifact_ids TEXT,
+    evidence_refusal_ids TEXT,
+    recorded_at TEXT NOT NULL,
+    CHECK (
+        (reason_code = 'evidence_capture_failed'
+            AND evidence_policy_id IS NOT NULL
+            AND evidence_artifact_ids IS NOT NULL
+            AND evidence_refusal_ids IS NOT NULL
+            AND evidence_refusal_ids != '[]')
+        OR (reason_code != 'evidence_capture_failed'
+            AND evidence_policy_id IS NULL
+            AND evidence_artifact_ids IS NULL
+            AND evidence_refusal_ids IS NULL)
+    )
 ) STRICT
 """,
     """
@@ -212,7 +255,7 @@ class _DatabaseOpenMode(StrEnum):
     EXISTING_ONLY = "rw"
 
 
-_CURRENT_DATABASE_VERSION = 5
+_CURRENT_DATABASE_VERSION = 6
 _CURRENT_SCHEMA_SIGNATURE = frozenset(" ".join(statement.split()) for statement in _CURRENT_SCHEMA)
 
 _PROJECTION_SCHEMA = """
@@ -441,9 +484,26 @@ class SQLiteLifecycleLedger:
             key = _command_key(command)
             refusals = _load_refusals(connection, command=command)
             terminal = decide_terminal_refusal(tuple(refusals), command)
-            if terminal is not None:
+            terminal_requires_history = terminal is not None and bool(
+                terminal.evidence_artifact_ids or terminal.evidence_refusal_ids
+            )
+            if terminal is not None and not terminal_requires_history:
                 return terminal
             next_refusal_sequence = _next_refusal_sequence(connection)
+            if terminal_requires_history:
+                if not isinstance(command, AdvanceCommand):  # pragma: no cover - advance-only.
+                    raise LifecyclePersistenceError(_DATABASE_INTEGRITY_FAILED)
+                try:
+                    history = LifecycleHistory(
+                        events=tuple(_load_events(connection, key=key)),
+                        conflicts=tuple(_load_conflicts(connection, key=key)),
+                    )
+                except InvalidLifecycleStateError:
+                    return AdvanceReceipt.failed_closed(
+                        AdvanceFailureReason.INVALID_DURABLE_STATE,
+                        cycle=command.request.session,
+                    )
+                return decide_evidence_refusal_replay(history, tuple(refusals), command)
             try:
                 history = LifecycleHistory(
                     events=() if key is None else tuple(_load_events(connection, key=key)),
@@ -464,6 +524,8 @@ class SQLiteLifecycleLedger:
                 return decision
             if isinstance(decision, AdvanceReceipt):
                 return decision
+            if isinstance(decision, PerformEvidenceCapture):
+                return decision
             # Strict mypy proves this line unreachable; removing it is runtime-equivalent.
             assert_never(decision)  # pragma: no cover
 
@@ -481,6 +543,19 @@ class SQLiteLifecycleLedger:
             status = derive_lifecycle_status(history)
             _replace_status_projection(connection, status)
             return status
+
+        return self._write(operation)
+
+    def rebuild_evidence_checkpoints(self) -> tuple[EvidenceCaptureReference, ...]:
+        """Reconstruct every validated lifecycle reference into Evidence Vault state."""
+
+        def operation(connection: sqlite3.Connection) -> tuple[EvidenceCaptureReference, ...]:
+            history = LifecycleHistory(
+                events=tuple(_load_events(connection)),
+                refusals=tuple(_load_refusals(connection)),
+                conflicts=tuple(_load_conflicts(connection)),
+            )
+            return reconstruct_evidence_checkpoints(history)
 
         return self._write(operation)
 
@@ -509,7 +584,9 @@ def _load_events(
                    data_regime, evidence_cutoff, instrument_snapshot_hash,
                    position_snapshot_hash, eligibility_policy_hash,
                    event_kind, completed_phase, universe_snapshot_id,
-                   universe_snapshot, event_envelope, recorded_at
+                   universe_snapshot, evidence_policy_id,
+                   evidence_artifact_ids, evidence_refusal_ids,
+                   event_envelope, recorded_at
             FROM lifecycle_events ORDER BY stream_id, sequence
             """
         ).fetchall()
@@ -521,7 +598,9 @@ def _load_events(
                    data_regime, evidence_cutoff, instrument_snapshot_hash,
                    position_snapshot_hash, eligibility_policy_hash,
                    event_kind, completed_phase, universe_snapshot_id,
-                   universe_snapshot, event_envelope, recorded_at
+                   universe_snapshot, evidence_policy_id,
+                   evidence_artifact_ids, evidence_refusal_ids,
+                   event_envelope, recorded_at
             FROM lifecycle_events WHERE idempotency_key = ? ORDER BY sequence
             """,
             (key.value,),
@@ -547,7 +626,7 @@ def _load_event(row: tuple[object, ...]) -> LifecycleEvent:
     instrument_snapshot_hash = _hash(row[10], "instrument_snapshot_hash")
     position_snapshot_hash = _hash(row[11], "position_snapshot_hash")
     eligibility_policy_hash = _hash(row[12], "eligibility_policy_hash")
-    recorded_at = _canonical_timestamp(row[18], "recorded_at")
+    recorded_at = _canonical_timestamp(row[21], "recorded_at")
     if evidence_cutoff.value > recorded_at.value:
         raise InvalidLifecycleStateError(_FUTURE_EVIDENCE_CUTOFF)
     try:
@@ -562,6 +641,7 @@ def _load_event(row: tuple[object, ...]) -> LifecycleEvent:
         run_id=run_id,
         recorded_at=recorded_at,
     )
+    evidence_capture = _load_evidence_capture(row[17], row[18], row[19], event_kind=event_kind)
     event = LifecycleEvent(
         stream_id=stream_id,
         sequence=sequence,
@@ -581,8 +661,9 @@ def _load_event(row: tuple[object, ...]) -> LifecycleEvent:
         completed_phase=completed_phase,
         prepared_universe_snapshot=prepared_snapshot,
         published_universe_snapshot_id=published_snapshot_id,
+        evidence_capture=evidence_capture,
     )
-    envelope = _text(row[17], "event_envelope")
+    envelope = _text(row[20], "event_envelope")
     if _canonical_json(event.to_envelope(recorded_at)) != envelope:
         raise InvalidLifecycleStateError(_INVALID_CHECKPOINT_ORDER)
     return event
@@ -623,6 +704,61 @@ def _load_universe_reference(
     assert_never(parsed)  # pragma: no cover
 
 
+def _load_evidence_capture(
+    policy_id_value: object,
+    artifact_ids_value: object,
+    refusal_ids_value: object,
+    *,
+    event_kind: LifecycleEventKind,
+) -> EvidenceCaptureCheckpoint | None:
+    if event_kind is not LifecycleEventKind.EVIDENCE_CAPTURED:
+        if policy_id_value is not None:
+            raise InvalidLifecycleStateError(_INVALID_CHECKPOINT_ORDER)
+        if artifact_ids_value is not None:
+            raise InvalidLifecycleStateError(_INVALID_CHECKPOINT_ORDER)
+        if refusal_ids_value is not None:
+            raise InvalidLifecycleStateError(_INVALID_CHECKPOINT_ORDER)
+        return None
+    checkpoint = _parse_evidence_capture(
+        policy_id_value,
+        artifact_ids_value,
+        refusal_ids_value,
+    )
+    if not checkpoint.is_complete:
+        raise InvalidLifecycleStateError(_INVALID_CHECKPOINT_ORDER)
+    return checkpoint
+
+
+def _parse_evidence_capture(
+    policy_id_value: object,
+    artifact_ids_value: object,
+    refusal_ids_value: object,
+) -> EvidenceCaptureCheckpoint:
+    policy_id = _hash(policy_id_value, "evidence_policy_id")
+    artifact_ids = _hash_tuple_json(artifact_ids_value, "evidence_artifact_ids")
+    refusal_ids = _hash_tuple_json(refusal_ids_value, "evidence_refusal_ids")
+    try:
+        return EvidenceCaptureCheckpoint(policy_id, artifact_ids, refusal_ids)
+    except ValueError as error:
+        raise InvalidLifecycleStateError(_INVALID_CHECKPOINT_ORDER) from error
+
+
+def _hash_tuple_json(value: object, field: str) -> tuple[str, ...]:
+    encoded = _text(value, field)
+    try:
+        decoded: object = json.loads(encoded)
+    except (ValueError, RecursionError) as error:
+        raise InvalidLifecycleStateError(_INVALID_CHECKPOINT_ORDER) from error
+    if type(decoded) is not list:
+        raise InvalidLifecycleStateError(_INVALID_CHECKPOINT_ORDER)
+    if any(not is_sha256(item) for item in decoded):
+        raise InvalidLifecycleStateError(_INVALID_CHECKPOINT_ORDER)
+    result = tuple(decoded)
+    if _canonical_json(list(result)) != encoded:
+        raise InvalidLifecycleStateError(_INVALID_CHECKPOINT_ORDER)
+    return result
+
+
 def _load_refusals(
     connection: sqlite3.Connection,
     *,
@@ -631,7 +767,8 @@ def _load_refusals(
     if command is None:
         rows = connection.execute(
             """
-            SELECT refusal_id, idempotency_key, cycle_identity, reason_code, recorded_at
+            SELECT refusal_id, idempotency_key, cycle_identity, reason_code,
+                   evidence_policy_id, evidence_artifact_ids, evidence_refusal_ids, recorded_at
             FROM advance_refusals ORDER BY refusal_id
             """
         ).fetchall()
@@ -641,7 +778,8 @@ def _load_refusals(
             cycle = command.cycle
             rows = connection.execute(
                 """
-                SELECT refusal_id, idempotency_key, cycle_identity, reason_code, recorded_at
+                SELECT refusal_id, idempotency_key, cycle_identity, reason_code,
+                       evidence_policy_id, evidence_artifact_ids, evidence_refusal_ids, recorded_at
                 FROM advance_refusals
                 WHERE idempotency_key IS NULL AND reason_code = ?
                     AND cycle_identity IS ?
@@ -655,7 +793,8 @@ def _load_refusals(
         else:
             rows = connection.execute(
                 """
-                SELECT refusal_id, idempotency_key, cycle_identity, reason_code, recorded_at
+                SELECT refusal_id, idempotency_key, cycle_identity, reason_code,
+                       evidence_policy_id, evidence_artifact_ids, evidence_refusal_ids, recorded_at
                 FROM advance_refusals WHERE idempotency_key = ? ORDER BY refusal_id
                 """,
                 (refusal_key.value,),
@@ -663,7 +802,8 @@ def _load_refusals(
     else:
         rows = connection.execute(
             """
-            SELECT refusal_id, idempotency_key, cycle_identity, reason_code, recorded_at
+            SELECT refusal_id, idempotency_key, cycle_identity, reason_code,
+                   evidence_policy_id, evidence_artifact_ids, evidence_refusal_ids, recorded_at
             FROM advance_refusals WHERE idempotency_key = ? ORDER BY refusal_id
             """,
             (command.request.idempotency_key.value,),
@@ -674,9 +814,40 @@ def _load_refusals(
         key = _optional_refusal_key(row[1])
         cycle = None if row[2] is None else _market_session(row[2])
         reason = _failure_reason(row[3])
-        _canonical_timestamp(row[4], "recorded_at")
-        refusals.append(DurableAdvanceRefusal(sequence, key, reason, cycle))
+        evidence_capture = _load_refusal_evidence_capture(
+            row[4],
+            row[5],
+            row[6],
+            reason=reason,
+        )
+        _canonical_timestamp(row[7], "recorded_at")
+        refusals.append(DurableAdvanceRefusal(sequence, key, reason, cycle, evidence_capture))
     return refusals
+
+
+def _load_refusal_evidence_capture(
+    policy_id_value: object,
+    artifact_ids_value: object,
+    refusal_ids_value: object,
+    *,
+    reason: AdvanceFailureReason,
+) -> EvidenceCaptureCheckpoint | None:
+    if reason is not AdvanceFailureReason.EVIDENCE_CAPTURE_FAILED:
+        if policy_id_value is not None:
+            raise InvalidLifecycleStateError(_INVALID_REFUSAL_KEY)
+        if artifact_ids_value is not None:
+            raise InvalidLifecycleStateError(_INVALID_REFUSAL_KEY)
+        if refusal_ids_value is not None:
+            raise InvalidLifecycleStateError(_INVALID_REFUSAL_KEY)
+        return None
+    checkpoint = _parse_evidence_capture(
+        policy_id_value,
+        artifact_ids_value,
+        refusal_ids_value,
+    )
+    if checkpoint.is_complete:
+        raise InvalidLifecycleStateError(_INVALID_REFUSAL_KEY)
+    return checkpoint
 
 
 def _load_conflicts(
@@ -755,8 +926,10 @@ def _append_record(
                 data_regime, evidence_cutoff, instrument_snapshot_hash,
                 position_snapshot_hash, eligibility_policy_hash,
                 event_kind, completed_phase, universe_snapshot_id,
-                universe_snapshot, event_envelope, recorded_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                universe_snapshot, evidence_policy_id,
+                evidence_artifact_ids, evidence_refusal_ids,
+                event_envelope, recorded_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 record.stream_id,
@@ -784,6 +957,17 @@ def _append_record(
                     if record.prepared_universe_snapshot is None
                     else record.prepared_universe_snapshot.to_json()
                 ),
+                None if record.evidence_capture is None else record.evidence_capture.policy_id,
+                (
+                    None
+                    if record.evidence_capture is None
+                    else _canonical_json(list(record.evidence_capture.artifact_ids))
+                ),
+                (
+                    None
+                    if record.evidence_capture is None
+                    else _canonical_json(list(record.evidence_capture.refusal_ids))
+                ),
                 _canonical_json(record.to_envelope(recorded_at)),
                 timestamp,
             ),
@@ -793,14 +977,26 @@ def _append_record(
         connection.execute(
             """
             INSERT INTO advance_refusals (
-                refusal_id, idempotency_key, cycle_identity, reason_code, recorded_at
-            ) VALUES (?, ?, ?, ?, ?)
+                refusal_id, idempotency_key, cycle_identity, reason_code,
+                evidence_policy_id, evidence_artifact_ids, evidence_refusal_ids, recorded_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 record.sequence,
                 None if record.idempotency_key is None else record.idempotency_key.value,
                 (None if record.cycle is None else _canonical_json(record.cycle.to_payload())),
                 record.reason.value,
+                None if record.evidence_capture is None else record.evidence_capture.policy_id,
+                (
+                    None
+                    if record.evidence_capture is None
+                    else _canonical_json(list(record.evidence_capture.artifact_ids))
+                ),
+                (
+                    None
+                    if record.evidence_capture is None
+                    else _canonical_json(list(record.evidence_capture.refusal_ids))
+                ),
                 timestamp,
             ),
         )

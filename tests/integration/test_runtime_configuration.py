@@ -15,6 +15,7 @@ from agentic_investment_os.entrypoints.configuration import (
     RuntimeConfiguration,
     resolve_runtime_configuration,
 )
+from tests._evidence import evidence_policy
 from tests._universe import universe_policy
 
 SHA256_HEX_LENGTH = 64
@@ -51,6 +52,7 @@ def _with_policy(values: dict[str, object]) -> dict[str, object]:
         **values,
         "enabled_asset_classes": ["us_equity"],
         "universe_policy": universe_policy(),
+        "evidence_policy": evidence_policy(),
     }
 
 
@@ -87,6 +89,7 @@ def test_runtime_configuration_is_complete_immutable_and_deterministically_hashe
                     "schema_version": 1,
                     "enabled_asset_classes": ["us_equity"],
                     "universe_policy": universe_policy(),
+                    "evidence_policy": evidence_policy(),
                 },
             ),
             ConfigurationSource(
@@ -96,6 +99,7 @@ def test_runtime_configuration_is_complete_immutable_and_deterministically_hashe
                     "state_root": str(state_root),
                     "enabled_asset_classes": ["us_equity"],
                     "universe_policy": universe_policy(),
+                    "evidence_policy": evidence_policy(),
                 },
             ),
         ),
@@ -109,6 +113,7 @@ def test_runtime_configuration_is_complete_immutable_and_deterministically_hashe
                     "state_root": str(state_root),
                     "enabled_asset_classes": ["us_equity"],
                     "universe_policy": universe_policy(),
+                    "evidence_policy": evidence_policy(),
                 },
             ),
             ConfigurationSource(
@@ -117,6 +122,7 @@ def test_runtime_configuration_is_complete_immutable_and_deterministically_hashe
                     "schema_version": 1,
                     "enabled_asset_classes": ["us_equity"],
                     "universe_policy": universe_policy(),
+                    "evidence_policy": evidence_policy(),
                 },
             ),
         ),
@@ -141,7 +147,7 @@ def test_runtime_configuration_is_complete_immutable_and_deterministically_hashe
         repository_root=Path(__file__).resolve().parents[2],
     )
     assert isinstance(fixed, RuntimeConfiguration)
-    assert fixed.fingerprint == "cb7fb3025a8ff2ff847705e9489e0ab44386af25ef1e36fb5e64931a8395f065"
+    assert fixed.fingerprint == "c92cbb974b6ad1a89c022f645c6c98d0f09e4a74eacd7fa5b63663758f412339"
 
     unicode_path = resolve_runtime_configuration(
         (
@@ -154,7 +160,7 @@ def test_runtime_configuration_is_complete_immutable_and_deterministically_hashe
     assert isinstance(unicode_path, RuntimeConfiguration)
     assert (
         unicode_path.fingerprint
-        == "a800fd75cfd9e8bb37df2a558884fe713bf99b787cdcc818a48e1916a34c8a8c"
+        == "f25c4a6a68ed477bf962e88954f9f2517afa3fef1f8fabade5f5406bdc30afd2"
     )
 
 
@@ -169,6 +175,7 @@ def test_runtime_configuration_is_complete_immutable_and_deterministically_hashe
                         "schema_version": 1,
                         "enabled_asset_classes": ["us_equity"],
                         "universe_policy": universe_policy(),
+                        "evidence_policy": evidence_policy(),
                     },
                 ),
             ),
@@ -182,6 +189,7 @@ def test_runtime_configuration_is_complete_immutable_and_deterministically_hashe
                         "schema_version": 1,
                         "state_root": "/runtime/state",
                         "enabled_asset_classes": ["us_equity"],
+                        "evidence_policy": evidence_policy(),
                     },
                 ),
             ),
@@ -258,6 +266,7 @@ def test_runtime_configuration_is_complete_immutable_and_deterministically_hashe
                             **universe_policy(),
                             "approved_exchanges": ["NASDAQ", "OTC"],
                         },
+                        "evidence_policy": evidence_policy(),
                     },
                 ),
             ),
@@ -510,6 +519,7 @@ def test_runtime_configuration_validates_duplicate_supported_invalid_scalars() -
                     "state_root": "/runtime/state",
                     "enabled_asset_classes": ["us_equity"],
                     "universe_policy": invalid_policy,
+                    "evidence_policy": evidence_policy(),
                 },
             ),
         ),
@@ -823,3 +833,27 @@ def test_runtime_configuration_rejects_nul_and_intermediate_symlinks(tmp_path: P
         assert resolution == ConfigurationRefusal(
             ConfigurationRefusalCode.INVALID_STATE_ROOT, ("state_root",)
         )
+
+
+@pytest.mark.parametrize("evidence_value", [None, "different-regime-v1"])
+def test_runtime_configuration_refuses_invalid_or_mismatched_evidence_policy(
+    evidence_value: str | None,
+) -> None:
+    configuration = _with_policy({"schema_version": 1, "state_root": "/runtime/state"})
+    if evidence_value is None:
+        configuration["evidence_policy"] = None
+    else:
+        configuration["evidence_policy"] = {
+            **evidence_policy(),
+            "data_regime": evidence_value,
+        }
+
+    resolution = resolve_runtime_configuration(
+        (ConfigurationSource("evidence", configuration),),
+        repository_root=Path(__file__).resolve().parents[2],
+    )
+
+    assert resolution == ConfigurationRefusal(
+        ConfigurationRefusalCode.INVALID_EVIDENCE_POLICY,
+        ("evidence_policy",),
+    )

@@ -49,6 +49,7 @@ from agentic_investment_os.domain.lifecycle import (
     LifecyclePersistenceError,
     LifecyclePhase,
     LifecycleStatus,
+    PerformEvidenceCapture,
     PinnedRunIdentity,
 )
 from agentic_investment_os.domain.temporal import UtcInstant
@@ -59,6 +60,7 @@ from agentic_investment_os.entrypoints.configuration import (
     ConfigurationSource,
 )
 from agentic_investment_os.entrypoints.lifecycle import SystemClock, configure_advance
+from tests._evidence import evidence_capture_checkpoint, recorded_evidence
 from tests._universe import (
     advance_command,
     pinned_run_identity,
@@ -72,12 +74,60 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 SHA256_HEX_LENGTH = 64
 PRIVATE_DIRECTORY_MODE = 0o700
 PRIVATE_FILE_MODE = 0o600
-PINNED_EVENT_COUNT = 4
+PINNED_EVENT_COUNT = 5
 RECEIPT_FIELD_COUNT = 4
 RECORDED_AT = datetime(2026, 8, 21, 22, 0, tzinfo=UTC)
 SQLiteValue = str | bytes | int | float | None
 NONCANONICAL_CHECKPOINT_SQL = (
     "UPDATE lifecycle_events SET completed_phase = ' ' || completed_phase WHERE sequence = 1"
+)
+VALID_EVIDENCE_IDS_JSON = json.dumps(["a" * SHA256_HEX_LENGTH], separators=(",", ":"))
+DUPLICATE_EVIDENCE_IDS_JSON = json.dumps(
+    ["a" * SHA256_HEX_LENGTH, "a" * SHA256_HEX_LENGTH],
+    separators=(",", ":"),
+)
+EVIDENCE_ON_WRONG_EVENT_SQL = (
+    f"UPDATE lifecycle_events SET evidence_artifact_ids = '{VALID_EVIDENCE_IDS_JSON}', "  # noqa: S608
+    "evidence_refusal_ids = '[]' WHERE sequence = 0"
+)
+EVIDENCE_ARTIFACT_ON_WRONG_EVENT_SQL = (
+    f"UPDATE lifecycle_events SET evidence_artifact_ids = '{VALID_EVIDENCE_IDS_JSON}' "  # noqa: S608
+    "WHERE sequence = 0"
+)
+EVIDENCE_REFUSAL_ON_WRONG_EVENT_SQL = (
+    f"UPDATE lifecycle_events SET evidence_refusal_ids = '{VALID_EVIDENCE_IDS_JSON}' "  # noqa: S608
+    "WHERE sequence = 0"
+)
+EVIDENCE_POLICY_ON_WRONG_EVENT_SQL = (
+    f"UPDATE lifecycle_events SET evidence_policy_id = '{'a' * SHA256_HEX_LENGTH}' "  # noqa: S608
+    "WHERE sequence = 0"
+)
+MISSING_CAPTURED_EVIDENCE_SQL = (
+    "UPDATE lifecycle_events SET evidence_artifact_ids = '[]' "
+    "WHERE event_kind = 'evidence_captured'"
+)
+REFUSAL_ON_CAPTURED_EVIDENCE_SQL = (
+    f"UPDATE lifecycle_events SET evidence_refusal_ids = '{VALID_EVIDENCE_IDS_JSON}' "  # noqa: S608
+    "WHERE event_kind = 'evidence_captured'"
+)
+DUPLICATE_EVIDENCE_IDENTIFIERS_SQL = (
+    f"UPDATE lifecycle_events SET evidence_artifact_ids = '{DUPLICATE_EVIDENCE_IDS_JSON}' "  # noqa: S608
+    "WHERE event_kind = 'evidence_captured'"
+)
+MALFORMED_EVIDENCE_IDENTIFIERS_SQL = (
+    "UPDATE lifecycle_events SET evidence_artifact_ids = '{' WHERE event_kind = 'evidence_captured'"
+)
+NON_LIST_EVIDENCE_IDENTIFIERS_SQL = (
+    "UPDATE lifecycle_events SET evidence_artifact_ids = '{}' "
+    "WHERE event_kind = 'evidence_captured'"
+)
+INVALID_EVIDENCE_IDENTIFIER_SQL = (
+    "UPDATE lifecycle_events SET evidence_artifact_ids = '[\"invalid\"]' "
+    "WHERE event_kind = 'evidence_captured'"
+)
+NONCANONICAL_EVIDENCE_IDENTIFIERS_SQL = (
+    f"UPDATE lifecycle_events SET evidence_artifact_ids = '[ \"{'a' * SHA256_HEX_LENGTH}\"]' "  # noqa: S608
+    "WHERE event_kind = 'evidence_captured'"
 )
 
 
@@ -127,7 +177,9 @@ CORRUPTIONS = {
                    data_regime, evidence_cutoff, instrument_snapshot_hash,
                    position_snapshot_hash, eligibility_policy_hash,
                    event_kind, completed_phase, universe_snapshot_id,
-                   universe_snapshot, event_envelope, recorded_at
+                   universe_snapshot, evidence_policy_id,
+                   evidence_artifact_ids, evidence_refusal_ids,
+                   event_envelope, recorded_at
             FROM lifecycle_events WHERE sequence = 2
             """,
         ),
@@ -380,6 +432,86 @@ CORRUPTIONS = {
         ("UPDATE lifecycle_events SET event_envelope = 3 WHERE sequence = 1",),
         "invalid event_envelope in lifecycle ledger",
     ),
+    "evidence_on_wrong_event": (
+        (EVIDENCE_ON_WRONG_EVENT_SQL,),
+        "lifecycle stream checkpoint order is invalid",
+    ),
+    "evidence_artifact_on_wrong_event": (
+        (EVIDENCE_ARTIFACT_ON_WRONG_EVENT_SQL,),
+        "lifecycle stream checkpoint order is invalid",
+    ),
+    "evidence_refusal_on_wrong_event": (
+        (EVIDENCE_REFUSAL_ON_WRONG_EVENT_SQL,),
+        "lifecycle stream checkpoint order is invalid",
+    ),
+    "evidence_policy_on_wrong_event": (
+        (EVIDENCE_POLICY_ON_WRONG_EVENT_SQL,),
+        "lifecycle stream checkpoint order is invalid",
+    ),
+    "non_text_evidence_policy_id": (
+        (
+            (
+                "UPDATE lifecycle_events SET evidence_policy_id = 3 "
+                "WHERE event_kind = 'evidence_captured'"
+            ),
+        ),
+        "invalid evidence_policy_id in lifecycle ledger",
+    ),
+    "missing_evidence_policy_id": (
+        (
+            (
+                "UPDATE lifecycle_events SET evidence_policy_id = NULL "
+                "WHERE event_kind = 'evidence_captured'"
+            ),
+        ),
+        "invalid evidence_policy_id in lifecycle ledger",
+    ),
+    "non_text_evidence_artifact_ids": (
+        (
+            (
+                "UPDATE lifecycle_events SET evidence_artifact_ids = 3 "
+                "WHERE event_kind = 'evidence_captured'"
+            ),
+        ),
+        "invalid evidence_artifact_ids in lifecycle ledger",
+    ),
+    "non_text_evidence_refusal_ids": (
+        (
+            (
+                "UPDATE lifecycle_events SET evidence_refusal_ids = 3 "
+                "WHERE event_kind = 'evidence_captured'"
+            ),
+        ),
+        "invalid evidence_refusal_ids in lifecycle ledger",
+    ),
+    "missing_captured_evidence": (
+        (MISSING_CAPTURED_EVIDENCE_SQL,),
+        "lifecycle stream checkpoint order is invalid",
+    ),
+    "refusal_on_captured_evidence": (
+        (REFUSAL_ON_CAPTURED_EVIDENCE_SQL,),
+        "lifecycle stream checkpoint order is invalid",
+    ),
+    "duplicate_evidence_identifiers": (
+        (DUPLICATE_EVIDENCE_IDENTIFIERS_SQL,),
+        "lifecycle stream checkpoint order is invalid",
+    ),
+    "malformed_evidence_identifiers": (
+        (MALFORMED_EVIDENCE_IDENTIFIERS_SQL,),
+        "lifecycle stream checkpoint order is invalid",
+    ),
+    "non_list_evidence_identifiers": (
+        (NON_LIST_EVIDENCE_IDENTIFIERS_SQL,),
+        "lifecycle stream checkpoint order is invalid",
+    ),
+    "invalid_evidence_identifier": (
+        (INVALID_EVIDENCE_IDENTIFIER_SQL,),
+        "lifecycle stream checkpoint order is invalid",
+    ),
+    "noncanonical_evidence_identifiers": (
+        (NONCANONICAL_EVIDENCE_IDENTIFIERS_SQL,),
+        "lifecycle stream checkpoint order is invalid",
+    ),
 }
 
 
@@ -419,6 +551,12 @@ ROLLBACK_TRIGGERS = {
         BEFORE INSERT ON lifecycle_events
         WHEN NEW.event_kind = 'universe_snapshotted'
         BEGIN SELECT RAISE(ABORT, 'injected universe snapshot failure'); END
+    """,
+    "evidence_captured": """
+        CREATE TRIGGER fail_evidence_captured_before_insert
+        BEFORE INSERT ON lifecycle_events
+        WHEN NEW.event_kind = 'evidence_captured'
+        BEGIN SELECT RAISE(ABORT, 'injected evidence capture failure'); END
     """,
     "advance_refusal": """
         CREATE TRIGGER fail_advance_refusal_before_insert
@@ -602,13 +740,15 @@ class RacingStartLedger:
 def _attempt_operation(command: LifecycleCommand, attempt: AdvanceAttempt) -> str:
     if isinstance(command, InputRefusal):
         return "refuse"
-    return {None: "start", 0: "reconcile", 1: "pin", 2: "snapshot"}.get(
+    return {None: "start", 0: "reconcile", 1: "pin", 2: "snapshot", 3: "evidence"}.get(
         attempt.last_sequence,
-        "snapshot",
+        "evidence",
     )
 
 
 def _decision_operation(decision: LifecycleDecision, fallback: str) -> str:
+    if isinstance(decision, PerformEvidenceCapture):
+        return "capture_effect"
     if not isinstance(decision, AppendLifecycleRecord):
         return fallback
     if isinstance(decision.record, DurableAdvanceRefusal):
@@ -616,7 +756,9 @@ def _decision_operation(decision: LifecycleDecision, fallback: str) -> str:
     if isinstance(decision.record, DurableAdvanceConflict):
         return "start"
     assert isinstance(decision.record, LifecycleEvent)
-    return {0: "start", 1: "reconcile", 2: "pin", 3: "snapshot"}[decision.record.sequence]
+    return {0: "start", 1: "reconcile", 2: "pin", 3: "snapshot", 4: "evidence"}[
+        decision.record.sequence
+    ]
 
 
 def _reference_mapping(value: object) -> dict[str, object]:
@@ -922,12 +1064,14 @@ class _LifecycleReferenceModel:
     def _advanced(stream: _ReferenceStream, recovery: AdvanceRecovery) -> AdvanceReceipt:
         return AdvanceReceipt(
             disposition=AdvanceDisposition.ADVANCED,
-            completed_phase=LifecycleCheckpoint.equity(LifecyclePhase.SNAPSHOT_UNIVERSE),
+            completed_phase=LifecycleCheckpoint.equity(LifecyclePhase.CAPTURE_EVIDENCE),
             pinned_run_identity=stream.pinned_run_identity,
             failure_reason=None,
             recovery=recovery,
             universe_snapshot_id=stream.universe_snapshot_id,
             recorded_at=UtcInstant.from_datetime(RECORDED_AT),
+            evidence_policy_id=evidence_capture_checkpoint().policy_id,
+            evidence_artifact_ids=evidence_capture_checkpoint().artifact_ids,
         )
 
     def _stream(self, session: str, events: int) -> _ReferenceStream:
@@ -1013,6 +1157,7 @@ def _configure(state_root: Path) -> Advance:
         ),
         repository_root=REPOSITORY_ROOT,
         recorded_universe=recorded_universe(),
+        recorded_evidence=recorded_evidence(),
         clock=FixedClock(datetime(2026, 8, 21, 22, 0, tzinfo=UTC)),
     )
     assert isinstance(configured, Advance)
@@ -1096,7 +1241,7 @@ def test_advance_pins_one_stream_and_reconstructs_its_receipt_after_reopen(
     assert first.pinned_run_identity == replay.pinned_run_identity
     assert first.disposition is AdvanceDisposition.ADVANCED
     assert first.completed_phase is not None
-    assert first.completed_phase.phase is LifecyclePhase.SNAPSHOT_UNIVERSE
+    assert first.completed_phase.phase is LifecyclePhase.CAPTURE_EVIDENCE
     assert first.pinned_run_identity is not None
     assert len(first.pinned_run_identity.run_id) == SHA256_HEX_LENGTH
     assert len(first.pinned_run_identity.configuration_hash) == SHA256_HEX_LENGTH
@@ -1106,6 +1251,7 @@ def test_advance_pins_one_stream_and_reconstructs_its_receipt_after_reopen(
         ("phase_completed", "ReconcilePriorState"),
         ("run_inputs_pinned", "PinRunInputs"),
         ("universe_snapshotted", "SnapshotUniverse"),
+        ("evidence_captured", "CaptureEvidence"),
     ]
     assert stat.S_IMODE(state_root.stat().st_mode) == PRIVATE_DIRECTORY_MODE
     assert stat.S_IMODE((state_root / "lifecycle.sqlite3").stat().st_mode) == PRIVATE_FILE_MODE
@@ -1145,7 +1291,9 @@ def test_disabled_crypto_cycle_is_refused_before_authoritative_state_changes(
         ("pin", "before", 2, AdvanceRecovery.RESUMED),
         ("pin", "after", 3, AdvanceRecovery.RESUMED),
         ("snapshot", "before", 3, AdvanceRecovery.RESUMED),
-        ("snapshot", "after", 4, AdvanceRecovery.PREVIOUSLY_COMPLETED),
+        ("snapshot", "after", 4, AdvanceRecovery.RESUMED),
+        ("evidence", "before", 4, AdvanceRecovery.RESUMED),
+        ("evidence", "after", 5, AdvanceRecovery.PREVIOUSLY_COMPLETED),
     ],
 )
 def test_fresh_process_resumes_at_every_universe_snapshot_write_boundary(
@@ -1166,6 +1314,7 @@ def test_fresh_process_resumes_at_every_universe_snapshot_write_boundary(
         universe_source=capability.universe_source,
         enabled_asset_classes=capability.enabled_asset_classes,
         universe_policy=capability.universe_policy,
+        evidence_capture=capability.evidence_capture,
         clock=capability.clock,
     )
 
@@ -1183,7 +1332,7 @@ def test_fresh_process_resumes_at_every_universe_snapshot_write_boundary(
     )
 
     assert disposition == AdvanceDisposition.ADVANCED.value
-    assert phase == LifecyclePhase.SNAPSHOT_UNIVERSE.value
+    assert phase == LifecyclePhase.CAPTURE_EVIDENCE.value
     assert recovery == expected_recovery.value
     assert len(run_id) == SHA256_HEX_LENGTH
     assert len(_events(database)) == PINNED_EVENT_COUNT
@@ -1220,6 +1369,7 @@ def test_fresh_process_recovers_at_each_refusal_write_boundary(
         universe_source=capability.universe_source,
         enabled_asset_classes=capability.enabled_asset_classes,
         universe_policy=capability.universe_policy,
+        evidence_capture=capability.evidence_capture,
         clock=capability.clock,
     )
 
@@ -1275,6 +1425,7 @@ def test_fresh_process_recovers_at_each_completed_conflict_write_boundary(
         universe_source=capability.universe_source,
         enabled_asset_classes=capability.enabled_asset_classes,
         universe_policy=capability.universe_policy,
+        evidence_capture=capability.evidence_capture,
         clock=capability.clock,
     )
 
@@ -1326,6 +1477,7 @@ def test_duplicate_delivery_reports_progress_committed_by_the_winner_as_resumed(
         universe_source=capability.universe_source,
         enabled_asset_classes=capability.enabled_asset_classes,
         universe_policy=capability.universe_policy,
+        evidence_capture=capability.evidence_capture,
         clock=capability.clock,
     )
 
@@ -1429,7 +1581,8 @@ class LifecycleStateMachine(RuleBasedStateMachine):
                 ("start", 1),
                 ("reconcile", 2),
                 ("pin", 3),
-                ("snapshot", PINNED_EVENT_COUNT),
+                ("snapshot", 4),
+                ("evidence", PINNED_EVENT_COUNT),
             )
         )
     )
@@ -1445,6 +1598,7 @@ class LifecycleStateMachine(RuleBasedStateMachine):
             universe_source=self.capability.universe_source,
             enabled_asset_classes=self.capability.enabled_asset_classes,
             universe_policy=self.capability.universe_policy,
+            evidence_capture=self.capability.evidence_capture,
             clock=self.capability.clock,
         )
         with pytest.raises(SimulatedInterruptionError):
@@ -1732,6 +1886,7 @@ def test_conflicting_pinned_identity_fails_without_rewriting_completed_work(
         universe_source=capability.universe_source,
         enabled_asset_classes=capability.enabled_asset_classes,
         universe_policy=capability.universe_policy,
+        evidence_capture=capability.evidence_capture,
         clock=capability.clock,
     )
 
@@ -1768,6 +1923,7 @@ def test_terminal_conflict_refusal_prevents_partial_stream_resumption(tmp_path: 
         universe_source=capability.universe_source,
         enabled_asset_classes=capability.enabled_asset_classes,
         universe_policy=capability.universe_policy,
+        evidence_capture=capability.evidence_capture,
         clock=capability.clock,
     )
     with pytest.raises(SimulatedInterruptionError):
@@ -1806,6 +1962,7 @@ def test_terminal_conflict_refusal_prevents_partial_stream_resumption(tmp_path: 
         ("phase_completed", 1, AdvanceRecovery.RESUMED),
         ("run_inputs_pinned", 2, AdvanceRecovery.RESUMED),
         ("universe_snapshotted", 3, AdvanceRecovery.RESUMED),
+        ("evidence_captured", 4, AdvanceRecovery.RESUMED),
     ],
 )
 def test_advance_resumes_after_each_checkpoint_transaction_rolls_back(
@@ -1844,13 +2001,16 @@ def test_advance_resumes_after_each_checkpoint_transaction_rolls_back(
             "fail_universe_snapshotted_before_insert": (
                 "DROP TRIGGER fail_universe_snapshotted_before_insert"
             ),
+            "fail_evidence_captured_before_insert": (
+                "DROP TRIGGER fail_evidence_captured_before_insert"
+            ),
         }
         connection.execute(known_drop_statements[str(trigger_name[0])])
 
     disposition, phase, recovery, run_id = _advance_in_fresh_process(state_root, "rollback-key")
 
     assert disposition == AdvanceDisposition.ADVANCED.value
-    assert phase == LifecyclePhase.SNAPSHOT_UNIVERSE.value
+    assert phase == LifecyclePhase.CAPTURE_EVIDENCE.value
     assert recovery == expected_recovery.value
     assert len(run_id) == SHA256_HEX_LENGTH
     assert len(_events(database)) == PINNED_EVENT_COUNT
@@ -1963,6 +2123,7 @@ def test_runtime_state_root_cannot_point_into_source_directories(tmp_path: Path)
         ),
         repository_root=repository,
         recorded_universe=recorded_universe(),
+        recorded_evidence=recorded_evidence(),
         clock=FixedClock(datetime(2026, 8, 21, 22, 0, tzinfo=UTC)),
     )
 
@@ -2006,6 +2167,7 @@ def test_malformed_universe_policy_is_refused_before_state_creation(
         (ConfigurationSource("test", configuration),),
         repository_root=REPOSITORY_ROOT,
         recorded_universe=recorded_universe(),
+        recorded_evidence=recorded_evidence(),
         clock=FixedClock(datetime(2026, 8, 21, 22, 0, tzinfo=UTC)),
     )
 
@@ -2025,6 +2187,7 @@ def test_hostile_asset_activation_is_refused_before_state_creation(tmp_path: Pat
         (ConfigurationSource("test", configuration),),
         repository_root=REPOSITORY_ROOT,
         recorded_universe=recorded_universe(),
+        recorded_evidence=recorded_evidence(),
         clock=FixedClock(datetime(2026, 8, 21, 22, 0, tzinfo=UTC)),
     )
 
@@ -2047,6 +2210,7 @@ def test_hostile_top_level_configuration_key_is_refused_before_state_creation(
         (ConfigurationSource("test", configuration),),
         repository_root=REPOSITORY_ROOT,
         recorded_universe=recorded_universe(),
+        recorded_evidence=recorded_evidence(),
         clock=FixedClock(datetime(2026, 8, 21, 22, 0, tzinfo=UTC)),
     )
 
@@ -2104,6 +2268,7 @@ def test_runtime_state_storage_refuses_links_public_modes_and_unsafe_shapes(
             ),
             repository_root=REPOSITORY_ROOT,
             recorded_universe=recorded_universe(),
+            recorded_evidence=recorded_evidence(),
             clock=FixedClock(datetime(2026, 8, 21, 22, 0, tzinfo=UTC)),
         )
         assert configured == ConfigurationRefusal(
@@ -2135,6 +2300,7 @@ def test_equivalent_clock_offsets_persist_identically_after_reopen(
         (ConfigurationSource("test", runtime_configuration(state_root)),),
         repository_root=REPOSITORY_ROOT,
         recorded_universe=recorded_universe(),
+        recorded_evidence=recorded_evidence(),
         clock=FixedClock(instant),
     )
     assert isinstance(configured, Advance)
@@ -2218,7 +2384,11 @@ def test_lifecycle_ledger_appends_generic_checkpoint_records(tmp_path: Path) -> 
     terminal: AppendTerminalLifecycleRecord | None = None
     for expected_sequence in range(PINNED_EVENT_COUNT):
         decision = ledger.advance_step(command, attempt, now)
+        if isinstance(decision, PerformEvidenceCapture):
+            command = replace(command, evidence_capture=evidence_capture_checkpoint())
+            decision = ledger.advance_step(command, attempt, now)
         assert not isinstance(decision, AdvanceReceipt)
+        assert not isinstance(decision, PerformEvidenceCapture)
         assert isinstance(decision.record, LifecycleEvent)
         assert decision.record.sequence == expected_sequence
         if isinstance(decision, AppendTerminalLifecycleRecord):
@@ -2232,12 +2402,14 @@ def test_lifecycle_ledger_appends_generic_checkpoint_records(tmp_path: Path) -> 
         snapshot,
         AdvanceRecovery.FRESH,
         now,
+        evidence_capture_checkpoint(),
     )
     assert ledger.advance_step(command, AdvanceAttempt(), now) == AdvanceReceipt.advanced(
         identity,
         snapshot,
         AdvanceRecovery.PREVIOUSLY_COMPLETED,
         now,
+        evidence_capture_checkpoint(),
     )
 
     conflicting_identity = pinned_run_identity(
@@ -2324,6 +2496,7 @@ def test_universe_source_rejects_a_forged_utc_instant_before_append(tmp_path: Pa
         universe_source=FixedUniverseSource(replace(loaded, evidence_cutoff=_forged_utc_instant())),
         enabled_asset_classes=capability.enabled_asset_classes,
         universe_policy=capability.universe_policy,
+        evidence_capture=capability.evidence_capture,
         clock=capability.clock,
     )
 
@@ -2346,6 +2519,7 @@ def test_naive_clock_cannot_create_a_checkpoint(tmp_path: Path) -> None:
         (ConfigurationSource("test", runtime_configuration(state_root)),),
         repository_root=REPOSITORY_ROOT,
         recorded_universe=recorded_universe(),
+        recorded_evidence=recorded_evidence(),
         # Intentionally hostile clock value proves the boundary refuses naive time.
         clock=FixedClock(datetime(2026, 8, 21, 22, 0)),  # noqa: DTZ001
     )
@@ -2370,6 +2544,7 @@ def test_out_of_range_aware_clock_cannot_create_a_checkpoint(tmp_path: Path) -> 
         (ConfigurationSource("test", runtime_configuration(state_root)),),
         repository_root=REPOSITORY_ROOT,
         recorded_universe=recorded_universe(),
+        recorded_evidence=recorded_evidence(),
         clock=FixedClock(datetime(1, 1, 1, tzinfo=timezone(timedelta(hours=14)))),
     )
     assert isinstance(configured, Advance)
@@ -2464,6 +2639,7 @@ def test_missing_refusal_sequence_row_fails_closed(tmp_path: Path) -> None:
         universe_source=capability.universe_source,
         enabled_asset_classes=capability.enabled_asset_classes,
         universe_policy=capability.universe_policy,
+        evidence_capture=capability.evidence_capture,
         clock=capability.clock,
     )
 
@@ -2488,6 +2664,7 @@ def test_invalid_refusal_sequence_row_has_a_bounded_diagnostic(tmp_path: Path) -
         universe_source=capability.universe_source,
         enabled_asset_classes=capability.enabled_asset_classes,
         universe_policy=capability.universe_policy,
+        evidence_capture=capability.evidence_capture,
         clock=capability.clock,
     )
 
@@ -2572,18 +2749,20 @@ def test_corrupt_refusal_rows_fail_closed_with_a_bounded_diagnostic(
     database = state_root / "lifecycle.sqlite3"
     with sqlite3.connect(database) as connection:
         row = connection.execute(
-            "SELECT refusal_id, idempotency_key, cycle_identity, reason_code, recorded_at "
+            "SELECT refusal_id, idempotency_key, cycle_identity, reason_code, "
+            "evidence_policy_id, evidence_artifact_ids, evidence_refusal_ids, recorded_at "
             "FROM advance_refusals"
         ).fetchone()
         connection.execute("DROP TABLE advance_refusals")
         connection.execute(
             "CREATE TABLE advance_refusals "
-            "(refusal_id, idempotency_key, cycle_identity, reason_code, recorded_at)"
+            "(refusal_id, idempotency_key, cycle_identity, reason_code, "
+            "evidence_policy_id, evidence_artifact_ids, evidence_refusal_ids, recorded_at)"
         )
         assert row is not None
         connection.execute(
-            "INSERT INTO advance_refusals VALUES (?, ?, ?, ?, ?)",
-            (row[0], row[1], row[2], reason_code, recorded_at),
+            "INSERT INTO advance_refusals VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (row[0], row[1], row[2], reason_code, row[4], row[5], row[6], recorded_at),
         )
 
     with pytest.raises(LifecyclePersistenceError, match=expected_message):
@@ -2751,6 +2930,7 @@ def test_corrupt_checkpoint_history_uses_the_call_timestamp_for_its_refusal(
         universe_source=capability.universe_source,
         enabled_asset_classes=capability.enabled_asset_classes,
         universe_policy=capability.universe_policy,
+        evidence_capture=capability.evidence_capture,
         clock=FixedClock(refused_at),
     )
     receipt = refused(
@@ -2875,18 +3055,20 @@ def test_unrelated_corrupt_history_does_not_change_a_fresh_request(tmp_path: Pat
     _replace_with_corrupt_events(database, ("UPDATE lifecycle_events SET mode = 'invalid'",))
     with sqlite3.connect(database) as connection:
         row = connection.execute(
-            "SELECT refusal_id, idempotency_key, cycle_identity, reason_code, recorded_at "
+            "SELECT refusal_id, idempotency_key, cycle_identity, reason_code, "
+            "evidence_policy_id, evidence_artifact_ids, evidence_refusal_ids, recorded_at "
             "FROM advance_refusals"
         ).fetchone()
         connection.execute("DROP TABLE advance_refusals")
         connection.execute(
             "CREATE TABLE advance_refusals "
-            "(refusal_id, idempotency_key, cycle_identity, reason_code, recorded_at)"
+            "(refusal_id, idempotency_key, cycle_identity, reason_code, "
+            "evidence_policy_id, evidence_artifact_ids, evidence_refusal_ids, recorded_at)"
         )
         assert row is not None
         connection.execute(
-            "INSERT INTO advance_refusals VALUES (?, ?, ?, ?, ?)",
-            (row[0], row[1], row[2], "unknown", row[4]),
+            "INSERT INTO advance_refusals VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (row[0], row[1], row[2], "unknown", row[4], row[5], row[6], row[7]),
         )
 
     receipt = capability(
@@ -3037,7 +3219,9 @@ def _replace_with_corrupt_events(
                    data_regime, evidence_cutoff, instrument_snapshot_hash,
                    position_snapshot_hash, eligibility_policy_hash,
                    event_kind, completed_phase, universe_snapshot_id,
-                   universe_snapshot, event_envelope, recorded_at
+                   universe_snapshot, evidence_policy_id,
+                   evidence_artifact_ids, evidence_refusal_ids,
+                   event_envelope, recorded_at
             FROM lifecycle_events ORDER BY sequence
             """
         ).fetchall()
@@ -3050,13 +3234,15 @@ def _replace_with_corrupt_events(
                 data_regime, evidence_cutoff, instrument_snapshot_hash,
                 position_snapshot_hash, eligibility_policy_hash,
                 event_kind, completed_phase, universe_snapshot_id,
-                universe_snapshot, event_envelope, recorded_at
+                universe_snapshot, evidence_policy_id,
+                evidence_artifact_ids, evidence_refusal_ids,
+                event_envelope, recorded_at
             )
             """
         )
         connection.executemany(
             "INSERT INTO lifecycle_events VALUES "
-            "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             rows,
         )
         for statement in statements:

@@ -31,9 +31,22 @@ from agentic_investment_os.entrypoints.configuration import (
     ConfigurationSource,
 )
 from agentic_investment_os.entrypoints.lifecycle import configure_advance, configure_status
+from tests._evidence import recorded_evidence
 from tests._universe import recorded_universe, runtime_configuration
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
+VALID_EVIDENCE_IDS_JSON = json.dumps(["a" * 64], separators=(",", ":"))
+EVIDENCE_ON_REFUSAL_SQL = (
+    f"UPDATE advance_refusals SET evidence_artifact_ids = '{VALID_EVIDENCE_IDS_JSON}', "  # noqa: S608
+    "evidence_refusal_ids = '[]'"
+)
+EVIDENCE_ARTIFACT_ON_REFUSAL_SQL = (
+    f"UPDATE advance_refusals SET evidence_artifact_ids = '{VALID_EVIDENCE_IDS_JSON}'"  # noqa: S608
+)
+EVIDENCE_REFUSAL_ON_REFUSAL_SQL = (
+    f"UPDATE advance_refusals SET evidence_refusal_ids = '{VALID_EVIDENCE_IDS_JSON}'"  # noqa: S608
+)
+EVIDENCE_POLICY_ON_REFUSAL_SQL = f"UPDATE advance_refusals SET evidence_policy_id = '{'a' * 64}'"  # noqa: S608
 
 
 def _cycle_payload(value: object) -> object:
@@ -72,6 +85,7 @@ def _advance_at(state_root: Path, instant: datetime) -> Advance:
         _sources(state_root),
         repository_root=REPOSITORY_ROOT,
         recorded_universe=recorded_universe(),
+        recorded_evidence=recorded_evidence(),
         clock=FixedClock(instant),
     )
     assert isinstance(capability, Advance)
@@ -458,7 +472,9 @@ def test_status_rejects_corrupt_authoritative_history_instead_of_using_projectio
                    data_regime, evidence_cutoff, instrument_snapshot_hash,
                    position_snapshot_hash, eligibility_policy_hash,
                    event_kind, completed_phase, universe_snapshot_id,
-                   universe_snapshot, event_envelope, recorded_at
+                   universe_snapshot, evidence_policy_id,
+                   evidence_artifact_ids, evidence_refusal_ids,
+                   event_envelope, recorded_at
             FROM lifecycle_events ORDER BY sequence
             """
         ).fetchall()
@@ -471,13 +487,15 @@ def test_status_rejects_corrupt_authoritative_history_instead_of_using_projectio
                 data_regime, evidence_cutoff, instrument_snapshot_hash,
                 position_snapshot_hash, eligibility_policy_hash,
                 event_kind, completed_phase, universe_snapshot_id,
-                universe_snapshot, event_envelope, recorded_at
+                universe_snapshot, evidence_policy_id,
+                evidence_artifact_ids, evidence_refusal_ids,
+                event_envelope, recorded_at
             )
             """
         )
         connection.executemany(
             "INSERT INTO lifecycle_events VALUES "
-            "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             rows,
         )
         connection.execute(
@@ -616,9 +634,27 @@ def test_status_rejects_an_invalid_refusal_reason_for_a_partial_stream(tmp_path:
             "invalid refusal association",
         ),
         (
+            EVIDENCE_ON_REFUSAL_SQL,
+            "invalid idempotency_key in lifecycle refusal ledger",
+        ),
+        (
+            EVIDENCE_ARTIFACT_ON_REFUSAL_SQL,
+            "invalid idempotency_key in lifecycle refusal ledger",
+        ),
+        (
+            EVIDENCE_REFUSAL_ON_REFUSAL_SQL,
+            "invalid idempotency_key in lifecycle refusal ledger",
+        ),
+        (
+            EVIDENCE_POLICY_ON_REFUSAL_SQL,
+            "invalid idempotency_key in lifecycle refusal ledger",
+        ),
+        (
             """
                 INSERT INTO advance_refusals
-                SELECT 2, idempotency_key, cycle_identity, reason_code, recorded_at
+                SELECT 2, idempotency_key, cycle_identity, reason_code,
+                       evidence_policy_id, evidence_artifact_ids,
+                       evidence_refusal_ids, recorded_at
                 FROM advance_refusals
                 """,
             "refusal uniqueness is invalid",
@@ -640,15 +676,20 @@ def test_status_rejects_corrupt_refusal_history(
     database = state_root / "lifecycle.sqlite3"
     with sqlite3.connect(database) as connection:
         rows = connection.execute(
-            "SELECT refusal_id, idempotency_key, cycle_identity, reason_code, recorded_at "
+            "SELECT refusal_id, idempotency_key, cycle_identity, reason_code, "
+            "evidence_policy_id, evidence_artifact_ids, evidence_refusal_ids, recorded_at "
             "FROM advance_refusals"
         ).fetchall()
         connection.execute("DROP TABLE advance_refusals")
         connection.execute(
             "CREATE TABLE advance_refusals "
-            "(refusal_id, idempotency_key, cycle_identity, reason_code, recorded_at)"
+            "(refusal_id, idempotency_key, cycle_identity, reason_code, "
+            "evidence_policy_id, evidence_artifact_ids, evidence_refusal_ids, recorded_at)"
         )
-        connection.executemany("INSERT INTO advance_refusals VALUES (?, ?, ?, ?, ?)", rows)
+        connection.executemany(
+            "INSERT INTO advance_refusals VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            rows,
+        )
         connection.execute(corruption)
 
     with pytest.raises(InvalidLifecycleStateError, match=expected_message):
@@ -666,19 +707,25 @@ def test_status_rejects_duplicate_unkeyed_refusal_authority(tmp_path: Path) -> N
     database = state_root / "lifecycle.sqlite3"
     with sqlite3.connect(database) as connection:
         rows = connection.execute(
-            "SELECT refusal_id, idempotency_key, cycle_identity, reason_code, recorded_at "
+            "SELECT refusal_id, idempotency_key, cycle_identity, reason_code, "
+            "evidence_policy_id, evidence_artifact_ids, evidence_refusal_ids, recorded_at "
             "FROM advance_refusals"
         ).fetchall()
         connection.execute("DROP TABLE advance_refusals")
         connection.execute(
             "CREATE TABLE advance_refusals "
-            "(refusal_id, idempotency_key, cycle_identity, reason_code, recorded_at)"
+            "(refusal_id, idempotency_key, cycle_identity, reason_code, "
+            "evidence_policy_id, evidence_artifact_ids, evidence_refusal_ids, recorded_at)"
         )
-        connection.executemany("INSERT INTO advance_refusals VALUES (?, ?, ?, ?, ?)", rows)
+        connection.executemany(
+            "INSERT INTO advance_refusals VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            rows,
+        )
         connection.execute(
             """
             INSERT INTO advance_refusals
-            SELECT 2, idempotency_key, cycle_identity, reason_code, recorded_at
+            SELECT 2, idempotency_key, cycle_identity, reason_code,
+                   evidence_policy_id, evidence_artifact_ids, evidence_refusal_ids, recorded_at
             FROM advance_refusals
             """
         )
@@ -845,7 +892,9 @@ def _replace_event_table(database: Path, statement: str) -> None:
                    data_regime, evidence_cutoff, instrument_snapshot_hash,
                    position_snapshot_hash, eligibility_policy_hash,
                    event_kind, completed_phase, universe_snapshot_id,
-                   universe_snapshot, event_envelope, recorded_at
+                   universe_snapshot, evidence_policy_id,
+                   evidence_artifact_ids, evidence_refusal_ids,
+                   event_envelope, recorded_at
             FROM lifecycle_events ORDER BY stream_id, sequence
             """
         ).fetchall()
@@ -858,13 +907,15 @@ def _replace_event_table(database: Path, statement: str) -> None:
                 data_regime, evidence_cutoff, instrument_snapshot_hash,
                 position_snapshot_hash, eligibility_policy_hash,
                 event_kind, completed_phase, universe_snapshot_id,
-                universe_snapshot, event_envelope, recorded_at
+                universe_snapshot, evidence_policy_id,
+                evidence_artifact_ids, evidence_refusal_ids,
+                event_envelope, recorded_at
             )
             """
         )
         connection.executemany(
             "INSERT INTO lifecycle_events VALUES "
-            "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             rows,
         )
         connection.execute(statement)

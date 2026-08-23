@@ -17,6 +17,7 @@ from agentic_investment_os.domain.lifecycle import (
     AppendTerminalLifecycleRecord,
     DurableAdvanceConflict,
     DurableAdvanceRefusal,
+    EvidenceCaptureCheckpoint,
     InputRefusal,
     InputRefusalCode,
     InvalidLifecycleStateError,
@@ -28,6 +29,8 @@ from agentic_investment_os.domain.lifecycle import (
     LifecycleHistory,
     LifecycleLiveness,
     LifecyclePhase,
+    PerformEvidenceCapture,
+    decide_evidence_refusal_replay,
     decide_invalid_history,
     decide_terminal_refusal,
     derive_lifecycle_status,
@@ -44,6 +47,16 @@ from tests._universe import (
 )
 
 SHA256_HEX_LENGTH = 64
+EVIDENCE_CAPTURE = EvidenceCaptureCheckpoint(
+    "c" * SHA256_HEX_LENGTH,
+    ("d" * SHA256_HEX_LENGTH,),
+    (),
+)
+REFUSED_EVIDENCE_CAPTURE = EvidenceCaptureCheckpoint(
+    "c" * SHA256_HEX_LENGTH,
+    ("d" * SHA256_HEX_LENGTH,),
+    ("e" * SHA256_HEX_LENGTH,),
+)
 INVALID_HISTORY_REFUSAL_SEQUENCE = 5
 KERNEL_RECORDED_AT = UtcInstant.from_datetime(datetime(2026, 8, 21, 22, 0, tzinfo=UTC))
 
@@ -80,7 +93,12 @@ def _append_decision(
     attempt: AdvanceAttempt,
 ) -> tuple[LifecycleHistory, AdvanceAttempt, AdvanceReceipt | None]:
     decision = decide_advance(history, command, attempt)
+    if isinstance(decision, PerformEvidenceCapture):
+        assert isinstance(command, AdvanceCommand)
+        command = replace(command, evidence_capture=EVIDENCE_CAPTURE)
+        decision = decide_advance(history, command, attempt)
     assert not isinstance(decision, AdvanceReceipt)
+    assert not isinstance(decision, PerformEvidenceCapture)
     next_history = history.append(decision.record)
     if isinstance(decision, AppendTerminalLifecycleRecord):
         return next_history, attempt, decision.receipt
@@ -97,6 +115,9 @@ def _complete(
         decision = decide_advance(history, command, current_attempt)
         if isinstance(decision, AdvanceReceipt):
             return history, decision
+        if isinstance(decision, PerformEvidenceCapture):
+            command = replace(command, evidence_capture=EVIDENCE_CAPTURE)
+            continue
         history = history.append(decision.record)
         if isinstance(decision, AppendTerminalLifecycleRecord):
             return history, decision.receipt
@@ -108,6 +129,18 @@ def _first_event(command: AdvanceCommand) -> LifecycleEvent:
     assert isinstance(decision, AppendLifecycleRecord)
     assert isinstance(decision.record, LifecycleEvent)
     return decision.record
+
+
+def _through_snapshot(command: AdvanceCommand) -> tuple[LifecycleHistory, AdvanceAttempt]:
+    history = LifecycleHistory()
+    attempt = AdvanceAttempt()
+    for _ in range(4):
+        decision = decide_advance(history, command, attempt)
+        assert isinstance(decision, AppendLifecycleRecord)
+        assert isinstance(decision.record, LifecycleEvent)
+        history = history.append(decision.record)
+        attempt = decision.attempt
+    return history, attempt
 
 
 def test_kernel_assigns_universe_events_and_fresh_recovery() -> None:
@@ -130,11 +163,16 @@ def test_kernel_assigns_universe_events_and_fresh_recovery() -> None:
         (1, LifecycleEventKind.PHASE_COMPLETED),
         (2, LifecycleEventKind.RUN_INPUTS_PINNED),
         (3, LifecycleEventKind.UNIVERSE_SNAPSHOTTED),
+        (4, LifecycleEventKind.EVIDENCE_CAPTURED),
     )
     completed: AppendTerminalLifecycleRecord | None = None
     for sequence, event_kind in expected:
         decision = decide_advance(history, command, attempt)
+        if isinstance(decision, PerformEvidenceCapture):
+            command = replace(command, evidence_capture=EVIDENCE_CAPTURE)
+            decision = decide_advance(history, command, attempt)
         assert not isinstance(decision, AdvanceReceipt)
+        assert not isinstance(decision, PerformEvidenceCapture)
         assert isinstance(decision.record, LifecycleEvent)
         assert decision.record.sequence == sequence
         assert decision.record.event_kind is event_kind
@@ -161,12 +199,14 @@ def test_kernel_resumes_partial_history_and_replays_completion() -> None:
         command.universe_snapshot,
         AdvanceRecovery.RESUMED,
         KERNEL_RECORDED_AT,
+        EVIDENCE_CAPTURE,
     )
     assert replay == AdvanceReceipt.advanced(
         command.pinned_run_identity,
         command.universe_snapshot,
         AdvanceRecovery.PREVIOUSLY_COMPLETED,
         KERNEL_RECORDED_AT,
+        EVIDENCE_CAPTURE,
     )
 
 
@@ -236,11 +276,15 @@ def test_kernel_rejects_each_snapshot_fact_that_changes_pinned_material(
             policy=replace(original.policy, fingerprint="f" * SHA256_HEX_LENGTH),
         )
     changed_pinned_event = replace(
-        complete_history.events[-2],
+        complete_history.events[2],
         prepared_universe_snapshot=changed_snapshot,
     )
     changed_history = LifecycleHistory(
-        events=(*complete_history.events[:-2], changed_pinned_event, complete_history.events[-1]),
+        events=(
+            *complete_history.events[:2],
+            changed_pinned_event,
+            *complete_history.events[3:],
+        ),
     )
 
     with pytest.raises(
@@ -321,17 +365,185 @@ def test_reconstructed_progress_rejects_snapshot_access_before_pin_checkpoint() 
         match="lifecycle stream checkpoint order is invalid",
     ):
         progress[0].require_prepared_universe_snapshot()
+    with pytest.raises(
+        InvalidLifecycleStateError,
+        match="lifecycle stream checkpoint order is invalid",
+    ):
+        progress[0].require_evidence_capture()
+
+
+def test_kernel_rejects_incomplete_evidence_on_a_completed_event() -> None:
+    command = _command()
+    complete_history, _ = _complete(LifecycleHistory(), command)
+    changed_final = replace(
+        complete_history.events[-1],
+        evidence_capture=REFUSED_EVIDENCE_CAPTURE,
+    )
+
+    with pytest.raises(
+        InvalidLifecycleStateError,
+        match="lifecycle stream checkpoint order is invalid",
+    ):
+        reconstruct_lifecycle(
+            LifecycleHistory(events=(*complete_history.events[:-1], changed_final))
+        )
+
+
+def test_kernel_turns_required_evidence_refusals_into_a_terminal_refusal() -> None:
+    command = _command()
+    history, attempt = _through_snapshot(command)
+    command = replace(command, evidence_capture=REFUSED_EVIDENCE_CAPTURE)
+
+    decision = decide_advance(history, command, attempt)
+
+    assert isinstance(decision, AppendTerminalLifecycleRecord)
+    assert isinstance(decision.record, DurableAdvanceRefusal)
+    assert decision.record.evidence_capture == REFUSED_EVIDENCE_CAPTURE
+    assert decision.receipt == AdvanceReceipt.failed_closed(
+        AdvanceFailureReason.EVIDENCE_CAPTURE_FAILED,
+        cycle=command.request.session,
+        evidence_capture=REFUSED_EVIDENCE_CAPTURE,
+    )
+    reconstruct_lifecycle(history.append(decision.record))
+
+
+def test_kernel_replays_evidence_refusal_only_for_unchanged_pinned_inputs() -> None:
+    command = _command()
+    history, _ = _through_snapshot(command)
+    refusal = DurableAdvanceRefusal(
+        1,
+        command.request.idempotency_key,
+        AdvanceFailureReason.EVIDENCE_CAPTURE_FAILED,
+        command.request.session,
+        REFUSED_EVIDENCE_CAPTURE,
+    )
+    durable = replace(history, refusals=(refusal,))
+
+    assert decide_advance(durable, command, AdvanceAttempt()) == AdvanceReceipt.failed_closed(
+        AdvanceFailureReason.EVIDENCE_CAPTURE_FAILED,
+        cycle=command.request.session,
+        evidence_capture=REFUSED_EVIDENCE_CAPTURE,
+    )
+    changed = _command(configuration_hash="c" * SHA256_HEX_LENGTH)
+    assert decide_advance(durable, changed, AdvanceAttempt()) == AdvanceReceipt.failed_closed(
+        AdvanceFailureReason.IDEMPOTENCY_KEY_CONFLICT,
+        cycle=command.request.session,
+    )
+
+
+def test_scoped_evidence_refusal_replay_fails_closed_on_missing_or_invalid_state() -> None:
+    command = _command()
+    history, _ = _through_snapshot(command)
+    refusal = DurableAdvanceRefusal(
+        1,
+        command.request.idempotency_key,
+        AdvanceFailureReason.EVIDENCE_CAPTURE_FAILED,
+        command.request.session,
+        REFUSED_EVIDENCE_CAPTURE,
+    )
+    invalid_event = replace(history.events[0], sequence=1)
+
+    assert decide_evidence_refusal_replay(history, (), command) == AdvanceReceipt.failed_closed(
+        AdvanceFailureReason.INVALID_DURABLE_STATE,
+        cycle=command.request.session,
+    )
+    bounded_refusal = DurableAdvanceRefusal(
+        1,
+        command.request.idempotency_key,
+        AdvanceFailureReason.INVALID_DURABLE_STATE,
+        command.request.session,
+    )
+    assert decide_evidence_refusal_replay(
+        history,
+        (bounded_refusal,),
+        command,
+    ) == AdvanceReceipt.failed_closed(
+        AdvanceFailureReason.INVALID_DURABLE_STATE,
+        cycle=command.request.session,
+    )
+    assert decide_evidence_refusal_replay(
+        LifecycleHistory(events=(invalid_event,)),
+        (refusal,),
+        command,
+    ) == AdvanceReceipt.failed_closed(
+        AdvanceFailureReason.INVALID_DURABLE_STATE,
+        cycle=command.request.session,
+    )
+    before_snapshot = LifecycleHistory(events=history.events[:-1])
+    assert decide_evidence_refusal_replay(
+        before_snapshot,
+        (refusal,),
+        command,
+    ) == AdvanceReceipt.failed_closed(
+        AdvanceFailureReason.INVALID_DURABLE_STATE,
+        cycle=command.request.session,
+    )
+
+
+@pytest.mark.parametrize(
+    "invalid_association",
+    ["missing_progress", "wrong_phase", "missing_capture", "complete_capture"],
+)
+def test_kernel_rejects_each_invalid_required_evidence_refusal_association(
+    invalid_association: str,
+) -> None:
+    command = _command()
+    history, _ = _through_snapshot(command)
+    evidence_capture: EvidenceCaptureCheckpoint | None = REFUSED_EVIDENCE_CAPTURE
+    if invalid_association == "missing_progress":
+        history = LifecycleHistory()
+    elif invalid_association == "wrong_phase":
+        history = LifecycleHistory(events=history.events[:-1])
+    elif invalid_association == "missing_capture":
+        evidence_capture = None
+    else:
+        assert invalid_association == "complete_capture"
+        evidence_capture = EVIDENCE_CAPTURE
+    refusal = DurableAdvanceRefusal(
+        1,
+        command.request.idempotency_key,
+        AdvanceFailureReason.EVIDENCE_CAPTURE_FAILED,
+        command.request.session,
+        evidence_capture,
+    )
+
+    with pytest.raises(InvalidLifecycleStateError, match="invalid refusal association"):
+        reconstruct_lifecycle(LifecycleHistory(events=history.events, refusals=(refusal,)))
+
+
+def test_kernel_rejects_evidence_references_on_unassociated_refusals() -> None:
+    command = _command()
+    invalid_refusals = (
+        DurableAdvanceRefusal(
+            1,
+            None,
+            AdvanceFailureReason.INVALID_IDEMPOTENCY_KEY,
+            command.request.session,
+            REFUSED_EVIDENCE_CAPTURE,
+        ),
+        DurableAdvanceRefusal(
+            1,
+            command.request.idempotency_key,
+            AdvanceFailureReason.INVALID_MODE,
+            command.request.session,
+            REFUSED_EVIDENCE_CAPTURE,
+        ),
+    )
+
+    for refusal in invalid_refusals:
+        with pytest.raises(InvalidLifecycleStateError, match="invalid refusal association"):
+            reconstruct_lifecycle(LifecycleHistory(refusals=(refusal,)))
 
 
 def test_kernel_rejects_a_changed_published_snapshot_reference() -> None:
     command = _command()
     complete_history, _ = _complete(LifecycleHistory(), command)
     changed_final = replace(
-        complete_history.events[-1],
+        complete_history.events[3],
         published_universe_snapshot_id="f" * SHA256_HEX_LENGTH,
     )
     changed_history = LifecycleHistory(
-        events=(*complete_history.events[:-1], changed_final),
+        events=(*complete_history.events[:3], changed_final, *complete_history.events[4:]),
     )
 
     with pytest.raises(
@@ -353,7 +565,7 @@ def test_kernel_rejects_a_snapshot_reference_at_the_wrong_checkpoint(reference: 
         )
     else:
         assert reference == "missing_published"
-        events[-1] = replace(events[-1], published_universe_snapshot_id=None)
+        events[3] = replace(events[3], published_universe_snapshot_id=None)
 
     with pytest.raises(
         InvalidLifecycleStateError,
@@ -741,6 +953,7 @@ def test_status_uses_the_kernel_transition_sequence() -> None:
         LifecyclePhase.RECONCILE_PRIOR_STATE,
         LifecyclePhase.PIN_RUN_INPUTS,
         LifecyclePhase.SNAPSHOT_UNIVERSE,
+        LifecyclePhase.CAPTURE_EVIDENCE,
         None,
     )
 

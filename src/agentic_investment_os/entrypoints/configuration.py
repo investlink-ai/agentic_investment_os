@@ -15,16 +15,26 @@ from typing import TYPE_CHECKING, assert_never
 from agentic_investment_os.adapters.recorded_universe import is_alpaca_paper_identity
 from agentic_investment_os.domain.identity import AssetClass
 from agentic_investment_os.domain.universe import EquityUniversePolicy, UniverseRefusal
+from agentic_investment_os.evidence.capture import EvidencePolicy
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
-_FIELDS = frozenset({"schema_version", "state_root", "enabled_asset_classes", "universe_policy"})
+_FIELDS = frozenset(
+    {
+        "schema_version",
+        "state_root",
+        "enabled_asset_classes",
+        "universe_policy",
+        "evidence_policy",
+    }
+)
 _IGNORED_RUNTIME_ROOTS = frozenset({"artifacts", "data", "var"})
 _SCHEMA_VERSION_FIELDS = ("schema_version",)
 _STATE_ROOT_FIELDS = ("state_root",)
 _ENABLED_ASSET_CLASS_FIELDS = ("enabled_asset_classes",)
 _UNIVERSE_POLICY_FIELDS = ("universe_policy",)
+_EVIDENCE_POLICY_FIELDS = ("evidence_policy",)
 _LIFECYCLE_DATABASE_NAME = "lifecycle.sqlite3"
 
 
@@ -38,6 +48,7 @@ class ConfigurationRefusalCode(StrEnum):
     INVALID_STATE_ROOT = "invalid_state_root"
     INVALID_ENABLED_ASSET_CLASSES = "invalid_enabled_asset_classes"
     INVALID_UNIVERSE_POLICY = "invalid_universe_policy"
+    INVALID_EVIDENCE_POLICY = "invalid_evidence_policy"
 
 
 @dataclass(frozen=True, slots=True)
@@ -64,6 +75,7 @@ class RuntimeConfiguration:
     state_root: Path
     enabled_asset_classes: tuple[AssetClass, ...]
     universe_policy: EquityUniversePolicy
+    evidence_policy: EvidencePolicy
     fingerprint: str
 
 
@@ -79,6 +91,9 @@ _INVALID_ENABLED_ASSET_CLASSES_REFUSAL = ConfigurationRefusal(
 )
 _INVALID_UNIVERSE_POLICY_REFUSAL = ConfigurationRefusal(
     ConfigurationRefusalCode.INVALID_UNIVERSE_POLICY, _UNIVERSE_POLICY_FIELDS
+)
+_INVALID_EVIDENCE_POLICY_REFUSAL = ConfigurationRefusal(
+    ConfigurationRefusalCode.INVALID_EVIDENCE_POLICY, _EVIDENCE_POLICY_FIELDS
 )
 _UNKNOWN_FIELD_REFUSAL = ConfigurationRefusal(ConfigurationRefusalCode.UNKNOWN_FIELD)
 
@@ -165,7 +180,7 @@ def _same_configuration_scalar(left: object, right: object) -> bool:
     return type(left) in (bool, int, float, str) and left == right
 
 
-def _validate_configuration(
+def _validate_configuration(  # noqa: PLR0911 - each invalid configuration layer is distinct.
     merged: Mapping[str, object], *, repository_root: Path
 ) -> ConfigurationResolution:
     missing = _FIELDS - set(merged)
@@ -195,12 +210,16 @@ def _validate_configuration(
     if not isinstance(universe_policy, EquityUniversePolicy):
         # Strict mypy proves this line unreachable; removing it is runtime-equivalent.
         assert_never(universe_policy)  # pragma: no cover
+    evidence_policy = EvidencePolicy.parse(merged["evidence_policy"])
+    if evidence_policy is None or evidence_policy.data_regime != universe_policy.data_regime:
+        return _INVALID_EVIDENCE_POLICY_REFUSAL
 
     canonical = {
         "state_root": str(state_root),
         "schema_version": schema_version,
         "enabled_asset_classes": [item.value for item in enabled_asset_classes],
         "universe_policy": universe_policy.to_payload(),
+        "evidence_policy": evidence_policy.to_payload(),
     }
     fingerprint = hashlib.sha256(
         json.dumps(canonical, sort_keys=True, separators=(",", ":")).encode()
@@ -210,6 +229,7 @@ def _validate_configuration(
         state_root,
         enabled_asset_classes,
         universe_policy,
+        evidence_policy,
         fingerprint,
     )
 

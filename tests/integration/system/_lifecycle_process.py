@@ -22,6 +22,7 @@ from agentic_investment_os.domain.lifecycle import (
 )
 from agentic_investment_os.entrypoints.configuration import ConfigurationSource
 from agentic_investment_os.entrypoints.lifecycle import configure_advance, configure_status
+from tests._evidence import recorded_evidence
 from tests._universe import recorded_universe, runtime_configuration
 
 if TYPE_CHECKING:
@@ -92,6 +93,7 @@ def _advance(state_root: Path) -> Advance:
         _sources(state_root),
         repository_root=REPOSITORY_ROOT,
         recorded_universe=recorded_universe(),
+        recorded_evidence=recorded_evidence(),
         clock=FixedClock(),
     )
     if not isinstance(capability, Advance):
@@ -170,6 +172,7 @@ def _interrupt_after_reconcile(state_root: Path) -> None:
         universe_source=configured.universe_source,
         enabled_asset_classes=configured.enabled_asset_classes,
         universe_policy=configured.universe_policy,
+        evidence_capture=configured.evidence_capture,
         clock=configured.clock,
     )
     interrupted(

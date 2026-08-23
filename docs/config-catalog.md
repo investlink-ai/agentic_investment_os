@@ -34,6 +34,7 @@ required and have no default.
 | `state_root` | Absolute path string; must be symlink-free and either outside the repository or below the top-level `var/`, `data/`, or `artifacts/` root; Git's effective rules must ignore both the root and fixed database path | Included after canonical path resolution | Resolved at process composition by the local operator | Do not log or expose the local path; only its configuration hash enters receipts and lifecycle records |
 | `enabled_asset_classes` | Exact JSON list `["us_equity"]`; no empty, duplicate, unknown, crypto, option, or multi-class activation is accepted in V0 | Included canonically | Resolved at process composition; it authorizes only the implemented equity lifecycle and policy | Safe to log or expose to a model after validation |
 | `universe_policy` | Complete object matching the schema below | Included canonically; its own content hash is also pinned into the run identity | Resolved at process composition; changes activate through a later run identity | Safe to log or expose to a model after validation |
+| `evidence_policy` | Complete object matching the schema below | Included canonically | Resolved at process composition; it authorizes exactly the required market and news captures for the pinned Data Regime | Safe to log or expose to a model after validation |
 
 The resolver hashes canonical JSON containing exactly these validated fields with SHA-256. The state
 root is created with mode `0700`; the fixed `lifecycle.sqlite3` file is created with mode `0600`.
@@ -67,6 +68,28 @@ Unknown, missing, duplicate, malformed, mixed-variant, or out-of-domain policy v
 configuration before the runtime database is prepared. Provider entitlement or observed instruments
 cannot activate an asset class. Policy fields cannot be inferred from recorded data; threshold
 values are mechanics-calibrated and must not be selected by optimizing investment return.
+
+### Evidence policy
+
+`evidence_policy` contains the complete recorded Alpaca market-and-news capture policy for
+`CaptureEvidence`. Its Data Regime must match `universe_policy`; an entitlement or feed change cannot
+enter an existing regime. Exactly one market retrieval and one news retrieval are required, with
+distinct stable identities. Each capture appends intent before consulting the recorded source, then
+persists a typed outcome and any immutable content before lifecycle completion.
+
+| Field | Type and validation | Effect |
+| --- | --- | --- |
+| `schema_version` | Integer; must equal `1` | Versions the policy representation |
+| `policy_type` | String; must equal `alpaca_market_news` | Discriminates the implemented evidence policy |
+| `data_regime` | Lowercase bounded identifier equal to `universe_policy.data_regime` | Prevents market or news observations from crossing regime boundaries |
+| `requests` | Exactly two objects, sorted canonically by kind and retrieval identity; one `market` and one `news`, with unique identities | Makes the complete required capture set explicit |
+| `requests[].kind` | String; `market` or `news` | Selects the typed source contract and coverage semantics |
+| `requests[].retrieval_identity` | Lowercase bounded identifier | Creates a stable idempotent intent identity within the run and cutoff |
+| `requests[].maximum_age_seconds` | Integer from `1` through `86,399,999,999,999` seconds | Marks an otherwise valid observation stale when its derived availability precedes the allowed cutoff window |
+
+The Evidence Vault lives at the fixed `evidence-vault/` child of `state_root`. Its directories and
+files use private modes `0700` and `0600`; those names and modes are safety constants, not tunable
+configuration.
 
 ## Repository tooling configuration
 

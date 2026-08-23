@@ -1,4 +1,4 @@
-"""Compose uncredentialed lifecycle capabilities through universe snapshotting."""
+"""Compose uncredentialed lifecycle capabilities through evidence capture."""
 
 from __future__ import annotations
 
@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, assert_never
 
+from agentic_investment_os.adapters.filesystem_evidence import FilesystemEvidenceVault
+from agentic_investment_os.adapters.recorded_evidence import RecordedAlpacaEvidenceSource
 from agentic_investment_os.adapters.recorded_universe import RecordedUniverseSource
 from agentic_investment_os.adapters.sqlite_lifecycle import (
     PreparedRuntimeDatabase,
@@ -22,6 +24,7 @@ from agentic_investment_os.entrypoints.configuration import (
     RuntimeConfiguration,
     resolve_runtime_configuration,
 )
+from agentic_investment_os.evidence.capture import CaptureEvidence
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -43,6 +46,7 @@ def configure_advance(
     *,
     repository_root: Path,
     recorded_universe: object,
+    recorded_evidence: object,
     clock: Clock | None = None,
 ) -> Advance | ConfigurationRefusal:
     """Validate configuration and compose Advance without credentials or network access.
@@ -70,6 +74,11 @@ def configure_advance(
             universe_source=RecordedUniverseSource(recorded_universe),
             enabled_asset_classes=resolution.enabled_asset_classes,
             universe_policy=resolution.universe_policy,
+            evidence_capture=CaptureEvidence(
+                policy=resolution.evidence_policy,
+                source=RecordedAlpacaEvidenceSource(recorded_evidence),
+                vault=FilesystemEvidenceVault(resolution.state_root / "evidence-vault"),
+            ),
             clock=clock if clock is not None else SystemClock(),
         )
     # Strict mypy proves this line unreachable; removing it is runtime-equivalent.
@@ -100,6 +109,11 @@ def configure_status(
             fields=("state_root",),
         )
     if isinstance(database, PreparedRuntimeDatabase):
-        return Status(SQLiteLifecycleLedger.open_existing(database.path))
+        return Status(
+            SQLiteLifecycleLedger.open_existing(database.path),
+            FilesystemEvidenceVault.reference_validator(
+                resolution.state_root / "evidence-vault",
+            ),
+        )
     # Strict mypy proves this line unreachable; removing it is runtime-equivalent.
     assert_never(database)  # pragma: no cover

@@ -174,7 +174,7 @@ def test_lifecycle_journey_resumes_replays_and_rebuilds_status_across_processes(
     resumed = _advance_observation(_run_process("advance", state_root))
 
     assert resumed.disposition == "advanced"
-    assert resumed.completed_phase == "SnapshotUniverse"
+    assert resumed.completed_phase == "CaptureEvidence"
     assert resumed.recovery == "resumed"
     assert resumed.configuration_version == 1
     assert len(resumed.run_id) == SHA256_HEX_LENGTH
@@ -186,6 +186,7 @@ def test_lifecycle_journey_resumes_replays_and_rebuilds_status_across_processes(
         (1, "phase_completed", "ReconcilePriorState"),
         (2, "run_inputs_pinned", "PinRunInputs"),
         (3, "universe_snapshotted", "SnapshotUniverse"),
+        (4, "evidence_captured", "CaptureEvidence"),
     ]
     assert {str(row[3]) for row in completed_history} == {resumed.run_id}
     assert {str(row[4]) for row in completed_history} == {resumed.configuration_hash}
@@ -221,4 +222,7 @@ def test_lifecycle_journey_resumes_replays_and_rebuilds_status_across_processes(
     assert replayed.ambient_authority_absent is True
     assert _authoritative_history(database) == completed_history
     assert _non_event_counts(database) == (0, 0)
-    assert sorted(path.name for path in state_root.iterdir()) == ["lifecycle.sqlite3"]
+    assert sorted(path.name for path in state_root.iterdir()) == [
+        "evidence-vault",
+        "lifecycle.sqlite3",
+    ]

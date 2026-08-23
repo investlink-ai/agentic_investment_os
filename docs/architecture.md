@@ -378,8 +378,10 @@ The V0 scheduler resolves an NYSE trading date and exchange-relative deadlines i
 `MarketSession`. `ReconcilePriorState` proves cash, positions, pending orders, and prior receipts agree.
 `PinRunInputs` records the equity cycle identity, equity-feed Data Regime and Evidence Cutoff,
 configuration, instrument catalog, position snapshot, and policy fingerprints; the current Basic
-entitlement uses IEX, while a later SIP entitlement is a different regime. The remaining phases run
-once and publish at most one Champion decision and packet for that cycle. A non-equity activation
+entitlement uses IEX, while a later SIP entitlement is a different regime. `SnapshotUniverse`
+publishes the eligible universe before `CaptureEvidence` appends intent-first market and news capture
+outcomes to the Evidence Vault. The remaining phases run once and publish at most one Champion
+decision and packet for that cycle. A non-equity activation
 request or position is refused before evidence or research; an NYSE holiday produces the existing
 durable no-action path rather than a synthetic session.
 
@@ -570,6 +572,28 @@ authoritative history. Reopen and retry revalidate it from canonical bytes, and 
 cannot replace the provenance pinned before an interruption. The cutoff cannot be later than the
 lifecycle record time. Missing identity, future or changed material, or a conflicting retry fails
 closed without another snapshot event.
+
+`CaptureEvidence` derives each artifact's availability from its applicable source-event,
+publication, and first-observed instants and admits it only at the pinned Evidence Cutoff. The
+filesystem Evidence Vault stores content once by SHA-256 while appending distinct observation
+metadata in the common evidence-snapshot envelope and typed unavailable, stale, or refused outcomes.
+The artifact identifier hashes that observation envelope; the separate source-content fingerprint
+addresses the deduplicated bytes. Owner-defined closed market and news variants validate canonical
+content at the recorded boundary, Vault publication, and reopen. Before the first capture intent, the
+Vault appends the complete canonical retrieval policy under its content hash; the lifecycle
+checkpoint pins that policy identifier beside its artifact and refusal identifiers. A durable
+capture intent precedes each source consultation; reopen and retry reuse its completed outcome or
+safely resume an intent that has no outcome only while its pinned policy snapshot remains valid; it
+never recreates that snapshot over related durable intent or outcome state. Lifecycle reconstruction
+loads each run's historical policy and rebuilds its complete configured intent set for the exact run,
+Universe Snapshot, cutoff, and Data Regime, then requires exact equality with the referenced artifact
+and refusal identifiers. A terminal refusal retry reconstructs only its owning request stream before
+comparing pinned material, including the policy identifier returned for application-boundary Vault
+validation, so unrelated corrupt history cannot replay stale evidence references. The final lifecycle
+event and `Advance` receipt expose only bounded policy, artifact, and refusal identifiers. Any required
+refusal prevents the final event and appends an
+`evidence_capture_failed` terminal refusal without erasing valid observations captured in the same
+attempt.
 
 SQLite is the initial event and checkpoint store, while the filesystem holds content-addressed
 artifacts and atomic publications. Runtime state uses ignored, configurable roots such as `var/`,

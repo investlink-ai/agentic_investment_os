@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Protocol, assert_never
 
 from agentic_investment_os.domain.identity import (
@@ -19,6 +19,7 @@ from agentic_investment_os.domain.lifecycle import (
     AdvanceRequest,
     AppendLifecycleRecord,
     AppendTerminalLifecycleRecord,
+    EvidenceCaptureCheckpoint,
     InputRefusal,
     InputRefusalCode,
     InvalidLifecycleStateError,
@@ -27,6 +28,7 @@ from agentic_investment_os.domain.lifecycle import (
     LifecyclePersistenceError,
     LifecycleStatus,
     LifecycleStatusProjection,
+    PerformEvidenceCapture,
     PinnedRunIdentity,
 )
 from agentic_investment_os.domain.temporal import InvalidUtcInstantError, UtcInstant
@@ -44,6 +46,11 @@ from agentic_investment_os.domain.universe import (
 if TYPE_CHECKING:
     from datetime import datetime
 
+    from agentic_investment_os.evidence.capture import (
+        EvidenceCaptureCapability,
+        EvidenceReferenceValidator,
+    )
+
 __all__ = ("Advance", "Clock", "Status")
 
 
@@ -60,7 +67,7 @@ class Clock(Protocol):
 
 @dataclass(frozen=True, slots=True)
 class Advance:
-    """Advance or resume one validated Decision Cycle through a universe snapshot."""
+    """Advance or resume one validated Decision Cycle through evidence capture."""
 
     ledger: LifecycleLedger
     configuration_version: int
@@ -68,6 +75,7 @@ class Advance:
     universe_source: UniverseInputSource
     enabled_asset_classes: tuple[AssetClass, ...]
     universe_policy: EquityUniversePolicy
+    evidence_capture: EvidenceCaptureCapability
     clock: Clock
 
     def __call__(
@@ -99,8 +107,10 @@ class Advance:
         while True:
             decision = self.ledger.advance_step(command, attempt, recorded_at)
             if isinstance(decision, AdvanceReceipt):
+                self._validate_evidence_receipt(command, decision)
                 return decision
             if isinstance(decision, AppendTerminalLifecycleRecord):
+                self._validate_evidence_receipt(command, decision.receipt)
                 return decision.receipt
             if isinstance(decision, AppendLifecycleRecord):
                 if decision.attempt.last_sequence is None or (
@@ -110,8 +120,50 @@ class Advance:
                     raise InvalidLifecycleStateError(_INCOMPLETE_CHECKPOINT_RESULT)
                 attempt = decision.attempt
                 continue
+            if isinstance(decision, PerformEvidenceCapture):
+                if not isinstance(command, AdvanceCommand):
+                    raise InvalidLifecycleStateError(_INCOMPLETE_CHECKPOINT_RESULT)
+                summary = self.evidence_capture(
+                    run_id=decision.pinned_run_identity.run_id,
+                    universe_snapshot_id=decision.universe_snapshot.snapshot_id,
+                    cutoff=decision.pinned_run_identity.evidence_cutoff,
+                    data_regime=decision.pinned_run_identity.data_regime,
+                )
+                command = replace(
+                    command,
+                    evidence_capture=EvidenceCaptureCheckpoint(
+                        summary.policy_id,
+                        summary.artifact_ids,
+                        summary.refusal_ids,
+                    ),
+                )
+                continue
             # Strict mypy proves this line unreachable; removing it is runtime-equivalent.
             assert_never(decision)  # pragma: no cover
+
+    def _validate_evidence_receipt(
+        self,
+        command: LifecycleCommand,
+        receipt: AdvanceReceipt,
+    ) -> None:
+        if not (receipt.evidence_artifact_ids or receipt.evidence_refusal_ids):
+            return
+        if not isinstance(command, AdvanceCommand):
+            raise InvalidLifecycleStateError(_INCOMPLETE_CHECKPOINT_RESULT)
+        policy_id = receipt.evidence_policy_id
+        if policy_id is None:  # pragma: no cover - receipt validation requires it with evidence.
+            raise InvalidLifecycleStateError(_INCOMPLETE_CHECKPOINT_RESULT)
+        self.evidence_capture.validate_checkpoint(
+            run_id=command.pinned_run_identity.run_id,
+            universe_snapshot_id=command.universe_snapshot.snapshot_id,
+            cutoff=command.pinned_run_identity.evidence_cutoff,
+            data_regime=command.pinned_run_identity.data_regime,
+            checkpoint=EvidenceCaptureCheckpoint(
+                policy_id,
+                receipt.evidence_artifact_ids,
+                receipt.evidence_refusal_ids,
+            ),
+        )
 
     def _prepare_command(
         self,
@@ -183,6 +235,9 @@ class Status:
     """Rebuild and return lifecycle status without advancing authoritative history."""
 
     projection: LifecycleStatusProjection
+    evidence_validator: EvidenceReferenceValidator
 
     def __call__(self) -> LifecycleStatus:
-        return self.projection.rebuild_status()
+        status = self.projection.rebuild_status()
+        self.evidence_validator.validate_references(self.projection.rebuild_evidence_checkpoints())
+        return status

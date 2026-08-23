@@ -22,6 +22,7 @@ from agentic_investment_os.domain.lifecycle import (
 from agentic_investment_os.domain.temporal import UtcInstant
 from agentic_investment_os.entrypoints.configuration import ConfigurationSource
 from agentic_investment_os.entrypoints.lifecycle import configure_advance, configure_status
+from tests._evidence import recorded_evidence
 from tests._universe import (
     mutable_mapping,
     mutable_mapping_list,
@@ -55,6 +56,7 @@ def _configure(
         (ConfigurationSource("test", runtime_configuration(state_root)),),
         repository_root=Path.cwd(),
         recorded_universe=payload,
+        recorded_evidence=recorded_evidence(),
         clock=FixedClock() if clock is None else clock,
     )
     assert isinstance(configured, Advance)
@@ -81,7 +83,7 @@ def test_advance_durably_publishes_a_reconstructable_universe_snapshot(tmp_path:
 
     assert first.disposition is AdvanceDisposition.ADVANCED
     assert first.completed_phase is not None
-    assert first.completed_phase.phase is LifecyclePhase.SNAPSHOT_UNIVERSE
+    assert first.completed_phase.phase is LifecyclePhase.CAPTURE_EVIDENCE
     assert first.recovery is AdvanceRecovery.FRESH
     assert first.universe_snapshot_id is not None
     assert first.pinned_run_identity is not None
@@ -97,6 +99,9 @@ def test_advance_durably_publishes_a_reconstructable_universe_snapshot(tmp_path:
         failure_reason=None,
         recovery=AdvanceRecovery.PREVIOUSLY_COMPLETED,
         recorded_at=UtcInstant.from_datetime(FixedClock().instant),
+        evidence_policy_id=first.evidence_policy_id,
+        evidence_artifact_ids=first.evidence_artifact_ids,
+        evidence_refusal_ids=(),
     )
 
     database = state_root / "lifecycle.sqlite3"
@@ -113,11 +118,14 @@ def test_advance_durably_publishes_a_reconstructable_universe_snapshot(tmp_path:
         ("phase_completed", "ReconcilePriorState"),
         ("run_inputs_pinned", "PinRunInputs"),
         ("universe_snapshotted", "SnapshotUniverse"),
+        ("evidence_captured", "CaptureEvidence"),
     ]
     assert all(row[2] is None and row[3] is None for row in events[:2])
     assert events[2][2] == first.universe_snapshot_id
     assert events[2][3] is not None
-    assert events[-1][2] == first.universe_snapshot_id
+    assert events[3][2] == first.universe_snapshot_id
+    assert events[3][3] is None
+    assert events[-1][2] is None
     assert events[-1][3] is None
     snapshot = json.loads(events[2][3])
     material = snapshot["payload"]
@@ -375,5 +383,5 @@ def test_retry_with_changed_recorded_snapshot_fails_without_changing_first_snaps
     assert replay.universe_snapshot_id == first.universe_snapshot_id
     assert replay.recovery is AdvanceRecovery.PREVIOUSLY_COMPLETED
     with sqlite3.connect(state_root / "lifecycle.sqlite3") as connection:
-        assert connection.execute("SELECT COUNT(*) FROM lifecycle_events").fetchone() == (4,)
+        assert connection.execute("SELECT COUNT(*) FROM lifecycle_events").fetchone() == (5,)
         assert connection.execute("SELECT COUNT(*) FROM advance_conflicts").fetchone() == (1,)

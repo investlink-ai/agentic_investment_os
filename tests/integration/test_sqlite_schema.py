@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+from dataclasses import replace
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, override
 
@@ -18,17 +19,19 @@ from agentic_investment_os.domain.lifecycle import (
     InvalidLifecycleStateError,
     LifecycleEvent,
     LifecyclePersistenceError,
+    PerformEvidenceCapture,
     PinnedRunIdentity,
 )
 from agentic_investment_os.domain.temporal import UtcInstant
+from tests._evidence import evidence_capture_checkpoint
 from tests._universe import advance_command
 
-CURRENT_DATABASE_VERSION = 5
+CURRENT_DATABASE_VERSION = 6
 CONFIGURATION_HASH = "a" * 64
 RECORDED_AT = "2026-08-21T22:00:00.000000+00:00"
 MAX_DIAGNOSTIC_LENGTH = 100
 SQLiteValue = str | bytes | int | float | None
-SNAPSHOT_EVENT_SEQUENCE = 3
+CAPTURE_EVENT_SEQUENCE = 4
 
 
 class InvalidDatabaseVersionCursor(sqlite3.Cursor):
@@ -90,9 +93,12 @@ def _populate_current_history(database: Path) -> tuple[AdvanceRequest, PinnedRun
     ledger = SQLiteLifecycleLedger(database)
     attempt = AdvanceAttempt()
     recorded_at = UtcInstant.parse(RECORDED_AT)
-    for expected_sequence in range(4):
+    for expected_sequence in range(5):
         decision = ledger.advance_step(command, attempt, recorded_at)
-        if expected_sequence < SNAPSHOT_EVENT_SEQUENCE:
+        if isinstance(decision, PerformEvidenceCapture):
+            command = replace(command, evidence_capture=evidence_capture_checkpoint())
+            decision = ledger.advance_step(command, attempt, recorded_at)
+        if expected_sequence < CAPTURE_EVENT_SEQUENCE:
             assert isinstance(decision, AppendLifecycleRecord)
             attempt = decision.attempt
         else:
