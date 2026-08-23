@@ -120,10 +120,46 @@ passing suite remains supporting evidence rather than proof of complete semantic
 
 ## Coverage
 
-The configured gate requires 100% line and branch coverage of the production package. Coverage is a
-deletion and design signal, not proof of correctness. Do not add meaningless assertions, exclusions,
-or unreachable branches to satisfy the number. If a line cannot be exercised through a useful
-contract, simplify or remove it.
+`make check` produces machine-readable line and branch coverage through pytest, then applies the
+consequence tiers configured in `pyproject.toml`:
+
+- **Critical authority code:** 100% line and 100% branch coverage. This tier contains deterministic
+  portfolio sizing, risk clamps, cash preservation, whole-share conversion, Target Bands,
+  DecisionPacket construction and authorization, stable effect identity and order planning,
+  intent-before-effect transitions, retry and timeout handling, partial-fill replacement,
+  reconciliation, authority-sensitive append-only reducers, and exact authority or asset refusals
+  as those behaviors are implemented.
+- **Safety-supporting code:** at least 90% line and 85% branch coverage. This tier contains provenance
+  and as-of validation, universe and position snapshot integrity, non-authorizing lifecycle
+  durability and reconstruction, runtime safety configuration, persistence validation, and semantic
+  normalization at external boundaries.
+- **Production package overall:** at least 85% line and 80% branch coverage. Ordinary wiring,
+  serialization, diagnostics, reports, and disposable projections remain subject to this floor and
+  require unit, contract, integration, architecture, or reconstruction evidence appropriate to
+  their behavior; tests do not exist solely to improve the aggregate percentage.
+
+This section owns the policy meaning; the versioned `tool.coverage_tiers` table is the single
+executable owner of current critical and safety-supporting module patterns and threshold values.
+Critical patterns cover the complete `portfolio/` and `execution/` capabilities before their first
+implementation so new financial-authority modules cannot silently inherit only the package floor.
+Every configured pattern must match a Python module below the configured package root, the two tiers
+must not overlap, and every production module must appear in the coverage report. Empty, missing,
+malformed, conflicting, unmatched, or unmeasurable declarations fail the gate. A module with no
+branch opportunities has 100% branch coverage; it is not excluded from classification.
+
+The repository checker calculates line and branch percentages independently from coverage counts and
+fails closed on missing branch measurement, malformed JSON, incomplete summaries, or inconsistent
+uncovered-line and uncovered-branch details. A failure names the tier, measured and required
+percentages, and affected files with their uncovered lines or branch edges. Consequently, aggregate
+package coverage cannot hide one uncovered critical line or branch. GitHub Actions delegates to
+`make check` and carries no duplicate threshold logic.
+
+Coverage is an execution and design signal, not proof of correctness. Critical behavior still
+requires applicable refusal, property, corruption, idempotency, and mutation evidence. Do not add
+blanket exclusions, broad `pragma: no cover` directives, trivial assertions, unreachable branches,
+or unnecessary mixed-risk module splits to manufacture a passing result. Split a mixed-risk module
+only when a precise owned boundary is needed to isolate a critical decision. If a line cannot be
+exercised through a useful contract, simplify or remove it.
 
 ## Mutation testing
 
@@ -155,12 +191,12 @@ is not the repository gate.
 
 Mutation runs select only deterministic unit, integration, and contract tiers. They use fake or
 recorded broker boundaries and receive no credentials or network-enabled live rehearsal. Repository
-harness tests for issue worktrees, agent workflows, capability dependencies, and unit-tier
-enforcement are excluded because they exercise scripts outside the copied production tree and cannot
-distinguish product mutants. Their dedicated harness, architecture, and ordinary test gates remain
-mandatory. While the repository contains no callable in the configured scope, the runner reports the
-scaffold exemption and exits successfully; adding the first scoped callable activates the gate
-automatically.
+harness tests for issue worktrees, agent workflows, capability dependencies, consequence-tiered
+coverage, and unit-tier enforcement are excluded because they exercise scripts outside the copied
+production tree and cannot distinguish product mutants. Their dedicated harness, architecture, and
+ordinary test gates remain mandatory. While the repository contains no callable in the configured
+scope, the runner reports the scaffold exemption and exits successfully; adding the first scoped
+callable activates the gate automatically.
 
 ## Fixtures
 

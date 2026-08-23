@@ -36,6 +36,7 @@ harness:
 	test -f scripts/__init__.py
 	test -f scripts/agent_workflow_harness.py
 	test -f scripts/check_capability_dependencies.py
+	test -f scripts/check_coverage_tiers.py
 	test -f scripts/check_unit_test_tier.py
 	test -f scripts/run_mutation.py
 	test -x scripts/start-issue.sh
@@ -78,6 +79,7 @@ typecheck:
 
 test:
 	uv run pytest
+	uv run python -m scripts.check_coverage_tiers --root .
 
 mutation:
 	uv run python scripts/run_mutation.py

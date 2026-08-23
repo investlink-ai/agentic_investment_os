@@ -258,7 +258,7 @@ addopts = [
   "--cov=agentic_investment_os",
   "--cov-branch",
   "--cov-report=term-missing",
-  "--cov-fail-under=100",
+  "--cov-report=json:.coverage.json",
 ]
 testpaths = ["tests"]
 
@@ -269,6 +269,32 @@ source = ["agentic_investment_os"]
 [tool.coverage.report]
 show_missing = true
 skip_covered = false
+
+[tool.coverage_tiers]
+schema_version = 1
+package_root = "src/agentic_investment_os"
+report = ".coverage.json"
+overall_lines = 85
+overall_branches = 80
+critical_lines = 100
+critical_branches = 100
+safety_supporting_lines = 90
+safety_supporting_branches = 85
+critical_paths = [
+  "adapters/sqlite_lifecycle.py",
+  "application/lifecycle.py",
+  "domain/lifecycle.py",
+  "domain/universe.py",
+  "entrypoints/configuration.py",
+  "execution/**/*.py",
+  "portfolio/**/*.py",
+]
+safety_supporting_paths = [
+  "adapters/recorded_universe.py",
+  "domain/identity.py",
+  "domain/temporal.py",
+  "entrypoints/lifecycle.py",
+]
 
 [tool.mutmut]
 source_paths = ["src"]
@@ -293,6 +319,7 @@ pytest_add_cli_args_test_selection = [
   "--ignore=tests/unit/test_unit_test_tier.py",
   "--ignore=tests/integration/test_agent_workflow_harness.py",
   "--ignore=tests/integration/test_capability_dependencies.py",
+  "--ignore=tests/integration/test_coverage_tiers.py",
   "--ignore=tests/integration/test_issue_worktree_harness.py",
   "--ignore=tests/integration/test_unit_test_tier.py",
 ]
