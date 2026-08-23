@@ -1,0 +1,9 @@
+import shutil
+import tempfile
+import os
+from pathlib import Path
+
+with tempfile.TemporaryDirectory() as directory:
+    shutil.copy(Path(directory) / "source", Path(directory) / "target")
+
+os.path.exists("state")

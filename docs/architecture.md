@@ -185,6 +185,30 @@ is supporting evidence, not proof that the owning semantic contract is complete 
 add brittle checks merely to mechanize prose, and do not let a changed review or publication gate
 approve itself.
 
+### Capability effect boundaries
+
+[ADR 0007](adr/0007-enforce-bounded-capability-effects.md) makes concrete effect dependencies
+mechanically visible at the production capability boundary. Every Python source under
+`src/agentic_investment_os/` is protected by default except `adapters/` and `entrypoints/`, which own
+external effects and composition. Protected capabilities receive typed values or owner-defined ports;
+they do not obtain wall-clock time, ambient randomness or identifiers, host environment or local-time
+state, network or model access, broker authority, database access, filesystem effects, or process
+control directly.
+
+`make architecture` enforces this boundary with a fixed Ruff banned-API catalog and a small syntax
+check for cases whose acceptability depends on an explicit argument or typed receiver. The contextual
+check recognizes direct construction, annotations, and simple name or attribute aliases for `Path`,
+`Random`, and `datetime`; it requires seeded local generators and explicit timezone conversion. Inline
+lint suppression does not bypass the gate. Diagnostics identify a stable `CAP000`–`CAP010` category,
+repository-relative location, and remediation without printing source content.
+
+This is deliberately bounded static evidence. It does not infer arbitrary control flow, containers,
+protocol implementations, reflection, dynamic imports, or interprocedural types, and it does not
+claim exhaustive detection of evasive code. Extend the catalog or narrow contextual recognizer only
+for a demonstrated, high-signal effect pattern with both denied and allowed fixtures. Adapters and
+entrypoints remain subject to their authority contracts, module direction, behavioral tests, and
+semantic review even though this particular gate exempts them.
+
 ## System topology
 
 ```mermaid
