@@ -12,6 +12,7 @@ from agentic_investment_os.domain.lifecycle import (
     AdvanceRequest,
     PinnedRunIdentity,
 )
+from agentic_investment_os.domain.temporal import UtcInstant
 from agentic_investment_os.domain.universe import (
     EquityUniversePolicy,
     UniverseInputIdentity,
@@ -23,7 +24,7 @@ from agentic_investment_os.domain.universe import (
 if TYPE_CHECKING:
     from pathlib import Path
 
-RECORDED_AT = datetime(2026, 8, 21, 22, 0, tzinfo=UTC)
+RECORDED_AT = UtcInstant.from_datetime(datetime(2026, 8, 21, 22, 0, tzinfo=UTC))
 INSTRUMENT_SOURCE_FINGERPRINT = "1" * 64
 POSITION_SOURCE_FINGERPRINT = "2" * 64
 
@@ -151,14 +152,14 @@ def recorded_universe() -> dict[str, object]:
         "schema_version": 1,
         "record_kind": "universe_inputs",
         "data_regime": "alpaca-basic-iex-v1",
-        "evidence_cutoff": "2026-08-21T20:00:00+00:00",
+        "evidence_cutoff": "2026-08-21T20:00:00.000000+00:00",
         "instruments": {
             "envelope_schema_version": 1,
             "payload_schema_version": 1,
             "record_kind": "instrument_snapshot",
             "payload_discriminator": "recorded_instrument_snapshot",
-            "observed_at": "2026-08-21T19:30:00+00:00",
-            "available_at": "2026-08-21T19:35:00+00:00",
+            "observed_at": "2026-08-21T19:30:00.000000+00:00",
+            "available_at": "2026-08-21T19:35:00.000000+00:00",
             "data_regime": "alpaca-basic-iex-v1",
             "authority_scope": "market_data_observation",
             "source_fingerprint": INSTRUMENT_SOURCE_FINGERPRINT,
@@ -203,8 +204,8 @@ def recorded_universe() -> dict[str, object]:
             "payload_schema_version": 1,
             "record_kind": "position_snapshot",
             "payload_discriminator": "recorded_position_snapshot",
-            "observed_at": "2026-08-21T19:45:00+00:00",
-            "available_at": "2026-08-21T19:46:00+00:00",
+            "observed_at": "2026-08-21T19:45:00.000000+00:00",
+            "available_at": "2026-08-21T19:46:00.000000+00:00",
             "data_regime": "alpaca-basic-iex-v1",
             "authority_scope": "portfolio_observation",
             "source_fingerprint": POSITION_SOURCE_FINGERPRINT,
@@ -223,6 +224,9 @@ def reseal_recorded_snapshot(payload: dict[str, object], name: str) -> None:
     snapshot = payload[name]
     assert isinstance(snapshot, dict)
     envelope = {key: value for key, value in snapshot.items() if key != "content_hash"}
+    for field in ("observed_at", "available_at"):
+        text = exact_text(envelope[field])
+        envelope[field] = UtcInstant.from_datetime(datetime.fromisoformat(text)).isoformat()
     item_payload = envelope["payload"]
     assert isinstance(item_payload, dict)
     items = item_payload["items"]
@@ -254,11 +258,13 @@ def pinned_run_identity(
 ) -> PinnedRunIdentity:
     inputs = typed_universe_inputs(payload)
     policy = typed_universe_policy()
+    input_identity = UniverseInputIdentity.from_inputs(inputs, policy)
+    assert isinstance(input_identity, UniverseInputIdentity)
     return PinnedRunIdentity.create(
         request,
         configuration_version=configuration_version,
         configuration_hash=configuration_hash,
-        universe_inputs=UniverseInputIdentity.from_inputs(inputs, policy),
+        universe_inputs=input_identity,
     )
 
 

@@ -88,6 +88,10 @@ Every Evidence Artifact retains, when applicable:
 - parser and normalization version; and
 - entity-mapping confidence.
 
+Times that identify a moment follow the architecture's
+[Absolute Instant contract](architecture.md#temporal-semantics); a source-calendar date remains a
+date and does not acquire a synthetic midnight instant.
+
 Availability at the pinned Evidence Cutoff determines whether evidence may enter a decision. A source
 event date alone is insufficient. SEC artifacts are keyed by accession and acceptance time; current
 aggregates, later amendments, or restatements cannot leak into prior contexts. Repeated capture of

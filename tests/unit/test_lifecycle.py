@@ -30,9 +30,12 @@ from agentic_investment_os.domain.lifecycle import (
     LifecycleEvent,
     LifecycleEventKind,
     LifecyclePhase,
+    PinnedRunIdentity,
     parse_advance_receipt,
     parse_lifecycle_checkpoint,
 )
+from agentic_investment_os.domain.temporal import InvalidUtcInstantError, UtcInstant
+from agentic_investment_os.domain.universe import UniverseInputIdentity
 from tests._universe import (
     exact_text,
     pinned_run_identity,
@@ -43,7 +46,7 @@ from tests._universe import (
 
 SHA256_HEX_LENGTH = 64
 PINNED_SEQUENCE = 2
-RECEIPT_RECORDED_AT = datetime(2026, 8, 21, 22, 0, tzinfo=UTC)
+RECEIPT_RECORDED_AT = UtcInstant.from_datetime(datetime(2026, 8, 21, 22, 0, tzinfo=UTC))
 
 
 class _StringSubclass(str):
@@ -130,7 +133,7 @@ class ConcurrentCompletionLedger:
         self,
         command: LifecycleCommand,
         attempt: AdvanceAttempt,
-        _recorded_at: datetime,
+        _recorded_at: UtcInstant,
     ) -> LifecycleDecision:
         assert isinstance(command, AdvanceCommand)
         if self.completion_point == "start" and self.steps == 0:
@@ -188,7 +191,7 @@ def test_advance_request_validates_the_complete_boundary() -> None:
         request,
         configuration_hash="a" * SHA256_HEX_LENGTH,
     )
-    assert identity.run_id == "303ab24fb94d601573699667036c493b05804e2af80943071ae1afe120c5ad05"
+    assert identity.run_id == "0ac44d25caa90c6870877bb8704957ecf837a83e0d3f2587687d5be645bd37db"
 
     invalid_cases = (
         (
@@ -309,7 +312,7 @@ def test_lifecycle_event_uses_a_hashed_common_envelope() -> None:
         snapshot,
     )
 
-    envelope = event.to_envelope(datetime(2026, 8, 21, 22, 0, tzinfo=UTC))
+    envelope = event.to_envelope(UtcInstant.from_datetime(datetime(2026, 8, 21, 22, 0, tzinfo=UTC)))
 
     assert envelope["payload_discriminator"] == "equity_market_session_lifecycle_event"
     assert envelope["authority_scope"] == "investment_operating_system"
@@ -320,7 +323,30 @@ def test_lifecycle_event_uses_a_hashed_common_envelope() -> None:
     assert event_payload["completed_phase"] == checkpoint.to_payload()
     assert event_payload["universe_snapshot_id"] == snapshot.snapshot_id
     with pytest.raises(ValueError, match="timezone-aware"):
-        event.to_envelope(datetime(2026, 8, 21, 22, 0))  # noqa: DTZ001
+        event.to_envelope(
+            cast("UtcInstant", datetime(2026, 8, 21, 22, 0))  # noqa: DTZ001
+        )
+
+
+def test_pinned_identity_rejects_an_untyped_evidence_cutoff_with_a_bounded_error() -> None:
+    universe_inputs = UniverseInputIdentity(
+        data_regime="adjusted-sip-v1",
+        evidence_cutoff=cast("UtcInstant", datetime(2026, 8, 21, 20, 0, tzinfo=UTC)),
+        instrument_snapshot_hash="1" * 64,
+        position_snapshot_hash="2" * 64,
+        eligibility_policy_hash="3" * 64,
+    )
+
+    with pytest.raises(
+        InvalidUtcInstantError,
+        match="lifecycle absolute instant must be canonical",
+    ):
+        PinnedRunIdentity.create(
+            _request(),
+            configuration_version=1,
+            configuration_hash="a" * 64,
+            universe_inputs=universe_inputs,
+        )
 
 
 def test_advance_receipt_rejects_incomplete_success_and_failure_shapes() -> None:
@@ -359,8 +385,8 @@ def test_advance_receipt_rejects_incomplete_success_and_failure_shapes() -> None
             AdvanceRecovery.RESUMED,
         )
     crypto_cycle = CryptoDecisionWindow(
-        datetime(2026, 8, 22, tzinfo=UTC),
-        datetime(2026, 8, 23, tzinfo=UTC),
+        UtcInstant.from_datetime(datetime(2026, 8, 22, tzinfo=UTC)),
+        UtcInstant.from_datetime(datetime(2026, 8, 23, tzinfo=UTC)),
     )
     with pytest.raises(ValueError, match="failed receipt requires one bounded reason"):
         AdvanceReceipt.failed_closed(AdvanceFailureReason.UNSUPPORTED_CYCLE)
@@ -387,8 +413,8 @@ def test_advance_receipts_round_trip_through_one_versioned_public_envelope() -> 
     identity = pinned_run_identity(_request())
     snapshot = universe_snapshot(identity)
     crypto_cycle = CryptoDecisionWindow(
-        datetime(2026, 8, 22, tzinfo=UTC),
-        datetime(2026, 8, 22, tzinfo=UTC) + timedelta(hours=1),
+        UtcInstant.from_datetime(datetime(2026, 8, 22, tzinfo=UTC)),
+        UtcInstant.from_datetime(datetime(2026, 8, 22, tzinfo=UTC) + timedelta(hours=1)),
     )
     receipts = (
         AdvanceReceipt.advanced(identity, snapshot, AdvanceRecovery.FRESH, RECEIPT_RECORDED_AT),
@@ -428,8 +454,8 @@ def test_advance_receipt_parser_rejects_crypto_as_success_even_when_resealed() -
         identity, snapshot, AdvanceRecovery.FRESH, RECEIPT_RECORDED_AT
     ).to_payload()
     crypto_cycle = CryptoDecisionWindow(
-        datetime(2026, 8, 22, tzinfo=UTC),
-        datetime(2026, 8, 23, tzinfo=UTC),
+        UtcInstant.from_datetime(datetime(2026, 8, 22, tzinfo=UTC)),
+        UtcInstant.from_datetime(datetime(2026, 8, 23, tzinfo=UTC)),
     ).to_payload()
     envelope["cycle"] = crypto_cycle
     payload = envelope["payload"]
@@ -472,7 +498,7 @@ def test_advance_receipt_rejects_a_completion_time_before_its_evidence_cutoff() 
             identity,
             snapshot,
             AdvanceRecovery.FRESH,
-            identity.evidence_cutoff - timedelta(seconds=1),
+            UtcInstant.from_datetime(identity.evidence_cutoff.value - timedelta(seconds=1)),
         )
 
 
@@ -696,7 +722,7 @@ def test_advance_receipt_parser_rejects_a_self_consistent_naive_cutoff() -> None
     assert isinstance(payload, dict)
     pinned = payload["pinned_run_identity"]
     assert isinstance(pinned, dict)
-    naive_cutoff = identity.evidence_cutoff.replace(tzinfo=None).isoformat()
+    naive_cutoff = identity.evidence_cutoff.value.replace(tzinfo=None).isoformat()
     pinned["evidence_cutoff"] = naive_cutoff
     envelope["relevant_at"] = naive_cutoff
     envelope["available_at"] = naive_cutoff

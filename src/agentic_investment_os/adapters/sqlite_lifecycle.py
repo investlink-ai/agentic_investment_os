@@ -8,7 +8,6 @@ import sqlite3
 import stat
 from contextlib import closing
 from dataclasses import dataclass
-from datetime import datetime
 from enum import StrEnum
 from typing import TYPE_CHECKING, Self, TypeVar, assert_never
 
@@ -47,6 +46,7 @@ from agentic_investment_os.domain.lifecycle import (
     is_sha256,
     parse_lifecycle_checkpoint,
 )
+from agentic_investment_os.domain.temporal import InvalidUtcInstantError, UtcInstant
 from agentic_investment_os.domain.universe import (
     UniverseRefusal,
     UniverseSnapshot,
@@ -97,7 +97,7 @@ _INVALID_REQUEST = "invalid request values in lifecycle ledger"
 _UNKNOWN_REASON_CODE = "unknown reason_code in lifecycle ledger"
 _INVALID_REFUSAL_KEY = "invalid idempotency_key in lifecycle refusal ledger"
 _INVALID_CONFLICT_KEY = "invalid idempotency_key in lifecycle conflict ledger"
-_CLOCK_NOT_AWARE = "lifecycle clock must return a timezone-aware timestamp"
+_RECORDED_AT_NOT_CANONICAL = "recorded_at must use canonical UTC format"
 _INVALID_CHECKPOINT_ORDER = "lifecycle stream checkpoint order is invalid"
 _INVALID_DATA_REGIME = "invalid data_regime in lifecycle ledger"
 _FUTURE_EVIDENCE_CUTOFF = "evidence_cutoff cannot be later than recorded_at"
@@ -432,9 +432,10 @@ class SQLiteLifecycleLedger:
         self,
         command: LifecycleCommand,
         attempt: AdvanceAttempt,
-        recorded_at: datetime,
+        recorded_at: object,
     ) -> LifecycleDecision:
         """Apply one pure lifecycle decision inside an append transaction."""
+        recorded_at_value, timestamp = _canonical_write_timestamp(recorded_at)
 
         def operation(connection: sqlite3.Connection) -> LifecycleDecision:
             key = _command_key(command)
@@ -457,9 +458,9 @@ class SQLiteLifecycleLedger:
                     next_refusal_sequence=next_refusal_sequence,
                 )
             else:
-                decision = decide_advance(history, command, attempt, recorded_at)
+                decision = decide_advance(history, command, attempt, recorded_at_value)
             if isinstance(decision, (AppendLifecycleRecord, AppendTerminalLifecycleRecord)):
-                _append_record(connection, decision.record, recorded_at)
+                _append_record(connection, decision.record, recorded_at_value, timestamp)
                 return decision
             if isinstance(decision, AdvanceReceipt):
                 return decision
@@ -542,12 +543,12 @@ def _load_event(row: tuple[object, ...]) -> LifecycleEvent:
     configuration_hash = _hash(row[6], "configuration_hash")
     run_id = _hash(row[7], "run_id")
     data_regime = _data_regime(row[8])
-    evidence_cutoff = _aware_timestamp(row[9], "evidence_cutoff")
+    evidence_cutoff = _canonical_timestamp(row[9], "evidence_cutoff")
     instrument_snapshot_hash = _hash(row[10], "instrument_snapshot_hash")
     position_snapshot_hash = _hash(row[11], "position_snapshot_hash")
     eligibility_policy_hash = _hash(row[12], "eligibility_policy_hash")
-    recorded_at = _aware_timestamp(row[18], "recorded_at")
-    if evidence_cutoff > recorded_at:
+    recorded_at = _canonical_timestamp(row[18], "recorded_at")
+    if evidence_cutoff.value > recorded_at.value:
         raise InvalidLifecycleStateError(_FUTURE_EVIDENCE_CUTOFF)
     try:
         event_kind = LifecycleEventKind(_text(row[13], "event_kind"))
@@ -593,7 +594,7 @@ def _load_universe_reference(
     *,
     event_kind: LifecycleEventKind,
     run_id: str,
-    recorded_at: datetime,
+    recorded_at: UtcInstant,
 ) -> tuple[UniverseSnapshot | None, str | None]:
     if event_kind is LifecycleEventKind.RUN_INPUTS_PINNED:
         snapshot_id = _hash(snapshot_id_value, "universe_snapshot_id")
@@ -673,7 +674,7 @@ def _load_refusals(
         key = _optional_refusal_key(row[1])
         cycle = None if row[2] is None else _market_session(row[2])
         reason = _failure_reason(row[3])
-        _aware_timestamp(row[4], "recorded_at")
+        _canonical_timestamp(row[4], "recorded_at")
         refusals.append(DurableAdvanceRefusal(sequence, key, reason, cycle))
     return refusals
 
@@ -702,7 +703,7 @@ def _load_conflicts(
     for row in rows:
         key = _conflict_key(row[0])
         reason = _failure_reason(row[1])
-        _aware_timestamp(row[2], "recorded_at")
+        _canonical_timestamp(row[2], "recorded_at")
         conflicts.append(DurableAdvanceConflict(key, reason))
     return conflicts
 
@@ -740,9 +741,9 @@ def _next_refusal_sequence(connection: sqlite3.Connection) -> int:
 def _append_record(
     connection: sqlite3.Connection,
     record: LifecycleRecord,
-    recorded_at: datetime,
+    recorded_at: UtcInstant,
+    timestamp: str,
 ) -> None:
-    timestamp = _timestamp(recorded_at)
     if isinstance(record, LifecycleEvent):
         request = record.request
         identity = record.pinned_run_identity
@@ -848,7 +849,7 @@ def _replace_status_projection(
             None if identity is None else identity.configuration_version,
             None if identity is None else identity.configuration_hash,
             None if identity is None else identity.data_regime,
-            None if identity is None else identity.evidence_cutoff.isoformat(),
+            (None if identity is None else identity.evidence_cutoff.isoformat()),
             None if identity is None else identity.instrument_snapshot_hash,
             None if identity is None else identity.position_snapshot_hash,
             None if identity is None else identity.eligibility_policy_hash,
@@ -951,20 +952,19 @@ def _conflict_key(value: object) -> IdempotencyKey:
     return key
 
 
-def _aware_timestamp(value: object, field: str) -> datetime:
+def _canonical_timestamp(value: object, field: str) -> UtcInstant:
     text = _text(value, field)
     try:
-        parsed = datetime.fromisoformat(text)
-    except ValueError as error:
-        message = f"invalid {field} in lifecycle ledger"
+        return UtcInstant.parse(text)
+    except InvalidUtcInstantError as error:
+        message = f"{field} must use canonical UTC format"
         raise InvalidLifecycleStateError(message) from error
-    if parsed.utcoffset() is None:
-        message = f"{field} must be timezone-aware"
-        raise InvalidLifecycleStateError(message)
-    return parsed
 
 
-def _timestamp(value: datetime) -> str:
-    if value.utcoffset() is None:
-        raise LifecyclePersistenceError(_CLOCK_NOT_AWARE)
-    return value.isoformat()
+def _canonical_write_timestamp(value: object) -> tuple[UtcInstant, str]:
+    if type(value) is not UtcInstant:
+        raise LifecyclePersistenceError(_RECORDED_AT_NOT_CANONICAL)
+    try:
+        return value, value.isoformat()
+    except InvalidUtcInstantError as error:
+        raise LifecyclePersistenceError(_RECORDED_AT_NOT_CANONICAL) from error

@@ -20,11 +20,12 @@ from agentic_investment_os.domain.lifecycle import (
     LifecyclePersistenceError,
     PinnedRunIdentity,
 )
+from agentic_investment_os.domain.temporal import UtcInstant
 from tests._universe import advance_command
 
 CURRENT_DATABASE_VERSION = 5
 CONFIGURATION_HASH = "a" * 64
-RECORDED_AT = "2026-08-21T22:00:00+00:00"
+RECORDED_AT = "2026-08-21T22:00:00.000000+00:00"
 MAX_DIAGNOSTIC_LENGTH = 100
 SQLiteValue = str | bytes | int | float | None
 SNAPSHOT_EVENT_SEQUENCE = 3
@@ -88,7 +89,7 @@ def _populate_current_history(database: Path) -> tuple[AdvanceRequest, PinnedRun
     identity = command.pinned_run_identity
     ledger = SQLiteLifecycleLedger(database)
     attempt = AdvanceAttempt()
-    recorded_at = datetime.fromisoformat(RECORDED_AT)
+    recorded_at = UtcInstant.parse(RECORDED_AT)
     for expected_sequence in range(4):
         decision = ledger.advance_step(command, attempt, recorded_at)
         if expected_sequence < SNAPSHOT_EVENT_SEQUENCE:
@@ -571,7 +572,8 @@ def test_current_append_only_objects_continue_to_reject_rewrites(tmp_path: Path)
         "DELETE FROM advance_refusals",
         (
             "INSERT INTO advance_conflicts VALUES "
-            "('conflict', 'idempotency_key_conflict', '2026-08-21T22:00:00+00:00')"
+            "('conflict', 'idempotency_key_conflict', "
+            "'2026-08-21T22:00:00.000000+00:00')"
         ),
     )
     with sqlite3.connect(database) as connection:
@@ -617,7 +619,7 @@ def test_current_ledger_remains_usable_after_startup_validation(tmp_path: Path) 
     started = ledger.advance_step(
         command,
         AdvanceAttempt(),
-        datetime(2026, 8, 21, 22, 0, tzinfo=UTC),
+        UtcInstant.from_datetime(datetime(2026, 8, 21, 22, 0, tzinfo=UTC)),
     )
     assert isinstance(started, AppendLifecycleRecord)
 
@@ -625,7 +627,7 @@ def test_current_ledger_remains_usable_after_startup_validation(tmp_path: Path) 
     continued = reopened.advance_step(
         command,
         started.attempt,
-        datetime(2026, 8, 21, 22, 1, tzinfo=UTC),
+        UtcInstant.from_datetime(datetime(2026, 8, 21, 22, 1, tzinfo=UTC)),
     )
 
     assert isinstance(continued, AppendLifecycleRecord)

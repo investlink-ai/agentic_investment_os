@@ -18,9 +18,10 @@ positions as explicit portfolio mismatches. Canonical asset-neutral identities, 
 and lifecycle envelopes, explicit position valuation provenance, and exact cycle-to-snapshot Status
 identity keep future variants additive without activating non-equity behavior in V0. The lifecycle
 ledger accepts one current database-wide schema, while the status projection is disposable and never
-substitutes for invalid authoritative records. A pure domain kernel owns reconstruction and transition
-decisions while SQLite validates representations and atomically appends the selected record. Evidence
-capture, research, portfolio, execution, evaluation, and later lifecycle phases remain scaffolds.
+substitutes for invalid authoritative records. Absolute instants use canonical UTC text while Market
+Sessions retain NYSE-date meaning. A pure domain kernel owns reconstruction and transition decisions
+while SQLite validates representations and atomically appends the selected record. Evidence capture,
+research, portfolio, execution, evaluation, and later lifecycle phases remain scaffolds.
 Active repository documentation owns implementation authority, and the runtime has no dependency on
 the design's Second Brain origin.
 

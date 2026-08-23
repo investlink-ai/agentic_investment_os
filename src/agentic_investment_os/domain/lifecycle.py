@@ -6,7 +6,7 @@ import hashlib
 import json
 import re
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date
 from enum import StrEnum
 from typing import TYPE_CHECKING, Protocol, TypeGuard, assert_never
 
@@ -17,6 +17,7 @@ from agentic_investment_os.domain.identity import (
     canonical_cycle_bytes,
     parse_decision_cycle_identity,
 )
+from agentic_investment_os.domain.temporal import InvalidUtcInstantError, UtcInstant
 from agentic_investment_os.domain.universe import is_data_regime
 
 if TYPE_CHECKING:
@@ -76,6 +77,7 @@ _NONCONTIGUOUS_SEQUENCE = "lifecycle stream sequence is not contiguous"
 _INVALID_CHECKPOINT_ORDER = "lifecycle stream checkpoint order is invalid"
 _INVALID_CHECKPOINT_PHASE = "invalid lifecycle checkpoint phase"
 _INVALID_EVENT_TIME = "lifecycle event time must be timezone-aware"
+_INVALID_ABSOLUTE_INSTANT = "lifecycle absolute instant must be canonical"
 _LIFECYCLE_ENVELOPE_SCHEMA_VERSION = 1
 _LIFECYCLE_PAYLOAD_SCHEMA_VERSION = 1
 _LIFECYCLE_AUTHORITY_SCOPE = "investment_operating_system"
@@ -342,7 +344,7 @@ class PinnedRunIdentity:
     configuration_version: int
     configuration_hash: str
     data_regime: str
-    evidence_cutoff: datetime
+    evidence_cutoff: UtcInstant
     instrument_snapshot_hash: str
     position_snapshot_hash: str
     eligibility_policy_hash: str
@@ -364,7 +366,7 @@ class PinnedRunIdentity:
                     request.mode.value,
                     canonical_cycle_bytes(request.session).decode(),
                     universe_inputs.data_regime,
-                    universe_inputs.evidence_cutoff.isoformat(),
+                    _instant_text(universe_inputs.evidence_cutoff),
                     universe_inputs.instrument_snapshot_hash,
                     universe_inputs.position_snapshot_hash,
                     universe_inputs.eligibility_policy_hash,
@@ -392,7 +394,7 @@ class AdvanceReceipt:
     recovery: AdvanceRecovery | None = None
     universe_snapshot_id: str | None = None
     refused_cycle: DecisionCycleIdentity | None = None
-    recorded_at: datetime | None = None
+    recorded_at: UtcInstant | None = None
 
     @property
     def cycle(self) -> DecisionCycleIdentity | None:
@@ -407,7 +409,7 @@ class AdvanceReceipt:
         identity = self.pinned_run_identity
         cycle = self.cycle
         recorded_at = self.recorded_at
-        recorded_at_text = recorded_at.isoformat() if type(recorded_at) is datetime else None
+        recorded_at_text = _instant_text(recorded_at) if type(recorded_at) is UtcInstant else None
         if identity is not None:
             discriminator = "equity_market_session_advance_receipt"
             relevant_at = recorded_at_text
@@ -416,7 +418,7 @@ class AdvanceReceipt:
             fingerprints: dict[str, object] = _material_fingerprints(identity)
         elif type(cycle) is CryptoDecisionWindow:
             discriminator = "unsupported_cycle_advance_receipt"
-            relevant_at = cycle.starts_at.isoformat()
+            relevant_at = _instant_text(cycle.starts_at)
             available_at = None
             data_regime = None
             fingerprints = {}
@@ -456,17 +458,23 @@ class AdvanceReceipt:
 
     def __post_init__(self) -> None:
         if self.disposition is AdvanceDisposition.ADVANCED:
+            recorded_at = self.recorded_at
+            identity = self.pinned_run_identity
+            try:
+                if type(recorded_at) is not UtcInstant or identity is None:
+                    raise InvalidUtcInstantError(_INVALID_ADVANCED_RECEIPT)
+                recorded_at.isoformat()
+                identity.evidence_cutoff.isoformat()
+            except InvalidUtcInstantError as error:
+                raise ValueError(_INVALID_ADVANCED_RECEIPT) from error
             if (
                 self.completed_phase != LifecycleCheckpoint.equity(LifecyclePhase.SNAPSHOT_UNIVERSE)
-                or self.pinned_run_identity is None
                 or self.failure_reason is not None
                 or self.recovery is None
                 or self.universe_snapshot_id is None
                 or self.refused_cycle is not None
-                or type(self.pinned_run_identity.cycle) is not MarketSession
-                or type(self.recorded_at) is not datetime
-                or self.recorded_at.utcoffset() is None
-                or self.recorded_at < self.pinned_run_identity.evidence_cutoff
+                or type(identity.cycle) is not MarketSession
+                or recorded_at.value < identity.evidence_cutoff.value
             ):
                 raise ValueError(_INVALID_ADVANCED_RECEIPT)
             return
@@ -498,7 +506,7 @@ class AdvanceReceipt:
         identity: PinnedRunIdentity,
         snapshot: UniverseSnapshot,
         recovery: AdvanceRecovery,
-        recorded_at: datetime,
+        recorded_at: UtcInstant,
     ) -> AdvanceReceipt:
         return cls(
             AdvanceDisposition.ADVANCED,
@@ -645,10 +653,12 @@ class LifecycleEvent:
             return self.prepared_universe_snapshot.snapshot_id
         return self.published_universe_snapshot_id
 
-    def to_envelope(self, recorded_at: datetime) -> dict[str, object]:
+    def to_envelope(self, recorded_at: UtcInstant) -> dict[str, object]:
         """Serialize one equity event through the stable hashed lifecycle envelope."""
-        if type(recorded_at) is not datetime or recorded_at.utcoffset() is None:
-            raise ValueError(_INVALID_EVENT_TIME)
+        try:
+            recorded_at_text = _instant_text(recorded_at)
+        except InvalidUtcInstantError as error:
+            raise ValueError(_INVALID_EVENT_TIME) from error
         identity = self.pinned_run_identity
         material = {
             "envelope_schema_version": _LIFECYCLE_ENVELOPE_SCHEMA_VERSION,
@@ -656,8 +666,8 @@ class LifecycleEvent:
             "payload_discriminator": "equity_market_session_lifecycle_event",
             "payload_schema_version": _LIFECYCLE_PAYLOAD_SCHEMA_VERSION,
             "cycle": identity.cycle.to_payload(),
-            "event_at": recorded_at.isoformat(),
-            "available_at": recorded_at.isoformat(),
+            "event_at": recorded_at_text,
+            "available_at": recorded_at_text,
             "data_regime": identity.data_regime,
             "authority_scope": _LIFECYCLE_AUTHORITY_SCOPE,
             "material_fingerprints": {
@@ -810,7 +820,7 @@ def decide_advance(
     history: LifecycleHistory,
     command: LifecycleCommand,
     attempt: AdvanceAttempt,
-    recorded_at: datetime,
+    recorded_at: UtcInstant,
 ) -> LifecycleDecision:
     """Reconstruct authoritative history and choose one durable transition or receipt."""
     terminal = decide_terminal_refusal(history.refusals, command)
@@ -1020,7 +1030,7 @@ def _reconstruct_stream(  # noqa: PLR0912 - validate each durable checkpoint inv
             request.mode.value,
             canonical_cycle_bytes(request.session).decode(),
             identity.data_regime,
-            identity.evidence_cutoff.isoformat(),
+            _instant_text(identity.evidence_cutoff),
             identity.instrument_snapshot_hash,
             identity.position_snapshot_hash,
             identity.eligibility_policy_hash,
@@ -1089,7 +1099,7 @@ def _decide_valid_advance(
     progress_by_key: dict[str, LifecycleProgress],
     command: AdvanceCommand,
     attempt: AdvanceAttempt,
-    recorded_at: datetime,
+    recorded_at: UtcInstant,
 ) -> LifecycleDecision:
     request = command.request
     key = request.idempotency_key
@@ -1220,7 +1230,7 @@ def _append_next_event(
     progress: LifecycleProgress,
     command: AdvanceCommand,
     recovery: AdvanceRecovery,
-    recorded_at: datetime,
+    recorded_at: UtcInstant,
 ) -> AppendLifecycleRecord | AppendTerminalLifecycleRecord:
     sequence = progress.sequence + 1
     event_kind, phase, prepares_snapshot, publishes_snapshot = _EVENT_SEQUENCE[sequence]
@@ -1396,7 +1406,7 @@ class LifecycleLedger(Protocol):
         self,
         command: LifecycleCommand,
         attempt: AdvanceAttempt,
-        recorded_at: datetime,
+        recorded_at: UtcInstant,
     ) -> LifecycleDecision: ...
 
 
@@ -1449,18 +1459,11 @@ def _optional_enum[T: StrEnum](
     return parsed is not None, parsed
 
 
-def _parse_aware_timestamp(value: object) -> datetime | None:
-    if type(value) is not str:
-        return None
+def _parse_aware_timestamp(value: object) -> UtcInstant | None:
     try:
-        parsed = datetime.fromisoformat(value)
-    except ValueError:
+        return UtcInstant.parse(value)
+    except InvalidUtcInstantError:
         return None
-    if parsed.utcoffset() is None:
-        return None
-    if parsed.isoformat() != value:
-        return None
-    return parsed
 
 
 def _pinned_identity_payload(identity: PinnedRunIdentity) -> dict[str, object]:
@@ -1470,7 +1473,7 @@ def _pinned_identity_payload(identity: PinnedRunIdentity) -> dict[str, object]:
         "configuration_version": identity.configuration_version,
         "configuration_hash": identity.configuration_hash,
         "data_regime": identity.data_regime,
-        "evidence_cutoff": identity.evidence_cutoff.isoformat(),
+        "evidence_cutoff": _instant_text(identity.evidence_cutoff),
         "instrument_snapshot_hash": identity.instrument_snapshot_hash,
         "position_snapshot_hash": identity.position_snapshot_hash,
         "eligibility_policy_hash": identity.eligibility_policy_hash,
@@ -1524,7 +1527,7 @@ def _parse_pinned_identity(value: object) -> PinnedRunIdentity | None:
             SessionMode.CHAMPION.value,
             canonical_cycle_bytes(identity.cycle).decode(),
             identity.data_regime,
-            identity.evidence_cutoff.isoformat(),
+            _instant_text(identity.evidence_cutoff),
             identity.instrument_snapshot_hash,
             identity.position_snapshot_hash,
             identity.eligibility_policy_hash,
@@ -1559,3 +1562,9 @@ def _parse_market_session(value: object) -> MarketSession | None:
 def _fingerprint(values: tuple[str | int, ...]) -> str:
     encoded = json.dumps(values).encode()
     return hashlib.sha256(encoded).hexdigest()
+
+
+def _instant_text(value: object) -> str:
+    if type(value) is not UtcInstant:
+        raise InvalidUtcInstantError(_INVALID_ABSOLUTE_INSTANT)
+    return value.isoformat()

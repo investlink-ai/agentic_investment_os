@@ -5,10 +5,12 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from datetime import date
 from decimal import Decimal, InvalidOperation
 from enum import StrEnum
 from typing import assert_never
+
+from agentic_investment_os.domain.temporal import InvalidUtcInstantError, UtcInstant
 
 __all__ = (
     "AssetClass",
@@ -242,8 +244,8 @@ class MarketSession:
 class CryptoDecisionWindow:
     """Identify one reserved UTC crypto decision interval."""
 
-    starts_at: datetime
-    ends_at: datetime
+    starts_at: UtcInstant
+    ends_at: UtcInstant
 
     def __post_init__(self) -> None:
         if not _is_valid_crypto_window(self.starts_at, self.ends_at):
@@ -381,8 +383,8 @@ def parse_decision_cycle_identity(  # noqa: PLR0911 - each closed variant fails 
         payload = _mapping(fields["payload"], frozenset({"ends_at", "starts_at"}))
         if payload is None:
             return None
-        starts_at = _parse_datetime(payload["starts_at"])
-        ends_at = _parse_datetime(payload["ends_at"])
+        starts_at = _parse_instant(payload["starts_at"])
+        ends_at = _parse_instant(payload["ends_at"])
         if starts_at is None:
             return None
         if ends_at is None:
@@ -594,16 +596,11 @@ def _parse_date(value: object) -> date | None:
     return parsed if parsed.isoformat() == value else None
 
 
-def _parse_datetime(value: object) -> datetime | None:
-    if type(value) is not str:
-        return None
+def _parse_instant(value: object) -> UtcInstant | None:
     try:
-        parsed = datetime.fromisoformat(value)
-    except ValueError:
+        return UtcInstant.parse(value)
+    except InvalidUtcInstantError:
         return None
-    if parsed.utcoffset() is None or parsed.isoformat() != value:
-        return None
-    return parsed
 
 
 def _parse_decimal(  # noqa: PLR0911 - reject each hostile decimal property independently.
@@ -646,15 +643,14 @@ def _decimal_text(value: Decimal) -> str:
 
 
 def _is_valid_crypto_window(starts_at: object, ends_at: object) -> bool:
-    return (
-        type(starts_at) is datetime
-        and type(ends_at) is datetime
-        and starts_at.utcoffset() is not None
-        and ends_at.utcoffset() is not None
-        and starts_at.utcoffset() == timedelta(0)
-        and ends_at.utcoffset() == timedelta(0)
-        and starts_at < ends_at
-    )
+    if type(starts_at) is not UtcInstant or type(ends_at) is not UtcInstant:
+        return False
+    try:
+        starts_at.isoformat()
+        ends_at.isoformat()
+    except InvalidUtcInstantError:
+        return False
+    return starts_at.value < ends_at.value
 
 
 def _canonical_json(value: object) -> bytes:

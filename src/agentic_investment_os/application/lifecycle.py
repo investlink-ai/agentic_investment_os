@@ -24,10 +24,12 @@ from agentic_investment_os.domain.lifecycle import (
     InvalidLifecycleStateError,
     LifecycleCommand,
     LifecycleLedger,
+    LifecyclePersistenceError,
     LifecycleStatus,
     LifecycleStatusProjection,
     PinnedRunIdentity,
 )
+from agentic_investment_os.domain.temporal import InvalidUtcInstantError, UtcInstant
 from agentic_investment_os.domain.universe import (
     EquityUniversePolicy,
     UniverseInputIdentity,
@@ -46,6 +48,8 @@ __all__ = ("Advance", "Clock", "Status")
 
 
 _INCOMPLETE_CHECKPOINT_RESULT = "lifecycle ledger returned an incomplete checkpoint result"
+_CLOCK_INVALID = "lifecycle clock must return a timezone-aware instant representable in UTC"
+_UNIVERSE_SOURCE_INVALID = "universe source returned a noncanonical absolute instant"
 
 
 class Clock(Protocol):
@@ -86,7 +90,10 @@ class Advance:
             mode=mode,
             idempotency_key=idempotency_key,
         )
-        recorded_at = self.clock.now()
+        try:
+            recorded_at = UtcInstant.from_datetime(self.clock.now())
+        except InvalidUtcInstantError as error:
+            raise LifecyclePersistenceError(_CLOCK_INVALID) from error
         command = self._prepare_command(parsed, recorded_at)
         attempt = AdvanceAttempt()
         while True:
@@ -109,7 +116,7 @@ class Advance:
     def _prepare_command(
         self,
         parsed: AdvanceRequest | InputRefusal,
-        recorded_at: datetime,
+        recorded_at: UtcInstant,
     ) -> LifecycleCommand:
         if isinstance(parsed, InputRefusal):
             return parsed
@@ -122,14 +129,17 @@ class Advance:
                     parsed.session,
                 )
             if isinstance(loaded, UniverseInputs):
+                universe_identity = UniverseInputIdentity.from_inputs(
+                    loaded,
+                    self.universe_policy,
+                )
+                if isinstance(universe_identity, UniverseRefusal):
+                    raise LifecyclePersistenceError(_UNIVERSE_SOURCE_INVALID)
                 identity = PinnedRunIdentity.create(
                     parsed,
                     configuration_version=self.configuration_version,
                     configuration_hash=self.configuration_hash,
-                    universe_inputs=UniverseInputIdentity.from_inputs(
-                        loaded,
-                        self.universe_policy,
-                    ),
+                    universe_inputs=universe_identity,
                 )
                 snapshot = build_universe_snapshot(
                     identity.run_id,

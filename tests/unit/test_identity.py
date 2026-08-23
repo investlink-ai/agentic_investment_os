@@ -25,6 +25,7 @@ from agentic_investment_os.domain.identity import (
     parse_instrument_alias,
     parse_instrument_identity,
 )
+from agentic_investment_os.domain.temporal import UtcInstant
 from tests._universe import mutable_mapping
 
 
@@ -100,8 +101,8 @@ def test_instrument_identity_round_trips_without_a_display_symbol_key() -> None:
 def test_decision_cycle_identity_round_trips_closed_variants() -> None:
     market_session = MarketSession(date(2026, 8, 21))
     crypto_window = CryptoDecisionWindow(
-        starts_at=datetime(2026, 8, 22, tzinfo=UTC),
-        ends_at=datetime(2026, 8, 23, tzinfo=UTC),
+        starts_at=UtcInstant.from_datetime(datetime(2026, 8, 22, tzinfo=UTC)),
+        ends_at=UtcInstant.from_datetime(datetime(2026, 8, 23, tzinfo=UTC)),
     )
 
     assert market_session.asset_class is AssetClass.US_EQUITY
@@ -144,8 +145,19 @@ def test_crypto_decision_window_requires_canonical_utc_boundaries() -> None:
     non_utc = timezone(timedelta(hours=10))
     with pytest.raises(ValueError, match="invalid crypto decision window"):
         CryptoDecisionWindow(
-            starts_at=datetime(2026, 8, 22, tzinfo=non_utc),
-            ends_at=datetime(2026, 8, 23, tzinfo=non_utc),
+            starts_at=cast("UtcInstant", datetime(2026, 8, 22, tzinfo=non_utc)),
+            ends_at=UtcInstant.from_datetime(datetime(2026, 8, 23, tzinfo=non_utc)),
+        )
+    forged = object.__new__(UtcInstant)
+    object.__setattr__(
+        forged,
+        "value",
+        datetime(2026, 8, 22),  # noqa: DTZ001
+    )
+    with pytest.raises(ValueError, match="invalid crypto decision window"):
+        CryptoDecisionWindow(
+            starts_at=forged,
+            ends_at=UtcInstant.from_datetime(datetime(2026, 8, 23, tzinfo=UTC)),
         )
 
     payload = {
@@ -404,8 +416,8 @@ def test_decision_cycle_parser_refuses_every_hostile_variant(  # noqa: PLR0912, 
             market["trading_date"] = "20260821"
     else:
         value = CryptoDecisionWindow(
-            datetime(2026, 8, 22, tzinfo=UTC),
-            datetime(2026, 8, 23, tzinfo=UTC),
+            UtcInstant.from_datetime(datetime(2026, 8, 22, tzinfo=UTC)),
+            UtcInstant.from_datetime(datetime(2026, 8, 23, tzinfo=UTC)),
         ).to_payload()
         payload = value
         window = mutable_mapping(payload["payload"])
@@ -491,8 +503,8 @@ def test_option_decimal_parser_rejects_non_plain_or_nonfinite_decimals(value: st
 
 def test_crypto_parser_rejects_an_empty_window() -> None:
     payload = CryptoDecisionWindow(
-        datetime(2026, 8, 22, tzinfo=UTC),
-        datetime(2026, 8, 23, tzinfo=UTC),
+        UtcInstant.from_datetime(datetime(2026, 8, 22, tzinfo=UTC)),
+        UtcInstant.from_datetime(datetime(2026, 8, 23, tzinfo=UTC)),
     ).to_payload()
     window = mutable_mapping(payload["payload"])
     window["starts_at"] = window["ends_at"]

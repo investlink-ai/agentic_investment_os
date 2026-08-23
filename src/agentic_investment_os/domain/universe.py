@@ -23,6 +23,7 @@ from agentic_investment_os.domain.identity import (
     canonical_instrument_bytes,
     parse_instrument_identity,
 )
+from agentic_investment_os.domain.temporal import InvalidUtcInstantError, UtcInstant
 
 __all__ = (
     "CryptoSpotInstrument",
@@ -67,6 +68,7 @@ _MAXIMUM_DECIMAL_TEXT_LENGTH = 64
 _MAXIMUM_HISTORY_DAYS = 1_000_000
 _MAXIMUM_TIMEDELTA_SECONDS = 86_399_999_999_999
 _INVALID_POSITION_VALUATION = "invalid position valuation"
+_INVALID_ABSOLUTE_INSTANT = "universe absolute instant must be canonical"
 _POLICY_FIELDS = frozenset(
     {
         "asset_class",
@@ -357,8 +359,8 @@ type PositionObservation = EquityPosition | CryptoSpotPosition | ListedOptionPos
 class InstrumentSnapshot:
     """Pin one complete availability-aware instrument observation set."""
 
-    observed_at: datetime
-    available_at: datetime
+    observed_at: UtcInstant
+    available_at: UtcInstant
     data_regime: str
     source_fingerprint: str
     instruments: tuple[InstrumentObservation, ...]
@@ -375,8 +377,15 @@ class InstrumentSnapshot:
         source_fingerprint: str,
         instruments: tuple[InstrumentObservation, ...],
     ) -> Self | UniverseRefusal:
-        if not _valid_snapshot_metadata(observed_at, available_at, data_regime, source_fingerprint):
+        normalized_times = _normalize_snapshot_metadata(
+            observed_at,
+            available_at,
+            data_regime,
+            source_fingerprint,
+        )
+        if normalized_times is None:
             return UniverseRefusal(UniverseRefusalCode.INVALID_INPUT)
+        normalized_observed, normalized_available = normalized_times
         ordered = tuple(
             sorted(instruments, key=lambda item: canonical_instrument_bytes(item.identity))
         )
@@ -387,22 +396,22 @@ class InstrumentSnapshot:
             record_kind="instrument_snapshot",
             payload_discriminator="recorded_instrument_snapshot",
             authority_scope="market_data_observation",
-            observed_at=observed_at,
-            available_at=available_at,
+            observed_at=normalized_observed,
+            available_at=normalized_available,
             data_regime=data_regime,
             source_fingerprint=source_fingerprint,
             items=ordered,
         )
         return cls(
-            observed_at,
-            available_at,
+            normalized_observed,
+            normalized_available,
             data_regime,
             source_fingerprint,
             ordered,
             _content_hash(
                 _instrument_snapshot_material(
-                    observed_at=observed_at,
-                    available_at=available_at,
+                    observed_at=normalized_observed,
+                    available_at=normalized_available,
                     data_regime=data_regime,
                     source_fingerprint=source_fingerprint,
                     instruments=ordered,
@@ -429,8 +438,8 @@ class InstrumentSnapshot:
 class PositionSnapshot:
     """Pin one complete availability-aware position observation set."""
 
-    observed_at: datetime
-    available_at: datetime
+    observed_at: UtcInstant
+    available_at: UtcInstant
     data_regime: str
     source_fingerprint: str
     positions: tuple[PositionObservation, ...]
@@ -446,8 +455,15 @@ class PositionSnapshot:
         source_fingerprint: str,
         positions: tuple[PositionObservation, ...],
     ) -> Self | UniverseRefusal:
-        if not _valid_snapshot_metadata(observed_at, available_at, data_regime, source_fingerprint):
+        normalized_times = _normalize_snapshot_metadata(
+            observed_at,
+            available_at,
+            data_regime,
+            source_fingerprint,
+        )
+        if normalized_times is None:
             return UniverseRefusal(UniverseRefusalCode.INVALID_INPUT)
+        normalized_observed, normalized_available = normalized_times
         ordered = tuple(
             sorted(positions, key=lambda item: canonical_instrument_bytes(item.identity))
         )
@@ -458,15 +474,15 @@ class PositionSnapshot:
             record_kind="position_snapshot",
             payload_discriminator="recorded_position_snapshot",
             authority_scope="portfolio_observation",
-            observed_at=observed_at,
-            available_at=available_at,
+            observed_at=normalized_observed,
+            available_at=normalized_available,
             data_regime=data_regime,
             source_fingerprint=source_fingerprint,
             items=ordered,
         )
         return cls(
-            observed_at,
-            available_at,
+            normalized_observed,
+            normalized_available,
             data_regime,
             source_fingerprint,
             ordered,
@@ -492,7 +508,7 @@ class UniverseInputs:
     """Pin complete normalized instrument and position snapshots at one cutoff."""
 
     data_regime: str
-    evidence_cutoff: datetime
+    evidence_cutoff: UtcInstant
     instrument_snapshot: InstrumentSnapshot
     position_snapshot: PositionSnapshot
 
@@ -504,15 +520,29 @@ class UniverseInputs:
         evidence_cutoff: datetime,
         instrument_snapshot: InstrumentSnapshot,
         position_snapshot: PositionSnapshot,
-    ) -> Self:
-        return cls(data_regime, evidence_cutoff, instrument_snapshot, position_snapshot)
+    ) -> Self | UniverseRefusal:
+        snapshot_instants = (
+            instrument_snapshot.observed_at,
+            instrument_snapshot.available_at,
+            position_snapshot.observed_at,
+            position_snapshot.available_at,
+        )
+        if any(type(instant) is not UtcInstant for instant in snapshot_instants):
+            return UniverseRefusal(UniverseRefusalCode.INVALID_INPUT)
+        try:
+            cutoff = UtcInstant.from_datetime(evidence_cutoff)
+            for instant in snapshot_instants:
+                instant.isoformat()
+        except InvalidUtcInstantError:
+            return UniverseRefusal(UniverseRefusalCode.INVALID_INPUT)
+        return cls(data_regime, cutoff, instrument_snapshot, position_snapshot)
 
     def to_payload(self) -> dict[str, object]:
         return {
             "record_kind": "universe_inputs",
             "schema_version": _SCHEMA_VERSION,
             "data_regime": self.data_regime,
-            "evidence_cutoff": self.evidence_cutoff.isoformat(),
+            "evidence_cutoff": _instant_text(self.evidence_cutoff),
             "instruments": self.instrument_snapshot.to_payload(),
             "positions": self.position_snapshot.to_payload(),
         }
@@ -523,13 +553,19 @@ class UniverseInputIdentity:
     """Pin the material input and policy facts carried into a lifecycle run."""
 
     data_regime: str
-    evidence_cutoff: datetime
+    evidence_cutoff: UtcInstant
     instrument_snapshot_hash: str
     position_snapshot_hash: str
     eligibility_policy_hash: str
 
     @classmethod
-    def from_inputs(cls, inputs: UniverseInputs, policy: EquityUniversePolicy) -> Self:
+    def from_inputs(
+        cls,
+        inputs: UniverseInputs,
+        policy: EquityUniversePolicy,
+    ) -> Self | UniverseRefusal:
+        if not _has_canonical_input_instants(inputs):
+            return UniverseRefusal(UniverseRefusalCode.INVALID_INPUT)
         return cls(
             data_regime=inputs.data_regime,
             evidence_cutoff=inputs.evidence_cutoff,
@@ -625,7 +661,7 @@ def build_universe_snapshot(  # noqa: PLR0913 - durable authority inputs remain 
     policy: EquityUniversePolicy,
     *,
     enabled_asset_classes: tuple[AssetClass, ...],
-    recorded_at: datetime,
+    recorded_at: UtcInstant,
 ) -> UniverseSnapshot | UniverseRefusal:
     """Evaluate equity membership while retaining every mapped position explicitly."""
     if (
@@ -640,16 +676,16 @@ def build_universe_snapshot(  # noqa: PLR0913 - durable authority inputs remain 
     recording_time_refusal = _recording_time_refusal(inputs, recorded_at)
     if recording_time_refusal is not None:
         return recording_time_refusal
-    cutoff = inputs.evidence_cutoff
+    cutoff = inputs.evidence_cutoff.value
     maximum_age = timedelta(seconds=policy.maximum_snapshot_age_seconds)
     for observed_at, available_at in (
         (
-            inputs.instrument_snapshot.observed_at,
-            inputs.instrument_snapshot.available_at,
+            inputs.instrument_snapshot.observed_at.value,
+            inputs.instrument_snapshot.available_at.value,
         ),
         (
-            inputs.position_snapshot.observed_at,
-            inputs.position_snapshot.available_at,
+            inputs.position_snapshot.observed_at.value,
+            inputs.position_snapshot.available_at.value,
         ),
     ):
         if available_at > cutoff:
@@ -748,7 +784,7 @@ def _universe_snapshot_envelope(  # noqa: PLR0913 - envelope binds all authority
         "run_id": run_id,
         "cycle": cycle.to_payload(),
         "data_regime": inputs.data_regime,
-        "evidence_cutoff": inputs.evidence_cutoff.isoformat(),
+        "evidence_cutoff": _instant_text(inputs.evidence_cutoff),
         "authority_scope": "research_attention",
         "material_fingerprints": {
             "eligibility_policy": policy.fingerprint,
@@ -777,7 +813,7 @@ def _universe_snapshot_identity(
         "run_id": run_id,
         "cycle": cycle.to_payload(),
         "data_regime": inputs.data_regime,
-        "evidence_cutoff": inputs.evidence_cutoff.isoformat(),
+        "evidence_cutoff": _instant_text(inputs.evidence_cutoff),
         "material_fingerprints": {
             "eligibility_policy": policy.fingerprint,
             "instrument_snapshot": inputs.instrument_snapshot.material_fingerprint,
@@ -799,8 +835,8 @@ def _subject_identity_payload(subject: UniverseSubject) -> dict[str, object]:
 
 def _instrument_snapshot_material(
     *,
-    observed_at: datetime,
-    available_at: datetime,
+    observed_at: UtcInstant,
+    available_at: UtcInstant,
     data_regime: str,
     source_fingerprint: str,
     instruments: tuple[InstrumentObservation, ...],
@@ -808,8 +844,8 @@ def _instrument_snapshot_material(
     return {
         "fingerprint_kind": "instrument_snapshot_material",
         "fingerprint_schema_version": _SCHEMA_VERSION,
-        "observed_at": observed_at.isoformat(),
-        "available_at": available_at.isoformat(),
+        "observed_at": _instant_text(observed_at),
+        "available_at": _instant_text(available_at),
         "data_regime": data_regime,
         "source_fingerprint": source_fingerprint,
         "items": [
@@ -821,13 +857,35 @@ def _instrument_snapshot_material(
 
 def _recording_time_refusal(
     inputs: UniverseInputs,
-    recorded_at: datetime,
+    recorded_at: UtcInstant,
 ) -> UniverseRefusal | None:
-    if recorded_at.utcoffset() is None:
+    try:
+        if type(recorded_at) is not UtcInstant or not _has_canonical_input_instants(inputs):
+            return UniverseRefusal(UniverseRefusalCode.INVALID_INPUT)
+        recorded_at.isoformat()
+    except InvalidUtcInstantError:
         return UniverseRefusal(UniverseRefusalCode.INVALID_INPUT)
-    if inputs.evidence_cutoff > recorded_at:
+    if inputs.evidence_cutoff.value > recorded_at.value:
         return UniverseRefusal(UniverseRefusalCode.CONTRADICTORY_INPUT)
     return None
+
+
+def _has_canonical_input_instants(inputs: UniverseInputs) -> bool:
+    input_instants = (
+        inputs.evidence_cutoff,
+        inputs.instrument_snapshot.observed_at,
+        inputs.instrument_snapshot.available_at,
+        inputs.position_snapshot.observed_at,
+        inputs.position_snapshot.available_at,
+    )
+    if any(type(instant) is not UtcInstant for instant in input_instants):
+        return False
+    try:
+        for instant in input_instants:
+            instant.isoformat()
+    except InvalidUtcInstantError:
+        return False
+    return True
 
 
 def is_data_regime(value: object) -> TypeGuard[str]:
@@ -989,8 +1047,8 @@ def _snapshot_payload(  # noqa: PLR0913 - the common envelope names every proven
     record_kind: str,
     payload_discriminator: str,
     authority_scope: str,
-    observed_at: datetime,
-    available_at: datetime,
+    observed_at: UtcInstant,
+    available_at: UtcInstant,
     data_regime: str,
     source_fingerprint: str,
     items: tuple[InstrumentObservation, ...] | tuple[PositionObservation, ...],
@@ -1000,8 +1058,8 @@ def _snapshot_payload(  # noqa: PLR0913 - the common envelope names every proven
         "payload_schema_version": _SCHEMA_VERSION,
         "record_kind": record_kind,
         "payload_discriminator": payload_discriminator,
-        "observed_at": observed_at.isoformat(),
-        "available_at": available_at.isoformat(),
+        "observed_at": _instant_text(observed_at),
+        "available_at": _instant_text(available_at),
         "data_regime": data_regime,
         "authority_scope": authority_scope,
         "source_fingerprint": source_fingerprint,
@@ -1012,22 +1070,31 @@ def _snapshot_payload(  # noqa: PLR0913 - the common envelope names every proven
     }
 
 
-def _valid_snapshot_metadata(
+def _normalize_snapshot_metadata(
     observed_at: datetime,
     available_at: datetime,
     data_regime: str,
     source_fingerprint: str,
-) -> bool:
-    return (
-        type(observed_at) is datetime
-        and observed_at.utcoffset() is not None
-        and type(available_at) is datetime
-        and available_at.utcoffset() is not None
-        and observed_at <= available_at
+) -> tuple[UtcInstant, UtcInstant] | None:
+    try:
+        normalized_observed = UtcInstant.from_datetime(observed_at)
+        normalized_available = UtcInstant.from_datetime(available_at)
+    except InvalidUtcInstantError:
+        return None
+    if (
+        normalized_observed.value <= normalized_available.value
         and is_data_regime(data_regime)
         and type(source_fingerprint) is str
         and _SHA256.fullmatch(source_fingerprint) is not None
-    )
+    ):
+        return normalized_observed, normalized_available
+    return None
+
+
+def _instant_text(value: object) -> str:
+    if type(value) is not UtcInstant:
+        raise InvalidUtcInstantError(_INVALID_ABSOLUTE_INSTANT)
+    return value.isoformat()
 
 
 def _content_hash(value: object) -> str:

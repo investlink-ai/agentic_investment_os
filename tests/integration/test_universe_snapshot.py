@@ -19,6 +19,7 @@ from agentic_investment_os.domain.lifecycle import (
     LifecyclePhase,
     LifecycleStatus,
 )
+from agentic_investment_os.domain.temporal import UtcInstant
 from agentic_investment_os.entrypoints.configuration import ConfigurationSource
 from agentic_investment_os.entrypoints.lifecycle import configure_advance, configure_status
 from tests._universe import (
@@ -95,7 +96,7 @@ def test_advance_durably_publishes_a_reconstructable_universe_snapshot(tmp_path:
         universe_snapshot_id=first.universe_snapshot_id,
         failure_reason=None,
         recovery=AdvanceRecovery.PREVIOUSLY_COMPLETED,
-        recorded_at=FixedClock().instant,
+        recorded_at=UtcInstant.from_datetime(FixedClock().instant),
     )
 
     database = state_root / "lifecycle.sqlite3"
@@ -253,7 +254,10 @@ def test_disabled_crypto_cycle_fails_before_loading_or_snapshotting_equity_input
 ) -> None:
     state_root = tmp_path / "runtime"
     starts_at = datetime(2026, 8, 21, 20, 0, tzinfo=UTC)
-    cycle = CryptoDecisionWindow(starts_at, starts_at + timedelta(hours=1))
+    cycle = CryptoDecisionWindow(
+        UtcInstant.from_datetime(starts_at),
+        UtcInstant.from_datetime(starts_at + timedelta(hours=1)),
+    )
 
     refused = _configure(state_root, recorded_universe())(
         cycle=cycle.to_payload(),

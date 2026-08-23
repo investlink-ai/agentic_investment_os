@@ -20,6 +20,7 @@ from agentic_investment_os.domain.identity import (
     parse_instrument_alias,
     parse_instrument_identity,
 )
+from agentic_investment_os.domain.temporal import InvalidUtcInstantError, UtcInstant
 from agentic_investment_os.domain.universe import (
     CryptoSpotInstrument,
     CryptoSpotPosition,
@@ -195,7 +196,7 @@ def _parse_recorded_snapshots(
         return instruments
     if isinstance(positions, UniverseRefusal):
         return positions
-    if instruments.available_at > cutoff or positions.available_at > cutoff:
+    if instruments.available_at.value > cutoff or positions.available_at.value > cutoff:
         return UniverseRefusal(UniverseRefusalCode.CONTRADICTORY_INPUT)
     if instruments.data_regime != data_regime or positions.data_regime != data_regime:
         return UniverseRefusal(UniverseRefusalCode.CONTRADICTORY_INPUT)
@@ -212,7 +213,7 @@ def parse_persisted_universe_snapshot(
     *,
     expected_run_id: str,
     expected_snapshot_id: str,
-    recorded_at: datetime,
+    recorded_at: UtcInstant,
 ) -> UniverseSnapshot | UniverseRefusal:
     """Revalidate a durable snapshot and every material input at the SQLite boundary."""
     root = _parse_persisted_root(value)
@@ -254,7 +255,7 @@ def _rebuild_persisted_snapshot(
     *,
     expected_run_id: str,
     expected_snapshot_id: str,
-    recorded_at: datetime,
+    recorded_at: UtcInstant,
 ) -> UniverseSnapshot | UniverseRefusal:
     payload = _mapping(root["payload"], _PERSISTED_PAYLOAD_FIELDS)
     fingerprints = _mapping(root["material_fingerprints"], _FINGERPRINT_FIELDS)
@@ -611,9 +612,15 @@ def _aware_timestamp(value: object) -> datetime | None:
         parsed = datetime.fromisoformat(value)
     except ValueError:
         return None
-    if parsed.utcoffset() is None or parsed.isoformat() != value:
+    if value not in (
+        datetime.isoformat(parsed),
+        datetime.isoformat(parsed, timespec="microseconds"),
+    ):
         return None
-    return parsed
+    try:
+        return UtcInstant.from_datetime(parsed).value
+    except InvalidUtcInstantError:
+        return None
 
 
 def _signed_nonzero_decimal(value: object) -> Decimal | None:

@@ -36,6 +36,7 @@ from agentic_investment_os.domain.lifecycle import (
 from agentic_investment_os.domain.lifecycle import (
     decide_advance as _decide_advance,
 )
+from agentic_investment_os.domain.temporal import UtcInstant
 from tests._universe import (
     advance_command,
     pinned_run_identity,
@@ -44,7 +45,7 @@ from tests._universe import (
 
 SHA256_HEX_LENGTH = 64
 INVALID_HISTORY_REFUSAL_SEQUENCE = 5
-KERNEL_RECORDED_AT = datetime(2026, 8, 21, 22, 0, tzinfo=UTC)
+KERNEL_RECORDED_AT = UtcInstant.from_datetime(datetime(2026, 8, 21, 22, 0, tzinfo=UTC))
 
 
 def decide_advance(
@@ -201,7 +202,9 @@ def test_kernel_rejects_each_snapshot_fact_that_changes_pinned_material(
             original,
             inputs=replace(
                 original.inputs,
-                evidence_cutoff=original.inputs.evidence_cutoff + timedelta(seconds=1),
+                evidence_cutoff=UtcInstant.from_datetime(
+                    original.inputs.evidence_cutoff.value + timedelta(seconds=1)
+                ),
             ),
         )
     elif changed_field == "instrument_snapshot_hash":

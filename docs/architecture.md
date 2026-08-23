@@ -147,6 +147,23 @@ or runtime discovery path; composition and every closed union remain explicit an
 checked. Later activation must also remain within PR-CON-001's existing-entitlement and
 no-metered-fallback constraint; this extension design adds no service dependency.
 
+## Temporal semantics
+
+[ADR 0006](adr/0006-separate-absolute-instants-from-market-time.md) separates the shared timeline from
+asset-owned calendar meaning. Every Absolute Instant crossing deterministic code, a durable boundary,
+a process or model boundary, or machine telemetry is normalized to UTC at microsecond precision. Its
+canonical durable text is fixed-width ISO 8601 with the `+00:00` offset. Equivalent aware inputs
+therefore have one value for comparison, ordering, hashing, replay, and reconstruction. Naive,
+over-precise, malformed, or noncanonical durable values fail closed at their owning seam.
+
+A `MarketSession` remains an NYSE trading date, not a midnight instant. US-equity schedule policy uses
+the NYSE calendar and `America/New_York` to interpret exchange-relative rules, including holidays,
+early closes, and daylight-saving changes, then resolves a deadline or cutoff to an Absolute Instant.
+Provider timestamp spelling remains raw provenance only when material; it never replaces the
+normalized instant. Operator trading views may derive Eastern Time, but host-local or displayed time
+is not authoritative state. Timeouts and latency use monotonic elapsed time rather than wall-clock
+arithmetic. These invariants are fixed architecture, not runtime timezone configuration.
+
 ## Executable invariants
 
 Rules that protect investment authority, determinism, provenance, append-only durability, or process

@@ -6,8 +6,8 @@ import sqlite3
 import stat
 import subprocess
 import sys
-from dataclasses import dataclass, field
-from datetime import UTC, date, datetime, timedelta
+from dataclasses import dataclass, field, replace
+from datetime import UTC, date, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -51,6 +51,8 @@ from agentic_investment_os.domain.lifecycle import (
     LifecycleStatus,
     PinnedRunIdentity,
 )
+from agentic_investment_os.domain.temporal import UtcInstant
+from agentic_investment_os.domain.universe import UniverseInputs
 from agentic_investment_os.entrypoints.configuration import (
     ConfigurationRefusal,
     ConfigurationRefusalCode,
@@ -241,11 +243,19 @@ CORRUPTIONS = {
     ),
     "invalid_timestamp": (
         ("UPDATE lifecycle_events SET recorded_at = 'invalid'",),
-        "invalid recorded_at in lifecycle ledger",
+        "recorded_at must use canonical UTC format",
     ),
     "naive_timestamp": (
         ("UPDATE lifecycle_events SET recorded_at = '2026-08-21T22:00:00'",),
-        "recorded_at must be timezone-aware",
+        "recorded_at must use canonical UTC format",
+    ),
+    "noncanonical_offset_timestamp": (
+        ("UPDATE lifecycle_events SET recorded_at = '2026-08-21T18:00:00.000000-04:00'",),
+        "recorded_at must use canonical UTC format",
+    ),
+    "out_of_range_timestamp": (
+        ("UPDATE lifecycle_events SET recorded_at = '0001-01-01T00:00:00.000000+14:00'",),
+        "recorded_at must use canonical UTC format",
     ),
     "non_text_evidence_cutoff": (
         ("UPDATE lifecycle_events SET evidence_cutoff = 3",),
@@ -253,14 +263,22 @@ CORRUPTIONS = {
     ),
     "invalid_evidence_cutoff": (
         ("UPDATE lifecycle_events SET evidence_cutoff = 'invalid'",),
-        "invalid evidence_cutoff in lifecycle ledger",
+        "evidence_cutoff must use canonical UTC format",
     ),
     "naive_evidence_cutoff": (
         ("UPDATE lifecycle_events SET evidence_cutoff = '2026-08-21T20:00:00'",),
-        "evidence_cutoff must be timezone-aware",
+        "evidence_cutoff must use canonical UTC format",
+    ),
+    "noncanonical_offset_evidence_cutoff": (
+        ("UPDATE lifecycle_events SET evidence_cutoff = '2026-08-21T16:00:00.000000-04:00'",),
+        "evidence_cutoff must use canonical UTC format",
+    ),
+    "out_of_range_evidence_cutoff": (
+        ("UPDATE lifecycle_events SET evidence_cutoff = '0001-01-01T00:00:00.000000+14:00'",),
+        "evidence_cutoff must use canonical UTC format",
     ),
     "future_evidence_cutoff": (
-        ("UPDATE lifecycle_events SET evidence_cutoff = '2030-08-21T20:00:00+00:00'",),
+        ("UPDATE lifecycle_events SET evidence_cutoff = '2030-08-21T20:00:00.000000+00:00'",),
         "evidence_cutoff cannot be later than recorded_at",
     ),
     "missing_snapshot_identity": (
@@ -423,6 +441,30 @@ class FixedClock:
         return self.instant
 
 
+@dataclass(frozen=True)
+class FixedUniverseSource:
+    inputs: UniverseInputs
+
+    def load(self) -> UniverseInputs:
+        return self.inputs
+
+
+class NoncanonicalDatetime(datetime):
+    @override
+    def isoformat(self, *_args: object, **_kwargs: object) -> str:
+        return "2026-08-21T18:00:00.000000-04:00"
+
+
+def _forged_utc_instant() -> UtcInstant:
+    forged = object.__new__(UtcInstant)
+    object.__setattr__(
+        forged,
+        "value",
+        NoncanonicalDatetime(2026, 8, 21, 22, 0, tzinfo=UTC),
+    )
+    return forged
+
+
 class SimulatedInterruptionError(RuntimeError):
     """Stop one Advance call at an exact ledger write boundary."""
 
@@ -523,7 +565,7 @@ class InterruptingLedger:
         self,
         command: LifecycleCommand,
         attempt: AdvanceAttempt,
-        recorded_at: datetime,
+        recorded_at: UtcInstant,
     ) -> LifecycleDecision:
         expected_operation = _attempt_operation(command, attempt)
         if self.operation == expected_operation and self.timing == "before":
@@ -545,7 +587,7 @@ class RacingStartLedger:
         self,
         command: LifecycleCommand,
         attempt: AdvanceAttempt,
-        recorded_at: datetime,
+        recorded_at: UtcInstant,
     ) -> LifecycleDecision:
         if not self.raced:
             winner = self.delegate.advance_step(command, AdvanceAttempt(), recorded_at)
@@ -885,7 +927,7 @@ class _LifecycleReferenceModel:
             failure_reason=None,
             recovery=recovery,
             universe_snapshot_id=stream.universe_snapshot_id,
-            recorded_at=RECORDED_AT,
+            recorded_at=UtcInstant.from_datetime(RECORDED_AT),
         )
 
     def _stream(self, session: str, events: int) -> _ReferenceStream:
@@ -932,7 +974,7 @@ class _LifecycleReferenceModel:
             configuration_version=self.configuration_version,
             configuration_hash=self.configuration_hash,
             data_regime=data_regime,
-            evidence_cutoff=datetime.fromisoformat(cutoff_text),
+            evidence_cutoff=UtcInstant.parse(cutoff_text),
             instrument_snapshot_hash=instrument_snapshot_hash,
             position_snapshot_hash=position_snapshot_hash,
             eligibility_policy_hash=eligibility_policy_hash,
@@ -1075,8 +1117,8 @@ def test_disabled_crypto_cycle_is_refused_before_authoritative_state_changes(
     state_root = tmp_path / "runtime"
     capability = _configure(state_root)
     cycle = CryptoDecisionWindow(
-        datetime(2026, 8, 22, tzinfo=UTC),
-        datetime(2026, 8, 22, 1, tzinfo=UTC),
+        UtcInstant.from_datetime(datetime(2026, 8, 22, tzinfo=UTC)),
+        UtcInstant.from_datetime(datetime(2026, 8, 22, 1, tzinfo=UTC)),
     )
 
     receipt = capability(
@@ -2076,6 +2118,43 @@ def test_default_clock_is_aware() -> None:
     assert instant.tzinfo is UTC
 
 
+@pytest.mark.parametrize(
+    "instant",
+    [
+        datetime(2026, 8, 21, 22, 0, tzinfo=UTC),
+        datetime(2026, 8, 21, 18, 0, tzinfo=timezone(-timedelta(hours=4))),
+    ],
+    ids=("utc", "non-utc-offset"),
+)
+def test_equivalent_clock_offsets_persist_identically_after_reopen(
+    tmp_path: Path,
+    instant: datetime,
+) -> None:
+    state_root = tmp_path / "runtime"
+    configured = configure_advance(
+        (ConfigurationSource("test", runtime_configuration(state_root)),),
+        repository_root=REPOSITORY_ROOT,
+        recorded_universe=recorded_universe(),
+        clock=FixedClock(instant),
+    )
+    assert isinstance(configured, Advance)
+
+    configured(
+        cycle=_cycle_payload("2026-08-21"),
+        mode="champion",
+        idempotency_key="normalized-clock",
+    )
+
+    database = state_root / "lifecycle.sqlite3"
+    reopened = SQLiteLifecycleLedger.open_existing(database)
+    reopened.rebuild_status()
+    with sqlite3.connect(database) as connection:
+        timestamps = connection.execute(
+            "SELECT DISTINCT recorded_at FROM lifecycle_events"
+        ).fetchall()
+    assert timestamps == [("2026-08-21T22:00:00.000000+00:00",)]
+
+
 def test_lifecycle_ledger_applies_domain_steps_idempotently(tmp_path: Path) -> None:
     state_root = tmp_path / "runtime"
     capability = _configure(state_root)
@@ -2087,7 +2166,7 @@ def test_lifecycle_ledger_applies_domain_steps_idempotently(tmp_path: Path) -> N
         idempotency_key="adapter-idempotency",
     )
     assert isinstance(parsed, AdvanceRequest)
-    now = datetime(2026, 8, 22, 22, 0, tzinfo=UTC)
+    now = UtcInstant.from_datetime(datetime(2026, 8, 22, 22, 0, tzinfo=UTC))
 
     command = advance_command(parsed)
     started = ledger.advance_step(command, AdvanceAttempt(), now)
@@ -2132,7 +2211,7 @@ def test_lifecycle_ledger_appends_generic_checkpoint_records(tmp_path: Path) -> 
     )
     assert isinstance(request, AdvanceRequest)
     identity = pinned_run_identity(request, configuration_hash="c" * SHA256_HEX_LENGTH)
-    now = datetime(2026, 8, 22, 22, 0, tzinfo=UTC)
+    now = UtcInstant.from_datetime(datetime(2026, 8, 22, 22, 0, tzinfo=UTC))
 
     command = AdvanceCommand(request, identity, universe_snapshot(identity))
     attempt = AdvanceAttempt()
@@ -2186,6 +2265,81 @@ def test_lifecycle_ledger_appends_generic_checkpoint_records(tmp_path: Path) -> 
     )
 
 
+def test_lifecycle_ledger_rejects_an_untyped_datetime_before_append(tmp_path: Path) -> None:
+    state_root = tmp_path / "runtime"
+    capability = _configure(state_root)
+    ledger = capability.ledger
+    assert isinstance(ledger, SQLiteLifecycleLedger)
+    request = AdvanceRequest.parse(
+        session="2026-08-26",
+        mode="champion",
+        idempotency_key="adapter-invalid-instant",
+    )
+    assert isinstance(request, AdvanceRequest)
+
+    with pytest.raises(
+        LifecyclePersistenceError,
+        match="recorded_at must use canonical UTC format",
+    ):
+        ledger.advance_step(
+            advance_command(request),
+            AdvanceAttempt(),
+            datetime(2026, 8, 22, 22, 0),  # noqa: DTZ001
+        )
+
+    assert _authoritative_counts(state_root / "lifecycle.sqlite3") == (0, 0, 0)
+
+
+def test_lifecycle_ledger_rejects_a_forged_utc_instant_before_append(tmp_path: Path) -> None:
+    state_root = tmp_path / "runtime"
+    capability = _configure(state_root)
+    ledger = capability.ledger
+    assert isinstance(ledger, SQLiteLifecycleLedger)
+    request = AdvanceRequest.parse(
+        session="2026-08-26",
+        mode="champion",
+        idempotency_key="adapter-forged-instant",
+    )
+    assert isinstance(request, AdvanceRequest)
+    forged = _forged_utc_instant()
+
+    with pytest.raises(
+        LifecyclePersistenceError,
+        match="recorded_at must use canonical UTC format",
+    ):
+        ledger.advance_step(advance_command(request), AdvanceAttempt(), forged)
+
+    assert _authoritative_counts(state_root / "lifecycle.sqlite3") == (0, 0, 0)
+
+
+def test_universe_source_rejects_a_forged_utc_instant_before_append(tmp_path: Path) -> None:
+    state_root = tmp_path / "runtime"
+    capability = _configure(state_root)
+    loaded = capability.universe_source.load()
+    assert isinstance(loaded, UniverseInputs)
+    hostile = Advance(
+        ledger=capability.ledger,
+        configuration_version=capability.configuration_version,
+        configuration_hash=capability.configuration_hash,
+        universe_source=FixedUniverseSource(replace(loaded, evidence_cutoff=_forged_utc_instant())),
+        enabled_asset_classes=capability.enabled_asset_classes,
+        universe_policy=capability.universe_policy,
+        clock=capability.clock,
+    )
+
+    with pytest.raises(
+        LifecyclePersistenceError,
+        match="universe source returned a noncanonical absolute instant",
+    ):
+        hostile(
+            cycle=_cycle_payload("2026-08-21"),
+            mode="champion",
+            idempotency_key="forged-universe-instant",
+        )
+
+    assert _authoritative_counts(state_root / "lifecycle.sqlite3") == (0, 0, 0)
+
+
 def test_naive_clock_cannot_create_a_checkpoint(tmp_path: Path) -> None:
     state_root = tmp_path / "runtime"
     configured = configure_advance(
@@ -2199,13 +2353,38 @@ def test_naive_clock_cannot_create_a_checkpoint(tmp_path: Path) -> None:
 
     with pytest.raises(
         LifecyclePersistenceError,
-        match="lifecycle clock must return a timezone-aware timestamp",
+        match="lifecycle clock must return a timezone-aware instant representable in UTC",
     ):
         configured(
             cycle=_cycle_payload("2026-08-21"),
             mode="champion",
             idempotency_key="naive-clock",
         )
+
+    assert _authoritative_counts(state_root / "lifecycle.sqlite3") == (0, 0, 0)
+
+
+def test_out_of_range_aware_clock_cannot_create_a_checkpoint(tmp_path: Path) -> None:
+    state_root = tmp_path / "runtime"
+    configured = configure_advance(
+        (ConfigurationSource("test", runtime_configuration(state_root)),),
+        repository_root=REPOSITORY_ROOT,
+        recorded_universe=recorded_universe(),
+        clock=FixedClock(datetime(1, 1, 1, tzinfo=timezone(timedelta(hours=14)))),
+    )
+    assert isinstance(configured, Advance)
+
+    with pytest.raises(
+        LifecyclePersistenceError,
+        match="lifecycle clock must return a timezone-aware instant representable in UTC",
+    ):
+        configured(
+            cycle=_cycle_payload("2026-08-21"),
+            mode="champion",
+            idempotency_key="out-of-range-clock",
+        )
+
+    assert _authoritative_counts(state_root / "lifecycle.sqlite3") == (0, 0, 0)
 
 
 def test_append_only_tables_reject_rewrites(tmp_path: Path) -> None:
@@ -2349,18 +2528,31 @@ def test_terminal_refusal_replays_without_reading_unrelated_missing_history(
 @pytest.mark.parametrize(
     ("reason_code", "recorded_at", "expected_message"),
     [
-        (3, "2026-08-21T22:00:00+00:00", "invalid reason_code in lifecycle ledger"),
+        (
+            3,
+            "2026-08-21T22:00:00.000000+00:00",
+            "invalid reason_code in lifecycle ledger",
+        ),
         (
             "x" * 5_000,
-            "2026-08-21T22:00:00+00:00",
+            "2026-08-21T22:00:00.000000+00:00",
             "unknown reason_code in lifecycle ledger",
         ),
         ("invalid_session", 3, "invalid recorded_at in lifecycle ledger"),
-        ("invalid_session", "invalid", "invalid recorded_at in lifecycle ledger"),
+        (
+            "invalid_session",
+            "invalid",
+            "recorded_at must use canonical UTC format",
+        ),
         (
             "invalid_session",
             "2026-08-21T22:00:00",
-            "recorded_at must be timezone-aware",
+            "recorded_at must use canonical UTC format",
+        ),
+        (
+            "invalid_session",
+            "2026-08-21T18:00:00.000000-04:00",
+            "recorded_at must use canonical UTC format",
         ),
     ],
 )
@@ -2407,13 +2599,13 @@ def test_corrupt_refusal_rows_fail_closed_with_a_bounded_diagnostic(
     [
         (
             "invalid_session",
-            "2026-08-21T22:00:00+00:00",
+            "2026-08-21T22:00:00.000000+00:00",
             "invalid conflict association",
         ),
         (
             "idempotency_key_conflict",
             "invalid",
-            "invalid recorded_at in lifecycle ledger",
+            "recorded_at must use canonical UTC format",
         ),
     ],
 )
@@ -2488,7 +2680,7 @@ def test_orphan_completed_conflict_refuses_before_starting_a_stream(tmp_path: Pa
             (
                 "orphan-conflict",
                 "idempotency_key_conflict",
-                "2026-08-21T22:00:00+00:00",
+                "2026-08-21T22:00:00.000000+00:00",
             ),
         )
 
@@ -2536,10 +2728,18 @@ def test_corrupt_checkpoint_history_uses_the_call_timestamp_for_its_refusal(
     started_at = datetime(2026, 8, 21, 22, 0, tzinfo=UTC)
     refused_at = datetime(2026, 8, 22, 23, 30, tzinfo=UTC)
     command = AdvanceCommand(request, identity, universe_snapshot(identity))
-    started = ledger.advance_step(command, AdvanceAttempt(), started_at)
+    started = ledger.advance_step(
+        command,
+        AdvanceAttempt(),
+        UtcInstant.from_datetime(started_at),
+    )
     assert isinstance(started, AppendLifecycleRecord)
     if operation == "pin":
-        reconciled = ledger.advance_step(command, started.attempt, started_at)
+        reconciled = ledger.advance_step(
+            command,
+            started.attempt,
+            UtcInstant.from_datetime(started_at),
+        )
         assert isinstance(reconciled, AppendLifecycleRecord)
     database = tmp_path / "runtime" / "lifecycle.sqlite3"
     _replace_with_corrupt_events(database, (("UPDATE lifecycle_events SET mode = 'invalid'",)))
@@ -2570,7 +2770,7 @@ def test_corrupt_checkpoint_history_uses_the_call_timestamp_for_its_refusal(
             (
                 request.idempotency_key.value,
                 AdvanceFailureReason.INVALID_DURABLE_STATE.value,
-                refused_at.isoformat(),
+                UtcInstant.from_datetime(refused_at).isoformat(),
             )
         ]
 
@@ -2715,7 +2915,7 @@ def test_restart_does_not_globally_validate_unrelated_history(tmp_path: Path) ->
             INSERT INTO advance_conflicts (idempotency_key, reason_code, recorded_at)
             VALUES ('unrelated-orphan', 'idempotency_key_conflict', ?)
             """,
-            (datetime(2026, 8, 21, 10, tzinfo=UTC).isoformat(),),
+            (UtcInstant.from_datetime(datetime(2026, 8, 21, 10, tzinfo=UTC)).isoformat(),),
         )
 
     restarted = _configure(state_root)

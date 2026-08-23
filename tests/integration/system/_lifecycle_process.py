@@ -7,6 +7,7 @@ import sys
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from agentic_investment_os.application.lifecycle import Advance, Status
 from agentic_investment_os.domain.identity import MarketSession, canonical_cycle_bytes
@@ -22,6 +23,9 @@ from agentic_investment_os.domain.lifecycle import (
 from agentic_investment_os.entrypoints.configuration import ConfigurationSource
 from agentic_investment_os.entrypoints.lifecycle import configure_advance, configure_status
 from tests._universe import recorded_universe, runtime_configuration
+
+if TYPE_CHECKING:
+    from agentic_investment_os.domain.temporal import UtcInstant
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
 INTERRUPTED_EXIT_CODE = 75
@@ -61,7 +65,7 @@ class InterruptAfterReconcileLedger:
         self,
         command: LifecycleCommand,
         attempt: AdvanceAttempt,
-        recorded_at: datetime,
+        recorded_at: UtcInstant,
     ) -> LifecycleDecision:
         decision = self.delegate.advance_step(command, attempt, recorded_at)
         if (

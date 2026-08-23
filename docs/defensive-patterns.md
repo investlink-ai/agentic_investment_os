@@ -39,6 +39,13 @@ Store source event time, publication or acceptance time, first-observed time, an
 time when they differ. As-of reads admit evidence by availability at the pinned cutoff, never merely by
 the date described inside the evidence.
 
+## Separate absolute instants from calendar time
+
+Normalize every aware absolute timestamp to the canonical UTC representation before deterministic or
+durable use, and reject naive or noncanonical boundary values. Keep exchange dates and schedule rules
+in their named calendar until an owner resolves them to an instant. Host-local time, provider spelling,
+and operator display conversions are never ordering, hashing, or replay authority.
+
 ## Validate on both sides of a boundary
 
 Validate hostile input before constructing domain values, and validate the artifact emitted to the

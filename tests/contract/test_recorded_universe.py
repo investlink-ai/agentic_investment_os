@@ -23,6 +23,7 @@ from agentic_investment_os.domain.identity import (
     MarketSession,
     OptionRight,
 )
+from agentic_investment_os.domain.temporal import UtcInstant
 from agentic_investment_os.domain.universe import (
     CryptoSpotInstrument,
     CryptoSpotPosition,
@@ -48,7 +49,7 @@ from tests._universe import (
 )
 
 SHA256_HEX_LENGTH = 64
-RECORDED_AT = datetime(2026, 8, 21, 22, 0, tzinfo=UTC)
+RECORDED_AT = UtcInstant.from_datetime(datetime(2026, 8, 21, 22, 0, tzinfo=UTC))
 
 
 class _MappingSubclass(dict[str, object]):
@@ -158,7 +159,7 @@ def _build(
     inputs: UniverseInputs,
     policy: EquityUniversePolicy,
     *,
-    recorded_at: datetime,
+    recorded_at: UtcInstant,
 ) -> UniverseSnapshot | UniverseRefusal:
     return _build_universe_snapshot(
         run_id,
@@ -192,6 +193,35 @@ def test_recorded_universe_validates_and_canonicalizes_accepted_inputs() -> None
     ) == ("HOLD",)
     assert len(loaded.instrument_snapshot.fingerprint) == SHA256_HEX_LENGTH
     assert len(loaded.position_snapshot.fingerprint) == SHA256_HEX_LENGTH
+
+
+def test_equivalent_provider_offsets_produce_identical_canonical_universe_inputs() -> None:
+    utc_payload = recorded_universe()
+    offset_payload = recorded_universe()
+    offset_payload["evidence_cutoff"] = "2026-08-21T16:00:00.000000-04:00"
+    instruments = _snapshot(offset_payload, "instruments")
+    instruments["observed_at"] = "2026-08-21T15:30:00.000000-04:00"
+    instruments["available_at"] = "2026-08-21T15:35:00.000000-04:00"
+    positions = _snapshot(offset_payload, "positions")
+    positions["observed_at"] = "2026-08-21T15:45:00.000000-04:00"
+    positions["available_at"] = "2026-08-21T15:46:00.000000-04:00"
+    reseal_recorded_snapshot(offset_payload, "instruments")
+    reseal_recorded_snapshot(offset_payload, "positions")
+
+    utc = RecordedUniverseSource(utc_payload).load()
+    offset = RecordedUniverseSource(offset_payload).load()
+
+    assert isinstance(utc, UniverseInputs)
+    assert offset == utc
+    assert offset.evidence_cutoff.value.tzinfo is UTC
+    assert offset.instrument_snapshot.observed_at.value.tzinfo is UTC
+    assert offset.instrument_snapshot.available_at.value.tzinfo is UTC
+    assert offset.position_snapshot.observed_at.value.tzinfo is UTC
+    assert offset.position_snapshot.available_at.value.tzinfo is UTC
+    assert offset.to_payload()["evidence_cutoff"] == "2026-08-21T20:00:00.000000+00:00"
+    assert offset.instrument_snapshot.to_payload()["observed_at"] == (
+        "2026-08-21T19:30:00.000000+00:00"
+    )
 
 
 @pytest.mark.parametrize(
@@ -463,6 +493,10 @@ def test_recorded_universe_refuses_hostile_position_variants(  # noqa: PLR0912 -
         ),
         (
             lambda payload: payload.update({"evidence_cutoff": "not-a-timestamp"}),
+            UniverseRefusalCode.INVALID_INPUT,
+        ),
+        (
+            lambda payload: payload.update({"evidence_cutoff": "2026-08-21T20:00:00.1+00:00"}),
             UniverseRefusalCode.INVALID_INPUT,
         ),
         (

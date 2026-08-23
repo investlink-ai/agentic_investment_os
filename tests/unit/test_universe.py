@@ -4,7 +4,8 @@ from copy import deepcopy
 from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
-from typing import TYPE_CHECKING, override
+from typing import TYPE_CHECKING, cast, override
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -20,6 +21,7 @@ from agentic_investment_os.domain.identity import (
     MarketSession,
     OptionRight,
 )
+from agentic_investment_os.domain.temporal import InvalidUtcInstantError, UtcInstant
 from agentic_investment_os.domain.universe import (
     CryptoSpotInstrument,
     CryptoSpotPosition,
@@ -32,6 +34,7 @@ from agentic_investment_os.domain.universe import (
     PositionSnapshot,
     PositionValuation,
     UniverseExclusionReason,
+    UniverseInputIdentity,
     UniverseInputs,
     UniverseRefusal,
     UniverseRefusalCode,
@@ -52,7 +55,7 @@ from tests._universe import (
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-RECORDED_AT = datetime(2026, 8, 21, 22, 0, tzinfo=UTC)
+RECORDED_AT = UtcInstant.from_datetime(datetime(2026, 8, 21, 22, 0, tzinfo=UTC))
 MAXIMUM_HISTORY_DAYS = 1_000_000
 
 
@@ -66,6 +69,16 @@ class _PolicyMap(dict[str, object]):
 
 class _StringList(list[str]):
     pass
+
+
+def _forged_utc_instant() -> UtcInstant:
+    forged = object.__new__(UtcInstant)
+    object.__setattr__(
+        forged,
+        "value",
+        datetime(2026, 8, 21, 22, 0),  # noqa: DTZ001
+    )
+    return forged
 
 
 class _StringSubclass(str):
@@ -140,7 +153,7 @@ def _build(
     inputs: UniverseInputs,
     policy: EquityUniversePolicy,
     *,
-    recorded_at: datetime,
+    recorded_at: UtcInstant,
 ) -> UniverseSnapshot | UniverseRefusal:
     return _build_universe_snapshot(
         run_id,
@@ -251,8 +264,8 @@ def test_disabled_asset_positions_are_preserved_as_explicit_portfolio_mismatches
         "100 shares",
     )
     instruments = InstrumentSnapshot.create(
-        observed_at=inputs.instrument_snapshot.observed_at,
-        available_at=inputs.instrument_snapshot.available_at,
+        observed_at=inputs.instrument_snapshot.observed_at.value,
+        available_at=inputs.instrument_snapshot.available_at.value,
         data_regime=inputs.instrument_snapshot.data_regime,
         source_fingerprint=inputs.instrument_snapshot.source_fingerprint,
         instruments=(
@@ -278,8 +291,8 @@ def test_disabled_asset_positions_are_preserved_as_explicit_portfolio_mismatches
         ),
     )
     positions = PositionSnapshot.create(
-        observed_at=inputs.position_snapshot.observed_at,
-        available_at=inputs.position_snapshot.available_at,
+        observed_at=inputs.position_snapshot.observed_at.value,
+        available_at=inputs.position_snapshot.available_at.value,
         data_regime=inputs.position_snapshot.data_regime,
         source_fingerprint=inputs.position_snapshot.source_fingerprint,
         positions=(
@@ -327,22 +340,124 @@ def test_snapshot_factories_refuse_invalid_common_metadata() -> None:
     assert isinstance(inputs, UniverseInputs)
 
     instruments = InstrumentSnapshot.create(
-        observed_at=inputs.instrument_snapshot.observed_at,
-        available_at=inputs.instrument_snapshot.available_at,
+        observed_at=inputs.instrument_snapshot.observed_at.value,
+        available_at=inputs.instrument_snapshot.available_at.value,
         data_regime=inputs.instrument_snapshot.data_regime,
         source_fingerprint="invalid",
         instruments=inputs.instrument_snapshot.instruments,
     )
     positions = PositionSnapshot.create(
-        observed_at=inputs.position_snapshot.observed_at,
-        available_at=inputs.position_snapshot.available_at,
+        observed_at=inputs.position_snapshot.observed_at.value,
+        available_at=inputs.position_snapshot.available_at.value,
         data_regime=inputs.position_snapshot.data_regime,
         source_fingerprint="invalid",
         positions=inputs.position_snapshot.positions,
     )
+    invalid_instrument_time = InstrumentSnapshot.create(
+        observed_at=datetime(2026, 8, 21, 19, 30),  # noqa: DTZ001
+        available_at=inputs.instrument_snapshot.available_at.value,
+        data_regime=inputs.instrument_snapshot.data_regime,
+        source_fingerprint=inputs.instrument_snapshot.source_fingerprint,
+        instruments=inputs.instrument_snapshot.instruments,
+    )
+    invalid_position_time = PositionSnapshot.create(
+        observed_at=inputs.position_snapshot.observed_at.value,
+        available_at=datetime(2026, 8, 21, 19, 30),  # noqa: DTZ001
+        data_regime=inputs.position_snapshot.data_regime,
+        source_fingerprint=inputs.position_snapshot.source_fingerprint,
+        positions=inputs.position_snapshot.positions,
+    )
+    invalid_inputs = UniverseInputs.create(
+        data_regime=inputs.data_regime,
+        evidence_cutoff=datetime(2026, 8, 21, 20, 0),  # noqa: DTZ001
+        instrument_snapshot=inputs.instrument_snapshot,
+        position_snapshot=inputs.position_snapshot,
+    )
+    untyped_instrument_snapshot = replace(
+        inputs.instrument_snapshot,
+        observed_at=cast("UtcInstant", datetime(2026, 8, 21, 19, 30, tzinfo=UTC)),
+    )
+    invalid_snapshot_inputs = UniverseInputs.create(
+        data_regime=inputs.data_regime,
+        evidence_cutoff=inputs.evidence_cutoff.value,
+        instrument_snapshot=untyped_instrument_snapshot,
+        position_snapshot=inputs.position_snapshot,
+    )
+    policy = EquityUniversePolicy.parse(universe_policy())
+    assert isinstance(policy, EquityUniversePolicy)
+    invalid_identity = UniverseInputIdentity.from_inputs(
+        replace(
+            inputs,
+            evidence_cutoff=cast(
+                "UtcInstant",
+                datetime(2026, 8, 21, 20, 0, tzinfo=UTC),
+            ),
+        ),
+        policy,
+    )
 
     assert instruments == UniverseRefusal(UniverseRefusalCode.INVALID_INPUT)
     assert positions == UniverseRefusal(UniverseRefusalCode.INVALID_INPUT)
+    assert invalid_instrument_time == UniverseRefusal(UniverseRefusalCode.INVALID_INPUT)
+    assert invalid_position_time == UniverseRefusal(UniverseRefusalCode.INVALID_INPUT)
+    assert invalid_inputs == UniverseRefusal(UniverseRefusalCode.INVALID_INPUT)
+    assert invalid_snapshot_inputs == UniverseRefusal(UniverseRefusalCode.INVALID_INPUT)
+    assert invalid_identity == UniverseRefusal(UniverseRefusalCode.INVALID_INPUT)
+    with pytest.raises(InvalidUtcInstantError, match="universe absolute instant"):
+        untyped_instrument_snapshot.to_payload()
+
+
+def test_universe_snapshot_refuses_a_forged_recording_instant() -> None:
+    inputs = RecordedUniverseSource(recorded_universe()).load()
+    policy = EquityUniversePolicy.parse(universe_policy())
+    assert isinstance(inputs, UniverseInputs)
+    assert isinstance(policy, EquityUniversePolicy)
+
+    assert _build(
+        "1" * 64,
+        inputs,
+        policy,
+        recorded_at=_forged_utc_instant(),
+    ) == UniverseRefusal(UniverseRefusalCode.INVALID_INPUT)
+
+
+def test_universe_snapshot_compares_fall_back_fold_times_as_absolute_instants() -> None:
+    inputs = RecordedUniverseSource(recorded_universe()).load()
+    policy = EquityUniversePolicy.parse(universe_policy())
+    assert isinstance(inputs, UniverseInputs)
+    assert isinstance(policy, EquityUniversePolicy)
+    new_york = ZoneInfo("America/New_York")
+    instruments = InstrumentSnapshot.create(
+        observed_at=datetime(2026, 11, 1, 1, 15, tzinfo=new_york, fold=0),
+        available_at=datetime(2026, 11, 1, 1, 30, tzinfo=new_york, fold=1),
+        data_regime=inputs.data_regime,
+        source_fingerprint=inputs.instrument_snapshot.source_fingerprint,
+        instruments=inputs.instrument_snapshot.instruments,
+    )
+    positions = PositionSnapshot.create(
+        observed_at=datetime(2026, 11, 1, 1, 20, tzinfo=new_york, fold=0),
+        available_at=datetime(2026, 11, 1, 1, 25, tzinfo=new_york, fold=0),
+        data_regime=inputs.data_regime,
+        source_fingerprint=inputs.position_snapshot.source_fingerprint,
+        positions=inputs.position_snapshot.positions,
+    )
+    assert isinstance(instruments, InstrumentSnapshot)
+    assert isinstance(positions, PositionSnapshot)
+    folded_inputs = UniverseInputs.create(
+        data_regime=inputs.data_regime,
+        evidence_cutoff=datetime(2026, 11, 1, 1, 45, tzinfo=new_york, fold=0),
+        instrument_snapshot=instruments,
+        position_snapshot=positions,
+    )
+    assert isinstance(folded_inputs, UniverseInputs)
+    assert instruments.available_at.value > folded_inputs.evidence_cutoff.value
+
+    assert _build(
+        "2" * 64,
+        folded_inputs,
+        policy,
+        recorded_at=UtcInstant.from_datetime(datetime(2026, 11, 1, 7, tzinfo=UTC)),
+    ) == UniverseRefusal(UniverseRefusalCode.CONTRADICTORY_INPUT)
 
 
 @pytest.mark.parametrize(
@@ -554,8 +669,8 @@ def test_universe_snapshot_refuses_cycle_and_activation_mismatches_independently
     assert isinstance(inputs, UniverseInputs)
     assert isinstance(policy, EquityUniversePolicy)
     crypto_window = CryptoDecisionWindow(
-        datetime(2026, 8, 21, tzinfo=UTC),
-        datetime(2026, 8, 22, tzinfo=UTC),
+        UtcInstant.from_datetime(datetime(2026, 8, 21, tzinfo=UTC)),
+        UtcInstant.from_datetime(datetime(2026, 8, 22, tzinfo=UTC)),
     )
 
     assert _build_universe_snapshot(
@@ -678,7 +793,10 @@ def test_universe_snapshot_refuses_a_future_cutoff_and_naive_record_time() -> No
         "f" * 64,
         inputs,
         policy,
-        recorded_at=datetime(2026, 8, 21, 22, 2),  # noqa: DTZ001
+        recorded_at=cast(
+            "UtcInstant",
+            datetime(2026, 8, 21, 22, 2),  # noqa: DTZ001
+        ),
     ) == UniverseRefusal(UniverseRefusalCode.INVALID_INPUT)
 
 
@@ -689,8 +807,8 @@ def test_universe_snapshot_refuses_an_observation_after_the_pinned_cutoff() -> N
     assert isinstance(policy, EquityUniversePolicy)
     future_instruments = replace(
         inputs.instrument_snapshot,
-        observed_at=inputs.evidence_cutoff + timedelta(seconds=1),
-        available_at=inputs.evidence_cutoff + timedelta(seconds=1),
+        observed_at=UtcInstant.from_datetime(inputs.evidence_cutoff.value + timedelta(seconds=1)),
+        available_at=UtcInstant.from_datetime(inputs.evidence_cutoff.value + timedelta(seconds=1)),
     )
 
     assert _build(
