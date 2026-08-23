@@ -2,20 +2,7 @@ name: Mutation testing
 
 on:
   pull_request:
-    paths:
-      - "src/agentic_investment_os/domain/**"
-      - "src/agentic_investment_os/portfolio/**"
-      - "src/agentic_investment_os/execution/**"
-      - "tests/unit/**"
-      - "tests/integration/**"
-      - "tests/contract/**"
-      - "scripts/run_mutation.py"
-      - "pyproject.toml"
-      - "uv.lock"
-      - "Makefile"
-      - ".github/workflows/mutation.yml"
-  schedule:
-    - cron: "17 6 * * 1"
+    types: [opened, labeled, synchronize, reopened]
   workflow_dispatch:
 
 concurrency:
@@ -28,6 +15,9 @@ permissions:
 jobs:
   mutation:
     name: make mutation
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      contains(github.event.pull_request.labels.*.name, 'mutation:critical')
     runs-on: macos-latest
     timeout-minutes: 20
     steps:

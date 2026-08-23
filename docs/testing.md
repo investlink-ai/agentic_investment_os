@@ -163,40 +163,78 @@ exercised through a useful contract, simplify or remove it.
 
 ## Mutation testing
 
-`make mutation` uses `mutmut` to verify that tests reject incorrect deterministic safety behavior.
-It is a separate, slower gate: `make check`, pre-commit, and pre-push do not run it. Pull requests that
-change its source, tests, configuration, or runner execute the same Make target in a keyless job; a
-weekly run detects drift outside those path filters.
+`make mutation` uses `mutmut` to certify **critical authority behavior**: deterministic behavior whose
+mutation can directly:
 
-The active scope is every callable under `domain/`, `portfolio/`, and `execution/`, together with
-implemented configuration resolution, `Advance` orchestration, SQLite lifecycle persistence, and
-lifecycle composition. This includes eligible-universe policy and snapshot integrity, decision-packet
-validation, deterministic sizing and limits, target bands, order planning, executor authorization,
-effect-local idempotency, execution state transitions, reconciliation, pinned run-input integrity, and
-lifecycle receipt reconstruction as those capabilities are implemented. Add semantic Alpaca request
-mapping, response parsing, and status normalization to the configured scope with their implementation;
-keep raw transport and process wiring under contract and integration tests. Add Evidence Vault cutoff,
-staleness, and append-only research transition logic when those behaviors become executable safety
-decisions.
+- alter accepted exposure, portfolio weights, cash preservation, sizing, or risk limits;
+- construct or admit an unauthorized, invalid, or expired `DecisionPacket`;
+- construct, duplicate, omit, or misidentify a broker effect;
+- change executor authorization, retry, replacement, partial-fill, timeout, or reconciliation
+  decisions;
+- corrupt append-only authoritative financial history; or
+- bypass an exact refusal that prevents unauthorized execution.
 
-The gate accepts only killed mutants and narrowly skipped equivalent mutations. It fails on surviving,
-uncovered, timed-out, suspicious, interrupted, or crashing mutants; it does not reduce those outcomes
-to a repository-wide score. A skip must use the narrowest supported pragma with an adjacent explanation
-of the semantic equivalence. Prefer adding an observable-behavior test or simplifying meaningless code
-over excluding a mutant.
+Evidence provenance, universe construction, configuration parsing, serialization, diagnostics,
+reports, disposable projections, raw transport, filesystem mechanics, SQL mechanics, composition,
+and non-authorizing lifecycle durability use their owning unit, property, contract, corruption,
+integration, architecture, and coverage evidence instead. A killed mutant does not make behavior
+critical; classification follows the direct consequence of an incorrect result.
 
-The Make target starts from a clean ignored `mutants/` workspace so a cached result cannot certify a
-changed safety path. Invoke `mutmut` directly only for incremental local diagnosis; its cached outcome
-is not the repository gate.
+The implemented candidate inventory is:
 
-Mutation runs select only deterministic unit, integration, and contract tiers. They use fake or
-recorded broker boundaries and receive no credentials or network-enabled live rehearsal. Repository
-harness tests for issue worktrees, agent workflows, capability dependencies, consequence-tiered
-coverage, and unit-tier enforcement are excluded because they exercise scripts outside the copied
-production tree and cannot distinguish product mutants. Their dedicated harness, architecture, and
-ordinary test gates remain mandatory. While the repository contains no callable in the configured
-scope, the runner reports the scaffold exemption and exits successfully; adding the first scoped
-callable activates the gate automatically.
+| Candidate source | Classification and evidence owner |
+| --- | --- |
+| `adapters/sqlite_lifecycle.py` | Non-critical SQL mechanics and non-authorizing lifecycle durability; integration, corruption, architecture, and coverage evidence |
+| `application/lifecycle.py` | Non-critical orchestration through universe snapshotting; unit, integration, system-journey, and coverage evidence |
+| `domain/identity.py` | Non-critical current identity serialization with no implemented packet or broker effect; unit, property, contract, and coverage evidence |
+| `domain/lifecycle.py` | Non-authorizing lifecycle decisions and reconstruction; unit, state-machine, integration, corruption, and coverage evidence |
+| `domain/temporal.py` | Non-critical time and provenance validation; unit, property, contract, and coverage evidence |
+| `domain/universe.py` | Non-critical universe construction; unit, property, integration, contract, and coverage evidence |
+| `entrypoints/configuration.py` | Non-critical configuration parsing; integration, hostile-input, and coverage evidence |
+| `entrypoints/lifecycle.py` | Non-critical composition; integration, system-journey, architecture, and coverage evidence |
+| `domain/__init__.py` | Non-critical package scaffold with no callable |
+| `execution/__init__.py`, `portfolio/__init__.py` | Critical-authority package scaffolds with no callable; explicit mutation scaffold exemption |
+
+`tool.mutmut.only_mutate` is the single static mutation source allowlist. It contains exact implemented
+critical module paths, never package globs or an engine exclusion list. `source_paths = ["src"]` is only
+the engine's copy root and confers no mutation scope. The current exact entries are the empty
+`execution` and `portfolio` initializers; they bound direct diagnostic runs without claiming that a
+critical callable exists. The separate `tool.mutation_gate` inventory names the authority-owning
+capability roots and any callable module a human has classified as non-critical; it never adds or
+removes a mutation source. A callable below those roots that appears in neither exact classification
+fails the gate, so the scaffold exemption cannot hide a new module while classification remains
+consequence-based rather than inferred from its path.
+
+Adding the first critical callable adds its exact module and its owning unit or property test files in
+the same change. `pytest_add_cli_args_test_selection` contains exact test files, not whole test tiers;
+it adds a cross-boundary test only when that test distinguishes a selected critical outcome. The
+runner rejects wildcard, symbolic-link, missing, duplicate, out-of-root, directory-wide,
+unclassified-authority, or callable-without-test selection before invoking `mutmut`. Extract a pure
+kernel only when an implemented critical decision cannot be isolated at file scope; do not add an
+empty module for the configuration.
+
+The gate generates mutants on covered and uncovered lines, accepts only killed mutants, and fails on
+surviving, uncovered, skipped, timed-out, suspicious, interrupted, crashing, or unaccounted mutants
+without reducing them to an aggregate score. `mutmut` does not bind its skipped result category to a
+source-adjacent equivalence explanation, so this gate has no approved equivalent-skip mechanism. Add
+and review an explicit justification-binding mechanism before accepting any equivalent mutation.
+Prefer an observable-behavior test or removal of meaningless code. Source outside the active
+allowlist carries no mutation-specific pragma.
+
+The Make target removes the ignored `mutants/` state before every certification, including a file or
+symbolic link at that path, so cached diagnostics cannot certify changed authority behavior. Direct
+`mutmut` runs remain incremental diagnostics and do not satisfy handoff evidence. If the exact
+allowlist contains no critical callable, `make mutation` reports the existing scaffold exemption and
+zero mutants without claiming product-level mutation evidence.
+
+Mutation remains separate from `make check`, pre-commit, and pre-push. The pull-request workflow runs
+the same clean, keyless Make target only when the PR carries the `mutation:critical` label: applying
+the label triggers it, and pushing or reopening the labeled PR reruns it at the latest commit. An
+unlabeled PR skips the job. The issue author and reviewer own label classification; no changed-path
+classifier assigns authority automatically. `workflow_dispatch` runs the same certification for an
+explicit investigation or baseline, and no scheduled mutation workflow exists. Mutation tests use
+fake or recorded boundaries and receive no credentials, network path, mutable broker account, model
+invocation, or metered service.
 
 ## Fixtures
 

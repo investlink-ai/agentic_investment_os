@@ -111,7 +111,7 @@ class Advance:
                 attempt = decision.attempt
                 continue
             # Strict mypy proves this line unreachable; removing it is runtime-equivalent.
-            assert_never(decision)  # pragma: no cover  # pragma: no mutate
+            assert_never(decision)  # pragma: no cover
 
     def _prepare_command(
         self,
@@ -158,11 +158,11 @@ class Advance:
                 if isinstance(snapshot, UniverseSnapshot):
                     return AdvanceCommand(parsed, identity, snapshot)
                 # Strict mypy proves this line unreachable; removing it is runtime-equivalent.
-                assert_never(snapshot)  # pragma: no cover  # pragma: no mutate
+                assert_never(snapshot)  # pragma: no cover
             # Strict mypy proves this line unreachable; removing it is runtime-equivalent.
-            assert_never(loaded)  # pragma: no cover  # pragma: no mutate
+            assert_never(loaded)  # pragma: no cover
         # Strict mypy proves this line unreachable; removing it is runtime-equivalent.
-        assert_never(parsed)  # pragma: no cover  # pragma: no mutate
+        assert_never(parsed)  # pragma: no cover
 
 
 def _input_refusal_code(code: UniverseRefusalCode) -> InputRefusalCode:
@@ -175,7 +175,7 @@ def _input_refusal_code(code: UniverseRefusalCode) -> InputRefusalCode:
     if code is UniverseRefusalCode.CONTRADICTORY_INPUT:
         return InputRefusalCode.CONTRADICTORY_UNIVERSE_INPUT
     # Strict mypy proves this line unreachable; removing it is runtime-equivalent.
-    assert_never(code)  # pragma: no cover  # pragma: no mutate
+    assert_never(code)  # pragma: no cover
 
 
 @dataclass(frozen=True, slots=True)

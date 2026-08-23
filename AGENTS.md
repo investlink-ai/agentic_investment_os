@@ -78,7 +78,7 @@ make harness                Verify shared agent instructions and required engine
 make architecture           Verify production import direction and deterministic effect boundaries
 make agent-workflow SCENARIO=<id>  Run one explicit model-backed agent workflow scenario
 make check                  Run formatting, lint, strict mypy, and deterministic tests
-make mutation               Verify tests reject mutations in deterministic safety behavior
+make mutation               Certify mutations in critical financial-authority behavior
 ./scripts/start-issue.sh N  Create or resume the linked worktree for issue N
 uv add <package>            Add a runtime dependency
 uv add --dev <package>      Add a development dependency

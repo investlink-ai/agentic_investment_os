@@ -299,28 +299,20 @@ safety_supporting_paths = [
 [tool.mutmut]
 source_paths = ["src"]
 only_mutate = [
-  "src/agentic_investment_os/adapters/sqlite_lifecycle.py",
-  "src/agentic_investment_os/application/lifecycle.py",
-  "src/agentic_investment_os/domain/*",
-  "src/agentic_investment_os/entrypoints/configuration.py",
-  "src/agentic_investment_os/entrypoints/lifecycle.py",
-  "src/agentic_investment_os/portfolio/*",
-  "src/agentic_investment_os/execution/*",
+  "src/agentic_investment_os/execution/__init__.py",
+  "src/agentic_investment_os/portfolio/__init__.py",
 ]
 pytest_add_cli_args = [
   "-o",
   "addopts=--strict-config --strict-markers -ra",
 ]
-pytest_add_cli_args_test_selection = [
-  "tests/unit",
-  "tests/integration",
-  "tests/contract",
-  "--ignore=tests/unit/test_agent_workflow_harness.py",
-  "--ignore=tests/unit/test_unit_test_tier.py",
-  "--ignore=tests/integration/test_agent_workflow_harness.py",
-  "--ignore=tests/integration/test_capability_dependencies.py",
-  "--ignore=tests/integration/test_coverage_tiers.py",
-  "--ignore=tests/integration/test_issue_worktree_harness.py",
-  "--ignore=tests/integration/test_unit_test_tier.py",
+pytest_add_cli_args_test_selection = []
+mutate_only_covered_lines = false
+
+[tool.mutation_gate]
+schema_version = 1
+authority_roots = [
+  "src/agentic_investment_os/execution",
+  "src/agentic_investment_os/portfolio",
 ]
-mutate_only_covered_lines = true
+noncritical_modules = []
