@@ -5,8 +5,9 @@ description: Perform the supplemental domain-safety review for agentic-investmen
 
 # Review Investment-System Safety
 
-Report substantiated defects in severity order. Prefer one reproducible authority or data-integrity
-failure over a list of stylistic observations.
+Report one complete batch of substantiated defects in severity order. Give every finding a stable
+`SAFE-###` identifier that remains unchanged during remediation verification. Prefer one reproducible
+authority or data-integrity failure over a list of stylistic observations.
 
 ## Keep the review independent
 
@@ -118,6 +119,7 @@ authoritative record or external effect.
 
 For each finding, state:
 
+- stable identifier and safety axis;
 - severity and concise defect title;
 - tight file and line location;
 - triggering input, sequence, or failure condition;
@@ -127,6 +129,12 @@ For each finding, state:
 Use **Blocker** for a path that can cross an authority boundary, expose credentials, create unintended
 orders or risk, corrupt append-only history, admit future evidence, or silently bypass fail-closed
 operation. Use **High**, **Medium**, or **Low** according to reachable impact and recovery cost.
+
+The calling delivery workflow assigns the finding's blocking disposition independently from severity.
+Every substantiated safety invariant or reachable safety defect is `must_fix` regardless of whether
+its recovery cost makes the severity Low. Concrete refutation may make it `disproved`; a pre-existing
+condition is `out_of_scope` only when the diff neither introduces, worsens, relies on, nor makes it
+newly reachable. Do not classify a safety defect as advisory.
 
 List findings first, then unresolved assumptions or questions, then commands run. Omit style issues
 already enforced by a passing gate. If no findings remain, say so explicitly and name any untested or

@@ -35,12 +35,13 @@ Standards sources are immutable inputs to the reviewers.
 Spawn the Standards and Spec reviewers as parallel subagents with no shared review conclusions. Give
 both the pinned commits, diff command, commit list, repository root, and a read-only instruction.
 
-Require every finding to carry one severity. Use **Blocker** when the diff is unsafe or impossible to
+Require reviewers to return one complete initial batch rather than stopping after the first defect.
+Give every candidate a stable axis-prefixed identifier (`STD-###` or `SPEC-###`) that remains unchanged
+across verification rounds, plus one severity. Use **Blocker** when the diff is unsafe or impossible to
 review or publish as pinned, **High** for incorrect required behavior or a likely runtime failure,
 **Medium** for a reachable edge case or maintainability defect likely to cause incorrect change, and
-**Low** for a bounded conformance, documentation, or test-evidence defect. Severity prioritizes repair;
-every substantiated finding blocks handoff until corrected or made inapplicable by an explicit Spec or
-authority change.
+**Low** for a bounded conformance, documentation, test-evidence, or judgment-call concern. Severity
+prioritizes repair; the separately assigned delivery disposition determines whether handoff blocks.
 
 ### Standards axis
 
@@ -55,31 +56,63 @@ not already enforce them:
 - tests coupled to private layout rather than observable behavior; and
 - stale prose, unresolved references, or mixed workflow responsibilities.
 
-Repository rules override a smell heuristic. Require each finding to state its severity, distinguish a
-documented breach from a judgment call, cite the governing rule and exact `file:line`, explain the
-reachable consequence, and propose the smallest correction. Limit the report to 400 words.
+Repository rules override a smell heuristic. Require each finding to state its stable identifier and
+severity, distinguish a documented breach from a judgment call, cite the governing rule and exact
+`file:line`, explain the reachable consequence, and propose the smallest correction. Limit the report
+to 400 words.
 
 ### Spec axis
 
 Give the Spec reviewer the issue or specification contents, not merely its location. Require findings
 for missing or partial requirements, incorrect behavior, scope creep, and acceptance criteria without
-observable evidence. Each finding states its severity, cites the exact requirement and `file:line`,
-explains the mismatch, and proposes the smallest correction. Limit the report to 400 words.
+observable evidence. Each finding states its stable identifier and severity, cites the exact
+requirement and `file:line`, explains the mismatch, and proposes the smallest correction. Limit the
+report to 400 words.
 
 Do not ask either reviewer for an investment-safety verdict or select the supplemental safety review
 from this skill. Its caller applies
 [investment-safety-review](../investment-safety-review/SKILL.md) independently when that skill's
 description matches the same pinned diff.
 
-## Substantiate and report
+## Substantiate and disposition
 
-1. Reproduce or trace each candidate finding against the pinned diff. Remove only claims disproved by
-   concrete evidence; keep reviewer uncertainty explicit.
+1. Reproduce or trace each candidate finding against the pinned diff and assign exactly one delivery
+   disposition without changing its severity:
+
+   - `disproved` requires concrete evidence that the claimed condition or consequence does not exist;
+   - `out_of_scope` requires evidence that the condition was pre-existing and the diff neither
+     introduces, worsens, relies on, nor makes it newly reachable;
+   - `must_fix` applies to every Blocker or High finding, every reachable Medium correctness, safety,
+     or maintainability defect, and every unmet acceptance criterion, required gate, explicit
+     repository obligation, or safety invariant regardless of severity; and
+   - `advisory` is limited to a Low judgment call that violates no documented obligation, acceptance
+     criterion, gate, or safety invariant.
+
+   Precedence matters: an explicit obligation cannot become advisory because its estimated impact is
+   Low. Keep unresolved evidence or reviewer uncertainty explicit; do not use it to manufacture a
+   pass.
 2. Preserve the axes under separate `Standards` and `Spec` headings. Order findings by severity within
-   each axis, without merging or reranking findings across axes.
-3. State questions, assumptions, skipped axes, and residual risks under their owning axis.
-4. End with finding counts and the highest severity within each axis. Passing one axis never implies
-   that the other passed.
+   each axis, without merging or reranking findings across axes. For each finding report its stable
+   identifier, axis, severity, rule or requirement, reachable consequence, and disposition with the
+   evidence supporting that disposition.
+3. State questions, assumptions, skipped axes, advisories, and residual risks under their owning
+   axis. An axis may pass with advisories but cannot pass with a `must_fix` finding.
+4. End with finding and disposition counts and the highest severity within each axis. Passing one axis
+   never implies that the other passed.
+
+## Verify a remediation batch
+
+For a caller-requested verification round, keep the original finding ledger and identifiers. Inspect
+the pinned remediation delta and the complete current diff, verify every correction and regression
+test, and report all remaining findings as one batch. Do not reissue an equivalent finding under a new
+identifier.
+
+A novel post-initial finding can restart blocking remediation only when it is Blocker or High, proves
+an unmet explicit obligation or safety invariant, or results from evidence that was materially
+unavailable to the initial review. Other new Low judgment calls are advisory. A regression introduced
+by remediation is not pre-existing and follows the normal disposition rules. The caller owns the
+round budget and decides whether another remediation round is authorized.
 
 The review is complete when every reported finding is tied to the pinned diff and its owning standard
-or requirement, and both axes have an explicit disposition.
+or requirement, every finding has an explicit delivery disposition, and both axes have an explicit
+pass, pass-with-advisories, or must-fix disposition.

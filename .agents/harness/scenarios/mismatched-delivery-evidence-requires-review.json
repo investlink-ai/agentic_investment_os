@@ -6,7 +6,7 @@
   "fixture": "mismatched-delivery-evidence-requires-review",
   "fixture_sha256": "c4c774fc307cad5a0f39d720ffe0862cb59acb90b84bdbf6c5d1b9bb49cb7ffb",
   "active_delivery_context": "mismatched-delivery-evidence-requires-review",
-  "active_delivery_context_sha256": "eaf6eac30765fe101bd396dcb3ec4ee83df3cb7adfc587ee38ccb4e3c1321261",
+  "active_delivery_context_sha256": "d5d3f5bd9b107d58d14c5d2b1942a676605f4d914e1f247c7c0ba385eb069f52",
   "expected_issue_number": 48,
   "expected_repository": "investlink-ai/fixture",
   "repository_paths": [

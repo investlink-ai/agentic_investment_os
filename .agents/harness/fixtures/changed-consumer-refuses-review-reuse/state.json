@@ -1,0 +1,17 @@
+{
+  "_fixture": {
+    "source_type": "synthetic review-equivalence counterexample",
+    "synthetic": true,
+    "timestamps": "not applicable",
+    "entitlement": "not applicable",
+    "redactions": "none"
+  },
+  "base_update": {
+    "patch_id_matches": true,
+    "range_diff_claims_unchanged": true,
+    "changed_paths_match": true,
+    "consumer_contract_changed": true,
+    "affected_consumer": "publication handoff validation",
+    "equivalence_complete": false
+  }
+}

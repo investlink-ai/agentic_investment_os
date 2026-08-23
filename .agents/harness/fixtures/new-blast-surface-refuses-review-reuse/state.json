@@ -1,0 +1,16 @@
+{
+  "_fixture": {
+    "source_type": "synthetic review-equivalence counterexample",
+    "synthetic": true,
+    "timestamps": "not applicable",
+    "entitlement": "not applicable",
+    "redactions": "none"
+  },
+  "base_update": {
+    "patch_id_matches": true,
+    "changed_paths_match": true,
+    "configured_blast_trigger": "review-routing",
+    "trigger_state": "newly reachable",
+    "equivalence_complete": false
+  }
+}

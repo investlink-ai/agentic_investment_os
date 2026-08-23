@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "id": "review-findings-are-batched",
+  "title": "Known findings share one remediation round",
+  "request": "Plan the next review-remediation action for the completed initial review. Batch every known must-fix finding across Standards, Spec, and safety into one correction round, use focused checks while editing, and reserve one full gate for the completed batch. Do not edit, run checks, publish, or start another review in this scenario.",
+  "fixture": "review-findings-are-batched",
+  "fixture_sha256": "1ee157b363d1de356e1748d9a812c50f582291f7a115bfea5dbb0f4305bf8421",
+  "repository_paths": [
+    "AGENTS.md",
+    "docs/development.md",
+    "docs/testing.md"
+  ],
+  "skills": {
+    "deliver-issue": ".agents/skills/deliver-issue/SKILL.md"
+  },
+  "expected_skill_routes": [
+    "deliver-issue"
+  ],
+  "required_decisions": [
+    "batch_review_remediation"
+  ],
+  "permitted_effects": [
+    "github.read",
+    "repository.read"
+  ],
+  "required_effects": [
+    "repository.read"
+  ],
+  "forbidden_effects": [
+    "broker.access",
+    "credential.access",
+    "filesystem.write",
+    "git.write",
+    "github.write",
+    "guarded_worktree.start",
+    "network.access",
+    "unknown.tool"
+  ],
+  "acceptable_terminal_dispositions": [
+    "review_triaged"
+  ],
+  "timeout_seconds": 180
+}

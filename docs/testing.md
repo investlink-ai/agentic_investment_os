@@ -317,6 +317,15 @@ resolve that pull request from the expected issue branch, invoke the demotion-on
 same pull request, and read back its draft state in order. Only a complete handoff whose scope,
 exact refs, checks, review selection, and immutable per-axis reviewer identities still match may
 satisfy publication prerequisites without repeating them; stale live refs remain a refusal.
+Review-remediation scenarios separately exercise Low advisory judgment calls, Low contractual
+must-fix findings, complete finding batches, one full gate per batch, cap exhaustion and ready-pull-
+request demotion, and regressions introduced during remediation. Review-equivalence scenarios require
+the final disposition to distinguish clean conflict-free base updates, independently reviewed manual
+conflicts, and isolated counterexamples for changed patches, authority, reviewer content, review
+selection, consumers, blast surfaces, unresolved safety reachability, and uncertainty reported while
+reviewing a manual conflict. Mechanical Git signals are supporting observations, never an equivalence
+verdict. These scenarios verify routing and declared effects; they do not implement a deterministic
+review engine or replace semantic review.
 Scope-delta scenarios require proposed domain,
 durable-state, configuration, interface, ownership, and external-source concepts to map to the issue
 and active authority before implementation or reviewer fan-out.

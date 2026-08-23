@@ -1,0 +1,16 @@
+{
+  "_fixture": {
+    "source_type": "synthetic review-equivalence counterexample",
+    "synthetic": true,
+    "timestamps": "not applicable",
+    "entitlement": "not applicable",
+    "redactions": "none"
+  },
+  "base_update": {
+    "semantic_patch": "unchanged",
+    "changed_paths": "unchanged",
+    "authority_contract": "changed",
+    "changed_authority": "docs/testing.md now requires an additional refusal observation",
+    "equivalence_complete": false
+  }
+}

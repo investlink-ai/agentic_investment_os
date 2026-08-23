@@ -1,0 +1,19 @@
+{
+  "_fixture": {
+    "source_type": "synthetic review-remediation state",
+    "synthetic": true,
+    "timestamps": "not applicable",
+    "entitlement": "not applicable",
+    "redactions": "none"
+  },
+  "review_round": {
+    "initial_review_complete": true,
+    "remediation_rounds_used": 1,
+    "new_finding": {
+      "id": "SPEC-003",
+      "severity": "Medium",
+      "source": "regression introduced by remediation",
+      "consequence": "A previously passing explicit acceptance case now fails."
+    }
+  }
+}

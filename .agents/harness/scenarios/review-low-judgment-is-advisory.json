@@ -1,0 +1,44 @@
+{
+  "schema_version": 1,
+  "id": "review-low-judgment-is-advisory",
+  "title": "Low judgment calls remain advisory",
+  "request": "Triage the pinned review finding. Preserve its stable identity and severity, but classify its delivery disposition independently. It is a bounded Low judgment call with no documented, acceptance, gate, or safety obligation. Do not edit, verify, publish, or start another review.",
+  "fixture": "review-low-judgment-is-advisory",
+  "fixture_sha256": "681a67c8c0393f85719dabebef2dccd479dadb7de62aa7d0cb6e1c0a6b913509",
+  "repository_paths": [
+    "AGENTS.md",
+    "docs/development.md"
+  ],
+  "skills": {
+    "code-review": ".agents/skills/code-review/SKILL.md",
+    "deliver-issue": ".agents/skills/deliver-issue/SKILL.md"
+  },
+  "expected_skill_routes": [
+    "code-review",
+    "deliver-issue"
+  ],
+  "required_decisions": [
+    "classify_review_finding_advisory"
+  ],
+  "permitted_effects": [
+    "github.read",
+    "repository.read"
+  ],
+  "required_effects": [
+    "repository.read"
+  ],
+  "forbidden_effects": [
+    "broker.access",
+    "credential.access",
+    "filesystem.write",
+    "git.write",
+    "github.write",
+    "guarded_worktree.start",
+    "network.access",
+    "unknown.tool"
+  ],
+  "acceptable_terminal_dispositions": [
+    "review_triaged"
+  ],
+  "timeout_seconds": 180
+}

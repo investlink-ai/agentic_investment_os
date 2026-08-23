@@ -1,0 +1,20 @@
+{
+  "_fixture": {
+    "source_type": "synthetic merge-conflict review state",
+    "synthetic": true,
+    "timestamps": "not applicable",
+    "entitlement": "not applicable",
+    "redactions": "none"
+  },
+  "base_update": {
+    "resolution": "manual",
+    "conflict_paths": ["docs/development.md"],
+    "conflict_hunks": ["review-loop handoff contract"],
+    "reviewed_side_intent": "Keep exact-commit review and verification fail-closed.",
+    "base_side_intent": "Revalidate immutable reviewer identities during publication.",
+    "intervening_base_changes": ["Publication now reads every reviewer digest before reuse."],
+    "affected_consumers": ["deliver-issue handoff", "create-pull-request validation"],
+    "prior_patch_outside_conflicts": "unchanged",
+    "focused_review_complete": false
+  }
+}

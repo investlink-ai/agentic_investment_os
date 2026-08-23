@@ -1,0 +1,21 @@
+{
+  "_fixture": {
+    "source_type": "synthetic merge-conflict review counterexample",
+    "synthetic": true,
+    "timestamps": "not applicable",
+    "entitlement": "not applicable",
+    "redactions": "none"
+  },
+  "base_update": {
+    "resolution": "manual",
+    "conflict_paths": ["docs/development.md"],
+    "conflict_hunks": ["review-equivalence handoff contract"],
+    "reviewed_side_intent": "Retain prior review only for proven-unchanged behavior.",
+    "base_side_intent": "Require fresh affected axes when integration semantics are uncertain.",
+    "intervening_base_changes": ["A new publication consumer reads the resolved handoff."],
+    "affected_consumers": ["deliver-issue handoff", "create-pull-request validation"],
+    "focused_review_complete": true,
+    "focused_review_result": "uncertain whether the resolution preserves reviewed behavior",
+    "equivalence_complete": false
+  }
+}

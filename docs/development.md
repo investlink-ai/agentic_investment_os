@@ -116,6 +116,29 @@ reviewers are read-only subagents. The stable local loop remains:
    documentation.
 5. Run `make check` before handoff or commit.
 
+The review loop separates severity from delivery disposition. Blocker and High findings, reachable
+Medium correctness, safety, or maintainability defects, and every unmet acceptance criterion, gate,
+explicit repository obligation, or safety invariant are must-fix regardless of severity. Only a Low
+non-contractual judgment call may remain advisory. Pre-existing conditions are out of scope only when
+the change does not introduce, worsen, rely on, or make them reachable; disproved findings retain the
+evidence that refuted them.
+
+Reviewers return one initial batch with stable finding identifiers. The delivery agent corrects all
+known must-fix findings together, uses focused checks while editing, runs the full gate once for that
+batch, and requests one affected-axis verification. Without explicit human direction, delivery has at
+most two such remediation-and-verification rounds after the initial review. Advisory findings may
+remain visible at handoff. An unresolved must-fix finding at the cap produces
+`human_review_required`, demotes any existing ready pull request, and stops; it never becomes an
+automatic pass.
+
+A base update retains review only through a same-session, pinned equivalence record proving unchanged
+patch semantics, authority, reviewer instructions, review selection, blast radius, consumers, and
+passing checks on the new exact head. Patch IDs, range-diff, changed paths, and an absent blast trigger
+support that conclusion but never establish it alone. Every manual conflict receives independent
+focused review of the resolution, both sides' intent, intervening base changes, and affected
+consumers. Uncertain or changed semantics rerun the affected full review axes; proven equivalence does
+not consume a remediation round.
+
 The pre-commit hook checks formatting, lint, and staged-diff whitespace. After checking destination
 refs, the pre-push hook clears Git's repository-local environment before running the full local gate,
 so nested fixture repositories cannot alter the issue worktree's index or refs. GitHub Actions
@@ -130,8 +153,9 @@ no-publication restriction stops after the verified commit. A coding request not
 issue does not authorize GitHub publication. Marking a pull request ready, merging, deployment, issue
 or stage closure, issue-graph publication, and worktree cleanup remain separately authorized actions.
 Fail-closed demotion of an existing ready pull request is always authorized when the current issue has
-a substantiated finding, incomplete material verification, an object-ID mismatch, or a
-reviewer-identity mismatch; it must not push commits or change other pull-request metadata.
+a must-fix finding, reaches the remediation cap, has incomplete material verification, or encounters
+an object-ID or reviewer-identity mismatch; it must not push commits or change other pull-request
+metadata.
 
 ## Commit messages
 
@@ -166,7 +190,10 @@ verification evidence. The issue owns the original problem and acceptance criter
 owns the delivered delta, review risk, and merge evidence. A complete handoff from the active
 `deliver-issue` session can satisfy review and verification prerequisites only while its exact base,
 head, scope, clean worktree, review selection, and immutable reviewer-contract identity for every
-axis still match; a direct invocation executes those gates.
+axis still match. A handoff retained across a base update must also carry its complete equivalence or
+focused-conflict record and remain bound to the new exact refs. A direct invocation executes the
+review and verification gates because retained evidence cannot be reconstructed outside its active
+delivery session.
 
 GitHub closing keywords take effect only when a pull request targets the repository's default branch.
 Keep `main` as the default branch. A stacked pull request's `Closes` link becomes active only after it

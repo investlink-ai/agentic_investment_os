@@ -1,0 +1,35 @@
+{
+  "_fixture": {
+    "source_type": "synthetic capped review-remediation state",
+    "synthetic": true,
+    "timestamps": "not applicable",
+    "entitlement": "not applicable",
+    "redactions": "none"
+  },
+  "local_git": {
+    "branch": "issue/46-bound-review-loop"
+  },
+  "github": {
+    "authenticated": true,
+    "repository": "investlink-ai/fixture",
+    "default_branch": "main",
+    "issue": {
+      "number": 46,
+      "state": "OPEN",
+      "title": "Bound review loops",
+      "body": "Bound review remediation and fail closed at the cap."
+    }
+  },
+  "review_round": {
+    "initial_review_complete": true,
+    "remediation_rounds_used": 2,
+    "unresolved_must_fix_findings": ["SPEC-004"]
+  },
+  "pull_request": {
+    "number": 46,
+    "state": "OPEN",
+    "draft": false,
+    "base_ref": "main",
+    "head_ref": "issue/46-bound-review-loop"
+  }
+}
