@@ -2906,14 +2906,31 @@ class _CapabilityVisitor(ast.NodeVisitor):
     def visit_If(self, node: ast.If) -> None:
         self._visit_truth_test(node.test)
         original = dict(self._scopes[-1])
-        guard = _none_guard(node.test)
+        none_guard = _none_guard(node.test)
+        awareness_guard = _datetime_awareness_guard(node.test)
         branches = (
             (
-                self._visit_branch(_narrowed_scope(original, guard, when_true=True), node.body),
+                self._visit_branch(
+                    _narrowed_scope(
+                        original,
+                        none_guard,
+                        awareness_guard,
+                        when_true=True,
+                    ),
+                    node.body,
+                ),
                 node.body,
             ),
             (
-                self._visit_branch(_narrowed_scope(original, guard, when_true=False), node.orelse),
+                self._visit_branch(
+                    _narrowed_scope(
+                        original,
+                        none_guard,
+                        awareness_guard,
+                        when_true=False,
+                    ),
+                    node.orelse,
+                ),
                 node.orelse,
             ),
         )
@@ -4345,16 +4362,20 @@ def _class_field_for_binding(
 
 def _narrowed_scope(
     scope: dict[str, _Binding],
-    guard: tuple[str, bool] | None,
+    none_guard: tuple[str, bool] | None,
+    awareness_guard: tuple[str, bool] | None,
     *,
     when_true: bool,
 ) -> dict[str, _Binding]:
     narrowed = dict(scope)
-    if guard is None:
-        return narrowed
-    name, non_none_when_true = guard
-    if name in narrowed and when_true is non_none_when_true:
-        narrowed[name] = replace(narrowed[name], can_be_none=False)
+    if none_guard is not None:
+        name, non_none_when_true = none_guard
+        if name in narrowed and when_true is non_none_when_true:
+            narrowed[name] = replace(narrowed[name], can_be_none=False)
+    if awareness_guard is not None:
+        name, aware_when_true = awareness_guard
+        if name in narrowed and when_true is aware_when_true:
+            narrowed[name] = replace(narrowed[name], can_be_naive=False)
     return narrowed
 
 
@@ -4783,6 +4804,31 @@ def _none_guard(expression: ast.AST) -> tuple[str, bool] | None:
             return (left.id, True)
         if isinstance(expression.ops[0], ast.Is):
             return (left.id, False)
+    return None
+
+
+def _datetime_awareness_guard(expression: ast.AST) -> tuple[str, bool] | None:
+    if not isinstance(expression, ast.Compare) or len(expression.ops) != 1:
+        return None
+    if len(expression.comparators) != 1:
+        return None
+    left = expression.left
+    right = expression.comparators[0]
+    if not (
+        isinstance(left, ast.Call)
+        and isinstance(left.func, ast.Attribute)
+        and left.func.attr == "utcoffset"
+        and isinstance(left.func.value, ast.Name)
+        and not left.args
+        and not left.keywords
+        and isinstance(right, ast.Constant)
+        and right.value is None
+    ):
+        return None
+    if isinstance(expression.ops[0], ast.IsNot):
+        return (left.func.value.id, True)
+    if isinstance(expression.ops[0], ast.Is):
+        return (left.func.value.id, False)
     return None
 
 

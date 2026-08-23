@@ -160,11 +160,12 @@ is not the repository gate.
 
 Mutation runs select only deterministic unit, integration, and contract tiers. They use fake or
 recorded broker boundaries and receive no credentials or network-enabled live rehearsal. Repository
-harness tests for issue worktrees, agent workflows, and unit-tier enforcement are excluded because
-they exercise scripts outside the copied production tree and cannot distinguish product mutants.
-Their dedicated harness and ordinary test gates remain mandatory. While the repository contains no
-callable in the configured scope, the runner reports the scaffold exemption and exits successfully;
-adding the first scoped callable activates the gate automatically.
+architecture and harness tests for capability dependencies, issue worktrees, agent workflows, and
+unit-tier enforcement are excluded because they exercise scripts outside the copied production tree
+and cannot distinguish product mutants. Their dedicated architecture, harness, and ordinary test
+gates remain mandatory. While the repository contains no callable in the configured scope, the runner
+reports the scaffold exemption and exits successfully; adding the first scoped callable activates the
+gate automatically.
 
 ## Fixtures
 

@@ -1088,6 +1088,42 @@ def test_explicit_timezone_and_seed_fallbacks_remain_deterministic(tmp_path: Pat
     assert inspect_capability_dependencies(package_root) == ()
 
 
+def test_timezone_aware_guards_allow_explicit_conversion(tmp_path: Path) -> None:
+    package_root = _fixture_package(tmp_path)
+    (package_root / "domain" / "deterministic.py").write_text(
+        "from datetime import UTC, datetime\n"
+        "def normalize(value: datetime) -> datetime:\n"
+        "    if value.utcoffset() is None:\n"
+        "        raise ValueError\n"
+        "    return value.astimezone(UTC)\n"
+        "def normalize_branch(value: datetime) -> datetime:\n"
+        "    if value.utcoffset() is not None:\n"
+        "        return value.astimezone(UTC)\n"
+        "    raise ValueError\n",
+        encoding="utf-8",
+    )
+
+    assert inspect_capability_dependencies(package_root) == ()
+
+
+def test_fallthrough_timezone_guard_remains_host_local(tmp_path: Path) -> None:
+    package_root = _fixture_package(tmp_path)
+    (package_root / "domain" / "unsafe.py").write_text(
+        "from datetime import UTC, datetime\n"
+        "def normalize(value: datetime) -> datetime:\n"
+        "    if value.utcoffset() is None:\n"
+        "        pass\n"
+        "    return value.astimezone(UTC)\n",
+        encoding="utf-8",
+    )
+
+    violations = inspect_capability_dependencies(package_root)
+
+    assert [(item.line, item.rule_id, item.subject) for item in violations] == [
+        (5, "CAP004", "datetime.datetime.astimezone")
+    ]
+
+
 def test_module_qualified_nullable_timezones_remain_host_local(tmp_path: Path) -> None:
     package_root = _fixture_package(tmp_path)
     (package_root / "domain" / "values.py").write_text(
