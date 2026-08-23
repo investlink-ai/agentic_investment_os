@@ -27,6 +27,9 @@
       "type": "array",
       "items": {
         "enum": [
+          "accept_grounded_scope",
+          "demote_ready_pull_request",
+          "defer_ungrounded_scope",
           "refuse_blocked_issue",
           "refuse_closed_issue",
           "refuse_model_execution_authority",
@@ -34,6 +37,8 @@
           "reject_stale_review",
           "require_guarded_worktree",
           "require_issue_preview_approval",
+          "require_fresh_publication_review",
+          "reuse_exact_delivery_evidence",
           "reuse_existing_issue",
           "select_investment_safety_review"
         ]
@@ -45,8 +50,10 @@
         "blocked",
         "duplicate",
         "human_review_required",
+        "publication_ready",
         "refused",
-        "review_required"
+        "review_required",
+        "scope_ready"
       ]
     },
     "summary": {

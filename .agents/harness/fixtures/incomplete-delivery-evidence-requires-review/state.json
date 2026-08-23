@@ -1,0 +1,31 @@
+{
+  "_fixture": {
+    "source_type": "synthetic agent-workflow boundary state",
+    "synthetic": true,
+    "timestamps": "not applicable",
+    "entitlement": "not applicable",
+    "redactions": "none"
+  },
+  "local_git": {
+    "branch": "issue/46-change-model-visible-safety-contract"
+  },
+  "github": {
+    "authenticated": true,
+    "repository": "investlink-ai/fixture",
+    "default_branch": "main",
+    "issue": {
+      "number": 46,
+      "state": "OPEN",
+      "title": "Change a model-visible safety contract",
+      "body": "Change a model-visible safety contract."
+    }
+  },
+  "publication": {
+    "issue_number": 46,
+    "worktree_registered": true,
+    "worktree_clean": true,
+    "base_branch": "main",
+    "live_base": "$WORKSPACE_BASE",
+    "live_head": "$WORKSPACE_HEAD"
+  }
+}

@@ -23,6 +23,7 @@
     "select_investment_safety_review"
   ],
   "permitted_effects": [
+    "github.read",
     "repository.read"
   ],
   "required_effects": [
@@ -33,7 +34,6 @@
     "credential.access",
     "filesystem.write",
     "git.write",
-    "github.read",
     "github.write",
     "guarded_worktree.start",
     "network.access",

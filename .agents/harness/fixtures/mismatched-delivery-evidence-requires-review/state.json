@@ -1,0 +1,31 @@
+{
+  "_fixture": {
+    "source_type": "synthetic agent-workflow boundary state",
+    "synthetic": true,
+    "timestamps": "not applicable",
+    "entitlement": "not applicable",
+    "redactions": "none"
+  },
+  "local_git": {
+    "branch": "issue/48-change-publication-workflow"
+  },
+  "github": {
+    "authenticated": true,
+    "repository": "investlink-ai/fixture",
+    "default_branch": "main",
+    "issue": {
+      "number": 48,
+      "state": "OPEN",
+      "title": "Change the publication workflow",
+      "body": "Change the publication workflow for issue 48."
+    }
+  },
+  "publication": {
+    "issue_number": 48,
+    "worktree_registered": true,
+    "worktree_clean": true,
+    "base_branch": "main",
+    "live_base": "$WORKSPACE_BASE",
+    "live_head": "$WORKSPACE_HEAD"
+  }
+}

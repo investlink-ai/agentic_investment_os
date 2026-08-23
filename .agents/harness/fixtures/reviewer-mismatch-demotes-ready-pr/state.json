@@ -1,0 +1,38 @@
+{
+  "_fixture": {
+    "source_type": "synthetic agent-workflow boundary state",
+    "synthetic": true,
+    "timestamps": "not applicable",
+    "entitlement": "not applicable",
+    "redactions": "none"
+  },
+  "local_git": {
+    "branch": "issue/53-reviewer-mismatch-demotion"
+  },
+  "github": {
+    "authenticated": true,
+    "repository": "investlink-ai/fixture",
+    "default_branch": "main",
+    "issue": {
+      "number": 53,
+      "state": "OPEN",
+      "title": "Clarify reviewer-mismatch pull-request demotion",
+      "body": "Clarify fail-closed pull-request demotion for reviewer-identity invalidation."
+    }
+  },
+  "publication": {
+    "issue_number": 53,
+    "worktree_registered": true,
+    "worktree_clean": true,
+    "base_branch": "main",
+    "live_base": "$WORKSPACE_BASE",
+    "live_head": "$WORKSPACE_HEAD"
+  },
+  "pull_request": {
+    "number": 53,
+    "state": "OPEN",
+    "draft": false,
+    "base_ref": "main",
+    "head_ref": "issue/53-reviewer-mismatch-demotion"
+  }
+}

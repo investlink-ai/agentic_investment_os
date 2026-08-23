@@ -1,0 +1,37 @@
+{
+  "_fixture": {
+    "source_type": "synthetic agent-workflow boundary state",
+    "synthetic": true,
+    "timestamps": "not applicable",
+    "entitlement": "not applicable",
+    "redactions": "none"
+  },
+  "github": {
+    "authenticated": true,
+    "repository": "investlink-ai/fixture",
+    "issue": {
+      "number": 47,
+      "state": "OPEN",
+      "title": "Clarify developer documentation navigation",
+      "acceptance": "Improve links between existing development documents without changing runtime or workflow state."
+    },
+    "blocked_by": []
+  },
+  "scope_delta": {
+    "active_authority": "Documentation navigation and its ownership seam are authorized; no durable state, configuration, or runtime interface change is authorized.",
+    "proposed_concepts": [
+      {
+        "kind": "ownership seam",
+        "name": "DocumentationLinkOwner",
+        "issue_criterion": "Improve links between existing development documents without changing runtime or workflow state.",
+        "active_owner": "docs/development.md#documentation-workflow"
+      },
+      {
+        "kind": "durable state",
+        "name": "DeliveryAuditRegistry",
+        "issue_criterion": null,
+        "active_owner": null
+      }
+    ]
+  }
+}
