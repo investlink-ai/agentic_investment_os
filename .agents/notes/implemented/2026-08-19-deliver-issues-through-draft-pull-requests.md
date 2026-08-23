@@ -21,10 +21,11 @@ ledger maps every proposed term, durable-state concept, configuration key, inter
 seam, and external-source assumption to the issue and its active authority owner. An ungrounded item is
 removed or deferred before implementation or reviewer fan-out.
 
-One delivery agent applies implementation and remediation inline and remains the sole writer of
-files, Git state, issues, and pull requests. Only independent Standards, Spec, and selected investment-
-safety reviews use separate read-only agents. Leaf skills retain their specialized procedures, while
-model and effort selection remains runtime configuration rather than a per-leaf routing policy.
+One delivery agent applies implementation and remediation inline and remains the sole writer of files,
+Git state, issues, and pull requests. Only independent Standards, Spec, selected investment-safety,
+and manually resolved conflict-equivalence reviews use separate read-only agents. Leaf skills retain
+their specialized procedures, while model and effort selection remains runtime configuration rather
+than a per-leaf routing policy.
 
 [The development workflow](../../../docs/development.md#daily-workflow) treats a request to work on a
 numbered issue as authority for the guarded path through a verified draft pull request, with an
@@ -34,9 +35,12 @@ A diff that changes review or publication gates is reviewed under the verified b
 trusted reviewer outside the diff. Publication binds the reviewed base and head commits to the pushed
 branch and pull request by exact object ID, then re-resolves both live refs after pull-request
 read-back. The active delivery ledger may hand its complete review and verification evidence to
-publication for the unchanged exact commit when every review axis remains bound to the same immutable
-trusted reviewer identity; it is not a durable cache and cannot be reconstructed after its delivery
-context is lost. A finding, incomplete verification, or object-ID or reviewer-identity mismatch
+publication for the exact current refs when every review axis remains bound to the same immutable
+trusted reviewer identity. A base update can establish those current refs through the bounded
+equivalence contract in
+[the review-remediation note](2026-08-23-bound-review-remediation-and-evidence-reuse.md); this remains
+same-session evidence, not a durable cache, and cannot be reconstructed after its delivery context is
+lost. A must-fix finding, incomplete verification, or unproved object-ID or reviewer-identity mismatch
 demotes an existing ready pull request before the workflow can leave it pointing at affected state.
 
 ## Alternatives considered
@@ -54,7 +58,8 @@ demotes an existing ready pull request before the workflow can leave it pointing
 - Building a deterministic workflow engine was rejected because implementation and review routing
   require semantic judgment; scripts and hooks continue to own repeatable Git safeguards.
 - Repeating review and full verification in both delivery and publication was rejected because an
-  exact-commit handoff removes duplicate model work without carrying evidence across a changed commit.
+  exact-current-ref handoff removes duplicate model work; a base update carries evidence forward only
+  through the separately bounded equivalence contract.
 - Persisting delivery attestations was rejected because publication needs only the active delivery
   ledger and independently resolved object IDs.
 
@@ -63,7 +68,8 @@ demotes an existing ready pull request before the workflow can leave it pointing
 - A numbered-issue request normally ends at a verified draft pull request without another prompt.
 - An explicit local-only request preserves a no-publication path.
 - Human control begins at draft review and remains required for every broader external effect.
-- A changed commit invalidates prior review and verification.
+- A semantically changed commit invalidates affected review and verification; a base-only change
+  retains them only through pinned equivalence or independent focused-conflict evidence.
 - A resumed session rebuilds its delivery ledger from durable repository and GitHub state.
 - Direct pull-request requests and incomplete delivery handoffs execute publication-time evidence
   gates.

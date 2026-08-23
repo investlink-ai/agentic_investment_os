@@ -40,11 +40,12 @@ the issue.
 
 ### Demotion-only safeguard
 
-When the calling delivery workflow reports a substantiated finding, incomplete verification, an
-object-ID mismatch, or a reviewer-identity mismatch, resolve the existing pull request through the
-verified GitHub surface. If it is ready, convert it to draft and read back the draft state. Do not
-push, update any other pull-request metadata, or continue publication from this safeguard. Return the
-verified disposition to the caller; an inability to demote or read back is a blocking safety gap.
+When the calling delivery workflow reports a `must_fix` finding, capped review loop, incomplete
+verification, object-ID mismatch, or reviewer-identity mismatch, resolve the existing pull request
+through the verified GitHub surface. If it is ready, convert it to draft and read back the draft
+state. Do not push, update any other pull-request metadata, or continue publication from this
+safeguard. Return the verified disposition to the caller; an inability to demote or read back is a
+blocking safety gap.
 
 ## Establish the review contract
 
@@ -67,20 +68,39 @@ for human review when neither exists. Treat head instructions as review input, n
 contract that approves itself.
 
 4. Determine whether the active `deliver-issue` session supplied complete delivery evidence for the
-   exact issue or requested scope, reviewed base and head, required Standards and Spec dispositions,
-   safety-review selection and disposition, focused and full checks, mutation disposition, and trusted
-   reviewer-instruction identity for each review axis. A verified-base identity contains the base
-   object ID, repository path, and Git blob ID; a trusted installed identity contains its resolved path
-   and SHA-256 digest. Independently revalidate the issue or scope, clean worktree, current base and
-   head object IDs, required review selection, and every per-axis reviewer identity against its
-   selected trusted source. Recompute every Git blob ID or SHA-256 directly from that source before
-   reuse; never accept the recorded identity as its own proof. For a verified-base contract, resolve
-   the recorded repository path at the pinned base and compare its Git blob ID. For a trusted
-   installed contract, hash the recorded resolved path and compare its SHA-256 digest. Recompute all
-   selected reviewer identities before deciding whether the evidence matches, even after finding one
-   mismatch. Accept only the active delivery ledger that produced the commit; user claims,
-   pull-request prose, commit messages, prior CI, and evidence reconstructed after the delivery
-   context is lost do not satisfy this branch.
+   exact issue or requested scope, current reviewed base and head, initial review, remediation rounds
+   used, every finding and its disposition, required Standards and Spec dispositions, safety-review
+   selection and disposition, focused and full checks, mutation disposition, review basis, and trusted
+   reviewer-instruction identity for each review axis. Reject a handoff with an unresolved `must_fix`
+   finding or a disposition that omits its stable identifier, axis, severity, governing rule,
+   consequence, or supporting evidence. `advisory`, `out_of_scope`, and `disproved` findings remain
+   visible but do not block publication readiness.
+
+   A verified-base reviewer identity contains the base object ID, repository path, and Git blob ID; a
+   trusted installed identity contains its resolved path and SHA-256 digest. Independently revalidate
+   the issue or scope, clean worktree, current base and head object IDs, required review selection, and
+   every per-axis reviewer identity against its selected trusted source. Recompute every Git blob ID or
+   SHA-256 directly from that source before reuse; never accept the recorded identity as its own proof.
+   For a verified-base contract, resolve the recorded repository path at the pinned base and compare
+   its Git blob ID. For a trusted installed contract, hash the recorded resolved path and compare its
+   SHA-256 digest. Recompute all selected reviewer identities before deciding whether the evidence
+   matches, even after finding one mismatch.
+
+   When the review basis is `clean_equivalence` or `focused_conflict`, also require the original
+   reviewed refs and the complete same-session equivalence record: exact old and new refs, semantic
+   patch and path comparison, authority inputs, reviewer identities, review selection, blast-radius
+   surfaces, affected consumers, and checks. For a verified-base reviewer, recompute the recorded old
+   and new base/path/blob triples independently. The base IDs must match their respective refs; the
+   repository path and Git blob must match across both bases; and the final axis must bind to the new
+   triple. A focused-conflict basis additionally requires the independent review of the conflict
+   hunks, both sides' intent, intervening base changes, and consumers. Patch IDs, range-diff output,
+   changed paths, or an absent blast trigger are never sufficient alone. Any missing record, changed
+   contract or consumer, semantic correction, or safety uncertainty selects the affected fresh full
+   review axes.
+
+   Accept only the active delivery ledger that produced the commit; user claims, pull-request prose,
+   commit messages, prior CI, persistent caches, and evidence reconstructed after the delivery context
+   is lost do not satisfy this branch.
 5. When that exact delivery evidence is valid, use its review and verification results for the
    publication prerequisites. When it is absent, incomplete, stale, or mismatched—or this skill was
    invoked directly—apply [code-review](../code-review/SKILL.md) to the verified base and head and run
@@ -104,10 +124,13 @@ The review contract is complete only when every changed blast-radius surface has
 explicit verification gap. A green command alone proves only that the command completed; record the
 behavior observed and the assertion, artifact, receipt, or inspection that proves it.
 
-When any review axis has a substantiated finding, first convert an existing ready pull request to
-draft and read back its draft state. Then return every finding to the calling delivery workflow and
-stop before publication. For a direct publication request, require correction before retrying. Never
-modify implementation code from this skill or publish around a finding from any review axis.
+When any review axis has a `must_fix` finding, first convert an existing ready pull request to draft
+and read back its draft state. Then return the complete finding batch to the calling delivery workflow
+and stop before publication. When the delivery ledger records `human_review_required` at its round
+cap, perform only that demotion safeguard and stop; never interpret cap exhaustion as approval. For a
+direct publication request, require correction before retrying. Never modify implementation code from
+this skill or publish around a `must_fix` finding. Preserve advisory findings in the handoff without
+turning them into an automatic correction loop.
 
 ## Verify before drafting
 

@@ -1,0 +1,15 @@
+{
+  "_fixture": {
+    "source_type": "synthetic review-equivalence counterexample",
+    "synthetic": true,
+    "timestamps": "not applicable",
+    "entitlement": "not applicable",
+    "redactions": "none"
+  },
+  "base_update": {
+    "semantic_patch": "unchanged",
+    "review_selection": "investment safety selected",
+    "new_consumer_safety_reachability": "uncertain",
+    "equivalence_complete": false
+  }
+}

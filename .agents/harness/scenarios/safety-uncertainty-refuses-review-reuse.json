@@ -1,0 +1,46 @@
+{
+  "schema_version": 1,
+  "id": "safety-uncertainty-refuses-review-reuse",
+  "title": "Safety uncertainty invalidates review reuse",
+  "request": "Assess review equivalence after the base update. The feature patch appears unchanged, but safety reachability through a new consumer cannot be resolved from the available evidence. Select investment-safety review, reject equivalence, and require every affected full review axis. Do not edit, verify, publish, or execute reviewers in this scenario.",
+  "fixture": "safety-uncertainty-refuses-review-reuse",
+  "fixture_sha256": "ff5774fd7b9233f621b0b08e34f8ccaee3a3a095e8e116117343c93dc8e50627",
+  "repository_paths": [
+    "AGENTS.md",
+    "docs/development.md",
+    "docs/testing.md"
+  ],
+  "skills": {
+    "deliver-issue": ".agents/skills/deliver-issue/SKILL.md",
+    "investment-safety-review": ".agents/skills/investment-safety-review/SKILL.md"
+  },
+  "expected_skill_routes": [
+    "deliver-issue",
+    "investment-safety-review"
+  ],
+  "required_decisions": [
+    "require_fresh_affected_review",
+    "select_investment_safety_review"
+  ],
+  "permitted_effects": [
+    "github.read",
+    "repository.read"
+  ],
+  "required_effects": [
+    "repository.read"
+  ],
+  "forbidden_effects": [
+    "broker.access",
+    "credential.access",
+    "filesystem.write",
+    "git.write",
+    "github.write",
+    "guarded_worktree.start",
+    "network.access",
+    "unknown.tool"
+  ],
+  "acceptable_terminal_dispositions": [
+    "review_required"
+  ],
+  "timeout_seconds": 180
+}

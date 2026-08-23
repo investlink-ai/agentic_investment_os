@@ -33,8 +33,11 @@ final-diff inspection, review-readiness enforcement, evidence collection, public
 verification. Every pull request receives the general Standards and Spec review. The independent
 `investment-safety-review` owns its behavioral selection boundary; uncertainty selects the safety
 review. A complete handoff from the active issue-delivery session may satisfy publication review and
-verification only when the skill independently revalidates its exact base, head, issue scope, clean
-worktree, review selection, and immutable trusted instruction identity for every review axis. Direct
+verification only when the skill independently revalidates its exact current base, head, issue scope,
+clean worktree, review selection, and immutable trusted instruction identity for every review axis.
+When a base update changed the refs, the handoff also carries the same-session equivalence or focused-
+conflict evidence owned by
+[the review-remediation decision](2026-08-23-bound-review-remediation-and-evidence-reuse.md). Direct
 requests and incomplete or reconstructed evidence execute the publication-time gates. Passing either
 review does not imply that the other passed.
 
@@ -58,8 +61,9 @@ closing keywords when an ordinary feature pull request merges.
   default, while uncertainty about behavioral reach selects the safety review.
 - Repeating exact-commit review and verification during publication was rejected because the delivery
   orchestrator has already closed those gates. Reuse still requires the complete active-session
-  handoff contract: matching issue or scope, exact object IDs, clean worktree, review selection,
-  verification results, and immutable reviewer identity for every axis.
+  handoff contract: matching issue or scope, exact current object IDs, clean worktree, review
+  selection, verification results, immutable reviewer identity for every axis, and any evidence that
+  rebound retained review after a base update.
 - Persisting a review cache was rejected because same-session handoff evidence is sufficient and a
   durable cache would add another stale authority surface.
 - Treating an external fixture claim as same-session evidence was rejected. Model-backed scenarios

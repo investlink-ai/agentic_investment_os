@@ -26,6 +26,9 @@ COMPACT_SHORT_OPTION_LENGTH = 3
 DECISION_IDS = frozenset(
     {
         "accept_grounded_scope",
+        "batch_review_remediation",
+        "classify_review_finding_advisory",
+        "classify_review_finding_must_fix",
         "demote_ready_pull_request",
         "defer_ungrounded_scope",
         "limit_incomplete_reflection_evidence",
@@ -39,8 +42,12 @@ DECISION_IDS = frozenset(
         "require_guarded_worktree",
         "require_issue_preview_approval",
         "require_fresh_publication_review",
+        "require_fresh_affected_review",
+        "require_focused_conflict_review",
         "reuse_exact_delivery_evidence",
+        "retain_equivalent_review",
         "reuse_existing_issue",
+        "require_human_review_at_cap",
         "select_investment_safety_review",
     }
 )
@@ -91,6 +98,8 @@ TERMINAL_DISPOSITIONS = frozenset(
         "reflection_ready",
         "refused",
         "review_required",
+        "review_retained",
+        "review_triaged",
         "scope_ready",
     }
 )

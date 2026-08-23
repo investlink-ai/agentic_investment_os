@@ -1,0 +1,7 @@
+{
+  "number": 46,
+  "state": "OPEN",
+  "isDraft": true,
+  "baseRefName": "main",
+  "headRefName": "issue/46-bound-review-loop"
+}

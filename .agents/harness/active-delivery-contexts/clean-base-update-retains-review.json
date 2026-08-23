@@ -1,0 +1,96 @@
+{
+  "_active_delivery_context": {
+    "source_type": "harness-controlled active delivery ledger",
+    "producer": "deliver-issue",
+    "same_execution": true
+  },
+  "delivery_evidence": {
+    "complete": true,
+    "issue_number": 46,
+    "requested_scope": "Bound review remediation without weakening exact-commit assurance.",
+    "review_basis": "clean_equivalence",
+    "original_reviewed_base": "1111111111111111111111111111111111111111",
+    "original_reviewed_head": "2222222222222222222222222222222222222222",
+    "reviewed_base": "$WORKSPACE_BASE",
+    "reviewed_head": "$WORKSPACE_HEAD",
+    "initial_review": "complete",
+    "remediation_rounds_used": 0,
+    "findings": [],
+    "equivalence": {
+      "conflicts": false,
+      "semantic_patch": "unchanged",
+      "changed_paths": "unchanged",
+      "authority_inputs": "unchanged",
+      "reviewer_instructions": {
+        "standards_and_spec": {
+          "original": {
+            "base_object_id": "1111111111111111111111111111111111111111",
+            "repository_path": ".agents/skills/code-review/SKILL.md",
+            "git_blob_id": "dd9aaf36754a6e9a46e8cd144cd0e10bb0bf3be7"
+          },
+          "current": {
+            "base_object_id": "$WORKSPACE_BASE",
+            "repository_path": ".agents/skills/code-review/SKILL.md",
+            "git_blob_id": "dd9aaf36754a6e9a46e8cd144cd0e10bb0bf3be7"
+          },
+          "content_equivalent": true
+        },
+        "investment_safety": "trusted installed digest unchanged"
+      },
+      "review_selection": "unchanged",
+      "blast_radius": "unchanged",
+      "affected_consumers": "unchanged",
+      "focused_checks": "passed on new head",
+      "full_gate": "passed on new head",
+      "observations": [
+        {
+          "command": "git range-diff 1111111111111111111111111111111111111111...2222222222222222222222222222222222222222 $WORKSPACE_BASE...$WORKSPACE_HEAD",
+          "result": "no semantic delta"
+        },
+        {
+          "command": "git diff --name-status $WORKSPACE_BASE...$WORKSPACE_HEAD",
+          "result": "same reviewed paths"
+        },
+        {
+          "command": "make check",
+          "result": "passed on $WORKSPACE_HEAD"
+        }
+      ],
+      "supporting_git_evidence": ["patch-id", "range-diff", "changed-path comparison"]
+    },
+    "review_axes": {
+      "standards": {
+        "disposition": "passed",
+        "reviewer_contract": {
+          "source": "verified_base",
+          "base_object_id": "$WORKSPACE_BASE",
+          "repository_path": ".agents/skills/code-review/SKILL.md",
+          "git_blob_id": "dd9aaf36754a6e9a46e8cd144cd0e10bb0bf3be7"
+        }
+      },
+      "spec": {
+        "disposition": "passed",
+        "reviewer_contract": {
+          "source": "verified_base",
+          "base_object_id": "$WORKSPACE_BASE",
+          "repository_path": ".agents/skills/code-review/SKILL.md",
+          "git_blob_id": "dd9aaf36754a6e9a46e8cd144cd0e10bb0bf3be7"
+        }
+      },
+      "investment_safety": {
+        "selection": "selected",
+        "disposition": "passed",
+        "reviewer_contract": {
+          "source": "trusted_installed",
+          "resolved_path": "$WORKSPACE/.agent-harness/trusted-reviewers/investment-safety-review/SKILL.md",
+          "sha256": "0dfea41e33bff84ed155bec9bf139a0c26a81532a3f3590bb2665faf2b44796c"
+        }
+      }
+    },
+    "verification": {
+      "focused_checks": "passed",
+      "make_check": "passed",
+      "mutation": "not_applicable"
+    }
+  }
+}

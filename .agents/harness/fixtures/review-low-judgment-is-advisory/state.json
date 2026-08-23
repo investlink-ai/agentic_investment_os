@@ -1,0 +1,17 @@
+{
+  "_fixture": {
+    "source_type": "synthetic review-finding state",
+    "synthetic": true,
+    "timestamps": "not applicable",
+    "entitlement": "not applicable",
+    "redactions": "none"
+  },
+  "finding": {
+    "id": "STD-001",
+    "axis": "standards",
+    "severity": "Low",
+    "kind": "judgment_call",
+    "rule": "A helper name could be more expressive.",
+    "consequence": "The bounded local name remains understandable and violates no documented rule, acceptance criterion, gate, or safety obligation."
+  }
+}

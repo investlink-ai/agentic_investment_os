@@ -6,7 +6,7 @@
   "fixture": "reviewer-mismatch-demotes-ready-pr",
   "fixture_sha256": "f179a9a19af6615ab7f331b869902dc0dec9c0a464b900ea4d738fee47dfb91a",
   "active_delivery_context": "reviewer-mismatch-demotes-ready-pr",
-  "active_delivery_context_sha256": "c3d8025b04c0239a77c80f57c8a7851c72fc39fd8456ce647d034bd7ddeb8fab",
+  "active_delivery_context_sha256": "fccc1c221c75752e064baf5ba25448ba17b82497914e148940e24599e2634adc",
   "expected_issue_number": 53,
   "expected_pull_request_number": 53,
   "expected_head_branch": "issue/53-reviewer-mismatch-demotion",

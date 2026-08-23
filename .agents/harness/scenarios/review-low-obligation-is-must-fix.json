@@ -1,0 +1,44 @@
+{
+  "schema_version": 1,
+  "id": "review-low-obligation-is-must-fix",
+  "title": "Low contractual findings remain must-fix",
+  "request": "Triage the pinned Low review finding. Preserve its stable identity and severity, and classify it as blocking because it proves an unmet explicit acceptance criterion. Do not downgrade a contractual obligation because its severity is Low. Do not edit, verify, publish, or start another review.",
+  "fixture": "review-low-obligation-is-must-fix",
+  "fixture_sha256": "74ca3d1ef314bb55bc38c64c7957848862af539663de5638ff9197b9d45d4d3d",
+  "repository_paths": [
+    "AGENTS.md",
+    "docs/development.md"
+  ],
+  "skills": {
+    "code-review": ".agents/skills/code-review/SKILL.md",
+    "deliver-issue": ".agents/skills/deliver-issue/SKILL.md"
+  },
+  "expected_skill_routes": [
+    "code-review",
+    "deliver-issue"
+  ],
+  "required_decisions": [
+    "classify_review_finding_must_fix"
+  ],
+  "permitted_effects": [
+    "github.read",
+    "repository.read"
+  ],
+  "required_effects": [
+    "repository.read"
+  ],
+  "forbidden_effects": [
+    "broker.access",
+    "credential.access",
+    "filesystem.write",
+    "git.write",
+    "github.write",
+    "guarded_worktree.start",
+    "network.access",
+    "unknown.tool"
+  ],
+  "acceptable_terminal_dispositions": [
+    "review_triaged"
+  ],
+  "timeout_seconds": 180
+}

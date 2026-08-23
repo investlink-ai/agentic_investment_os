@@ -1,0 +1,67 @@
+# Agent Note: Bound review remediation and retain equivalent evidence
+
+Status: implemented
+
+## Problem
+
+Issue delivery treated every substantiated finding as blocking, repeated focused and full verification
+after each correction, and invalidated every review axis after any amended commit. That preserved
+fail-closed handoff but could turn low-impact judgment calls into an unbounded review loop and repeat
+review when a base update left the reviewed change unchanged. A manual conflict cannot receive the
+same shortcut because resolving it makes a semantic choice even when most of the patch is unchanged.
+
+## Decision
+
+[Code review](../../skills/code-review/SKILL.md) gives each finding a stable identity, severity,
+governing rule, consequence, and blocking disposition. Severity prioritizes repair without overriding
+contractual obligations. Blocker and High findings, reachable Medium defects, and every unmet
+acceptance, gate, repository, or safety obligation are must-fix. Only a Low non-contractual judgment
+call may remain advisory.
+
+[Issue delivery](../../skills/deliver-issue/SKILL.md) batches all known must-fix findings and permits at
+most two remediation-and-verification rounds after the initial review without explicit human
+direction. A capped unresolved finding produces `human_review_required`; an existing ready pull
+request is demoted rather than treated as approved.
+
+Review may be retained across a clean base update only when a same-session, pinned record proves the
+patch, authority, reviewer instructions, review selection, blast radius, consumers, and checks remain
+equivalent. Every manual conflict receives independent focused review of the resolution and its base
+context. Uncertain or changed semantics return to the affected full review axes. The retained evidence
+is rebound to the new exact refs and is never persisted as a reusable cache.
+
+## Alternatives considered
+
+- Fix every finding regardless of consequence. This keeps one disposition but gives style and bounded
+  judgment calls the same delivery effect as unmet requirements or reachable defects.
+- Stop after a fixed number of model calls. This is easy to count but ignores whether a round batched
+  all known findings and whether unresolved work is blocking.
+- Trust patch identifiers or an empty blast-radius check alone. These are useful evidence but cannot
+  prove authority, reviewer, consumer, or conflict semantics remained unchanged.
+- Persist review results for later reuse. This creates a stale authority surface when same-session,
+  exact delivery evidence is sufficient.
+
+## Consequences
+
+- Review work has a default finite budget while must-fix obligations remain fail-closed.
+- Advisory, out-of-scope, and disproved findings stay visible without forcing automatic edits.
+- A novel post-initial finding restarts blocking remediation only for severe impact, an explicit or
+  safety obligation, or evidence materially unavailable to the initial review.
+- Equivalence checks do not consume remediation rounds; semantic corrections do.
+- Patch IDs, range-diff, changed paths, and blast triggers support but never decide review reuse.
+- Human merge control, trusted-base reviewer independence, hooks, pre-push checks, and CI remain
+  unchanged.
+
+Reconsider the two-round budget only from repeated delivery evidence, not because one change reached
+the cap. A revision is justified when capped deliveries repeatedly show that materially unavailable
+evidence arrives only after the second verification round, or when human audits demonstrate that a
+different bound would reduce unnecessary escalation without increasing regressions or weakening a
+mandatory obligation. Any revision requires its own approved issue, updated note and workflow
+contract, and counter-scenarios proving that unresolved must-fix findings still fail closed.
+
+## Verification
+
+[The testing policy](../../../docs/testing.md#agent-workflow-scenarios) owns deterministic validation
+and explicit model-backed scenarios for finding triage, batching, cap exhaustion, remediation
+regressions, clean base updates, focused conflict review, and failed equivalence. The publication
+fixtures also preserve exact-commit reuse and reviewer-identity invalidation under the expanded
+delivery ledger.

@@ -15,11 +15,11 @@ The invoking delivery agent is the sole writer for the issue. Apply implementati
 prose, testing, remediation, commit, and publication skills inline so one agent retains the complete
 delivery ledger and controls every workspace or external mutation.
 
-Use separate, read-only review subagents only for the independent Standards, Spec, and selected
-investment-safety axes. They may inspect the pinned diff and repository evidence but must not modify
-files, Git state, the issue, or the pull request. The delivery agent substantiates their findings and
-implements every correction inline. Review axes may run concurrently because they share no mutable
-work.
+Use separate, read-only review subagents only for the independent Standards, Spec, selected
+investment-safety, and manually resolved conflict-equivalence reviews. They may inspect the pinned
+diff and repository evidence but must not modify files, Git state, the issue, or the pull request. The
+delivery agent substantiates their findings and implements every correction inline. Reviews may run
+concurrently when they share no mutable work.
 
 Start delivery with a strong coding model and effort chosen before invocation, then use that invoking
 session throughout delivery. Reviewer configuration is a runtime concern; this skill defines no
@@ -106,29 +106,85 @@ record its source. Stop for human review when neither exists. Treat the changed 
 input, never as the sole contract that approves itself.
 
 1. Apply [code-review](../code-review/SKILL.md) to the committed base and head. Its separate read-only
-   subagents return independent Standards and Spec dispositions to the delivery agent.
+   subagents return the complete initial Standards and Spec finding batches to the delivery agent.
 2. Apply [investment-safety-review](../investment-safety-review/SKILL.md) through a separate read-only
    subagent when its description matches the changed behavior or uncertainty remains. Use the same
-   pinned base and head.
-3. Substantiate every finding. Correct each substantiated finding, update its regression evidence,
-   amend the unpushed commit when that preserves one coherent change, and rerun focused and full
-   gates. A substantiated finding blocks handoff until correction or an explicit issue or authority
-   change makes it no longer a finding.
-4. Re-pin the new head and rerun every affected review axis. Do not carry a pass across an amended
-   commit. Stop when a substantiated finding cannot be corrected within scope; never publish around
-   a finding.
+   pinned base and head and require one complete initial safety batch with stable `SAFE-###`
+   identifiers.
+3. Substantiate every candidate and preserve its stable identifier, axis, severity, governing rule or
+   requirement, reachable consequence, and exactly one disposition from `must_fix`, `advisory`,
+   `out_of_scope`, or `disproved`. Apply the precedence rules in `code-review`: Blocker, High,
+   reachable Medium correctness, safety, or maintainability defects, explicit obligations, acceptance
+   criteria, required gates, and safety invariants are `must_fix`; only a Low non-contractual judgment
+   call may be advisory.
+4. Correct all known `must_fix` findings as one batch. Use focused checks while editing, update
+   regression evidence, amend the unpushed commit when that preserves one coherent change, and run
+   the full `make check` gate once after the batch. Re-pin the new head, then ask every affected axis
+   once to verify the remediation delta and the complete current diff while retaining finding IDs.
+5. Permit one initial review and at most two remediation-and-verification rounds. The initial batch
+   does not consume a remediation round; each semantic correction batch does, regardless of the
+   number of findings it contains. A successful review-equivalence check consumes no round. A human
+   may explicitly authorize a further round, but elapsed time, model preference, or a still-open
+   finding does not extend the budget implicitly.
+6. Apply `code-review`'s novel-finding eligibility after the initial batch without creating a second
+   disposition rule in this skill. A regression introduced by remediation is newly introduced and
+   follows the normal disposition rules.
 
-The loop is closed only when every review axis passes against the exact final commit. Report
-verification gaps or unresolved reviewer uncertainty separately; neither can silently become a pass.
+The loop is closed when no `must_fix` finding remains and every required axis has a pass or
+pass-with-advisories disposition bound to the exact final commit. `advisory`, `out_of_scope`, and
+`disproved` findings remain visible in the handoff but do not block it. Verification gaps and
+unresolved reviewer uncertainty cannot silently become a pass. If any `must_fix` finding remains after
+the second authorized remediation round, invoke the demotion-only safeguard for an existing ready pull
+request, record `human_review_required`, and stop without automatic publication or another review
+round. Before stopping, give the human reviewer a capped-delivery handoff containing the complete
+round ledger, latest focused and full check results, every unresolved finding record and disposition,
+the ready-pull-request demotion result when applicable, and the explicit reason the autonomous budget
+was exhausted. A capped handoff reports evidence for human direction; it does not satisfy publication
+prerequisites.
+
+## Retain review only across proven equivalent changes
+
+After a base update, re-resolve the old and new base and head object IDs before deciding whether a
+prior review remains applicable. A clean conflict-free rebase or merge may retain the prior axis
+dispositions only when one same-session, pinned equivalence record proves all of the following:
+
+- the semantic patch and changed paths are unchanged;
+- issue and active-authority inputs are unchanged;
+- trusted installed reviewer digests are unchanged, while a verified-base reviewer has the same
+  repository path and Git blob across old and new bases;
+- Standards, Spec, and safety-review selection is unchanged;
+- blast-radius surfaces and affected consumers are unchanged; and
+- required focused checks and the full gate pass on the new exact head.
+
+Record exact old and new base and head IDs, commands and observed results, reviewer identities, scope,
+selection, consumers, and checks. For a verified-base reviewer, record both base/path/blob triples;
+the base bindings differ by design, so equivalence requires the same repository path and Git blob, and
+the retained final axis binds to the new triple. Patch IDs, range-diff output, changed-path comparison,
+and absence of a known blast trigger are supporting evidence only; no one signal establishes
+equivalence. If the patch, contract, reviewer content, selection, consumer, or safety conclusion
+changed—or any required evidence is absent or uncertain—rerun every affected full review axis.
+
+A manual conflict is never review-free. After resolving it, give an independent read-only reviewer the
+exact conflict hunks, both sides' intent, intervening base changes, and affected consumers. A passing
+focused conflict review may retain prior dispositions for the proven-unchanged remainder; it does not
+approve semantic changes inside the resolution. Route changed semantics and any reviewer uncertainty
+to the affected full axes. The writer who resolved the conflict cannot be this focused reviewer.
+
+When equivalence succeeds, rebind the retained dispositions to the new exact base and head and record
+whether the basis was `clean_equivalence` or `focused_conflict`. This is active-session evidence, not a
+persistent cache, and cannot be reconstructed after the delivery context is lost.
 
 After the loop closes, record a bounded handoff in the active delivery ledger: the issue or requested
-scope, reviewed base and head object IDs, Standards and Spec dispositions, safety-review selection and
-disposition, focused and full check results, and mutation disposition. For each Standards, Spec, and
-investment-safety axis, also record the trusted reviewer-instruction source and immutable content
-identity used for that axis. Bind a verified-base reviewer to its base object ID, repository path, and
-Git blob ID; bind a trusted installed reviewer to its resolved path and SHA-256 digest. Record the
-investment-safety contract even when its selection result is `not selected`. This evidence describes
-only the exact commit reviewed in this delivery session; an amendment, missing field, or changed
+scope, current reviewed base and head object IDs, initial-review identity, remediation rounds used,
+every finding record and disposition, Standards and Spec dispositions, safety-review selection and
+disposition, focused and full check results, mutation disposition, and review basis (`fresh`,
+`clean_equivalence`, or `focused_conflict`). For each Standards, Spec, and investment-safety axis, also
+record the trusted reviewer-instruction source and immutable content identity used for that axis. Bind
+a verified-base reviewer to its base object ID, repository path, and Git blob ID; bind a trusted
+installed reviewer to its resolved path and SHA-256 digest. Record the investment-safety contract even
+when its selection result is `not selected`. An equivalence basis also carries its complete pinned
+record and original reviewed refs. This evidence describes only the exact commit established in this
+delivery session; an unproved amendment, missing field, unresolved `must_fix` finding, or changed
 reviewer identity invalidates it.
 
 ## Hand off for human review

@@ -1,0 +1,17 @@
+{
+  "_fixture": {
+    "source_type": "synthetic review-finding state",
+    "synthetic": true,
+    "timestamps": "not applicable",
+    "entitlement": "not applicable",
+    "redactions": "none"
+  },
+  "finding": {
+    "id": "SPEC-001",
+    "axis": "spec",
+    "severity": "Low",
+    "kind": "documented_breach",
+    "rule": "The issue requires the refusal outcome to be documented.",
+    "consequence": "One explicit acceptance criterion remains unmet."
+  }
+}
