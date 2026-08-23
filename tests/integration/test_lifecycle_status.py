@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import json
 import os
 import sqlite3
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 import pytest
@@ -15,6 +16,7 @@ from agentic_investment_os.adapters.sqlite_lifecycle import (
     prepare_runtime_database,
 )
 from agentic_investment_os.application.lifecycle import Advance, Status
+from agentic_investment_os.domain.identity import MarketSession
 from agentic_investment_os.domain.lifecycle import (
     AdvanceFailureReason,
     InvalidLifecycleStateError,
@@ -29,8 +31,19 @@ from agentic_investment_os.entrypoints.configuration import (
     ConfigurationSource,
 )
 from agentic_investment_os.entrypoints.lifecycle import configure_advance, configure_status
+from tests._universe import recorded_universe, runtime_configuration
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _cycle_payload(value: object) -> object:
+    if type(value) is not str:
+        return value
+    try:
+        trading_date = date.fromisoformat(value)
+    except ValueError:
+        return value
+    return MarketSession(trading_date).to_payload()
 
 
 @dataclass(frozen=True)
@@ -45,7 +58,7 @@ def _sources(state_root: Path) -> tuple[ConfigurationSource, ...]:
     return (
         ConfigurationSource(
             "test",
-            {"schema_version": 1, "state_root": str(state_root)},
+            runtime_configuration(state_root),
         ),
     )
 
@@ -58,6 +71,7 @@ def _advance_at(state_root: Path, instant: datetime) -> Advance:
     capability = configure_advance(
         _sources(state_root),
         repository_root=REPOSITORY_ROOT,
+        recorded_universe=recorded_universe(),
         clock=FixedClock(instant),
     )
     assert isinstance(capability, Advance)
@@ -132,7 +146,7 @@ def test_database_preparation_refuses_a_database_create_failure(
     assert isinstance(prepare_runtime_database(state_root), RuntimeRootRefusal)
 
 
-def test_status_reports_empty_incomplete_and_pinned_stage_one_history(tmp_path: Path) -> None:
+def test_status_reports_empty_incomplete_and_universe_snapshot_history(tmp_path: Path) -> None:
     state_root = tmp_path / "runtime"
     status = _status(state_root)
     assert status() == LifecycleStatus.not_started()
@@ -152,17 +166,25 @@ def test_status_reports_empty_incomplete_and_pinned_stage_one_history(tmp_path: 
 
     with pytest.raises(LifecyclePersistenceError, match="SQLite lifecycle checkpoint failed"):
         advance(
-            session="2026-08-21",
+            cycle=_cycle_payload("2026-08-21"),
             mode="champion",
             idempotency_key="status-session",
         )
 
     incomplete = status()
     assert incomplete.liveness is LifecycleLiveness.ACTIVE
-    assert incomplete.active_phase is LifecyclePhase.RECONCILE_PRIOR_STATE
-    assert incomplete.last_completed_session is None
+    assert incomplete.active_phase is not None
+    assert incomplete.active_phase.phase is LifecyclePhase.RECONCILE_PRIOR_STATE
+    assert incomplete.last_completed_cycle is None
+    assert incomplete.universe_snapshot_cycle is None
     assert incomplete.pinned_run_identity is not None
     assert incomplete.durable_reason is None
+    projection = _projection(database)
+    assert projection[0][1] == json.dumps(
+        incomplete.active_phase.to_payload(),
+        sort_keys=True,
+        separators=(",", ":"),
+    )
 
     with sqlite3.connect(database) as connection:
         connection.execute("DROP TRIGGER stop_after_start")
@@ -178,19 +200,20 @@ def test_status_reports_empty_incomplete_and_pinned_stage_one_history(tmp_path: 
         )
     with pytest.raises(LifecyclePersistenceError, match="SQLite lifecycle checkpoint failed"):
         advance(
-            session="2026-08-21",
+            cycle=_cycle_payload("2026-08-21"),
             mode="champion",
             idempotency_key="status-session",
         )
 
     reconciled = status()
     assert reconciled.liveness is LifecycleLiveness.ACTIVE
-    assert reconciled.active_phase is LifecyclePhase.PIN_RUN_INPUTS
+    assert reconciled.active_phase is not None
+    assert reconciled.active_phase.phase is LifecyclePhase.PIN_RUN_INPUTS
 
     with sqlite3.connect(database) as connection:
         connection.execute("DROP TRIGGER stop_before_pin")
     receipt = advance(
-        session="2026-08-21",
+        cycle=_cycle_payload("2026-08-21"),
         mode="champion",
         idempotency_key="status-session",
     )
@@ -198,9 +221,11 @@ def test_status_reports_empty_incomplete_and_pinned_stage_one_history(tmp_path: 
     pinned = status()
     assert pinned.liveness is LifecycleLiveness.ACTIVE
     assert pinned.active_phase is None
-    assert pinned.last_completed_session is None
+    assert pinned.last_completed_cycle is None
+    assert pinned.universe_snapshot_cycle == MarketSession(date(2026, 8, 21))
     assert pinned.pinned_run_identity == receipt.pinned_run_identity
     assert pinned.durable_reason is None
+    assert pinned.universe_snapshot_id == receipt.universe_snapshot_id
     assert receipt.pinned_run_identity is not None
     assert _projection(database) == [
         (
@@ -210,8 +235,19 @@ def test_status_reports_empty_incomplete_and_pinned_stage_one_history(tmp_path: 
             receipt.pinned_run_identity.run_id,
             receipt.pinned_run_identity.configuration_version,
             receipt.pinned_run_identity.configuration_hash,
+            receipt.pinned_run_identity.data_regime,
+            receipt.pinned_run_identity.evidence_cutoff.isoformat(),
+            receipt.pinned_run_identity.instrument_snapshot_hash,
+            receipt.pinned_run_identity.position_snapshot_hash,
+            receipt.pinned_run_identity.eligibility_policy_hash,
             "active",
             None,
+            (
+                '{"asset_class":"us_equity","cycle_type":"market_session",'
+                '"payload":{"trading_date":"2026-08-21"},'
+                '"payload_schema_version":1,"schema_version":1}'
+            ),
+            receipt.universe_snapshot_id,
         )
     ]
 
@@ -219,8 +255,8 @@ def test_status_reports_empty_incomplete_and_pinned_stage_one_history(tmp_path: 
 def test_status_exposes_a_durable_fail_closed_reason(tmp_path: Path) -> None:
     state_root = tmp_path / "runtime"
     _advance(state_root)(
-        session="not-a-session",
-        mode="champion",
+        cycle=_cycle_payload("2026-08-21"),
+        mode="invalid",
         idempotency_key="status-refusal",
     )
 
@@ -228,14 +264,16 @@ def test_status_exposes_a_durable_fail_closed_reason(tmp_path: Path) -> None:
 
     assert status == LifecycleStatus(
         active_phase=None,
-        last_completed_session=None,
+        last_completed_cycle=None,
+        universe_snapshot_cycle=None,
         pinned_run_identity=None,
         liveness=LifecycleLiveness.FAILED_CLOSED,
-        durable_reason=AdvanceFailureReason.INVALID_SESSION,
+        durable_reason=AdvanceFailureReason.INVALID_MODE,
+        universe_snapshot_id=None,
     )
 
     _advance(state_root)(
-        session="2026-08-21",
+        cycle=_cycle_payload("2026-08-21"),
         mode="champion",
         idempotency_key="not valid",
     )
@@ -262,17 +300,17 @@ def test_status_retains_pinned_identity_for_a_terminal_partial_stream(tmp_path: 
         )
     with pytest.raises(LifecyclePersistenceError):
         advance(
-            session="2026-08-21",
+            cycle=_cycle_payload("2026-08-21"),
             mode="champion",
             idempotency_key="terminal-partial",
         )
     refusal(
-        session="invalid",
-        mode="champion",
+        cycle=_cycle_payload("2026-08-21"),
+        mode="invalid",
         idempotency_key="terminal-partial",
     )
     invalid_key(
-        session="2026-08-21",
+        cycle=_cycle_payload("2026-08-21"),
         mode="champion",
         idempotency_key="not valid",
     )
@@ -291,13 +329,13 @@ def test_status_reports_an_unrelated_refusal_without_terminating_the_current_str
     state_root = tmp_path / "runtime"
     advance = _advance_at(state_root, datetime(2026, 8, 21, 23, 0, tzinfo=UTC))
     receipt = advance(
-        session="2026-08-21",
+        cycle=_cycle_payload("2026-08-21"),
         mode="champion",
         idempotency_key="active-before-refusal",
     )
     _advance_at(state_root, datetime(2026, 8, 21, 21, 0, tzinfo=UTC))(
-        session="invalid",
-        mode="champion",
+        cycle=_cycle_payload("2026-08-22"),
+        mode="invalid",
         idempotency_key="later-refusal",
     )
 
@@ -306,7 +344,7 @@ def test_status_reports_an_unrelated_refusal_without_terminating_the_current_str
     assert status.liveness is LifecycleLiveness.ACTIVE
     assert status.active_phase is None
     assert status.pinned_run_identity == receipt.pinned_run_identity
-    assert status.durable_reason is AdvanceFailureReason.INVALID_SESSION
+    assert status.durable_reason is AdvanceFailureReason.INVALID_MODE
 
 
 def test_status_reports_completed_conflicts_without_terminating_a_stream(
@@ -315,12 +353,12 @@ def test_status_reports_completed_conflicts_without_terminating_a_stream(
     state_root = tmp_path / "runtime"
     advance = _advance(state_root)
     original = advance(
-        session="2026-08-01",
+        cycle=_cycle_payload("2026-08-01"),
         mode="champion",
         idempotency_key="completed-before-conflict",
     )
     conflict = advance(
-        session="2026-08-02",
+        cycle=_cycle_payload("2026-08-02"),
         mode="champion",
         idempotency_key="completed-before-conflict",
     )
@@ -333,7 +371,7 @@ def test_status_reports_completed_conflicts_without_terminating_a_stream(
     assert conflicted_status.durable_reason is AdvanceFailureReason.IDEMPOTENCY_KEY_CONFLICT
 
     latest = advance(
-        session="2026-08-02",
+        cycle=_cycle_payload("2026-08-02"),
         mode="champion",
         idempotency_key="latest-clean-stream",
     )
@@ -350,12 +388,12 @@ def test_status_selects_the_latest_market_session_independent_of_stream_order(
     state_root = tmp_path / "runtime"
     advance = _advance(state_root)
     advance(
-        session="2026-08-01",
+        cycle=_cycle_payload("2026-08-01"),
         mode="champion",
         idempotency_key="earlier-session",
     )
     latest = advance(
-        session="2026-08-02",
+        cycle=_cycle_payload("2026-08-02"),
         mode="champion",
         idempotency_key="latest-session",
     )
@@ -370,7 +408,7 @@ def test_status_rebuild_replaces_deleted_or_corrupt_projection_without_mutating_
 ) -> None:
     state_root = tmp_path / "runtime"
     _advance(state_root)(
-        session="2026-08-21",
+        cycle=_cycle_payload("2026-08-21"),
         mode="champion",
         idempotency_key="projection-rebuild",
     )
@@ -403,7 +441,7 @@ def test_status_rejects_corrupt_authoritative_history_instead_of_using_projectio
 ) -> None:
     state_root = tmp_path / "runtime"
     _advance(state_root)(
-        session="2026-08-21",
+        cycle=_cycle_payload("2026-08-21"),
         mode="champion",
         idempotency_key="corrupt-status-history",
     )
@@ -415,9 +453,12 @@ def test_status_rejects_corrupt_authoritative_history_instead_of_using_projectio
     with sqlite3.connect(database) as connection:
         rows = connection.execute(
             """
-            SELECT stream_id, sequence, idempotency_key, session, mode,
+            SELECT stream_id, sequence, idempotency_key, cycle_identity, mode,
                    configuration_version, configuration_hash, run_id,
-                   event_kind, completed_phase, recorded_at
+                   data_regime, evidence_cutoff, instrument_snapshot_hash,
+                   position_snapshot_hash, eligibility_policy_hash,
+                   event_kind, completed_phase, universe_snapshot_id,
+                   universe_snapshot, event_envelope, recorded_at
             FROM lifecycle_events ORDER BY sequence
             """
         ).fetchall()
@@ -425,14 +466,19 @@ def test_status_rejects_corrupt_authoritative_history_instead_of_using_projectio
         connection.execute(
             """
             CREATE TABLE lifecycle_events (
-                stream_id, sequence, idempotency_key, session, mode,
+                stream_id, sequence, idempotency_key, cycle_identity, mode,
                 configuration_version, configuration_hash, run_id,
-                event_kind, completed_phase, recorded_at
+                data_regime, evidence_cutoff, instrument_snapshot_hash,
+                position_snapshot_hash, eligibility_policy_hash,
+                event_kind, completed_phase, universe_snapshot_id,
+                universe_snapshot, event_envelope, recorded_at
             )
             """
         )
         connection.executemany(
-            "INSERT INTO lifecycle_events VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", rows
+            "INSERT INTO lifecycle_events VALUES "
+            "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            rows,
         )
         connection.execute(
             "UPDATE lifecycle_events SET completed_phase = 'PinRunInputs' WHERE sequence = 1"
@@ -452,12 +498,12 @@ def test_status_rejects_one_idempotency_key_across_multiple_streams(tmp_path: Pa
     state_root = tmp_path / "runtime"
     advance = _advance(state_root)
     advance(
-        session="2026-08-21",
+        cycle=_cycle_payload("2026-08-21"),
         mode="champion",
         idempotency_key="first-stream",
     )
     advance(
-        session="2026-08-22",
+        cycle=_cycle_payload("2026-08-22"),
         mode="champion",
         idempotency_key="second-stream",
     )
@@ -465,10 +511,11 @@ def test_status_rejects_one_idempotency_key_across_multiple_streams(tmp_path: Pa
     database = state_root / "lifecycle.sqlite3"
     _replace_event_table(
         database,
-        "UPDATE lifecycle_events SET idempotency_key = 'first-stream' WHERE session = '2026-08-22'",
+        "UPDATE lifecycle_events SET idempotency_key = 'first-stream' "
+        "WHERE cycle_identity LIKE '%2026-08-22%'",
     )
 
-    with pytest.raises(InvalidLifecycleStateError, match="changed pinned request facts"):
+    with pytest.raises(InvalidLifecycleStateError, match="checkpoint order is invalid"):
         status()
 
 
@@ -476,12 +523,12 @@ def test_status_rejects_a_refusal_for_a_completed_stream(tmp_path: Path) -> None
     state_root = tmp_path / "runtime"
     advance = _advance(state_root)
     advance(
-        session="2026-08-21",
+        cycle=_cycle_payload("2026-08-21"),
         mode="champion",
         idempotency_key="not valid",
     )
     advance(
-        session="2026-08-21",
+        cycle=_cycle_payload("2026-08-21"),
         mode="champion",
         idempotency_key="completed-with-refusal",
     )
@@ -520,7 +567,7 @@ def test_status_rejects_an_invalid_refusal_reason_for_a_partial_stream(tmp_path:
         )
     with pytest.raises(LifecyclePersistenceError):
         advance(
-            session="2026-08-21",
+            cycle=_cycle_payload("2026-08-21"),
             mode="champion",
             idempotency_key="partial-with-invalid-refusal",
         )
@@ -570,9 +617,10 @@ def test_status_rejects_an_invalid_refusal_reason_for_a_partial_stream(tmp_path:
         ),
         (
             """
-            INSERT INTO advance_refusals
-            SELECT 2, idempotency_key, reason_code, recorded_at FROM advance_refusals
-            """,
+                INSERT INTO advance_refusals
+                SELECT 2, idempotency_key, cycle_identity, reason_code, recorded_at
+                FROM advance_refusals
+                """,
             "refusal uniqueness is invalid",
         ),
     ],
@@ -584,21 +632,23 @@ def test_status_rejects_corrupt_refusal_history(
 ) -> None:
     state_root = tmp_path / "runtime"
     _advance(state_root)(
-        session="invalid",
-        mode="champion",
+        cycle=_cycle_payload("2026-08-21"),
+        mode="invalid",
         idempotency_key="corrupt-status-refusal",
     )
     status = _status(state_root)
     database = state_root / "lifecycle.sqlite3"
     with sqlite3.connect(database) as connection:
         rows = connection.execute(
-            "SELECT refusal_id, idempotency_key, reason_code, recorded_at FROM advance_refusals"
+            "SELECT refusal_id, idempotency_key, cycle_identity, reason_code, recorded_at "
+            "FROM advance_refusals"
         ).fetchall()
         connection.execute("DROP TABLE advance_refusals")
         connection.execute(
-            "CREATE TABLE advance_refusals (refusal_id, idempotency_key, reason_code, recorded_at)"
+            "CREATE TABLE advance_refusals "
+            "(refusal_id, idempotency_key, cycle_identity, reason_code, recorded_at)"
         )
-        connection.executemany("INSERT INTO advance_refusals VALUES (?, ?, ?, ?)", rows)
+        connection.executemany("INSERT INTO advance_refusals VALUES (?, ?, ?, ?, ?)", rows)
         connection.execute(corruption)
 
     with pytest.raises(InvalidLifecycleStateError, match=expected_message):
@@ -608,7 +658,7 @@ def test_status_rejects_corrupt_refusal_history(
 def test_status_rejects_duplicate_unkeyed_refusal_authority(tmp_path: Path) -> None:
     state_root = tmp_path / "runtime"
     _advance(state_root)(
-        session="2026-08-21",
+        cycle=_cycle_payload("2026-08-21"),
         mode="champion",
         idempotency_key="not valid",
     )
@@ -616,17 +666,20 @@ def test_status_rejects_duplicate_unkeyed_refusal_authority(tmp_path: Path) -> N
     database = state_root / "lifecycle.sqlite3"
     with sqlite3.connect(database) as connection:
         rows = connection.execute(
-            "SELECT refusal_id, idempotency_key, reason_code, recorded_at FROM advance_refusals"
+            "SELECT refusal_id, idempotency_key, cycle_identity, reason_code, recorded_at "
+            "FROM advance_refusals"
         ).fetchall()
         connection.execute("DROP TABLE advance_refusals")
         connection.execute(
-            "CREATE TABLE advance_refusals (refusal_id, idempotency_key, reason_code, recorded_at)"
+            "CREATE TABLE advance_refusals "
+            "(refusal_id, idempotency_key, cycle_identity, reason_code, recorded_at)"
         )
-        connection.executemany("INSERT INTO advance_refusals VALUES (?, ?, ?, ?)", rows)
+        connection.executemany("INSERT INTO advance_refusals VALUES (?, ?, ?, ?, ?)", rows)
         connection.execute(
             """
             INSERT INTO advance_refusals
-            SELECT 2, idempotency_key, reason_code, recorded_at FROM advance_refusals
+            SELECT 2, idempotency_key, cycle_identity, reason_code, recorded_at
+            FROM advance_refusals
             """
         )
 
@@ -674,12 +727,12 @@ def test_status_rejects_corrupt_conflict_history(
     state_root = tmp_path / "runtime"
     advance = _advance(state_root)
     advance(
-        session="2026-08-21",
+        cycle=_cycle_payload("2026-08-21"),
         mode="champion",
         idempotency_key="corrupt-status-conflict",
     )
     advance(
-        session="2026-08-22",
+        cycle=_cycle_payload("2026-08-22"),
         mode="champion",
         idempotency_key="corrupt-status-conflict",
     )
@@ -707,7 +760,7 @@ def test_status_configuration_refuses_invalid_configuration_and_runtime_root(
         (
             ConfigurationSource(
                 "test",
-                {"schema_version": 2, "state_root": str(tmp_path / "runtime")},
+                {**runtime_configuration(tmp_path / "runtime"), "schema_version": 2},
             ),
         ),
         repository_root=REPOSITORY_ROOT,
@@ -726,7 +779,7 @@ def test_status_configuration_refuses_invalid_configuration_and_runtime_root(
 def test_status_does_not_recreate_missing_authoritative_tables(tmp_path: Path) -> None:
     state_root = tmp_path / "runtime"
     _advance(state_root)(
-        session="2026-08-21",
+        cycle=_cycle_payload("2026-08-21"),
         mode="champion",
         idempotency_key="missing-authoritative-history",
     )
@@ -755,7 +808,7 @@ def test_status_does_not_recreate_missing_authoritative_tables(tmp_path: Path) -
 def test_status_does_not_recreate_a_missing_authoritative_database(tmp_path: Path) -> None:
     state_root = tmp_path / "runtime"
     _advance(state_root)(
-        session="2026-08-21",
+        cycle=_cycle_payload("2026-08-21"),
         mode="champion",
         idempotency_key="missing-authoritative-database",
     )
@@ -771,7 +824,7 @@ def test_status_does_not_recreate_a_missing_authoritative_database(tmp_path: Pat
 def test_status_bounds_an_invalid_stream_identifier_diagnostic(tmp_path: Path) -> None:
     state_root = tmp_path / "runtime"
     _advance(state_root)(
-        session="2026-08-21",
+        cycle=_cycle_payload("2026-08-21"),
         mode="champion",
         idempotency_key="invalid-stream-id",
     )
@@ -787,9 +840,12 @@ def _replace_event_table(database: Path, statement: str) -> None:
     with sqlite3.connect(database) as connection:
         rows = connection.execute(
             """
-            SELECT stream_id, sequence, idempotency_key, session, mode,
+            SELECT stream_id, sequence, idempotency_key, cycle_identity, mode,
                    configuration_version, configuration_hash, run_id,
-                   event_kind, completed_phase, recorded_at
+                   data_regime, evidence_cutoff, instrument_snapshot_hash,
+                   position_snapshot_hash, eligibility_policy_hash,
+                   event_kind, completed_phase, universe_snapshot_id,
+                   universe_snapshot, event_envelope, recorded_at
             FROM lifecycle_events ORDER BY stream_id, sequence
             """
         ).fetchall()
@@ -797,13 +853,18 @@ def _replace_event_table(database: Path, statement: str) -> None:
         connection.execute(
             """
             CREATE TABLE lifecycle_events (
-                stream_id, sequence, idempotency_key, session, mode,
+                stream_id, sequence, idempotency_key, cycle_identity, mode,
                 configuration_version, configuration_hash, run_id,
-                event_kind, completed_phase, recorded_at
+                data_regime, evidence_cutoff, instrument_snapshot_hash,
+                position_snapshot_hash, eligibility_policy_hash,
+                event_kind, completed_phase, universe_snapshot_id,
+                universe_snapshot, event_envelope, recorded_at
             )
             """
         )
         connection.executemany(
-            "INSERT INTO lifecycle_events VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", rows
+            "INSERT INTO lifecycle_events VALUES "
+            "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            rows,
         )
         connection.execute(statement)

@@ -42,7 +42,7 @@ class UtcInstant:
     @classmethod
     def parse(cls, value: object) -> Self:
         """Parse exact canonical durable text without normalizing stored history."""
-        if not isinstance(value, str):
+        if type(value) is not str:
             raise InvalidUtcInstantError(_CANONICAL_UTC_ERROR)
         try:
             instant = cls.from_datetime(datetime.fromisoformat(value))

@@ -17,7 +17,9 @@ A lifecycle key does not make broker submission, outcome recording, or evidence 
 Give each effect a stable domain identity and enforce uniqueness at its authoritative store. Replays
 return the prior disposition or append a new observation; they do not duplicate exposure or history.
 When hostile input supplies no trustworthy key, bound identical durable refusals without retaining
-the hostile value.
+the hostile value, but scope that bound to any independently validated cycle identity. Replay a
+durable refusal only when its stable key, normalized reason, and cycle match the current request;
+otherwise return a conflict tied to the current cycle.
 
 ## Report independent outcomes independently
 

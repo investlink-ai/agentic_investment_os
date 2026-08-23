@@ -250,12 +250,20 @@ credentials.
 Normal production callers see six capabilities:
 
 - **Advance** resolves or resumes a `DecisionCycleIdentity`. V0 accepts only its `MarketSession`
-  variant; the receipt contains the disposition, completed phase, cycle and pinned inputs, published
-  artifact identifiers, fail-closed reason, and whether the call advanced fresh work, resumed
-  committed progress, or replayed prior completion.
+  variant; its common versioned receipt envelope contains the disposition, a versioned
+  `LifecycleCheckpoint` whose discriminator selects the equity phase, exact cycle and pinned inputs,
+  eligible-universe snapshot identifier, fail-closed reason, and whether the call advanced fresh
+  work, resumed committed progress, or replayed prior completion. A successful receipt's relevant
+  and availability times identify when that call's result was recorded; the Evidence Cutoff remains
+  a separate pinned input. A recognized disabled cycle or malformed cycle is returned as a bounded
+  refusal before the clock, adapter, or authoritative lifecycle ledger is entered. A valid
+  `MarketSession` remains explicit in any later durable refusal and its replay.
 - **Status** validates authoritative lifecycle history, replaces its disposable projection, and returns
-  the active phase, `last_completed_cycle` as a `DecisionCycleIdentity`, pinned run identity, lifecycle
-  liveness, and any available durable terminal reason. In V0 that identity is always a `MarketSession`.
+  the active `LifecycleCheckpoint`, `last_completed_cycle` as a `DecisionCycleIdentity`, the latest
+  eligible-universe checkpoint as an exact `universe_snapshot_cycle` and snapshot-identifier pair,
+  pinned run identity, lifecycle liveness, and any available durable terminal reason. In V0 each
+  exposed cycle is a `MarketSession` and the checkpoint payload is an equity phase; neither public
+  result exposes a bare equity-only phase as the stable contract.
 - **Record** appends due market, forecast, thesis, and execution observations without changing the
   original decision.
 - **Govern** schedules a signed, operator-approved Constitution, champion, or controlled-policy
@@ -320,6 +328,7 @@ stateDiagram-v2
 
     ReconcilePriorState --> FailedClosed: invalid authoritative state
     PinRunInputs --> FailedClosed: incomplete or conflicting inputs
+    SnapshotUniverse --> FailedClosed: missing, stale, or contradictory recorded inputs
     CaptureEvidence --> FailedClosed: unavailable or stale evidence
     RunResearch --> FailedClosed: invalid output or missing role
     ConstructPortfolio --> FailedClosed: invariant failure
@@ -379,8 +388,10 @@ Lifecycle status is derived only from the append-only event, refusal, and confli
 validates the complete authoritative history before atomically replacing the projection; missing or
 malformed projection state is discarded, while malformed authoritative history fails closed. A
 completed phase does not imply a completed Decision Cycle: `last_completed_cycle` advances only from
-a durable `Complete` event. Status liveness describes whether the recorded lifecycle is not started,
-active, or failed closed; scheduler heartbeat and schedule health are separate operational concerns.
+a durable `Complete` event. The separately named `universe_snapshot_cycle` advances atomically with
+its exact snapshot identifier when `SnapshotUniverse` completes. Status liveness describes whether
+the recorded lifecycle is not started, active, or failed closed; scheduler heartbeat and schedule
+health are separate operational concerns.
 
 ## Safe execution handoff
 
@@ -438,27 +449,33 @@ between policy and executable edges.
 
 ## Eligible-universe compatibility contract
 
-The compatibility delta requested for
-[issue #19](https://github.com/investlink-ai/agentic_investment_os/issues/19) and
-[PR #32](https://github.com/investlink-ai/agentic_investment_os/pull/32) is the permanent contract for the
-first and every later eligible-universe implementation. It must hold before evidence work can depend
-on eligible-universe records.
+The following is the permanent contract for the first and every later eligible-universe
+implementation. It must hold before evidence work can depend on eligible-universe records.
 
 - **Instrument identity:** Replace symbol keys with the versioned `InstrumentIdentity` union and its
   equity, crypto-spot, and listed-option variants. Only `EquityInstrumentIdentity` is eligible in V0;
   the disabled variants preserve explicit portfolio mismatches. Aliases remain provenance, while
-  deduplication, ordering, membership, retry, and hashes use canonical identity bytes. An option whose
-  underlying does not resolve to an equity identity is unsupported rather than eligible.
+  deduplication, ordering, membership, retry, and hashes use canonical identity bytes. The Alpaca V0
+  adapter accepts only the `alpaca-paper` provider-and-environment catalog namespace, including for an
+  option's equity underlying. Every alias and provider catalog key maps to exactly one canonical
+  identity across the complete snapshot; missing, reused, or contradictory mappings fail closed. An
+  option whose underlying does not resolve to the supported equity identity is unsupported rather
+  than eligible.
 - **Universe snapshots:** Replace flat equity-shaped asset and symbol-only holding records with
-  versioned instrument and position snapshot envelopes containing exactly one discriminated payload.
-  Subjects reference canonical identity, new-entry eligibility remains distinct from holding refresh,
-  and disabled-class holdings remain explicit portfolio mismatches.
+  common versioned instrument and position snapshot envelopes containing exactly one discriminated
+  payload, observed and available times, Data Regime, authority scope, source fingerprint, and content
+  hash. Position variants carry a signed exact quantity, explicit unit, and valuation amount,
+  currency, and source. Subjects reference canonical identity, new-entry eligibility remains distinct
+  from holding refresh, and disabled-class holdings remain explicit portfolio mismatches.
 - **Lifecycle boundary:** The application accepts `DecisionCycleIdentity`, permits only its
   `MarketSession` variant in V0, and unwraps it before the current Market-Session-specific kernel. The
-  durable event and Status projection expose the cycle discriminator and `last_completed_cycle` while
-  retaining the kernel's specific transition policy. Cycle, instrument-snapshot, position-snapshot,
-  eligibility-policy, cutoff, and Data Regime fingerprints are pinned; changed retry inputs conflict
-  before further work.
+  public receipt, durable event, and Status projection expose common versioned checkpoint and event
+  envelopes whose discriminators select the equity phase and event payload. Status exposes the
+  latest completed `SnapshotUniverse` as a distinct cycle-and-snapshot pair without advancing
+  `last_completed_cycle` before a durable `Complete` event. Cycle, instrument-snapshot,
+  position-snapshot, eligibility-policy, cutoff, and Data Regime fingerprints are pinned; changed
+  retry inputs conflict before further work. The success receipt discriminator accepts only a
+  `MarketSession`; a crypto identity cannot be represented as successful equity progress.
 - **Persistence:** Parse discriminators before payloads, validate exact fields and identity references,
   and reconstruct canonical bytes and hashes on every reopen. Persist common cycle and snapshot
   envelopes rather than Alpaca enums or symbol foreign keys. Physical-schema tampering fails at the
@@ -518,6 +535,17 @@ captured evidence -> validated research -> HouseView -> deterministic portfolio
 Every model-visible input and material decision is reconstructable from content hashes, relevant time
 dimensions, configuration, prompt and model identity, and durable records. Corrections name what they
 supersede; they do not rewrite prior financial history.
+
+`PinRunInputs` records the canonical Decision Cycle identity, configuration, Data Regime, Evidence
+Cutoff, instrument-snapshot, position-snapshot, and eligibility-policy fingerprints in the run
+identity. It also persists the first complete normalized universe envelope as prepared provenance,
+including aliases that do not participate in authority identity. `SnapshotUniverse` publishes that
+prepared envelope by immutable identifier rather than rebuilding it from later adapter input. Its
+event and `Advance` receipt carry the same identifier; the complete envelope exists once in
+authoritative history. Reopen and retry revalidate it from canonical bytes, and an alias-only retry
+cannot replace the provenance pinned before an interruption. The cutoff cannot be later than the
+lifecycle record time. Missing identity, future or changed material, or a conflicting retry fails
+closed without another snapshot event.
 
 SQLite is the initial event and checkpoint store, while the filesystem holds content-addressed
 artifacts and atomic publications. Runtime state uses ignored, configurable roots such as `var/`,

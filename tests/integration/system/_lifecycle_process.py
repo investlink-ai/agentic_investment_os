@@ -5,11 +5,12 @@ from __future__ import annotations
 import os
 import sys
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from agentic_investment_os.application.lifecycle import Advance, Status
+from agentic_investment_os.domain.identity import MarketSession, canonical_cycle_bytes
 from agentic_investment_os.domain.lifecycle import (
     AdvanceAttempt,
     AppendLifecycleRecord,
@@ -21,6 +22,7 @@ from agentic_investment_os.domain.lifecycle import (
 )
 from agentic_investment_os.entrypoints.configuration import ConfigurationSource
 from agentic_investment_os.entrypoints.lifecycle import configure_advance, configure_status
+from tests._universe import recorded_universe, runtime_configuration
 
 if TYPE_CHECKING:
     from agentic_investment_os.domain.temporal import UtcInstant
@@ -69,7 +71,8 @@ class InterruptAfterReconcileLedger:
         if (
             isinstance(decision, AppendLifecycleRecord)
             and isinstance(decision.record, LifecycleEvent)
-            and decision.record.completed_phase is LifecyclePhase.RECONCILE_PRIOR_STATE
+            and decision.record.completed_phase is not None
+            and decision.record.completed_phase.phase is LifecyclePhase.RECONCILE_PRIOR_STATE
         ):
             os._exit(INTERRUPTED_EXIT_CODE)
         return decision
@@ -79,7 +82,7 @@ def _sources(state_root: Path) -> tuple[ConfigurationSource, ...]:
     return (
         ConfigurationSource(
             "lifecycle-system-journey",
-            {"schema_version": 1, "state_root": str(state_root)},
+            runtime_configuration(state_root),
         ),
     )
 
@@ -88,6 +91,7 @@ def _advance(state_root: Path) -> Advance:
     capability = configure_advance(
         _sources(state_root),
         repository_root=REPOSITORY_ROOT,
+        recorded_universe=recorded_universe(),
         clock=FixedClock(),
     )
     if not isinstance(capability, Advance):
@@ -108,7 +112,7 @@ def _ambient_authority_absent() -> str:
 
 def _emit_advance(state_root: Path) -> None:
     receipt = _advance(state_root)(
-        session=SESSION,
+        cycle=MarketSession(date.fromisoformat(SESSION)).to_payload(),
         mode=MODE,
         idempotency_key=IDEMPOTENCY_KEY,
     )
@@ -118,7 +122,7 @@ def _emit_advance(state_root: Path) -> None:
     fields = (
         "advance",
         receipt.disposition.value,
-        "" if receipt.completed_phase is None else receipt.completed_phase.value,
+        "" if receipt.completed_phase is None else receipt.completed_phase.phase.value,
         "" if receipt.recovery is None else receipt.recovery.value,
         identity.run_id,
         str(identity.configuration_version),
@@ -135,17 +139,23 @@ def _emit_status(state_root: Path) -> None:
         raise RuntimeError(STATUS_IDENTITY_MISSING)
     fields = (
         "status",
-        "" if status.active_phase is None else status.active_phase.value,
+        "" if status.active_phase is None else status.active_phase.phase.value,
         (
             ""
-            if status.last_completed_session is None
-            else status.last_completed_session.isoformat()
+            if status.last_completed_cycle is None
+            else canonical_cycle_bytes(status.last_completed_cycle).decode()
+        ),
+        (
+            ""
+            if status.universe_snapshot_cycle is None
+            else canonical_cycle_bytes(status.universe_snapshot_cycle).decode()
         ),
         status.liveness.value,
         "" if status.durable_reason is None else status.durable_reason.value,
         identity.run_id,
         str(identity.configuration_version),
         identity.configuration_hash,
+        "" if status.universe_snapshot_id is None else status.universe_snapshot_id,
         _ambient_authority_absent(),
     )
     sys.stdout.write("\t".join(fields))
@@ -157,9 +167,16 @@ def _interrupt_after_reconcile(state_root: Path) -> None:
         ledger=InterruptAfterReconcileLedger(configured.ledger),
         configuration_version=configured.configuration_version,
         configuration_hash=configured.configuration_hash,
+        universe_source=configured.universe_source,
+        enabled_asset_classes=configured.enabled_asset_classes,
+        universe_policy=configured.universe_policy,
         clock=configured.clock,
     )
-    interrupted(session=SESSION, mode=MODE, idempotency_key=IDEMPOTENCY_KEY)
+    interrupted(
+        cycle=MarketSession(date.fromisoformat(SESSION)).to_payload(),
+        mode=MODE,
+        idempotency_key=IDEMPOTENCY_KEY,
+    )
     raise RuntimeError(INTERRUPTION_NOT_REACHED)
 
 
