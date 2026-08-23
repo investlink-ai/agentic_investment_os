@@ -55,7 +55,7 @@ def configure_advance(
         return resolution
     if not isinstance(resolution, RuntimeConfiguration):
         # Strict mypy proves this line unreachable; removing it is runtime-equivalent.
-        assert_never(resolution)  # pragma: no cover  # pragma: no mutate
+        assert_never(resolution)  # pragma: no cover
     database = prepare_runtime_database(resolution.state_root)
     if isinstance(database, RuntimeRootRefusal):
         return ConfigurationRefusal(
@@ -73,7 +73,7 @@ def configure_advance(
             clock=clock if clock is not None else SystemClock(),
         )
     # Strict mypy proves this line unreachable; removing it is runtime-equivalent.
-    assert_never(database)  # pragma: no cover  # pragma: no mutate
+    assert_never(database)  # pragma: no cover
 
 
 def configure_status(
@@ -92,7 +92,7 @@ def configure_status(
         return resolution
     if not isinstance(resolution, RuntimeConfiguration):
         # Strict mypy proves this line unreachable; removing it is runtime-equivalent.
-        assert_never(resolution)  # pragma: no cover  # pragma: no mutate
+        assert_never(resolution)  # pragma: no cover
     database = open_runtime_database(resolution.state_root)
     if isinstance(database, RuntimeRootRefusal):
         return ConfigurationRefusal(
@@ -102,4 +102,4 @@ def configure_status(
     if isinstance(database, PreparedRuntimeDatabase):
         return Status(SQLiteLifecycleLedger.open_existing(database.path))
     # Strict mypy proves this line unreachable; removing it is runtime-equivalent.
-    assert_never(database)  # pragma: no cover  # pragma: no mutate
+    assert_never(database)  # pragma: no cover

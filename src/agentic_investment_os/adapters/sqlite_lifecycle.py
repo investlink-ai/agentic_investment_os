@@ -74,7 +74,7 @@ _ENABLE_FOREIGN_KEYS_SQL = "PRAGMA foreign_keys = ON"
 _BUSY_TIMEOUT_SQL = "PRAGMA busy_timeout = 5000"
 _BEGIN_IMMEDIATE_SQL = "BEGIN IMMEDIATE"
 _DROP_PROJECTION_SQL = (
-    "DROP TABLE IF EXISTS lifecycle_status_projection"  # pragma: no mutate
+    "DROP TABLE IF EXISTS lifecycle_status_projection"
     # SQLite keywords and identifiers are case-insensitive, so case-only mutants are equivalent.
 )
 _USER_VERSION_SQL = "PRAGMA user_version"
@@ -266,7 +266,7 @@ def prepare_runtime_database(state_root: Path) -> PreparedRuntimeDatabase | Runt
             return PreparedRuntimeDatabase(path=location.path, created=False)
         return _create_runtime_database(location.path)
     # Strict mypy proves this line unreachable; removing it is runtime-equivalent.
-    assert_never(location)  # pragma: no cover  # pragma: no mutate
+    assert_never(location)  # pragma: no cover
 
 
 def open_runtime_database(state_root: Path) -> PreparedRuntimeDatabase | RuntimeRootRefusal:
@@ -281,7 +281,7 @@ def open_runtime_database(state_root: Path) -> PreparedRuntimeDatabase | Runtime
             return _create_runtime_database(location.path)
         return PreparedRuntimeDatabase(path=location.path, created=False)
     # Strict mypy proves this line unreachable; removing it is runtime-equivalent.
-    assert_never(location)  # pragma: no cover  # pragma: no mutate
+    assert_never(location)  # pragma: no cover
 
 
 def _locate_runtime_database(
@@ -465,7 +465,7 @@ class SQLiteLifecycleLedger:
             if isinstance(decision, AdvanceReceipt):
                 return decision
             # Strict mypy proves this line unreachable; removing it is runtime-equivalent.
-            assert_never(decision)  # pragma: no cover  # pragma: no mutate
+            assert_never(decision)  # pragma: no cover
 
         return self._write(operation)
 
@@ -536,7 +536,7 @@ def _load_event(row: tuple[object, ...]) -> LifecycleEvent:
         raise InvalidLifecycleStateError(_INVALID_REQUEST)
     if not isinstance(request, AdvanceRequest):
         # Strict mypy proves this line unreachable; removing it is runtime-equivalent.
-        assert_never(request)  # pragma: no cover  # pragma: no mutate
+        assert_never(request)  # pragma: no cover
     stream_id = _text(row[0], "stream_id")
     sequence = _integer(row[1], "sequence")
     version = _integer(row[5], "configuration_version")
@@ -620,7 +620,7 @@ def _load_universe_reference(
     if isinstance(parsed, UniverseSnapshot):
         return parsed, None
     # Strict mypy proves this line unreachable; removing it is runtime-equivalent.
-    assert_never(parsed)  # pragma: no cover  # pragma: no mutate
+    assert_never(parsed)  # pragma: no cover
 
 
 def _load_refusals(
@@ -714,7 +714,7 @@ def _command_key(command: LifecycleCommand) -> IdempotencyKey | None:
     if isinstance(command, AdvanceCommand):
         return command.request.idempotency_key
     # Strict mypy proves this line unreachable; removing it is runtime-equivalent.
-    assert_never(command)  # pragma: no cover  # pragma: no mutate
+    assert_never(command)  # pragma: no cover
 
 
 def _occupied_stream_ids(
@@ -728,7 +728,7 @@ def _occupied_stream_ids(
         row = connection.execute(_STREAM_EXISTS_SQL, (stream_id,)).fetchone()
         return frozenset() if row is None else frozenset((stream_id,))
     # Strict mypy proves this line unreachable; removing it is runtime-equivalent.
-    assert_never(command)  # pragma: no cover  # pragma: no mutate
+    assert_never(command)  # pragma: no cover
 
 
 def _next_refusal_sequence(connection: sqlite3.Connection) -> int:
@@ -815,7 +815,7 @@ def _append_record(
         )
         return
     # Strict mypy proves this line unreachable; removing it is runtime-equivalent.
-    assert_never(record)  # pragma: no cover  # pragma: no mutate
+    assert_never(record)  # pragma: no cover
 
 
 def _replace_status_projection(

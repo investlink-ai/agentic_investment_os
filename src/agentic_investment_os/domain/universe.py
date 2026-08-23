@@ -1132,7 +1132,7 @@ def _decimal_text(value: Decimal) -> str:
     if value.is_zero():
         return "0"
     # Decimal's fixed-point format treats "f" and "F" identically.
-    text = format(value, "f")  # pragma: no mutate
+    text = format(value, "f")
     while "." in text and text.endswith("0"):
         text = text[:-1]
     return text.removesuffix(".")

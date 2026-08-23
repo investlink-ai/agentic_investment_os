@@ -203,8 +203,12 @@ is retargeted to `main`.
 
 The root `AGENTS.md` indexes the stable command surface and the `Makefile` is executable authority.
 Run a focused test directly with `uv run pytest <path-or-node-id>`; finish with `make check`.
-Run `make mutation` for mutation-critical domain, portfolio, or execution behavior. The mutation gate
-is deliberately separate from the fast default gate and Git hooks.
+Run `make mutation` when a change can directly alter critical financial or broker authority behavior.
+The issue author and reviewer apply the human-owned `mutation:critical` label when a pull request
+requires the same keyless certification; label application, a later push, or reopening reruns the
+labeled job. Use `workflow_dispatch` for explicit investigation or baseline preparation. The mutation
+gate remains separate from the fast default gate and Git hooks; `testing.md` owns its exact scope,
+scaffold exemption, and strict outcome policy.
 
 `make harness` enforces the pure unit-test tier and validates the versioned agent-workflow scenario
 schemas, references, fixture hashes, and deterministic evaluator without invoking a model. An operator

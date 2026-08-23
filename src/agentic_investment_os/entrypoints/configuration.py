@@ -95,7 +95,7 @@ def resolve_runtime_configuration(
     if isinstance(merged, dict):
         return _validate_configuration(merged, repository_root=repository_root)
     # Strict mypy proves this line unreachable; removing it is runtime-equivalent.
-    assert_never(merged)  # pragma: no cover  # pragma: no mutate
+    assert_never(merged)  # pragma: no cover
 
 
 def _merge_sources(
@@ -180,7 +180,7 @@ def _validate_configuration(
         return state_root
     if not isinstance(state_root, Path):
         # Strict mypy proves this line unreachable; removing it is runtime-equivalent.
-        assert_never(state_root)  # pragma: no cover  # pragma: no mutate
+        assert_never(state_root)  # pragma: no cover
     enabled_asset_classes = _validate_enabled_asset_classes(merged["enabled_asset_classes"])
     if enabled_asset_classes is None:
         return _INVALID_ENABLED_ASSET_CLASSES_REFUSAL
@@ -194,7 +194,7 @@ def _validate_configuration(
         return _INVALID_UNIVERSE_POLICY_REFUSAL
     if not isinstance(universe_policy, EquityUniversePolicy):
         # Strict mypy proves this line unreachable; removing it is runtime-equivalent.
-        assert_never(universe_policy)  # pragma: no cover  # pragma: no mutate
+        assert_never(universe_policy)  # pragma: no cover
 
     canonical = {
         "state_root": str(state_root),

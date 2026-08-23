@@ -498,7 +498,7 @@ class AdvanceReceipt:
                 raise ValueError(_INVALID_FAILED_RECEIPT)
             return
         # Strict mypy proves this line unreachable; removing it is runtime-equivalent.
-        assert_never(self.disposition)  # pragma: no cover  # pragma: no mutate
+        assert_never(self.disposition)  # pragma: no cover
 
     @classmethod
     def advanced(
@@ -623,7 +623,7 @@ class LifecycleProgress:
         if phase is LifecyclePhase.SNAPSHOT_UNIVERSE:
             return True
         # Strict mypy proves this line unreachable; removing it is runtime-equivalent.
-        assert_never(phase)  # pragma: no cover  # pragma: no mutate
+        assert_never(phase)  # pragma: no cover
 
     def require_prepared_universe_snapshot(self) -> UniverseSnapshot:
         """Return the pinned snapshot or reject access before its durable checkpoint."""
@@ -786,7 +786,7 @@ class LifecycleHistory:
                 next_refusal_sequence=self.next_refusal_sequence,
             )
         # Strict mypy proves this line unreachable; removing it is runtime-equivalent.
-        assert_never(record)  # pragma: no cover  # pragma: no mutate
+        assert_never(record)  # pragma: no cover
 
 
 @dataclass(frozen=True, slots=True)
@@ -843,7 +843,7 @@ def decide_advance(
             recorded_at,
         )
     # Strict mypy proves this line unreachable; removing it is runtime-equivalent.
-    assert_never(command)  # pragma: no cover  # pragma: no mutate
+    assert_never(command)  # pragma: no cover
 
 
 def decide_terminal_refusal(
@@ -856,7 +856,7 @@ def decide_terminal_refusal(
     if isinstance(command, InputRefusal):
         return _terminal_input_refusal(refusals, command)
     # Strict mypy proves this line unreachable; removing it is runtime-equivalent.
-    assert_never(command)  # pragma: no cover  # pragma: no mutate
+    assert_never(command)  # pragma: no cover
 
 
 def _terminal_advance_refusal(
@@ -942,7 +942,7 @@ def decide_invalid_history(
             command.request.session,
         )
     # Strict mypy proves this line unreachable; removing it is runtime-equivalent.
-    assert_never(command)  # pragma: no cover  # pragma: no mutate
+    assert_never(command)  # pragma: no cover
 
 
 def reconstruct_lifecycle(history: LifecycleHistory) -> tuple[LifecycleProgress, ...]:
@@ -1198,7 +1198,7 @@ def _input_failure_reason(code: InputRefusalCode) -> AdvanceFailureReason:
         reason = AdvanceFailureReason.CONTRADICTORY_UNIVERSE_INPUT
     else:
         # Strict mypy proves this line unreachable; removing it is runtime-equivalent.
-        assert_never(code)  # pragma: no cover  # pragma: no mutate
+        assert_never(code)  # pragma: no cover
     return reason
 
 
@@ -1252,7 +1252,7 @@ def _append_next_event(
     next_attempt = AdvanceAttempt(recovery, sequence)
     # Existing progress contains event zero, so its next phase cannot be absent.
     if phase is None:  # pragma: no cover
-        return AppendLifecycleRecord(event, next_attempt)  # pragma: no mutate
+        return AppendLifecycleRecord(event, next_attempt)
     if phase is LifecyclePhase.RECONCILE_PRIOR_STATE:
         return AppendLifecycleRecord(event, next_attempt)
     if phase is LifecyclePhase.PIN_RUN_INPUTS:
@@ -1268,7 +1268,7 @@ def _append_next_event(
             ),
         )
     # Strict mypy proves this line unreachable; removing it is runtime-equivalent.
-    assert_never(phase)  # pragma: no cover  # pragma: no mutate
+    assert_never(phase)  # pragma: no cover
 
 
 def _append_refusal(

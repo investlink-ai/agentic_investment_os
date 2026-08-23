@@ -344,7 +344,7 @@ def _parse_instrument_identity_variant(
     if asset_class is AssetClass.LISTED_OPTION:
         return _parse_option_identity(catalog_namespace, catalog_id, payload)
     # Static exhaustion protects future enum additions; runtime parsing cannot reach this arm.
-    assert_never(asset_class)  # pragma: no cover  # pragma: no mutate
+    assert_never(asset_class)  # pragma: no cover
 
 
 def parse_decision_cycle_identity(  # noqa: PLR0911 - each closed variant fails independently.
