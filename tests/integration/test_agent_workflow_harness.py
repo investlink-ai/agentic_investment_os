@@ -14,6 +14,7 @@ from scripts.agent_workflow_harness import (
     FailureClassification,
     HarnessValidationError,
     Outcome,
+    _prepare_workspace,
     _write_fake_tools,
     load_suite,
     main,
@@ -113,6 +114,28 @@ def _fixture_digest(root: Path) -> str:
         digest.update(b"\0")
         digest.update(content)
     return digest.hexdigest()
+
+
+def _add_pull_request_view_fixture(root: Path) -> None:
+    fixture = root / ".agents" / "harness" / "fixtures" / "issue-publication-awaits-approval"
+    change = fixture / "docs" / "merged-change.md"
+    change.parent.mkdir()
+    change.write_text("# Merged change\n", encoding="utf-8")
+    template = {
+        "number": 53,
+        "state": "MERGED",
+        "mergedAt": "2026-01-01T00:00:00Z",
+        "mergeCommit": {"oid": "$WORKSPACE_HEAD"},
+        "baseRefName": "main",
+        "files": ["docs/merged-change.md"],
+    }
+    (fixture / "pr-view.template.json").write_text(json.dumps(template), encoding="utf-8")
+    scenario_path = (
+        root / ".agents" / "harness" / "scenarios" / "issue-publication-awaits-approval.json"
+    )
+    scenario = json.loads(scenario_path.read_text(encoding="utf-8"))
+    scenario["fixture_sha256"] = _fixture_digest(fixture)
+    scenario_path.write_text(json.dumps(scenario), encoding="utf-8")
 
 
 def _write_fake_codex(path: Path, *, mode: str = "pass") -> Path:
@@ -575,6 +598,7 @@ def test_runner_uses_ephemeral_read_only_codex_and_records_provenance(tmp_path: 
     assert record.scenario_sha256
     assert record.active_delivery_context_sha256 is None
     assert record.active_delivery_context_materialization is None
+    assert record.pull_request_view_materialization is None
     assert record.skill_sha256[0][0] == "create-issue"
     assert dict(record.repository_path_sha256)["AGENTS.md"]
     assert dict(record.harness_contract_sha256)["decision-catalog.json"]
@@ -599,11 +623,88 @@ def test_runner_uses_ephemeral_read_only_codex_and_records_provenance(tmp_path: 
     assert written["fixture_sha256"] == suite.scenarios[0].fixture_sha256
     assert written["active_delivery_context_sha256"] is None
     assert written["active_delivery_context_materialization"] is None
+    assert written["pull_request_view_materialization"] is None
     assert written["repository_path_sha256"]["docs/development.md"]
     assert written["harness_contract_sha256"]["final-output.schema.json"]
     assert written["runner_sha256"] == record.runner_sha256
     assert written["prompt_sha256"] == record.prompt_sha256
     assert written["execution_config_sha256"] == record.execution_config_sha256
+
+
+def test_pull_request_view_materialization_matches_exact_synthetic_merge(tmp_path: Path) -> None:
+    _write_suite(tmp_path)
+    _add_pull_request_view_fixture(tmp_path)
+    suite = load_suite(tmp_path)
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+
+    workspace, _fake_bin, active_materialization, pull_request_materialization = _prepare_workspace(
+        suite, suite.scenarios[0], runtime
+    )
+
+    assert active_materialization is None
+    assert pull_request_materialization is not None
+    assert pull_request_materialization.files == ("docs/merged-change.md",)
+    changed = subprocess.run(
+        ["/usr/bin/git", "diff", "--name-only", "HEAD^", "HEAD"],
+        cwd=workspace,
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    assert changed.stdout.splitlines() == ["docs/merged-change.md"]
+    rendered_path = workspace / ".agent-harness" / "pr-view.json"
+    rendered = json.loads(rendered_path.read_text(encoding="utf-8"))
+    assert rendered["mergeCommit"]["oid"] == pull_request_materialization.head
+    assert (
+        pull_request_materialization.sha256
+        == hashlib.sha256(rendered_path.read_bytes()).hexdigest()
+    )
+    assert (
+        subprocess.run(
+            ["/usr/bin/git", "status", "--porcelain"],
+            cwd=workspace,
+            text=True,
+            capture_output=True,
+            check=True,
+        ).stdout
+        == ""
+    )
+
+    second_runtime = tmp_path / "second-runtime"
+    second_runtime.mkdir()
+    _second_workspace, _second_bin, _second_active, second_pull_request = _prepare_workspace(
+        suite,
+        suite.scenarios[0],
+        second_runtime,
+    )
+    assert second_pull_request == pull_request_materialization
+
+
+def test_runner_records_pull_request_view_materialization(tmp_path: Path) -> None:
+    _write_suite(tmp_path)
+    _add_pull_request_view_fixture(tmp_path)
+    suite = load_suite(tmp_path)
+    result_dir = tmp_path / "results"
+
+    record = run_scenario(
+        suite,
+        suite.scenarios[0],
+        codex_executable=_write_fake_codex(tmp_path / "bin" / "codex"),
+        result_dir=result_dir,
+    )
+
+    materialization = record.pull_request_view_materialization
+    assert materialization is not None
+    written = json.loads(
+        (result_dir / "issue-publication-awaits-approval.json").read_text(encoding="utf-8")
+    )
+    assert written["pull_request_view_materialization"] == {
+        "base": materialization.base,
+        "files": ["docs/merged-change.md"],
+        "head": materialization.head,
+        "sha256": materialization.sha256,
+    }
 
 
 def test_runner_preserves_a_version_manager_shim_for_its_adjacent_runtime(tmp_path: Path) -> None:

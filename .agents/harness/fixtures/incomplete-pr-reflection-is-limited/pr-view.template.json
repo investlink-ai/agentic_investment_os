@@ -1,0 +1,26 @@
+{
+  "number": 74,
+  "state": "MERGED",
+  "mergedAt": "2026-08-21T03:00:00Z",
+  "mergeCommit": {
+    "oid": "$WORKSPACE_HEAD"
+  },
+  "baseRefName": "main",
+  "headRefName": "issue/74-unfinished-cleanup",
+  "files": [
+    "docs/completed-change.md"
+  ],
+  "closingIssuesReferences": [],
+  "reviews": [],
+  "checks": [
+    {
+      "name": "make check",
+      "conclusion": "SUCCESS"
+    }
+  ],
+  "localCleanup": {
+    "worktreeRemoved": false,
+    "branchRemoved": false
+  },
+  "defaultBranchContainsMerge": true
+}

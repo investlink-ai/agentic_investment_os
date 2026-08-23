@@ -1,0 +1,45 @@
+{
+  "number": 73,
+  "state": "MERGED",
+  "mergedAt": "2026-08-20T03:00:00Z",
+  "mergeCommit": {
+    "oid": "$WORKSPACE_HEAD"
+  },
+  "baseRefName": "main",
+  "headRefName": "issue/72-add-release-checklist",
+  "closingIssuesReferences": [
+    {
+      "number": 72,
+      "title": "Add a guarded release checklist",
+      "acceptance": "Agents verify the selected repository and release before presenting a publication handoff."
+    }
+  ],
+  "files": [
+    ".agents/skills/release-checklist/SKILL.md",
+    "docs/release-checklist.md"
+  ],
+  "reviews": [
+    {
+      "round": 1,
+      "finding": "The workflow inspected release state without binding the command to the requested repository.",
+      "disposition": "The skill prose added a manual repository check; no behavioral scenario or subject-bound harness observation was added."
+    },
+    {
+      "round": 2,
+      "finding": "The same repository-binding ambiguity remained observable in the review trace.",
+      "disposition": "The final prose clarified the check and the pull request merged."
+    }
+  ],
+  "checks": [
+    {
+      "name": "make check",
+      "conclusion": "SUCCESS"
+    }
+  ],
+  "currentIssuesMatchingReviewTheme": [],
+  "localCleanup": {
+    "worktreeRemoved": true,
+    "branchRemoved": true
+  },
+  "defaultBranchContainsMerge": true
+}

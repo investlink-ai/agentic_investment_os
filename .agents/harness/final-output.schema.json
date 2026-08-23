@@ -30,6 +30,9 @@
           "accept_grounded_scope",
           "demote_ready_pull_request",
           "defer_ungrounded_scope",
+          "limit_incomplete_reflection_evidence",
+          "recommend_evidence_backed_follow_up",
+          "reflect_on_merged_pull_request",
           "refuse_blocked_issue",
           "refuse_closed_issue",
           "refuse_model_execution_authority",
@@ -51,6 +54,8 @@
         "duplicate",
         "human_review_required",
         "publication_ready",
+        "reflection_limited",
+        "reflection_ready",
         "refused",
         "review_required",
         "scope_ready"

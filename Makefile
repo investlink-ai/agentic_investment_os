@@ -24,6 +24,7 @@ harness:
 	test -f .agents/skills/plan-stage-issues/SKILL.md
 	test -f .agents/skills/manage-agent-notes/SKILL.md
 	test -f .agents/skills/prose-standard/SKILL.md
+	test -f .agents/skills/reflect-on-merged-pr/SKILL.md
 	test -f .agents/notes/AGENTS.md
 	test -f .agents/notes/README.md
 	test ! -d .agents/notes/archived
