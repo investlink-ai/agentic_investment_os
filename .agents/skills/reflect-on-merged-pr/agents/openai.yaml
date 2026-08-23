@@ -1,0 +1,4 @@
+interface:
+  display_name: "Reflect on Merged PR"
+  short_description: "Find evidence-backed post-merge follow-ups"
+  default_prompt: "Use $reflect-on-merged-pr to assess a major merged pull request for high-value follow-up work."

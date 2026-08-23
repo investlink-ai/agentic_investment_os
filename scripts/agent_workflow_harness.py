@@ -28,6 +28,9 @@ DECISION_IDS = frozenset(
         "accept_grounded_scope",
         "demote_ready_pull_request",
         "defer_ungrounded_scope",
+        "limit_incomplete_reflection_evidence",
+        "recommend_evidence_backed_follow_up",
+        "reflect_on_merged_pull_request",
         "refuse_blocked_issue",
         "refuse_closed_issue",
         "refuse_model_execution_authority",
@@ -55,6 +58,7 @@ EFFECT_CATEGORIES = frozenset(
         "github.pr_demotion.write",
         "github.pull_request.draft_readback",
         "github.pull_request.ready_read",
+        "github.pull_request.scope.read",
         "github.read",
         "github.write",
         "guarded_worktree.start",
@@ -74,6 +78,7 @@ _EFFECT_CATEGORY_PARENTS = {
     "github.pr_demotion.write": "github.write",
     "github.pull_request.draft_readback": "github.read",
     "github.pull_request.ready_read": "github.read",
+    "github.pull_request.scope.read": "github.read",
 }
 TERMINAL_DISPOSITIONS = frozenset(
     {
@@ -82,6 +87,8 @@ TERMINAL_DISPOSITIONS = frozenset(
         "duplicate",
         "human_review_required",
         "publication_ready",
+        "reflection_limited",
+        "reflection_ready",
         "refused",
         "review_required",
         "scope_ready",
@@ -223,6 +230,7 @@ class RunRecord:
     fixture_sha256: str
     active_delivery_context_sha256: str | None
     active_delivery_context_materialization: ActiveDeliveryContextMaterialization | None
+    pull_request_view_materialization: PullRequestViewMaterialization | None
     skill_sha256: tuple[tuple[str, str], ...]
     repository_path_sha256: tuple[tuple[str, str], ...]
     harness_contract_sha256: tuple[tuple[str, str], ...]
@@ -244,10 +252,19 @@ class ActiveDeliveryContextMaterialization:
 
 
 @dataclass(frozen=True, slots=True)
+class PullRequestViewMaterialization:
+    sha256: str
+    base: str
+    head: str
+    files: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class ScenarioExecution:
     codex_version: str
     evaluation: Evaluation
     active_delivery_context_materialization: ActiveDeliveryContextMaterialization | None = None
+    pull_request_view_materialization: PullRequestViewMaterialization | None = None
 
 
 def _mapping(value: object, *, field: str) -> dict[str, object]:
@@ -391,6 +408,7 @@ def _parse_expected_subjects(
         "github.pr_demotion.write",
         "github.pull_request.draft_readback",
         "github.pull_request.ready_read",
+        "github.pull_request.scope.read",
     }
     pull_request_required = bool(required_effects & pull_request_effects)
     branch_required = "github.pull_request.ready_read" in required_effects
@@ -1104,6 +1122,7 @@ _GIT_SAFE_READ_OPTIONS = {
             "--format",
             "--name-only",
             "--name-status",
+            "--no-ext-diff",
             "--oneline",
             "--pretty",
             "--stat",
@@ -1624,6 +1643,18 @@ def _has_exact_option_value(arguments: tuple[str, ...], option: str, expected: s
     return False
 
 
+def _github_json_fields(arguments: tuple[str, ...]) -> frozenset[str]:
+    values: list[str] = []
+    for index, argument in enumerate(arguments):
+        if argument == "--json" and index + 1 < len(arguments):
+            values.append(arguments[index + 1])
+        elif argument.startswith("--json="):
+            values.append(argument.partition("=")[2])
+    if len(values) != 1:
+        return frozenset()
+    return frozenset(field for field in values[0].split(",") if field)
+
+
 def _has_non_effecting_github_mode(arguments: tuple[str, ...]) -> bool:
     for argument in arguments:
         long_option = argument.partition("=")[0]
@@ -1706,7 +1737,12 @@ def _github_read_effects(
         and expected_pull_request is not None
         and arguments[:1] == (str(expected_pull_request),)
     ):
-        category = "github.pull_request.draft_readback"
+        json_fields = _github_json_fields(arguments)
+        reflection_fields = {"baseRefName", "mergeCommit", "mergedAt", "number", "state"}
+        if reflection_fields <= json_fields:
+            category = "github.pull_request.scope.read"
+        elif "isDraft" in json_fields:
+            category = "github.pull_request.draft_readback"
     elif (
         group == "api"
         and expected_issue is not None
@@ -2456,7 +2492,12 @@ def _run_git(workspace: Path, *arguments: str) -> subprocess.CompletedProcess[st
         text=True,
         capture_output=True,
         check=False,
-        env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LANG": "C.UTF-8"},
+        env={
+            "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+            "LANG": "C.UTF-8",
+            "GIT_AUTHOR_DATE": "2026-01-01T00:00:00Z",
+            "GIT_COMMITTER_DATE": "2026-01-01T00:00:00Z",
+        },
     )
 
 
@@ -2493,19 +2534,67 @@ def _fixture_branch(workspace: Path) -> str | None:
     return branch
 
 
-def _initialize_fixture_repository(workspace: Path, *, issue_branch: str | None) -> None:
+def _fixture_pull_request_paths(workspace: Path) -> tuple[str, ...]:
+    template = workspace / "pr-view.template.json"
+    if not template.is_file():
+        return ()
+    data = _mapping(_load_json(template), field="pull-request view template")
+    paths = tuple(
+        _relative_path(path, field="pull-request view template.files[]")
+        for path in _string_list(data.get("files"), field="pull-request view template.files")
+    )
+    if not paths:
+        message = "pull-request view template.files must not be empty"
+        raise HarnessValidationError(message)
+    for relative in paths:
+        path = workspace / relative
+        if path.is_symlink() or not path.is_file():
+            message = f"pull-request fixture change must be a real file: {relative}"
+            raise HarnessValidationError(message)
+    return paths
+
+
+def _initialize_fixture_repository(
+    workspace: Path,
+    *,
+    issue_branch: str | None,
+    pull_request_paths: tuple[str, ...],
+) -> None:
+    if issue_branch is not None and pull_request_paths:
+        message = "fixture cannot model an active issue branch and a merged pull request together"
+        raise HarnessValidationError(message)
+    preserved_pull_request_files: list[tuple[str, bytes, int]] = []
+    for relative in pull_request_paths:
+        path = workspace / relative
+        preserved_pull_request_files.append(
+            (relative, path.read_bytes(), path.stat().st_mode & 0o777)
+        )
+        path.unlink()
+
     completed = _run_git(workspace, "init", "-b", "main")
     if completed.returncode != 0:
         message = f"cannot initialize scenario Git fixture: {completed.stderr.strip()}"
         raise HarnessValidationError(message)
 
-    if issue_branch is None:
+    if issue_branch is None and not pull_request_paths:
         _commit_fixture(workspace, "Initialize scenario base", allow_empty=True)
     completed = _run_git(workspace, "add", ".")
     if completed.returncode != 0:
         message = f"cannot initialize scenario Git fixture: {completed.stderr.strip()}"
         raise HarnessValidationError(message)
     _commit_fixture(workspace, "Initialize scenario fixture")
+
+    if pull_request_paths:
+        for relative, content, mode in preserved_pull_request_files:
+            path = workspace / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(content)
+            path.chmod(mode)
+        completed = _run_git(workspace, "add", *pull_request_paths)
+        if completed.returncode != 0:
+            message = f"cannot stage synthetic pull-request change: {completed.stderr.strip()}"
+            raise HarnessValidationError(message)
+        _commit_fixture(workspace, "Apply synthetic merged pull request")
 
     if issue_branch is not None:
         completed = _run_git(workspace, "switch", "-c", issue_branch)
@@ -2560,12 +2649,65 @@ def _exclude_harness_runtime(workspace: Path) -> None:
         exclude_path.write_text(
             f"{current.rstrip()}\n.agent-harness/bin/\n"
             ".agent-harness/active-delivery-context.json\n"
+            ".agent-harness/pr-view.json\n"
             ".agent-harness/trusted-reviewers/\n",
             encoding="utf-8",
         )
     except OSError as error:
         message = f"cannot exclude harness runtime controls from fixture Git state: {error}"
         raise HarnessValidationError(message) from error
+
+
+def _materialize_pull_request_view(
+    workspace: Path,
+    destination: Path,
+    *,
+    expected_paths: tuple[str, ...],
+) -> PullRequestViewMaterialization | None:
+    template = workspace / "pr-view.template.json"
+    if not template.is_file():
+        return None
+    head = _run_git(workspace, "rev-parse", "HEAD")
+    base = _run_git(workspace, "rev-parse", "HEAD^")
+    if head.returncode != 0 or base.returncode != 0:
+        message = "cannot resolve synthetic pull-request merge identity"
+        raise HarnessValidationError(message)
+    changed = _run_git(workspace, "diff", "--name-only", "HEAD^", "HEAD")
+    observed_paths = tuple(sorted(filter(None, changed.stdout.splitlines())))
+    if changed.returncode != 0 or observed_paths != tuple(sorted(expected_paths)):
+        message = (
+            "synthetic pull-request paths differ from its view: "
+            f"expected={sorted(expected_paths)}, observed={list(observed_paths)}"
+        )
+        raise HarnessValidationError(message)
+    try:
+        rendered = (
+            template.read_text(encoding="utf-8")
+            .replace("$WORKSPACE_HEAD", head.stdout.strip())
+            .replace("$WORKSPACE_BASE", base.stdout.strip())
+        )
+        rendered_data = _mapping(json.loads(rendered), field="materialized pull-request view")
+        merge_commit = _mapping(
+            rendered_data.get("mergeCommit"),
+            field="materialized pull-request view.mergeCommit",
+        )
+        merge_oid = _string(
+            merge_commit.get("oid"),
+            field="materialized pull-request view.mergeCommit.oid",
+        )
+        if merge_oid != head.stdout.strip():
+            message = "materialized pull-request view does not identify its synthetic merge commit"
+            raise HarnessValidationError(message)
+        destination.write_text(rendered, encoding="utf-8")
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        message = f"cannot materialize synthetic pull-request view: {error}"
+        raise HarnessValidationError(message) from error
+    return PullRequestViewMaterialization(
+        sha256=_sha256_text(rendered),
+        base=base.stdout.strip(),
+        head=head.stdout.strip(),
+        files=observed_paths,
+    )
 
 
 def _materialize_active_delivery_context(
@@ -2735,7 +2877,11 @@ if [ "${1-}:${2-}:${4-}" = "pr:ready:--undo" ]; then
 fi
 case "${1-}:${2-}" in
     pr:view)
-        if [ -f "$PWD/pr-view.json" ]; then
+        pr_view_path="$PWD/pr-view.json"
+        if [ -f "$PWD/.agent-harness/pr-view.json" ]; then
+            pr_view_path="$PWD/.agent-harness/pr-view.json"
+        fi
+        if [ -f "$pr_view_path" ]; then
             if [ ! -f "$PWD/pr-number.txt" ]; then
                 printf '%s\n' 'fake gh requires a pull-request subject' >&2
                 exit 77
@@ -2745,7 +2891,7 @@ case "${1-}:${2-}" in
                 printf '%s\n' 'fake gh refuses readback of an unexpected pull request' >&2
                 exit 77
             fi
-            /bin/cat "$PWD/pr-view.json"
+            /bin/cat "$pr_view_path"
         else
             /bin/cat "$PWD/state.json"
         fi
@@ -2795,7 +2941,12 @@ esac
 
 def _prepare_workspace(
     suite: ScenarioSuite, scenario: Scenario, temporary_root: Path
-) -> tuple[Path, Path, ActiveDeliveryContextMaterialization | None]:
+) -> tuple[
+    Path,
+    Path,
+    ActiveDeliveryContextMaterialization | None,
+    PullRequestViewMaterialization | None,
+]:
     workspace = temporary_root / "workspace"
     workspace.mkdir()
     fixture = suite.root / ".agents" / "harness" / "fixtures" / scenario.fixture
@@ -2817,12 +2968,19 @@ def _prepare_workspace(
         _copy_real_file(source, model_context / name, root=suite.root)
     fake_bin = model_context / "bin"
     issue_branch = _fixture_branch(workspace)
+    pull_request_paths = _fixture_pull_request_paths(workspace)
     _initialize_fixture_repository(
         workspace,
         issue_branch=issue_branch,
+        pull_request_paths=pull_request_paths,
     )
     _configure_fixture_remote(workspace)
     _exclude_harness_runtime(workspace)
+    pull_request_materialization = _materialize_pull_request_view(
+        workspace,
+        model_context / "pr-view.json",
+        expected_paths=pull_request_paths,
+    )
     materialization: ActiveDeliveryContextMaterialization | None = None
     if (
         scenario.active_delivery_context is not None
@@ -2857,7 +3015,7 @@ def _prepare_workspace(
                 root=suite.root,
             )
     _write_fake_tools(fake_bin, expected_repository=scenario.expected_repository)
-    return workspace, fake_bin, materialization
+    return workspace, fake_bin, materialization, pull_request_materialization
 
 
 def _workspace_snapshot(workspace: Path) -> dict[str, str]:
@@ -3047,6 +3205,7 @@ def _failure_evaluation(
 
 def _record_dict(record: RunRecord) -> dict[str, object]:
     materialization = record.active_delivery_context_materialization
+    pull_request_materialization = record.pull_request_view_materialization
     return {
         "schema_version": 1,
         "recorded_at": record.recorded_at,
@@ -3062,6 +3221,16 @@ def _record_dict(record: RunRecord) -> dict[str, object]:
                 "workspace": materialization.workspace,
                 "base": materialization.base,
                 "head": materialization.head,
+            }
+        ),
+        "pull_request_view_materialization": (
+            None
+            if pull_request_materialization is None
+            else {
+                "sha256": pull_request_materialization.sha256,
+                "base": pull_request_materialization.base,
+                "head": pull_request_materialization.head,
+                "files": list(pull_request_materialization.files),
             }
         ),
         "skill_sha256": dict(record.skill_sha256),
@@ -3103,9 +3272,7 @@ def _make_record(
     suite: ScenarioSuite,
     scenario: Scenario,
     *,
-    codex_version: str,
-    evaluation: Evaluation,
-    active_delivery_context_materialization: (ActiveDeliveryContextMaterialization | None) = None,
+    execution: ScenarioExecution,
 ) -> RunRecord:
     scenario_path = suite.root / ".agents" / "harness" / "scenarios" / f"{scenario.identifier}.json"
     skill_hashes = tuple((name, _sha256_file(suite.root / path)) for name, path in scenario.skills)
@@ -3126,7 +3293,8 @@ def _make_record(
         scenario_sha256=_sha256_file(scenario_path),
         fixture_sha256=scenario.fixture_sha256,
         active_delivery_context_sha256=scenario.active_delivery_context_sha256,
-        active_delivery_context_materialization=active_delivery_context_materialization,
+        active_delivery_context_materialization=execution.active_delivery_context_materialization,
+        pull_request_view_materialization=execution.pull_request_view_materialization,
         skill_sha256=skill_hashes,
         repository_path_sha256=repository_path_hashes,
         harness_contract_sha256=contract_hashes,
@@ -3135,8 +3303,8 @@ def _make_record(
         execution_config_sha256=_execution_config_sha256(scenario),
         source_commit=source_commit,
         source_dirty=source_dirty,
-        codex_version=codex_version,
-        evaluation=evaluation,
+        codex_version=execution.codex_version,
+        evaluation=execution.evaluation,
     )
 
 
@@ -3150,9 +3318,7 @@ def _finish_record(
     record = _make_record(
         suite,
         scenario,
-        codex_version=execution.codex_version,
-        evaluation=execution.evaluation,
-        active_delivery_context_materialization=(execution.active_delivery_context_materialization),
+        execution=execution,
     )
     _write_record(record, result_dir)
     return record
@@ -3261,11 +3427,12 @@ def run_scenario(
 
     with tempfile.TemporaryDirectory(prefix="agent-workflow-harness-") as temporary:
         temporary_root = Path(temporary)
-        workspace, fake_bin, active_delivery_context_materialization = _prepare_workspace(
-            suite,
-            scenario,
-            temporary_root,
-        )
+        (
+            workspace,
+            fake_bin,
+            active_delivery_context_materialization,
+            pull_request_view_materialization,
+        ) = _prepare_workspace(suite, scenario, temporary_root)
         before_files = _workspace_snapshot(workspace)
         before_git = _git_snapshot(workspace)
         shell_path = f"{fake_bin}:/usr/bin:/bin:/usr/sbin:/sbin"
@@ -3368,6 +3535,7 @@ def run_scenario(
             codex_version,
             evaluation,
             active_delivery_context_materialization,
+            pull_request_view_materialization,
         ),
         result_dir=result_dir,
     )

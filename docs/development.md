@@ -84,6 +84,19 @@ Git's refusal to remove dirty work is a safety boundary. Do not automate forced 
 reject commits outside linked issue branches and direct pushes to `main`; repository rules must
 independently protect `main` because local hooks are not remote enforcement.
 
+## Post-merge reflection
+
+After a materially significant pull request merges and its authorized clean-worktree cleanup finishes,
+an operator may apply the `reflect-on-merged-pr` skill. It reconstructs the merged issue, diff, review,
+checks, current authority, Agent Notes, and existing issues, then returns only evidence-backed
+architecture, operational, verification, agent-workflow, or domain-interface follow-up dispositions.
+Materiality follows authority, risk, recurring cost, and assurance impact rather than diff size.
+
+Reflection is optional and read-only. It may conclude that no follow-up is warranted, and it never
+performs cleanup, repeats pull-request acceptance, creates repository artifacts, or publishes an issue.
+Observable incomplete cleanup limits the reflection instead of authorizing or assuming cleanup. Issue
+creation, capability-stage planning, and Agent Note changes require their own explicit workflows.
+
 ## Daily workflow
 
 Use `deliver-issue` as the agent entrypoint for a ready issue. It selects an implementation path from

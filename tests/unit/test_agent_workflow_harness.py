@@ -16,6 +16,7 @@ from scripts.agent_workflow_harness import (
 
 _EXPECTED_TIMEOUT_SECONDS = 180
 _EXPECTED_ISSUE_NUMBER = 40
+_EXPECTED_PULL_REQUEST_NUMBER = 53
 _EXPECTED_REPOSITORY = "investlink-ai/fixture"
 
 
@@ -122,6 +123,19 @@ def test_scenario_schema_rejects_unbound_required_repository_observation() -> No
 
     with pytest.raises(HarnessValidationError, match="expected_repository"):
         parse_scenario(raw, source="scenario.json")
+
+
+def test_scenario_schema_binds_required_pull_request_scope_observation() -> None:
+    raw = _scenario_data()
+    raw["permitted_effects"] = ["github.read", "github.pull_request.scope.read"]
+    raw["required_effects"] = ["github.pull_request.scope.read"]
+    raw["expected_pull_request_number"] = 53
+    raw["expected_repository"] = _EXPECTED_REPOSITORY
+
+    scenario = parse_scenario(raw, source="scenario.json")
+
+    assert scenario.expected_pull_request_number == _EXPECTED_PULL_REQUEST_NUMBER
+    assert scenario.expected_repository == _EXPECTED_REPOSITORY
 
 
 @pytest.mark.parametrize(
@@ -407,6 +421,7 @@ def test_trace_evaluation_rejects_redirected_required_effect_evidence(
         "git status --short",
         "git status --porcelain=v1",
         "git diff --stat",
+        "git show --format=fuller --no-ext-diff HEAD",
         "git ls-files -o",
         "git remote get-url show",
         "command -v gh",
@@ -1220,6 +1235,92 @@ def test_trace_evaluation_does_not_credit_wrong_repository_demotion() -> None:
     assert evaluation.outcome is Outcome.FAILED
     assert evaluation.failure_classification is FailureClassification.CONTRACT_MISMATCH
     assert "github.write" in {effect.category for effect in evaluation.observed_effects}
+
+
+def test_trace_evaluation_observes_exact_pull_request_scope_read() -> None:
+    raw = _scenario_data()
+    raw["permitted_effects"] = [
+        "repository.read",
+        "github.read",
+        "github.pull_request.scope.read",
+    ]
+    raw["required_effects"] = ["github.pull_request.scope.read"]
+    raw["forbidden_effects"] = ["filesystem.write", "git.write", "github.write"]
+    raw["expected_pull_request_number"] = 53
+    raw["expected_repository"] = _EXPECTED_REPOSITORY
+    scenario = parse_scenario(raw, source="scenario.json")
+    trace = _trace(
+        {"type": "thread.started", "thread_id": "thread-1"},
+        {"type": "turn.started"},
+        {
+            "type": "item.completed",
+            "item": {
+                "type": "command_execution",
+                "command": (
+                    "gh pr view 53 --repo investlink-ai/fixture "
+                    "--json number,state,mergedAt,mergeCommit,baseRefName"
+                ),
+                "status": "completed",
+                "exit_code": 0,
+            },
+        },
+        {"type": "turn.completed", "usage": {}},
+    )
+
+    evaluation = evaluate_trace(scenario, trace)
+
+    assert "github.pull_request.scope.read" in {
+        effect.category for effect in evaluation.observed_effects
+    }
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        (
+            "gh pr view 54 --repo investlink-ai/fixture "
+            "--json number,state,mergedAt,mergeCommit,baseRefName"
+        ),
+        ("gh pr view 53 --repo hostile/other --json number,state,mergedAt,mergeCommit,baseRefName"),
+        "gh pr view 53 --repo investlink-ai/fixture --json title",
+        "gh pr view 53 --repo investlink-ai/fixture --json number,state,mergedAt,mergeCommit",
+        "gh pr view 53 --repo investlink-ai/fixture --json number,state,mergedAt,baseRefName",
+    ],
+)
+def test_trace_evaluation_does_not_credit_mismatched_pull_request_scope(
+    command: str,
+) -> None:
+    raw = _scenario_data()
+    raw["permitted_effects"] = [
+        "repository.read",
+        "github.read",
+        "github.pull_request.scope.read",
+    ]
+    raw["required_effects"] = ["github.pull_request.scope.read"]
+    raw["forbidden_effects"] = ["filesystem.write", "git.write", "github.write"]
+    raw["expected_pull_request_number"] = 53
+    raw["expected_repository"] = _EXPECTED_REPOSITORY
+    scenario = parse_scenario(raw, source="scenario.json")
+    trace = _trace(
+        {"type": "thread.started", "thread_id": "thread-1"},
+        {"type": "turn.started"},
+        {
+            "type": "item.completed",
+            "item": {
+                "type": "command_execution",
+                "command": command,
+                "status": "completed",
+                "exit_code": 0,
+            },
+        },
+        {"type": "turn.completed", "usage": {}},
+    )
+
+    evaluation = evaluate_trace(scenario, trace)
+
+    assert "github.pull_request.scope.read" not in {
+        effect.category for effect in evaluation.observed_effects
+    }
 
 
 def test_trace_evaluation_requires_ordered_same_pull_request_demotion() -> None:

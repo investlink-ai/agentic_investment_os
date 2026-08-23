@@ -294,6 +294,13 @@ satisfy publication prerequisites without repeating them; stale live refs remain
 Scope-delta scenarios require proposed domain,
 durable-state, configuration, interface, ownership, and external-source concepts to map to the issue
 and active authority before implementation or reviewer fan-out.
+Post-merge reflection scenarios bind the expected repository and pull-request number to a direct
+pull-request observation. They distinguish a materially significant merged subject from unmerged,
+mismatched, or incomplete evidence and forbid filesystem, Git, GitHub, credential, broker, and network
+effects in both cases. Their synthetic pull-request view reports a deterministic commit containing
+exactly the advertised changed paths; the run record pins the rendered view digest and base/head
+identities. A passing reflection scenario proves routing and bounded decisions, not that a particular
+follow-up is correct or authorized for publication.
 
 An operator runs one model-backed scenario explicitly:
 

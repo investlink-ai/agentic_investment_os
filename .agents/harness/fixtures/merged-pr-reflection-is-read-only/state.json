@@ -1,0 +1,13 @@
+{
+  "_fixture": {
+    "source_type": "synthetic agent-workflow boundary state",
+    "synthetic": true,
+    "timestamps": "fixed synthetic UTC values",
+    "entitlement": "not applicable",
+    "redactions": "none"
+  },
+  "github": {
+    "authenticated": true,
+    "repository": "investlink-ai/fixture"
+  }
+}
