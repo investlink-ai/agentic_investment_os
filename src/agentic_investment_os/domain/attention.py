@@ -1021,17 +1021,11 @@ class AttentionArtifact:
 
 
 def attention_history_fingerprint(history: tuple[AttentionArtifact, ...]) -> str:
-    """Bind the ordered durable attention records consumed by one selection."""
+    """Bind the ordered deterministic attention identities consumed by one selection."""
     return _content_hash(
         {
             "schema_version": _SCHEMA_VERSION,
-            "history": [
-                {
-                    "artifact_id": artifact.artifact_id,
-                    "content_hash": artifact.content_hash,
-                }
-                for artifact in history
-            ],
+            "history": [artifact.artifact_id for artifact in history],
         }
     )
 

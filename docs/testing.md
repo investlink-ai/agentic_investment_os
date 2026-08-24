@@ -340,7 +340,8 @@ evidence. A scenario becomes mandatory when its owning behavior is implemented.
   produces a typed durable refusal with no attention event. Resuming an older partial cycle after a
   later selection has published likewise refuses rather than retroactively changing the append-only
   transition chain. A changing-clock interruption test proves retry preserves deterministic selection
-  identity while the envelope content hash records the later truthful publication time.
+  identity, including the next cycle's history-derived identity, while each envelope content hash
+  records its truthful publication time.
 - Model output containing a weight, order, unsupported citation, prompt injection, invalid enum,
   inconsistent horizon, missing Skeptic, timeout, quota exhaustion, or oversized result is rejected or
   safely normalized only as its schema explicitly permits.

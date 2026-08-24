@@ -597,6 +597,15 @@ def test_publication_time_changes_content_but_not_selection_identity() -> None:
     assert later.content_hash != first.content_hash
     assert later.available_at != first.available_at
 
+    next_inputs = _inputs(date(2026, 8, 25), inputs.subjects)
+    after_first = select_attention(_policy(), next_inputs, (first,), available_at=_CUTOFF)
+    after_later = select_attention(_policy(), next_inputs, (later,), available_at=_CUTOFF)
+
+    assert after_later.history_fingerprint == after_first.history_fingerprint
+    assert after_later.artifact_id == after_first.artifact_id
+    assert after_later.candidate_cards == after_first.candidate_cards
+    assert after_later.resource_accounting == after_first.resource_accounting
+
 
 def test_selection_rejects_duplicate_or_future_history_before_publishing() -> None:
     subjects = tuple(_subject(index) for index in range(5))

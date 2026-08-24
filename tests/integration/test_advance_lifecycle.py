@@ -1563,20 +1563,22 @@ def test_attention_retry_keeps_selection_identity_when_publication_time_changes(
     later_root = copytree(state_root, tmp_path / "later-publication")
     first_time = RECORDED_AT
     later_time = RECORDED_AT + timedelta(seconds=1)
-    first = replace(
+    first_capability = replace(
         capability,
         ledger=SQLiteLifecycleLedger(first_root / "lifecycle.sqlite3"),
         clock=FixedClock(first_time),
-    )(
+    )
+    later_capability = replace(
+        capability,
+        ledger=SQLiteLifecycleLedger(later_root / "lifecycle.sqlite3"),
+        clock=FixedClock(later_time),
+    )
+    first = first_capability(
         cycle=cycle,
         mode="champion",
         idempotency_key="changing-clock-retry",
     )
-    later = replace(
-        capability,
-        ledger=SQLiteLifecycleLedger(later_root / "lifecycle.sqlite3"),
-        clock=FixedClock(later_time),
-    )(
+    later = later_capability(
         cycle=cycle,
         mode="champion",
         idempotency_key="changing-clock-retry",
@@ -1594,6 +1596,30 @@ def test_attention_retry_keeps_selection_identity_when_publication_time_changes(
     assert later.attention_artifact.dossier_requests == first.attention_artifact.dossier_requests
     assert (
         later.attention_artifact.resource_accounting == first.attention_artifact.resource_accounting
+    )
+
+    after_first = first_capability(
+        cycle=_cycle_payload("2026-08-22"),
+        mode="champion",
+        idempotency_key="after-changing-clock-retry",
+    )
+    after_later = later_capability(
+        cycle=_cycle_payload("2026-08-22"),
+        mode="champion",
+        idempotency_key="after-changing-clock-retry",
+    )
+
+    assert after_first.attention_artifact is not None
+    assert after_later.attention_artifact is not None
+    assert after_later.attention_artifact.history_fingerprint == (
+        after_first.attention_artifact.history_fingerprint
+    )
+    assert after_later.attention_artifact.artifact_id == after_first.attention_artifact.artifact_id
+    assert after_later.attention_artifact.candidate_cards == (
+        after_first.attention_artifact.candidate_cards
+    )
+    assert after_later.attention_artifact.resource_accounting == (
+        after_first.attention_artifact.resource_accounting
     )
 
 
