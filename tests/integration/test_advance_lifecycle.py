@@ -1044,6 +1044,11 @@ class _LifecycleReferenceModel:
             return self._failed(AdvanceFailureReason.IDEMPOTENCY_KEY_CONFLICT, cycle)
         if current_reason is not None and reason is not current_reason:
             return self._failed(AdvanceFailureReason.IDEMPOTENCY_KEY_CONFLICT, cycle)
+        if reason is AdvanceFailureReason.ATTENTION_SELECTION_FAILED:
+            stream = self.streams.get(key)
+            if stream is None:  # pragma: no cover - reference-model invariant.
+                raise AssertionError
+            return self._attention_failed(stream)
         return self._failed(reason, cycle)
 
     def _advance_valid(
@@ -1055,6 +1060,14 @@ class _LifecycleReferenceModel:
         if stream is not None:
             if stream.session != session:
                 return self._record_idempotency_conflict(key, stream, session)
+            if stream.events < PINNED_EVENT_COUNT and any(
+                candidate.events == PINNED_EVENT_COUNT and candidate.session > session
+                for candidate in self.streams.values()
+            ):
+                cycle = MarketSession(date.fromisoformat(session))
+                stream.events = PINNED_EVENT_COUNT - 1
+                self.refusals[key] = AdvanceFailureReason.ATTENTION_SELECTION_FAILED, cycle
+                return self._attention_failed(stream)
             recovery = (
                 AdvanceRecovery.PREVIOUSLY_COMPLETED
                 if stream.events == PINNED_EVENT_COUNT
@@ -1114,6 +1127,22 @@ class _LifecycleReferenceModel:
         cycle: MarketSession | None = None,
     ) -> AdvanceReceipt:
         return AdvanceReceipt.failed_closed(reason, cycle=cycle)
+
+    @staticmethod
+    def _attention_failed(stream: _ReferenceStream) -> AdvanceReceipt:
+        identity = stream.pinned_run_identity
+        checkpoint = materialized_evidence_capture_checkpoint(
+            run_id=identity.run_id,
+            universe_snapshot_id=stream.universe_snapshot_id,
+            cutoff=identity.evidence_cutoff,
+            data_regime=identity.data_regime,
+        )
+        return AdvanceReceipt.failed_closed(
+            AdvanceFailureReason.ATTENTION_SELECTION_FAILED,
+            cycle=identity.cycle,
+            evidence_capture=checkpoint,
+            attention_refusal_reason=AttentionRefusalReason.CONTRADICTORY_EVIDENCE,
+        )
 
     @staticmethod
     def _advanced(stream: _ReferenceStream, recovery: AdvanceRecovery) -> AdvanceReceipt:
@@ -1804,6 +1833,70 @@ class LifecycleStateMachine(RuleBasedStateMachine):
 
 
 TestLifecycleStateMachine = LifecycleStateMachine.TestCase
+
+
+def test_resuming_an_older_partial_cycle_after_a_later_selection_fails_closed(
+    tmp_path: Path,
+) -> None:
+    state_root = tmp_path / "runtime"
+    capability = _configure(state_root)
+    ledger = capability.ledger
+    assert isinstance(ledger, SQLiteLifecycleLedger)
+    interrupted = Advance(
+        ledger=InterruptingLedger(ledger, "start", "after"),
+        configuration_version=capability.configuration_version,
+        configuration_hash=capability.configuration_hash,
+        universe_source=capability.universe_source,
+        enabled_asset_classes=capability.enabled_asset_classes,
+        universe_policy=capability.universe_policy,
+        evidence_capture=capability.evidence_capture,
+        attention_policy=capability.attention_policy,
+        attention_inputs=capability.attention_inputs,
+        clock=capability.clock,
+    )
+
+    with pytest.raises(SimulatedInterruptionError):
+        interrupted(
+            cycle=_cycle_payload("2026-09-02"),
+            mode="champion",
+            idempotency_key="older-partial",
+        )
+    later = capability(
+        cycle=_cycle_payload("2026-09-03"),
+        mode="champion",
+        idempotency_key="later-complete",
+    )
+    refused = capability(
+        cycle=_cycle_payload("2026-09-02"),
+        mode="champion",
+        idempotency_key="older-partial",
+    )
+    replay = _configure(state_root)(
+        cycle=_cycle_payload("2026-09-02"),
+        mode="champion",
+        idempotency_key="older-partial",
+    )
+
+    assert later.disposition is AdvanceDisposition.ADVANCED
+    assert refused.disposition is AdvanceDisposition.FAILED_CLOSED
+    assert refused.failure_reason is AdvanceFailureReason.ATTENTION_SELECTION_FAILED
+    assert refused.attention_refusal_reason is AttentionRefusalReason.CONTRADICTORY_EVIDENCE
+    assert refused.evidence_artifact_ids
+    assert replay == refused
+    with sqlite3.connect(state_root / "lifecycle.sqlite3") as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM lifecycle_events WHERE idempotency_key = ?",
+            ("older-partial",),
+        ).fetchone() == (5,)
+        assert connection.execute(
+            """SELECT COUNT(*) FROM lifecycle_events
+            WHERE idempotency_key = ? AND event_kind = 'attention_selected'""",
+            ("older-partial",),
+        ).fetchone() == (0,)
+        assert connection.execute(
+            "SELECT COUNT(*) FROM advance_refusals WHERE idempotency_key = ?",
+            ("older-partial",),
+        ).fetchone() == (1,)
 
 
 def test_conflicting_valid_idempotency_reuse_fails_without_shadowing_completed_work(
@@ -2588,6 +2681,7 @@ def test_lifecycle_ledger_appends_generic_checkpoint_records(tmp_path: Path) -> 
                     snapshot,
                     capture,
                     decision.attention_history,
+                    available_at=now,
                 ),
             )
             decision = ledger.advance_step(command, attempt, now)
@@ -2607,7 +2701,7 @@ def test_lifecycle_ledger_appends_generic_checkpoint_records(tmp_path: Path) -> 
         AdvanceRecovery.FRESH,
         now,
         capture,
-        attention_artifact(identity, snapshot, capture),
+        attention_artifact(identity, snapshot, capture, available_at=now),
     )
     assert ledger.advance_step(command, AdvanceAttempt(), now) == AdvanceReceipt.advanced(
         identity,
@@ -2615,7 +2709,7 @@ def test_lifecycle_ledger_appends_generic_checkpoint_records(tmp_path: Path) -> 
         AdvanceRecovery.PREVIOUSLY_COMPLETED,
         now,
         capture,
-        attention_artifact(identity, snapshot, capture),
+        attention_artifact(identity, snapshot, capture, available_at=now),
     )
 
     conflicting_identity = pinned_run_identity(

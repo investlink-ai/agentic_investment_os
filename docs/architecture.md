@@ -620,15 +620,25 @@ refusal prevents the final event and appends an
 `evidence_capture_failed` terminal refusal without erasing valid observations captured in the same
 attempt.
 
-`SelectAttention` loads only the artifact identifiers named by the completed evidence checkpoint and
-revalidates their immutable content, source bindings, Data Regime, availability, universe identity,
-and cutoff before deriving typed local features. The versioned attention policy fixes per-cycle and
-weekly capacity plus a deterministic exploration seed. Selection advances an active subject by at
-most one funnel state, places holding refreshes outside new-research capacity, and records exact card,
-Dossier-request, refresh, weekly exploration, model-token, model-turn, and adapter-quota counts. The
-artifact identifier hashes every material input and output, so subject ordering, retry, interruption,
-and reopen reproduce the same result. Missing, stale, contradictory, corrupt, or inconsistent history
-appends `attention_selection_failed` with a typed reason and publishes no Attention Artifact.
+`SelectAttention` validates the complete evidence checkpoint before loading or deriving any attention
+input. It loads only the artifact identifiers named by that checkpoint and revalidates their immutable
+content, source bindings, Data Regime, availability, universe identity, and cutoff. An unavailable
+optional source remains an explicit missing feature rather than becoming a known-negative signal. The
+versioned attention policy fixes per-cycle and weekly capacity plus a deterministic exploration seed.
+Selection advances an active subject by at most one funnel state, emits an explicit terminal card when
+a previously active subject becomes ineligible, places holding refreshes outside new-research capacity,
+and records exact card, Dossier-request, refresh, weekly exploration, model-token, model-turn, and
+adapter-quota counts.
+
+The Attention Artifact carries the complete policy preimage, the ordered history fingerprint used for
+state transitions, and the exact observed features supporting each card reason. Its `relevant_at` is
+the evidence cutoff, while `available_at` is the lifecycle event time at which the selection became
+observable. The artifact identifier hashes every material input and output, so subject ordering,
+retry, interruption, and reopen reproduce the same result. History reconstruction checks every
+artifact against its preceding chain and refuses an older interrupted cycle after a later cycle has
+already published; inserting that cycle retroactively would rewrite the later transition context.
+Missing, stale, contradictory, corrupt, or inconsistent evidence or history appends
+`attention_selection_failed` with a typed reason and publishes no Attention Artifact.
 
 SQLite is the initial event and checkpoint store, while the filesystem holds content-addressed
 artifacts and atomic publications. Runtime state uses ignored, configurable roots such as `var/`,

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
+from enum import StrEnum
 from typing import TYPE_CHECKING
 
 from agentic_investment_os.domain.attention import (
@@ -15,7 +16,11 @@ from agentic_investment_os.domain.attention import (
 )
 from agentic_investment_os.domain.identity import MarketSession, canonical_instrument_bytes
 from agentic_investment_os.domain.temporal import InvalidUtcInstantError, UtcInstant
-from agentic_investment_os.evidence.capture import EvidenceKind
+from agentic_investment_os.evidence.capture import (
+    CaptureIntent,
+    EvidenceCaptureStatus,
+    EvidenceKind,
+)
 
 if TYPE_CHECKING:
     from agentic_investment_os.domain.universe import UniverseSnapshot, UniverseSubject
@@ -24,6 +29,14 @@ if TYPE_CHECKING:
 __all__ = ("BuildAttentionInputs",)
 
 _MINIMUM_MARKET_OBSERVATIONS_FOR_CHANGE = 2
+
+
+class _MarketChange(StrEnum):
+    CHANGED = "changed"
+    UNCHANGED = "unchanged"
+    INSUFFICIENT = "insufficient"
+    CORRUPT = "corrupt"
+
 
 _UNAVAILABLE_FEATURES = frozenset(
     {
@@ -43,7 +56,7 @@ class BuildAttentionInputs:
 
     vault: EvidenceVault
 
-    def __call__(  # noqa: PLR0913 - every checkpoint fact remains explicit.
+    def __call__(  # noqa: PLR0911,PLR0913 - fail closed at each checkpoint seam.
         self,
         *,
         run_id: str,
@@ -54,6 +67,37 @@ class BuildAttentionInputs:
         evidence_policy_id: str,
         evidence_artifact_ids: tuple[str, ...],
     ) -> AttentionInputs | AttentionRefusalReason:
+        policy = self.vault.load_policy(evidence_policy_id)
+        if policy.policy_id != evidence_policy_id or policy.data_regime != data_regime:
+            return AttentionRefusalReason.CONTRADICTORY_EVIDENCE
+        outcomes = []
+        for request in policy.requests:
+            outcome = self.vault.load_outcome(
+                CaptureIntent.create(
+                    run_id=run_id,
+                    universe_snapshot_id=universe_snapshot.snapshot_id,
+                    cutoff=cutoff,
+                    data_regime=data_regime,
+                    request=request,
+                )
+            )
+            if outcome is None:
+                return AttentionRefusalReason.CORRUPT_EVIDENCE
+            outcomes.append((request, outcome))
+        captured_ids = tuple(
+            sorted(
+                outcome.artifact.artifact_id
+                for _, outcome in outcomes
+                if outcome.status is EvidenceCaptureStatus.CAPTURED and outcome.artifact is not None
+            )
+        )
+        if captured_ids != evidence_artifact_ids:
+            return AttentionRefusalReason.CONTRADICTORY_EVIDENCE
+        unavailable_kinds = frozenset(
+            request.kind
+            for request, outcome in outcomes
+            if outcome.status is not EvidenceCaptureStatus.CAPTURED
+        )
         records = self.vault.stored_records_for_artifacts(evidence_artifact_ids)
         by_id = {record.artifact.artifact_id: record for record in records}
         if any(artifact_id not in by_id for artifact_id in evidence_artifact_ids):
@@ -72,13 +116,15 @@ class BuildAttentionInputs:
             or universe_snapshot.inputs.data_regime != data_regime
         ):
             return AttentionRefusalReason.CONTRADICTORY_EVIDENCE
-        subjects = tuple(
-            _subject_input(subject, selected)
-            for subject in sorted(
-                universe_snapshot.subjects,
-                key=lambda item: canonical_instrument_bytes(item.identity),
-            )
-        )
+        subjects: list[AttentionSubjectInput] = []
+        for subject in sorted(
+            universe_snapshot.attention_subjects,
+            key=lambda item: canonical_instrument_bytes(item.identity),
+        ):
+            subject_input = _subject_input(subject, selected, unavailable_kinds)
+            if isinstance(subject_input, AttentionRefusalReason):
+                return subject_input
+            subjects.append(subject_input)
         return AttentionInputs(
             run_id=run_id,
             cycle=cycle,
@@ -87,14 +133,15 @@ class BuildAttentionInputs:
             data_regime=data_regime,
             evidence_policy_id=evidence_policy_id,
             evidence_artifact_ids=evidence_artifact_ids,
-            subjects=subjects,
+            subjects=tuple(subjects),
         )
 
 
 def _subject_input(
     subject: UniverseSubject,
     records: tuple[EvidenceStoredRecord, ...],
-) -> AttentionSubjectInput:
+    unavailable_kinds: frozenset[EvidenceKind],
+) -> AttentionSubjectInput | AttentionRefusalReason:
     identity_key = canonical_instrument_bytes(subject.identity)
     relevant = tuple(
         record
@@ -116,9 +163,11 @@ def _subject_input(
         record for record in relevant if record.artifact.kind is EvidenceKind.MARKET
     )
     market_change = _has_market_change(subject, market_records)
-    if market_change is None:
+    if market_change is _MarketChange.CORRUPT:
+        return AttentionRefusalReason.CORRUPT_EVIDENCE
+    if market_change is _MarketChange.INSUFFICIENT:
         missing.add(AttentionFeature.PRICE_CHANGE)
-    elif market_change:
+    elif market_change is _MarketChange.CHANGED:
         observed.add(AttentionFeature.PRICE_CHANGE)
     if any(
         record.artifact.kind in (EvidenceKind.NEWS, EvidenceKind.ISSUER_RELEASE)
@@ -127,6 +176,20 @@ def _subject_input(
         observed.add(AttentionFeature.NEWS_ARRIVAL)
     if any(record.artifact.kind is EvidenceKind.SEC_FILING for record in relevant):
         observed.add(AttentionFeature.FILING_ARRIVAL)
+    if (
+        EvidenceKind.SEC_FILING in unavailable_kinds
+        and AttentionFeature.FILING_ARRIVAL not in observed
+    ):
+        missing.add(AttentionFeature.FILING_ARRIVAL)
+    if (
+        unavailable_kinds
+        & {
+            EvidenceKind.NEWS,
+            EvidenceKind.ISSUER_RELEASE,
+        }
+        and AttentionFeature.NEWS_ARRIVAL not in observed
+    ):
+        missing.add(AttentionFeature.NEWS_ARRIVAL)
     return AttentionSubjectInput(
         subject=subject,
         observed_features=tuple(sorted(observed, key=lambda feature: feature.value)),
@@ -135,32 +198,36 @@ def _subject_input(
     )
 
 
-def _has_market_change(
+def _has_market_change(  # noqa: PLR0911 - distinguish each corrupt market shape.
     subject: UniverseSubject,
     records: tuple[EvidenceStoredRecord, ...],
-) -> bool | None:
+) -> _MarketChange:
     observations: list[tuple[UtcInstant, Decimal]] = []
     for record in records:
         parsed = _parse_json(record.content)
         if parsed is None:
-            return None
+            return _MarketChange.CORRUPT
         bars = parsed.get("bars")
         if type(bars) is not list:
-            return None
+            return _MarketChange.CORRUPT
         for item in bars:
             bar = _string_mapping(item, {"asset_id", "close", "timestamp"})
-            if bar is None or bar["asset_id"] != subject.identity.catalog_id:
+            if bar is None:
+                return _MarketChange.CORRUPT
+            if bar["asset_id"] != subject.identity.catalog_id:
                 continue
             try:
                 timestamp = UtcInstant.parse(bar["timestamp"])
                 close = Decimal(bar["close"])
             except (InvalidOperation, InvalidUtcInstantError):
-                return None
+                return _MarketChange.CORRUPT
+            if not close.is_finite():
+                return _MarketChange.CORRUPT
             observations.append((timestamp, close))
     if len(observations) < _MINIMUM_MARKET_OBSERVATIONS_FOR_CHANGE:
-        return None
+        return _MarketChange.INSUFFICIENT
     ordered = sorted(observations, key=lambda item: item[0].value)
-    return ordered[0][1] != ordered[-1][1]
+    return _MarketChange.CHANGED if ordered[0][1] != ordered[-1][1] else _MarketChange.UNCHANGED
 
 
 def _parse_json(content: bytes) -> dict[str, object] | None:

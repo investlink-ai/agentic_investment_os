@@ -34,9 +34,11 @@ not implementation structure, field schemas, or configurable values.
 - **Attention Subject:** a company, ETF, market theme, or held position moving through the research
   attention funnel.
 - **Candidate Card:** a compact, locally produced explanation of why an Attention Subject does or does
-  not merit expensive research.
+  not merit expensive research, binding each reason to the exact locally observed features and missing
+  evidence that support it.
 - **Attention Artifact:** the immutable result of one zero-token attention scan, binding Candidate
-  Cards, due-holding refreshes, bounded Dossier requests, and resource accounting to pinned inputs.
+  Cards, due-holding refreshes, bounded Dossier requests, resource accounting, policy, and prior
+  transition history to pinned inputs.
 - **Dossier:** a bounded evidence bundle for one Attention Subject, including contradicting and missing
   evidence.
 - **Thesis:** a causal, horizon-bound investment argument containing the apparent expectation, variant

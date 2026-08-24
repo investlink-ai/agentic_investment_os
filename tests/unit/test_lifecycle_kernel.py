@@ -249,7 +249,10 @@ def test_partial_progress_refuses_attention_access_before_its_checkpoint() -> No
         progress.require_attention_artifact()
 
 
-@pytest.mark.parametrize("invalid_selection", ["wrong_type", "changed_artifact"])
+@pytest.mark.parametrize(
+    "invalid_selection",
+    ["wrong_type", "changed_artifact", "changed_cutoff", "changed_regime", "changed_available"],
+)
 def test_kernel_refuses_invalid_attention_selection_at_publication(
     invalid_selection: str,
 ) -> None:
@@ -267,8 +270,25 @@ def test_kernel_refuses_invalid_attention_selection_at_publication(
     )
     if invalid_selection == "wrong_type":
         selection = cast("AttentionArtifact", "invalid")
-    else:
+    elif invalid_selection == "changed_artifact":
         object.__setattr__(artifact, "run_id", "f" * SHA256_HEX_LENGTH)
+        selection = artifact
+    elif invalid_selection == "changed_cutoff":
+        object.__setattr__(
+            artifact,
+            "cutoff",
+            UtcInstant(artifact.cutoff.value + timedelta(seconds=1)),
+        )
+        selection = artifact
+    elif invalid_selection == "changed_regime":
+        object.__setattr__(artifact, "data_regime", "alpaca:iex")
+        selection = artifact
+    else:
+        object.__setattr__(
+            artifact,
+            "available_at",
+            UtcInstant(artifact.available_at.value - timedelta(seconds=1)),
+        )
         selection = artifact
     invalid_command = replace(
         command,
@@ -345,6 +365,25 @@ def test_reconstruction_rejects_attention_that_changes_pinned_facts() -> None:
         match="lifecycle stream changed pinned request facts",
     ):
         reconstruct_lifecycle(history)
+
+
+def test_reconstruction_rejects_a_discontinuous_attention_history_chain() -> None:
+    first_history, _ = _complete(
+        LifecycleHistory(),
+        _command(session="2026-08-21", key="first-attention-cycle"),
+    )
+    second_history, _ = _complete(
+        LifecycleHistory(),
+        _command(session="2026-08-22", key="second-attention-cycle"),
+    )
+
+    with pytest.raises(
+        InvalidLifecycleStateError,
+        match="lifecycle stream changed pinned request facts",
+    ):
+        reconstruct_lifecycle(
+            LifecycleHistory(events=(*first_history.events, *second_history.events))
+        )
 
 
 @pytest.mark.parametrize(

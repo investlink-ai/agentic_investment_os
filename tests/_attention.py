@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import timedelta
 from typing import TYPE_CHECKING, cast
 
 from agentic_investment_os.domain.attention import (
@@ -10,6 +11,7 @@ from agentic_investment_os.domain.attention import (
     AttentionSubjectInput,
     select_attention,
 )
+from agentic_investment_os.domain.temporal import UtcInstant
 from tests._universe import attention_policy
 
 if TYPE_CHECKING:
@@ -18,7 +20,6 @@ if TYPE_CHECKING:
         EvidenceCaptureCheckpoint,
         PinnedRunIdentity,
     )
-    from agentic_investment_os.domain.temporal import UtcInstant
     from agentic_investment_os.domain.universe import UniverseSnapshot
 
 
@@ -93,10 +94,17 @@ def attention_artifact(
     snapshot: UniverseSnapshot,
     evidence: EvidenceCaptureCheckpoint,
     history: tuple[AttentionArtifact, ...] = (),
+    *,
+    available_at: UtcInstant | None = None,
 ) -> AttentionArtifact:
     """Select the baseline artifact bound to one lifecycle test checkpoint."""
     return select_attention(
         typed_attention_policy(),
         attention_inputs(identity, snapshot, evidence),
         history,
+        available_at=(
+            UtcInstant(identity.evidence_cutoff.value + timedelta(hours=2))
+            if available_at is None
+            else available_at
+        ),
     )

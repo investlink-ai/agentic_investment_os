@@ -45,8 +45,10 @@ __all__ = (
     "HoldingRefreshDisposition",
     "InvalidAttentionError",
     "ResourceAccounting",
+    "attention_history_fingerprint",
     "parse_attention_artifact",
     "select_attention",
+    "validate_attention_history",
 )
 
 _SCHEMA_VERSION = 1
@@ -379,6 +381,7 @@ class CandidateCard:
     previous_state: AttentionState
     next_state: AttentionState
     disposition: CandidateDisposition
+    observed_features: tuple[AttentionFeature, ...]
     reasons: tuple[CandidateReason, ...]
     evidence_artifact_ids: tuple[str, ...]
     missing_features: tuple[AttentionFeature, ...]
@@ -393,6 +396,7 @@ class CandidateCard:
         previous_state: AttentionState,
         next_state: AttentionState,
         disposition: CandidateDisposition,
+        observed_features: tuple[AttentionFeature, ...],
         reasons: tuple[CandidateReason, ...],
         evidence_artifact_ids: tuple[str, ...],
         missing_features: tuple[AttentionFeature, ...],
@@ -404,6 +408,7 @@ class CandidateCard:
             previous_state=previous_state,
             next_state=next_state,
             disposition=disposition,
+            observed_features=observed_features,
             reasons=reasons,
             evidence_artifact_ids=evidence_artifact_ids,
             missing_features=missing_features,
@@ -415,6 +420,9 @@ class CandidateCard:
             previous_state=previous_state,
             next_state=next_state,
             disposition=disposition,
+            observed_features=tuple(
+                sorted(set(observed_features), key=lambda feature: feature.value)
+            ),
             reasons=tuple(sorted(set(reasons), key=lambda reason: reason.value)),
             evidence_artifact_ids=evidence_artifact_ids,
             missing_features=tuple(
@@ -430,6 +438,7 @@ class CandidateCard:
             "previous_state": self.previous_state.value,
             "next_state": self.next_state.value,
             "disposition": self.disposition.value,
+            "observed_features": [feature.value for feature in self.observed_features],
             "reasons": [reason.value for reason in self.reasons],
             "evidence_artifact_ids": list(self.evidence_artifact_ids),
             "missing_features": [feature.value for feature in self.missing_features],
@@ -469,16 +478,46 @@ class CandidateCard:
             )
             or (
                 self.disposition is CandidateDisposition.EXITED_ACTIVE_PATH
+                and self.previous_state not in _TERMINAL_STATES
                 and terminal
                 and self.exit_reason is _exit_reason_for(self.next_state)
                 and CandidateReason.TERMINAL_STATE in self.reasons
             )
         )
+        feature_reasons = frozenset(_feature_reasons(self.observed_features))
+        workflow_reasons = set(self.reasons) - feature_reasons
+        expected_workflow_reasons: tuple[frozenset[CandidateReason], ...] = ()
+        if self.disposition is CandidateDisposition.NEW_DOSSIER_REQUESTED:
+            expected_workflow_reasons = (
+                frozenset(),
+                frozenset((CandidateReason.EXPLORATION_FUNNEL,)),
+            )
+        elif self.disposition is CandidateDisposition.ADVANCED_ONE_STATE:
+            expected_workflow_reasons = (
+                frozenset((CandidateReason.FUNNEL_PROGRESSION,)),
+                frozenset(
+                    (
+                        CandidateReason.FUNNEL_PROGRESSION,
+                        CandidateReason.EXPLORATION_FUNNEL,
+                    )
+                ),
+            )
+        elif self.disposition is CandidateDisposition.DEFERRED_AT_CAPACITY:
+            expected_workflow_reasons = (frozenset((CandidateReason.DOSSIER_CAPACITY,)),)
+        elif self.disposition is CandidateDisposition.ALREADY_IN_RESEARCH:
+            expected_workflow_reasons = (frozenset((CandidateReason.ALREADY_IN_RESEARCH,)),)
+        elif self.disposition is CandidateDisposition.EXITED_ACTIVE_PATH:
+            expected_workflow_reasons = (frozenset((CandidateReason.TERMINAL_STATE,)),)
         if (
             not _is_sha256(self.card_id)
             or type(self.previous_state) is not AttentionState
             or type(self.next_state) is not AttentionState
             or type(self.disposition) is not CandidateDisposition
+            or type(self.observed_features) is not tuple
+            or any(type(feature) is not AttentionFeature for feature in self.observed_features)
+            or tuple(sorted(set(self.observed_features), key=lambda feature: feature.value))
+            != self.observed_features
+            or AttentionFeature.CURRENT_HOLDING in self.observed_features
             or not self.reasons
             or any(type(reason) is not CandidateReason for reason in self.reasons)
             or tuple(sorted(set(self.reasons), key=lambda reason: reason.value)) != self.reasons
@@ -496,6 +535,8 @@ class CandidateCard:
             or (terminal != (self.exit_reason is not None))
             or (not terminal and not allowed_active)
             or not valid_disposition
+            or not feature_reasons <= set(self.reasons)
+            or frozenset(workflow_reasons) not in expected_workflow_reasons
         ):
             raise InvalidAttentionError(_INVALID_ARTIFACT)
 
@@ -711,11 +752,14 @@ class AttentionArtifact:
     cycle: MarketSession
     universe_snapshot_id: str
     cutoff: UtcInstant
+    available_at: UtcInstant
     data_regime: str
     evidence_policy_id: str
     evidence_artifact_ids: tuple[str, ...]
     attention_policy_id: str
+    attention_policy: AttentionPolicy
     input_fingerprint: str
+    history_fingerprint: str
     week: str
     disposition: AttentionDisposition
     no_action_reason: AttentionNoActionReason | None
@@ -730,11 +774,26 @@ class AttentionArtifact:
         *,
         inputs: AttentionInputs,
         policy: AttentionPolicy,
+        available_at: UtcInstant,
+        history_fingerprint: str,
         candidate_cards: tuple[CandidateCard, ...],
         dossier_requests: tuple[DossierRequest, ...],
         holding_refreshes: tuple[HoldingRefresh, ...],
         resource_accounting: ResourceAccounting,
     ) -> Self:
+        if (
+            type(available_at) is not UtcInstant
+            or available_at.value < inputs.cutoff.value
+            or not _selection_outputs_match_inputs(
+                inputs,
+                policy,
+                candidate_cards,
+                dossier_requests,
+                holding_refreshes,
+                resource_accounting,
+            )
+        ):
+            raise InvalidAttentionError(_INVALID_ARTIFACT)
         disposition = (
             AttentionDisposition.NO_ACTION
             if not candidate_cards and not dossier_requests and not holding_refreshes
@@ -749,6 +808,8 @@ class AttentionArtifact:
         identity_material = _artifact_identity_material(
             inputs=inputs,
             policy=policy,
+            available_at=available_at,
+            history_fingerprint=history_fingerprint,
             week=week,
             disposition=disposition,
             no_action_reason=no_action_reason,
@@ -762,6 +823,8 @@ class AttentionArtifact:
             artifact_id=artifact_id,
             inputs=inputs,
             policy=policy,
+            available_at=available_at,
+            history_fingerprint=history_fingerprint,
             week=week,
             disposition=disposition,
             no_action_reason=no_action_reason,
@@ -777,11 +840,14 @@ class AttentionArtifact:
             inputs.cycle,
             inputs.universe_snapshot_id,
             inputs.cutoff,
+            available_at,
             inputs.data_regime,
             inputs.evidence_policy_id,
             inputs.evidence_artifact_ids,
             policy.policy_id,
+            policy,
             inputs.fingerprint,
+            history_fingerprint,
             week,
             disposition,
             no_action_reason,
@@ -794,6 +860,28 @@ class AttentionArtifact:
     def to_payload(self) -> dict[str, object]:
         envelope = _artifact_envelope_from_artifact(self)
         return {**envelope, "content_hash": self.content_hash}
+
+    def matches_inputs(self, inputs: AttentionInputs, policy: AttentionPolicy) -> bool:
+        """Confirm outputs remain derived within the exact typed inputs and policy."""
+        return (
+            self.run_id == inputs.run_id
+            and self.cycle == inputs.cycle
+            and self.universe_snapshot_id == inputs.universe_snapshot_id
+            and self.cutoff == inputs.cutoff
+            and self.data_regime == inputs.data_regime
+            and self.evidence_policy_id == inputs.evidence_policy_id
+            and self.evidence_artifact_ids == inputs.evidence_artifact_ids
+            and self.input_fingerprint == inputs.fingerprint
+            and self.attention_policy == policy
+            and _selection_outputs_match_inputs(
+                inputs,
+                policy,
+                self.candidate_cards,
+                self.dossier_requests,
+                self.holding_refreshes,
+                self.resource_accounting,
+            )
+        )
 
     def __post_init__(self) -> None:
         card_ids = {card.card_id for card in self.candidate_cards}
@@ -815,6 +903,8 @@ class AttentionArtifact:
             or type(self.cycle) is not MarketSession
             or not _is_sha256(self.universe_snapshot_id)
             or type(self.cutoff) is not UtcInstant
+            or type(self.available_at) is not UtcInstant
+            or self.available_at.value < self.cutoff.value
             or not is_data_regime(self.data_regime)
             or not _is_sha256(self.evidence_policy_id)
             or type(self.evidence_artifact_ids) is not tuple
@@ -822,7 +912,10 @@ class AttentionArtifact:
             or tuple(sorted(set(self.evidence_artifact_ids))) != self.evidence_artifact_ids
             or any(not _is_sha256(item) for item in self.evidence_artifact_ids)
             or not _is_sha256(self.attention_policy_id)
+            or type(self.attention_policy) is not AttentionPolicy
+            or self.attention_policy.policy_id != self.attention_policy_id
             or not _is_sha256(self.input_fingerprint)
+            or not _is_sha256(self.history_fingerprint)
             or type(self.week) is not str
             or self.week != _week_key(self.cycle)
             or type(self.disposition) is not AttentionDisposition
@@ -846,6 +939,15 @@ class AttentionArtifact:
             or card_identities & refresh_identities
             or len(self.candidate_cards) > _MAXIMUM_CANDIDATE_CARDS
             or len(self.dossier_requests) > _MAXIMUM_NEW_DOSSIERS
+            or len(self.candidate_cards) > self.attention_policy.candidate_card_limit
+            or len(self.dossier_requests) > self.attention_policy.new_dossier_limit
+            or self.resource_accounting.candidate_card_limit
+            != self.attention_policy.candidate_card_limit
+            or self.resource_accounting.new_dossier_limit != self.attention_policy.new_dossier_limit
+            or self.resource_accounting.weekly_dossier_budget
+            != self.attention_policy.weekly_dossier_budget
+            or self.resource_accounting.weekly_exploration_budget
+            != self.attention_policy.weekly_exploration_budget
             or any(
                 CandidateCard.create(
                     run_id=self.run_id,
@@ -853,6 +955,7 @@ class AttentionArtifact:
                     previous_state=card.previous_state,
                     next_state=card.next_state,
                     disposition=card.disposition,
+                    observed_features=card.observed_features,
                     reasons=card.reasons,
                     evidence_artifact_ids=card.evidence_artifact_ids,
                     missing_features=card.missing_features,
@@ -867,6 +970,11 @@ class AttentionArtifact:
                 or cards_by_id[request.candidate_card_id].identity != request.identity
                 or cards_by_id[request.candidate_card_id].disposition
                 is not CandidateDisposition.NEW_DOSSIER_REQUESTED
+                or (
+                    CandidateReason.EXPLORATION_FUNNEL
+                    in cards_by_id[request.candidate_card_id].reasons
+                )
+                != (request.selection_kind is DossierSelectionKind.EXPLORATION)
                 or DossierRequest.create(
                     run_id=self.run_id,
                     card=cards_by_id[request.candidate_card_id],
@@ -913,10 +1021,123 @@ class AttentionArtifact:
             raise InvalidAttentionError(_INVALID_ARTIFACT)
 
 
+def attention_history_fingerprint(history: tuple[AttentionArtifact, ...]) -> str:
+    """Bind the ordered durable attention records consumed by one selection."""
+    return _content_hash(
+        {
+            "schema_version": _SCHEMA_VERSION,
+            "history": [
+                {
+                    "artifact_id": artifact.artifact_id,
+                    "content_hash": artifact.content_hash,
+                }
+                for artifact in history
+            ],
+        }
+    )
+
+
+def validate_attention_history(history: tuple[AttentionArtifact, ...]) -> None:
+    """Reconstruct attention transitions and weekly accounting or fail closed."""
+    if type(history) is not tuple or any(type(item) is not AttentionArtifact for item in history):
+        raise InvalidAttentionError(_INVALID_INPUTS)
+    states: dict[bytes, AttentionState] = {}
+    weekly_counts: dict[str, tuple[int, int]] = {}
+    prior: list[AttentionArtifact] = []
+    prior_date = None
+    for artifact in history:
+        artifact.__post_init__()
+        trading_date = artifact.cycle.trading_date
+        if prior_date is not None and trading_date <= prior_date:
+            raise InvalidAttentionError(_INVALID_INPUTS)
+        if artifact.history_fingerprint != attention_history_fingerprint(tuple(prior)):
+            raise InvalidAttentionError(_INVALID_INPUTS)
+        regular_before, exploration_before = weekly_counts.get(artifact.week, (0, 0))
+        accounting = artifact.resource_accounting
+        if (
+            accounting.weekly_dossiers_before != regular_before + exploration_before
+            or accounting.weekly_exploration_before != exploration_before
+        ):
+            raise InvalidAttentionError(_INVALID_INPUTS)
+        for card in artifact.candidate_cards:
+            key = canonical_instrument_bytes(card.identity)
+            if card.previous_state is not states.get(key, AttentionState.OBSERVED):
+                raise InvalidAttentionError(_INVALID_INPUTS)
+            states[key] = card.next_state
+        regular_after = regular_before + sum(
+            request.selection_kind is DossierSelectionKind.PRIORITY
+            for request in artifact.dossier_requests
+        )
+        exploration_after = exploration_before + sum(
+            request.selection_kind is DossierSelectionKind.EXPLORATION
+            for request in artifact.dossier_requests
+        )
+        weekly_counts[artifact.week] = (regular_after, exploration_after)
+        prior.append(artifact)
+        prior_date = trading_date
+
+
+def _selection_outputs_match_inputs(  # noqa: PLR0913,PLR0917 - validate one complete selection.
+    inputs: AttentionInputs,
+    policy: AttentionPolicy,
+    cards: tuple[CandidateCard, ...],
+    requests: tuple[DossierRequest, ...],
+    refreshes: tuple[HoldingRefresh, ...],
+    accounting: ResourceAccounting,
+) -> bool:
+    subjects = {canonical_instrument_bytes(item.subject.identity): item for item in inputs.subjects}
+    holding_subjects = {
+        key: subject for key, subject in subjects.items() if subject.subject.is_position
+    }
+    if (
+        len(cards) > policy.candidate_card_limit
+        or len(requests) > policy.new_dossier_limit
+        or accounting.candidate_card_limit != policy.candidate_card_limit
+        or accounting.new_dossier_limit != policy.new_dossier_limit
+        or accounting.weekly_dossier_budget != policy.weekly_dossier_budget
+        or accounting.weekly_exploration_budget != policy.weekly_exploration_budget
+        or {canonical_instrument_bytes(refresh.identity): refresh for refresh in refreshes}.keys()
+        != holding_subjects.keys()
+    ):
+        return False
+    for card in cards:
+        subject = subjects.get(canonical_instrument_bytes(card.identity))
+        if (
+            subject is None
+            or subject.subject.is_position
+            or card.observed_features
+            != tuple(sorted(subject.observed_features, key=lambda feature: feature.value))
+            or card.missing_features
+            != tuple(sorted(subject.missing_features, key=lambda feature: feature.value))
+            or card.evidence_artifact_ids != subject.evidence_artifact_ids
+            or (
+                card.disposition is CandidateDisposition.EXITED_ACTIVE_PATH
+                and (
+                    subject.subject.eligible_for_new_entry
+                    or card.next_state is not AttentionState.REJECTED
+                    or card.exit_reason is not AttentionTransitionExitReason.INELIGIBLE
+                )
+            )
+            or (
+                card.disposition is not CandidateDisposition.EXITED_ACTIVE_PATH
+                and not subject.subject.eligible_for_new_entry
+            )
+        ):
+            return False
+    return all(
+        refresh == HoldingRefresh.create(inputs.run_id, holding_subjects[key])
+        for key, refresh in (
+            (canonical_instrument_bytes(item.identity), item) for item in refreshes
+        )
+    )
+
+
 def select_attention(
     policy: AttentionPolicy,
     inputs: AttentionInputs,
     history: tuple[AttentionArtifact, ...],
+    *,
+    available_at: UtcInstant,
 ) -> AttentionArtifact:
     """Select cards, due refreshes, and Dossier requests without model or execution effects."""
     policy.__post_init__()
@@ -932,6 +1153,7 @@ def select_attention(
         item.cycle.trading_date >= inputs.cycle.trading_date for item in ordered_history
     ):
         raise InvalidAttentionError(_INVALID_INPUTS)
+    validate_attention_history(ordered_history)
 
     ordered_subjects = tuple(
         sorted(
@@ -944,15 +1166,22 @@ def select_attention(
         for subject in ordered_subjects
         if subject.subject.is_position
     )
-    eligible_for_new_entry = tuple(
+    previous_states = _latest_states(ordered_history)
+    exit_subjects = tuple(
+        subject
+        for subject in ordered_subjects
+        if not subject.subject.is_position
+        and not subject.subject.eligible_for_new_entry
+        and canonical_instrument_bytes(subject.subject.identity) in previous_states
+        and previous_states[canonical_instrument_bytes(subject.subject.identity)]
+        not in _TERMINAL_STATES
+    )
+    selected_exit_subjects = exit_subjects[: policy.candidate_card_limit]
+    remaining_card_capacity = policy.candidate_card_limit - len(selected_exit_subjects)
+    eligible = tuple(
         subject
         for subject in ordered_subjects
         if not subject.subject.is_position and subject.subject.eligible_for_new_entry
-    )
-    previous_states = _latest_states(ordered_history)
-    eligible = tuple(
-        subject
-        for subject in eligible_for_new_entry
         if previous_states.get(
             canonical_instrument_bytes(subject.subject.identity),
             AttentionState.OBSERVED,
@@ -963,6 +1192,7 @@ def select_attention(
         policy,
         inputs.cycle,
         eligible,
+        card_limit=remaining_card_capacity,
         history=ordered_history,
     )
     regular_before, exploration_before = _weekly_dossier_counts(
@@ -1020,7 +1250,7 @@ def select_attention(
         canonical_instrument_bytes(subject.subject.identity) for subject in exploration_selected
     }
 
-    cards = tuple(
+    active_cards = tuple(
         _build_card(
             inputs.run_id,
             subject,
@@ -1039,6 +1269,20 @@ def select_attention(
             ),
         )
         for subject in selected_subjects
+    )
+    exit_cards = tuple(
+        _build_exit_card(
+            inputs.run_id,
+            subject,
+            previous_states[canonical_instrument_bytes(subject.subject.identity)],
+        )
+        for subject in selected_exit_subjects
+    )
+    cards = tuple(
+        sorted(
+            (*active_cards, *exit_cards),
+            key=lambda card: canonical_instrument_bytes(card.identity),
+        )
     )
     cards_by_identity = {canonical_instrument_bytes(card.identity): card for card in cards}
     requests = tuple(
@@ -1079,6 +1323,8 @@ def select_attention(
     return AttentionArtifact.create(
         inputs=inputs,
         policy=policy,
+        available_at=available_at,
+        history_fingerprint=attention_history_fingerprint(ordered_history),
         candidate_cards=cards,
         dossier_requests=requests,
         holding_refreshes=holding_refreshes,
@@ -1091,13 +1337,16 @@ def _select_card_subjects(
     cycle: MarketSession,
     subjects: tuple[AttentionSubjectInput, ...],
     *,
+    card_limit: int,
     history: tuple[AttentionArtifact, ...],
 ) -> tuple[tuple[AttentionSubjectInput, ...], bytes | None]:
-    if len(subjects) <= policy.candidate_card_limit:
+    if card_limit == 0:
+        return (), None
+    if len(subjects) <= card_limit:
         return subjects, None
     _, exploration_before = _weekly_dossier_counts(cycle, history)
     reserve_exploration_card = exploration_before < policy.weekly_exploration_budget
-    regular_limit = policy.candidate_card_limit - (1 if reserve_exploration_card else 0)
+    regular_limit = card_limit - (1 if reserve_exploration_card else 0)
     regular = tuple(sorted(subjects, key=_priority_key)[:regular_limit])
     regular_keys = {canonical_instrument_bytes(subject.subject.identity) for subject in regular}
     if not reserve_exploration_card:
@@ -1137,10 +1386,6 @@ def _build_card(  # noqa: PLR0913 - transition inputs remain explicit and audita
         disposition = CandidateDisposition.NEW_DOSSIER_REQUESTED
         if exploration_selected:
             reasons.append(CandidateReason.EXPLORATION_FUNNEL)
-    elif previous_state in _TERMINAL_STATES:
-        next_state = previous_state
-        disposition = CandidateDisposition.EXITED_ACTIVE_PATH
-        reasons.append(CandidateReason.TERMINAL_STATE)
     elif previous_state in (AttentionState.OBSERVED, AttentionState.WATCH):
         next_state = _NEXT_ACTIVE_STATE[previous_state]
         disposition = CandidateDisposition.ADVANCED_ONE_STATE
@@ -1162,10 +1407,30 @@ def _build_card(  # noqa: PLR0913 - transition inputs remain explicit and audita
         previous_state=previous_state,
         next_state=next_state,
         disposition=disposition,
+        observed_features=subject.observed_features,
         reasons=tuple(reasons),
         evidence_artifact_ids=subject.evidence_artifact_ids,
         missing_features=subject.missing_features,
         exit_reason=exit_reason,
+    )
+
+
+def _build_exit_card(
+    run_id: str,
+    subject: AttentionSubjectInput,
+    previous_state: AttentionState,
+) -> CandidateCard:
+    return CandidateCard.create(
+        run_id=run_id,
+        identity=subject.subject.identity,
+        previous_state=previous_state,
+        next_state=AttentionState.REJECTED,
+        disposition=CandidateDisposition.EXITED_ACTIVE_PATH,
+        observed_features=subject.observed_features,
+        reasons=(*_feature_reasons(subject.observed_features), CandidateReason.TERMINAL_STATE),
+        evidence_artifact_ids=subject.evidence_artifact_ids,
+        missing_features=subject.missing_features,
+        exit_reason=AttentionTransitionExitReason.INELIGIBLE,
     )
 
 
@@ -1300,6 +1565,7 @@ def _candidate_material(  # noqa: PLR0913 - card identity binds every explanator
     previous_state: AttentionState,
     next_state: AttentionState,
     disposition: CandidateDisposition,
+    observed_features: tuple[AttentionFeature, ...],
     reasons: tuple[CandidateReason, ...],
     evidence_artifact_ids: tuple[str, ...],
     missing_features: tuple[AttentionFeature, ...],
@@ -1313,6 +1579,7 @@ def _candidate_material(  # noqa: PLR0913 - card identity binds every explanator
         "previous_state": previous_state.value,
         "next_state": next_state.value,
         "disposition": disposition.value,
+        "observed_features": sorted({feature.value for feature in observed_features}),
         "reasons": sorted({reason.value for reason in reasons}),
         "evidence_artifact_ids": list(evidence_artifact_ids),
         "missing_features": sorted({feature.value for feature in missing_features}),
@@ -1338,6 +1605,8 @@ def _artifact_identity_material(  # noqa: PLR0913 - artifact identity is deliber
     *,
     inputs: AttentionInputs,
     policy: AttentionPolicy,
+    available_at: UtcInstant,
+    history_fingerprint: str,
     week: str,
     disposition: AttentionDisposition,
     no_action_reason: AttentionNoActionReason | None,
@@ -1353,11 +1622,14 @@ def _artifact_identity_material(  # noqa: PLR0913 - artifact identity is deliber
         "cycle": inputs.cycle.to_payload(),
         "universe_snapshot_id": inputs.universe_snapshot_id,
         "cutoff": inputs.cutoff.isoformat(),
+        "available_at": available_at.isoformat(),
         "data_regime": inputs.data_regime,
         "evidence_policy_id": inputs.evidence_policy_id,
         "evidence_artifact_ids": list(inputs.evidence_artifact_ids),
         "attention_policy_id": policy.policy_id,
+        "attention_policy": policy.to_payload(),
         "input_fingerprint": inputs.fingerprint,
+        "history_fingerprint": history_fingerprint,
         "week": week,
         "disposition": disposition.value,
         "no_action_reason": (None if no_action_reason is None else no_action_reason.value),
@@ -1373,6 +1645,8 @@ def _artifact_envelope(  # noqa: PLR0913 - durable envelope names each material 
     artifact_id: str,
     inputs: AttentionInputs,
     policy: AttentionPolicy,
+    available_at: UtcInstant,
+    history_fingerprint: str,
     week: str,
     disposition: AttentionDisposition,
     no_action_reason: AttentionNoActionReason | None,
@@ -1389,7 +1663,7 @@ def _artifact_envelope(  # noqa: PLR0913 - durable envelope names each material 
         "artifact_id": artifact_id,
         "cycle": inputs.cycle.to_payload(),
         "relevant_at": inputs.cutoff.isoformat(),
-        "available_at": inputs.cutoff.isoformat(),
+        "available_at": available_at.isoformat(),
         "data_regime": inputs.data_regime,
         "authority_scope": "research_attention",
         "material_fingerprints": {
@@ -1397,9 +1671,11 @@ def _artifact_envelope(  # noqa: PLR0913 - durable envelope names each material 
             "evidence_policy": inputs.evidence_policy_id,
             "attention_policy": policy.policy_id,
             "attention_inputs": inputs.fingerprint,
+            "attention_history": history_fingerprint,
         },
         "payload": {
             "run_id": inputs.run_id,
+            "attention_policy": policy.to_payload(),
             "evidence_artifact_ids": list(inputs.evidence_artifact_ids),
             "week": week,
             "disposition": disposition.value,
@@ -1421,7 +1697,7 @@ def _artifact_envelope_from_artifact(artifact: AttentionArtifact) -> dict[str, o
         "artifact_id": artifact.artifact_id,
         "cycle": artifact.cycle.to_payload(),
         "relevant_at": artifact.cutoff.isoformat(),
-        "available_at": artifact.cutoff.isoformat(),
+        "available_at": artifact.available_at.isoformat(),
         "data_regime": artifact.data_regime,
         "authority_scope": "research_attention",
         "material_fingerprints": {
@@ -1429,9 +1705,11 @@ def _artifact_envelope_from_artifact(artifact: AttentionArtifact) -> dict[str, o
             "evidence_policy": artifact.evidence_policy_id,
             "attention_policy": artifact.attention_policy_id,
             "attention_inputs": artifact.input_fingerprint,
+            "attention_history": artifact.history_fingerprint,
         },
         "payload": {
             "run_id": artifact.run_id,
+            "attention_policy": artifact.attention_policy.to_payload(),
             "evidence_artifact_ids": list(artifact.evidence_artifact_ids),
             "week": artifact.week,
             "disposition": artifact.disposition.value,
@@ -1470,12 +1748,19 @@ def parse_attention_artifact(value: object) -> AttentionArtifact | None:  # noqa
         return None
     fingerprints = _exact_mapping(
         root["material_fingerprints"],
-        {"universe_snapshot", "evidence_policy", "attention_policy", "attention_inputs"},
+        {
+            "universe_snapshot",
+            "evidence_policy",
+            "attention_policy",
+            "attention_inputs",
+            "attention_history",
+        },
     )
     payload = _exact_mapping(
         root["payload"],
         {
             "run_id",
+            "attention_policy",
             "evidence_artifact_ids",
             "week",
             "disposition",
@@ -1497,12 +1782,15 @@ def parse_attention_artifact(value: object) -> AttentionArtifact | None:  # noqa
     evidence_policy_id = None if fingerprints is None else fingerprints["evidence_policy"]
     attention_policy_id = None if fingerprints is None else fingerprints["attention_policy"]
     input_fingerprint = None if fingerprints is None else fingerprints["attention_inputs"]
+    history_fingerprint = None if fingerprints is None else fingerprints["attention_history"]
+    parsed_policy = None if payload is None else AttentionPolicy.parse(payload["attention_policy"])
     if (
         fingerprints is None
         or payload is None
         or type(cycle) is not MarketSession
         or cutoff is None
-        or available != cutoff
+        or available is None
+        or available.value < cutoff.value
         or type(root["envelope_schema_version"]) is not int
         or root["envelope_schema_version"] != _SCHEMA_VERSION
         or type(root["payload_schema_version"]) is not int
@@ -1519,6 +1807,9 @@ def parse_attention_artifact(value: object) -> AttentionArtifact | None:  # noqa
         or not _is_sha256(evidence_policy_id)
         or not _is_sha256(attention_policy_id)
         or not _is_sha256(input_fingerprint)
+        or not _is_sha256(history_fingerprint)
+        or parsed_policy is None
+        or parsed_policy.policy_id != attention_policy_id
     ):
         return None
     evidence_ids = _parse_hash_tuple(payload["evidence_artifact_ids"])
@@ -1549,11 +1840,14 @@ def parse_attention_artifact(value: object) -> AttentionArtifact | None:  # noqa
             cycle=cycle,
             universe_snapshot_id=universe_snapshot_id,
             cutoff=cutoff,
+            available_at=available,
             data_regime=data_regime,
             evidence_policy_id=evidence_policy_id,
             evidence_artifact_ids=evidence_ids,
             attention_policy_id=attention_policy_id,
+            attention_policy=parsed_policy,
             input_fingerprint=input_fingerprint,
+            history_fingerprint=history_fingerprint,
             week=payload["week"],
             disposition=disposition,
             no_action_reason=no_action,
@@ -1584,11 +1878,14 @@ def _identity_from_envelope(envelope: dict[str, object]) -> dict[str, object]:
         "cycle": envelope["cycle"],
         "universe_snapshot_id": fingerprints["universe_snapshot"],
         "cutoff": envelope["relevant_at"],
+        "available_at": envelope["available_at"],
         "data_regime": envelope["data_regime"],
         "evidence_policy_id": fingerprints["evidence_policy"],
         "evidence_artifact_ids": payload["evidence_artifact_ids"],
         "attention_policy_id": fingerprints["attention_policy"],
+        "attention_policy": payload["attention_policy"],
         "input_fingerprint": fingerprints["attention_inputs"],
+        "history_fingerprint": fingerprints["attention_history"],
         "week": payload["week"],
         "disposition": payload["disposition"],
         "no_action_reason": payload["no_action_reason"],
@@ -1615,6 +1912,7 @@ def _parse_cards(  # noqa: PLR0911 - fail closed at each hostile card field.
                 "previous_state",
                 "next_state",
                 "disposition",
+                "observed_features",
                 "reasons",
                 "evidence_artifact_ids",
                 "missing_features",
@@ -1627,6 +1925,7 @@ def _parse_cards(  # noqa: PLR0911 - fail closed at each hostile card field.
         previous_state = _enum(AttentionState, root["previous_state"])
         next_state = _enum(AttentionState, root["next_state"])
         disposition = _enum(CandidateDisposition, root["disposition"])
+        observed = _enum_tuple(AttentionFeature, root["observed_features"])
         reasons = _enum_tuple(CandidateReason, root["reasons"])
         evidence_ids = _parse_hash_tuple(root["evidence_artifact_ids"])
         missing = _enum_tuple(AttentionFeature, root["missing_features"])
@@ -1636,6 +1935,7 @@ def _parse_cards(  # noqa: PLR0911 - fail closed at each hostile card field.
             or previous_state is None
             or next_state is None
             or disposition is None
+            or observed is None
             or reasons is None
             or evidence_ids is None
             or missing is None
@@ -1649,6 +1949,7 @@ def _parse_cards(  # noqa: PLR0911 - fail closed at each hostile card field.
                 previous_state=previous_state,
                 next_state=next_state,
                 disposition=disposition,
+                observed_features=observed,
                 reasons=reasons,
                 evidence_artifact_ids=evidence_ids,
                 missing_features=missing,

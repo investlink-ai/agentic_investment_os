@@ -101,7 +101,9 @@ configuration.
 
 `attention_policy` contains every tunable used by the local `SelectAttention` scan. The scan uses no
 model, credential, network call, or ambient randomness. Values outside the fixed product ceilings or
-the approved weekly exploration ratio fail configuration before runtime storage is prepared.
+the approved weekly exploration ratio fail configuration before runtime storage is prepared. Every
+Attention Artifact retains this complete validated policy object, not only its hash, so standalone
+artifact validation can prove the published counts and allocations obey the pinned limits.
 
 | Field | Type and validation | Effect |
 | --- | --- | --- |

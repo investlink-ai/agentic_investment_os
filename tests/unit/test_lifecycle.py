@@ -65,6 +65,7 @@ PINNED_SEQUENCE = 2
 RECEIPT_RECORDED_AT = UtcInstant.from_datetime(datetime(2026, 8, 21, 22, 0, tzinfo=UTC))
 UNEXPECTED_EVIDENCE_CAPTURE = "test ledger should terminate before evidence capture"
 EVIDENCE_VAULT_INVALID = "Evidence Vault state is invalid"
+ATTENTION_INPUTS_LOADED_TOO_EARLY = "attention inputs must not load before checkpoint validation"
 
 if TYPE_CHECKING:
     from agentic_investment_os.domain.attention import AttentionInputs
@@ -196,6 +197,22 @@ class _UnusedEvidenceCapture:
 
 
 @dataclass(frozen=True)
+class _InvalidCheckpointEvidenceCapture(_UnusedEvidenceCapture):
+    @override
+    def validate_checkpoint(
+        self,
+        *,
+        run_id: str,
+        universe_snapshot_id: str,
+        cutoff: UtcInstant,
+        data_regime: str,
+        checkpoint: EvidenceCaptureCheckpoint,
+    ) -> None:
+        _ = (run_id, universe_snapshot_id, cutoff, data_regime, checkpoint)
+        raise EvidencePersistenceError(EVIDENCE_VAULT_INVALID)
+
+
+@dataclass(frozen=True)
 class _FixtureAttentionInputs:
     def __call__(  # noqa: PLR0913 - mirror the production capability protocol.
         self,
@@ -249,6 +266,32 @@ class _FailingAttentionInputs:
         if self.reason is not None:
             return self.reason
         raise EvidencePersistenceError(EVIDENCE_VAULT_INVALID)
+
+
+@dataclass(frozen=True)
+class _UnexpectedAttentionInputs(_FailingAttentionInputs):
+    @override
+    def __call__(
+        self,
+        *,
+        run_id: str,
+        cycle: MarketSession,
+        universe_snapshot: UniverseSnapshot,
+        cutoff: UtcInstant,
+        data_regime: str,
+        evidence_policy_id: str,
+        evidence_artifact_ids: tuple[str, ...],
+    ) -> AttentionInputs | AttentionRefusalReason:
+        _ = (
+            run_id,
+            cycle,
+            universe_snapshot,
+            cutoff,
+            data_regime,
+            evidence_policy_id,
+            evidence_artifact_ids,
+        )
+        raise AssertionError(ATTENTION_INPUTS_LOADED_TOO_EARLY)
 
 
 @dataclass
@@ -1175,6 +1218,32 @@ def test_advance_translates_corrupt_attention_inputs_to_a_typed_refusal() -> Non
         idempotency_key="concurrent-request",
     )
 
+    assert receipt.attention_refusal_reason is AttentionRefusalReason.CORRUPT_EVIDENCE
+
+
+def test_advance_validates_the_complete_checkpoint_before_loading_attention_inputs() -> None:
+    identity = pinned_run_identity(_request())
+    snapshot = universe_snapshot(identity)
+    capture = evidence_capture_checkpoint()
+    ledger = _ContradictoryAttentionHistoryLedger(
+        identity,
+        snapshot,
+        attention_artifact(identity, snapshot, capture),
+        AttentionRefusalReason.CORRUPT_EVIDENCE,
+    )
+    capability = replace(
+        _advance(ledger),
+        evidence_capture=_InvalidCheckpointEvidenceCapture(),
+        attention_inputs=_UnexpectedAttentionInputs(),
+    )
+
+    receipt = capability(
+        cycle=_cycle(),
+        mode="champion",
+        idempotency_key="concurrent-request",
+    )
+
+    assert receipt.failure_reason is AdvanceFailureReason.ATTENTION_SELECTION_FAILED
     assert receipt.attention_refusal_reason is AttentionRefusalReason.CORRUPT_EVIDENCE
 
 

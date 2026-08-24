@@ -18,10 +18,15 @@ from agentic_investment_os.domain.attention import (
 )
 from agentic_investment_os.domain.identity import MarketSession
 from agentic_investment_os.domain.lifecycle import (
+    AdvanceAttempt,
     AdvanceDisposition,
     AdvanceFailureReason,
     AdvanceReceipt,
     AdvanceRecovery,
+    LifecycleCommand,
+    LifecycleDecision,
+    LifecycleLedger,
+    PerformAttentionSelection,
 )
 from agentic_investment_os.entrypoints.configuration import ConfigurationSource
 from agentic_investment_os.entrypoints.lifecycle import configure_advance
@@ -69,6 +74,26 @@ class _RefusingAttentionInputs:
             evidence_artifact_ids,
         )
         return self.reason
+
+
+@dataclass
+class _CorruptEvidenceBeforeAttention:
+    delegate: LifecycleLedger
+    vault_root: Path
+    corrupted: bool = False
+
+    def advance_step(
+        self,
+        command: LifecycleCommand,
+        attempt: AdvanceAttempt,
+        recorded_at: UtcInstant,
+    ) -> LifecycleDecision:
+        decision = self.delegate.advance_step(command, attempt, recorded_at)
+        if isinstance(decision, PerformAttentionSelection) and not self.corrupted:
+            content_path = min((self.vault_root / "contents").iterdir())
+            content_path.write_bytes(b"corrupt")
+            self.corrupted = True
+        return decision
 
 
 def _configure(state_root: Path) -> Advance:
@@ -138,6 +163,7 @@ def test_attention_selection_publishes_progression_refresh_and_exploration_idemp
         if card.identity.catalog_id == "equity-aapl"
     )
     assert AttentionFeature.NEWS_ARRIVAL not in aapl.missing_features
+    assert AttentionFeature.FILING_ARRIVAL in aapl.missing_features
     assert aapl.evidence_artifact_ids
     with sqlite3.connect(state_root / "lifecycle.sqlite3") as connection:
         assert connection.execute(
@@ -167,3 +193,29 @@ def test_attention_input_refusals_are_durable_specific_and_idempotent(
         assert connection.execute(
             "SELECT attention_refusal_reason FROM advance_refusals"
         ).fetchall() == [(reason.value,)]
+
+
+def test_corrupt_vault_content_fails_closed_before_attention_publication_and_replays(
+    tmp_path: Path,
+) -> None:
+    state_root = tmp_path / "corrupt-vault"
+    configured = _configure(state_root)
+    corrupting = _CorruptEvidenceBeforeAttention(
+        configured.ledger,
+        state_root / "evidence-vault",
+    )
+    capability = replace(configured, ledger=corrupting)
+
+    receipt = _advance(capability, date(2026, 8, 21), "attention-corrupt-vault")
+    replay = _advance(capability, date(2026, 8, 21), "attention-corrupt-vault")
+
+    assert receipt.disposition is AdvanceDisposition.FAILED_CLOSED
+    assert receipt.attention_refusal_reason is AttentionRefusalReason.CORRUPT_EVIDENCE
+    assert replay == receipt
+    with sqlite3.connect(state_root / "lifecycle.sqlite3") as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM lifecycle_events WHERE event_kind = 'attention_selected'"
+        ).fetchone() == (0,)
+        assert connection.execute(
+            "SELECT attention_refusal_reason FROM advance_refusals"
+        ).fetchall() == [(AttentionRefusalReason.CORRUPT_EVIDENCE.value,)]

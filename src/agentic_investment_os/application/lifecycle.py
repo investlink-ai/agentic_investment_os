@@ -51,7 +51,10 @@ from agentic_investment_os.domain.universe import (
     UniverseSnapshot,
     build_universe_snapshot,
 )
-from agentic_investment_os.evidence.capture import EvidencePersistenceError
+from agentic_investment_os.evidence.capture import (
+    EvidencePersistenceError,
+    InvalidEvidenceError,
+)
 
 if TYPE_CHECKING:
     from datetime import datetime
@@ -170,6 +173,13 @@ class Advance:
                 if not isinstance(command, AdvanceCommand):
                     raise InvalidLifecycleStateError(_INCOMPLETE_CHECKPOINT_RESULT)
                 try:
+                    self.evidence_capture.validate_checkpoint(
+                        run_id=decision.pinned_run_identity.run_id,
+                        universe_snapshot_id=decision.universe_snapshot.snapshot_id,
+                        cutoff=decision.pinned_run_identity.evidence_cutoff,
+                        data_regime=decision.pinned_run_identity.data_regime,
+                        checkpoint=decision.evidence_capture,
+                    )
                     attention_inputs = self.attention_inputs(
                         run_id=decision.pinned_run_identity.run_id,
                         cycle=command.request.session,
@@ -179,7 +189,7 @@ class Advance:
                         evidence_policy_id=decision.evidence_capture.policy_id,
                         evidence_artifact_ids=decision.evidence_capture.artifact_ids,
                     )
-                except EvidencePersistenceError:
+                except (EvidencePersistenceError, InvalidEvidenceError):
                     attention_inputs = AttentionRefusalReason.CORRUPT_EVIDENCE
                 attention_selection: AttentionArtifact | AttentionRefusalReason
                 if isinstance(attention_inputs, AttentionInputs):
@@ -188,6 +198,7 @@ class Advance:
                             self.attention_policy,
                             attention_inputs,
                             decision.attention_history,
+                            available_at=recorded_at,
                         )
                     except InvalidAttentionError:
                         attention_selection = AttentionRefusalReason.CONTRADICTORY_EVIDENCE
@@ -210,17 +221,25 @@ class Advance:
         policy_id = receipt.evidence_policy_id
         if policy_id is None:  # pragma: no cover - receipt validation requires it with evidence.
             raise InvalidLifecycleStateError(_INCOMPLETE_CHECKPOINT_RESULT)
-        self.evidence_capture.validate_checkpoint(
-            run_id=command.pinned_run_identity.run_id,
-            universe_snapshot_id=command.universe_snapshot.snapshot_id,
-            cutoff=command.pinned_run_identity.evidence_cutoff,
-            data_regime=command.pinned_run_identity.data_regime,
-            checkpoint=EvidenceCaptureCheckpoint(
-                policy_id,
-                receipt.evidence_artifact_ids,
-                receipt.evidence_refusal_ids,
-            ),
-        )
+        try:
+            self.evidence_capture.validate_checkpoint(
+                run_id=command.pinned_run_identity.run_id,
+                universe_snapshot_id=command.universe_snapshot.snapshot_id,
+                cutoff=command.pinned_run_identity.evidence_cutoff,
+                data_regime=command.pinned_run_identity.data_regime,
+                checkpoint=EvidenceCaptureCheckpoint(
+                    policy_id,
+                    receipt.evidence_artifact_ids,
+                    receipt.evidence_refusal_ids,
+                ),
+            )
+        except (EvidencePersistenceError, InvalidEvidenceError):
+            if (
+                receipt.failure_reason is AdvanceFailureReason.ATTENTION_SELECTION_FAILED
+                and receipt.attention_refusal_reason is AttentionRefusalReason.CORRUPT_EVIDENCE
+            ):
+                return
+            raise
         attention_artifact = receipt.attention_artifact
         if attention_artifact is None:
             return
@@ -238,8 +257,8 @@ class Advance:
             raise InvalidLifecycleStateError(_INCOMPLETE_CHECKPOINT_RESULT) from error
         if (
             not isinstance(attention_inputs, AttentionInputs)
-            or attention_artifact.input_fingerprint != attention_inputs.fingerprint
             or attention_artifact.attention_policy_id != self.attention_policy.policy_id
+            or not attention_artifact.matches_inputs(attention_inputs, self.attention_policy)
         ):
             raise InvalidLifecycleStateError(_INCOMPLETE_CHECKPOINT_RESULT)
 

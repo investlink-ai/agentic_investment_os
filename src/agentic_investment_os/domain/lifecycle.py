@@ -13,7 +13,10 @@ from typing import TYPE_CHECKING, Protocol, TypeGuard, assert_never
 from agentic_investment_os.domain.attention import (
     AttentionArtifact,
     AttentionRefusalReason,
+    InvalidAttentionError,
+    attention_history_fingerprint,
     parse_attention_artifact,
+    validate_attention_history,
 )
 from agentic_investment_os.domain.identity import (
     CryptoDecisionWindow,
@@ -569,6 +572,9 @@ class AdvanceReceipt:
                 or self.attention_artifact.run_id != identity.run_id
                 or self.attention_artifact.cycle != identity.cycle
                 or self.attention_artifact.universe_snapshot_id != self.universe_snapshot_id
+                or self.attention_artifact.cutoff != identity.evidence_cutoff
+                or self.attention_artifact.available_at.value > recorded_at.value
+                or self.attention_artifact.data_regime != identity.data_regime
                 or self.attention_artifact.evidence_policy_id != self.evidence_policy_id
                 or self.attention_artifact.evidence_artifact_ids != self.evidence_artifact_ids
                 or parse_attention_artifact(self.attention_artifact.to_payload())
@@ -1288,6 +1294,20 @@ def reconstruct_lifecycle(history: LifecycleHistory) -> tuple[LifecycleProgress,
         streams.setdefault(event.stream_id, []).append(event)
 
     progresses = tuple(_reconstruct_stream(tuple(events)) for events in streams.values())
+    attention_history = tuple(
+        sorted(
+            (
+                progress.require_attention_artifact()
+                for progress in progresses
+                if progress.attention_artifact is not None
+            ),
+            key=lambda artifact: (artifact.cycle.trading_date, artifact.artifact_id),
+        )
+    )
+    try:
+        validate_attention_history(attention_history)
+    except InvalidAttentionError as error:
+        raise InvalidLifecycleStateError(_CHANGED_PINNED_FACTS) from error
     progress_by_key: dict[str, LifecycleProgress] = {}
     for progress in progresses:
         key = progress.request.idempotency_key.value
@@ -1703,7 +1723,6 @@ def _append_next_event(  # noqa: PLR0911 - exhaust each lifecycle phase explicit
                 item.require_attention_artifact()
                 for item in reconstruct_lifecycle(history)
                 if item.attention_artifact is not None
-                and item.request.session.trading_date < command.request.session.trading_date
             ),
         )
     if phase is LifecyclePhase.SELECT_ATTENTION and isinstance(
@@ -1763,8 +1782,27 @@ def _append_next_event(  # noqa: PLR0911 - exhaust each lifecycle phase explicit
             or attention_artifact.cycle != progress.pinned_run_identity.cycle
             or attention_artifact.universe_snapshot_id
             != progress.require_prepared_universe_snapshot().snapshot_id
+            or attention_artifact.cutoff != progress.pinned_run_identity.evidence_cutoff
+            or attention_artifact.available_at != recorded_at
+            or attention_artifact.data_regime != progress.pinned_run_identity.data_regime
             or attention_artifact.evidence_policy_id != evidence_capture.policy_id
             or attention_artifact.evidence_artifact_ids != evidence_capture.artifact_ids
+            or attention_artifact.history_fingerprint
+            != attention_history_fingerprint(
+                tuple(
+                    sorted(
+                        (
+                            item.require_attention_artifact()
+                            for item in reconstruct_lifecycle(history)
+                            if item.attention_artifact is not None
+                        ),
+                        key=lambda artifact: (
+                            artifact.cycle.trading_date,
+                            artifact.artifact_id,
+                        ),
+                    )
+                )
+            )
             or parse_attention_artifact(attention_artifact.to_payload()) != attention_artifact
         ):
             raise InvalidLifecycleStateError(_INVALID_CHECKPOINT_ORDER)

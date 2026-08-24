@@ -188,13 +188,13 @@ The implemented candidate inventory is:
 | `adapters/recorded_evidence.py` | Non-critical recorded-boundary validation and normalization; contract, hostile-input, and coverage evidence |
 | `adapters/sqlite_lifecycle.py` | Non-critical SQL mechanics and non-authorizing lifecycle durability; integration, corruption, architecture, and coverage evidence |
 | `application/lifecycle.py` | Non-critical orchestration through evidence capture and bounded attention; unit, integration, system-journey, and coverage evidence |
-| `domain/attention.py` | Non-authorizing admission to bounded research capacity with no stance, sizing, packet, order, or execution effect; unit, property, integration, hostile-input, and coverage evidence |
+| `domain/attention.py` | Safety-supporting, non-authorizing admission to bounded research capacity with no stance, sizing, packet, order, or execution effect; unit, property, integration, hostile-input, and coverage evidence |
 | `domain/identity.py` | Non-critical current identity serialization with no implemented packet or broker effect; unit, property, contract, and coverage evidence |
 | `domain/lifecycle.py` | Non-authorizing lifecycle, evidence-intent, and reconstruction decisions; unit, state-machine, integration, corruption, and coverage evidence |
 | `domain/temporal.py` | Non-critical time and provenance validation; unit, property, contract, and coverage evidence |
 | `domain/universe.py` | Non-critical universe construction; unit, property, integration, contract, and coverage evidence |
 | `evidence/capture.py` | Non-critical evidence identity, availability, staleness, and capture policy; unit, integration, contract, corruption, and coverage evidence |
-| `evidence/attention.py` | Non-critical derivation of approved local attention features from exact captured evidence; unit, integration, corruption, and coverage evidence |
+| `evidence/attention.py` | Safety-supporting derivation of approved local attention features from exact captured evidence; unit, integration, corruption, and coverage evidence |
 | `entrypoints/configuration.py` | Non-critical configuration parsing; integration, hostile-input, and coverage evidence |
 | `entrypoints/lifecycle.py` | Non-critical composition; integration, system-journey, architecture, and coverage evidence |
 | `domain/__init__.py` | Non-critical package scaffold with no callable |
@@ -333,8 +333,13 @@ evidence. A scenario becomes mandatory when its owning behavior is implemented.
 - Belief Graph rebuild produces the same as-of projection from the Evidence Vault and Belief Ledger.
 - Attention caps, holding refresh, and weekly exploration budgets remain invariant as universe size
   and ordering change. Identical pinned retry and reopen preserve cards, transitions, selections,
-  counts, and artifact identifiers without duplicate authoritative rows; malformed evidence or
-  inconsistent history produces a typed durable refusal before attention publication.
+  counts, and artifact identifiers without duplicate authoritative rows. Hostile tests reject policy
+  spoofing, unsupported card reasons, discontinuous transition history, changed cutoffs or Data
+  Regimes, and artifact timestamps that precede publication. Real Evidence Vault integration preserves
+  unavailable optional sources as missing features and proves missing or corrupt checkpoint content
+  produces a typed durable refusal with no attention event. Resuming an older partial cycle after a
+  later selection has published likewise refuses rather than retroactively changing the append-only
+  transition chain.
 - Model output containing a weight, order, unsupported citation, prompt injection, invalid enum,
   inconsistent horizon, missing Skeptic, timeout, quota exhaustion, or oversized result is rejected or
   safely normalized only as its schema explicitly permits.

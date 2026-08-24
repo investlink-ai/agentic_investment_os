@@ -727,6 +727,7 @@ def _load_event(row: tuple[object, ...]) -> LifecycleEvent:
         row[20],
         row[21],
         event_kind=event_kind,
+        recorded_at=recorded_at,
     )
     event = LifecycleEvent(
         stream_id=stream_id,
@@ -835,6 +836,7 @@ def _load_attention_artifact(
     artifact_value: object,
     *,
     event_kind: LifecycleEventKind,
+    recorded_at: UtcInstant,
 ) -> AttentionArtifact | None:
     if event_kind is not LifecycleEventKind.ATTENTION_SELECTED:
         if artifact_id_value is not None or artifact_value is not None:
@@ -850,6 +852,7 @@ def _load_attention_artifact(
     if (
         artifact is None
         or artifact.artifact_id != artifact_id
+        or artifact.available_at != recorded_at
         or _canonical_json(artifact.to_payload()) != encoded
     ):
         raise InvalidLifecycleStateError(_INVALID_CHECKPOINT_ORDER)
