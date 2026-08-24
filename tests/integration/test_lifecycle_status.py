@@ -241,6 +241,7 @@ def test_status_reports_empty_incomplete_and_universe_snapshot_history(tmp_path:
     assert pinned.durable_reason is None
     assert pinned.universe_snapshot_id == receipt.universe_snapshot_id
     assert receipt.attention_artifact is not None
+    assert pinned.attention_artifact_cycle == MarketSession(date(2026, 8, 21))
     assert pinned.attention_artifact_id == receipt.attention_artifact.artifact_id
     assert receipt.pinned_run_identity is not None
     assert _projection(database) == [
@@ -264,6 +265,11 @@ def test_status_reports_empty_incomplete_and_universe_snapshot_history(tmp_path:
                 '"payload_schema_version":1,"schema_version":1}'
             ),
             receipt.universe_snapshot_id,
+            (
+                '{"asset_class":"us_equity","cycle_type":"market_session",'
+                '"payload":{"trading_date":"2026-08-21"},'
+                '"payload_schema_version":1,"schema_version":1}'
+            ),
             receipt.attention_artifact.artifact_id,
         )
     ]
@@ -418,6 +424,58 @@ def test_status_selects_the_latest_market_session_independent_of_stream_order(
     status = _status(state_root)()
 
     assert status.pinned_run_identity == latest.pinned_run_identity
+
+
+def test_status_keeps_the_latest_attention_artifact_bound_to_its_own_cycle(
+    tmp_path: Path,
+) -> None:
+    state_root = tmp_path / "runtime"
+    advance = _advance(state_root)
+    completed = advance(
+        cycle=_cycle_payload("2026-08-21"),
+        mode="champion",
+        idempotency_key="completed-attention",
+    )
+    assert completed.attention_artifact is not None
+    status_capability = _status(state_root)
+    database = state_root / "lifecycle.sqlite3"
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            """
+            CREATE TRIGGER stop_later_cycle_after_start
+            BEFORE INSERT ON lifecycle_events
+            WHEN NEW.event_kind = 'phase_completed'
+            BEGIN
+                SELECT RAISE(ABORT, 'injected interruption');
+            END
+            """
+        )
+    with pytest.raises(LifecyclePersistenceError, match="SQLite lifecycle checkpoint failed"):
+        advance(
+            cycle=_cycle_payload("2026-08-22"),
+            mode="champion",
+            idempotency_key="later-partial",
+        )
+
+    status = status_capability()
+
+    assert status.pinned_run_identity is not None
+    assert status.pinned_run_identity.cycle == MarketSession(date(2026, 8, 22))
+    assert status.attention_artifact_cycle == MarketSession(date(2026, 8, 21))
+    assert status.attention_artifact_id == completed.attention_artifact.artifact_id
+    with sqlite3.connect(database) as connection:
+        projection = connection.execute(
+            """SELECT attention_artifact_cycle, attention_artifact_id
+            FROM lifecycle_status_projection"""
+        ).fetchone()
+    assert projection == (
+        (
+            '{"asset_class":"us_equity","cycle_type":"market_session",'
+            '"payload":{"trading_date":"2026-08-21"},'
+            '"payload_schema_version":1,"schema_version":1}'
+        ),
+        completed.attention_artifact.artifact_id,
+    )
 
 
 def test_status_rebuild_replaces_deleted_or_corrupt_projection_without_mutating_history(

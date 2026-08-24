@@ -337,11 +337,13 @@ evidence. A scenario becomes mandatory when its owning behavior is implemented.
   spoofing, unsupported card reasons, discontinuous transition history, changed cutoffs or Data
   Regimes, and artifact timestamps that precede publication. Real Evidence Vault integration preserves
   unavailable optional sources as missing features and proves missing or corrupt checkpoint content
-  produces a typed durable refusal with no attention event. Resuming an older partial cycle after a
-  later selection has published likewise refuses rather than retroactively changing the append-only
-  transition chain. A changing-clock interruption test proves retry preserves deterministic selection
-  identity, including the next cycle's history-derived identity, while each envelope content hash
-  records its truthful publication time.
+  produces a typed durable refusal with no attention event. Distinct valid captures that assign
+  different market values to the same instrument and timestamp produce the same no-publication
+  contradiction refusal. Resuming an older partial cycle after a later selection has published likewise
+  refuses rather than retroactively changing the append-only transition chain. A changing-clock
+  interruption test proves retry preserves deterministic selection identity, including the next
+  cycle's history-derived identity, while each envelope content hash records its truthful publication
+  time.
 - Model output containing a weight, order, unsupported citation, prompt injection, invalid enum,
   inconsistent horizon, missing Skeptic, timeout, quota exhaustion, or oversized result is rejected or
   safely normalized only as its schema explicitly permits.

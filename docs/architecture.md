@@ -286,7 +286,10 @@ Normal production callers see six capabilities:
 - **Status** validates authoritative lifecycle history, replaces its disposable projection, and returns
   the active `LifecycleCheckpoint`, `last_completed_cycle` as a `DecisionCycleIdentity`, the latest
   eligible-universe checkpoint as an exact `universe_snapshot_cycle` and snapshot-identifier pair,
-  pinned run identity, lifecycle liveness, and any available durable terminal reason. In V0 each
+  the latest bounded selection as an exact `attention_artifact_cycle` and artifact-identifier pair,
+  pinned run identity, lifecycle liveness, and any available durable terminal reason. Snapshot and
+  attention references may belong to an earlier completed cycle than the current pinned run; their
+  paired cycle fields prevent that history from being attributed to the active cycle. In V0 each
   exposed cycle is a `MarketSession` and the checkpoint payload is an equity phase; neither public
   result exposes a bare equity-only phase as the stable contract.
 - **Record** appends due market, forecast, thesis, and execution observations without changing the
@@ -624,7 +627,9 @@ attempt.
 input. It loads only the artifact identifiers named by that checkpoint and revalidates their immutable
 content, source bindings, Data Regime, availability, universe identity, and cutoff. An unavailable
 optional source remains an explicit missing feature rather than becoming a known-negative signal. The
-versioned attention policy fixes per-cycle and weekly capacity plus a deterministic exploration seed.
+feature boundary also refuses distinct captures that assign different market values to the same
+instrument and observation timestamp. The versioned attention policy fixes per-cycle and weekly
+capacity plus a deterministic exploration seed.
 Selection advances an active subject by at most one funnel state, emits an explicit terminal card when
 a previously active subject becomes ineligible, places holding refreshes outside new-research capacity,
 and records exact card, Dossier-request, refresh, weekly exploration, model-token, model-turn, and

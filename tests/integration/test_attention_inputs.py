@@ -110,7 +110,7 @@ class _CapturedAttention:
         )
 
 
-def _capture(tmp_path: Path) -> _CapturedAttention:
+def _capture(tmp_path: Path, *, conflicting_market_capture: bool = False) -> _CapturedAttention:
     request = AdvanceRequest.parse(
         session="2026-08-21",
         mode="champion",
@@ -119,9 +119,30 @@ def _capture(tmp_path: Path) -> _CapturedAttention:
     assert isinstance(request, AdvanceRequest)
     identity = pinned_run_identity(request)
     snapshot = universe_snapshot(identity)
-    policy = EvidencePolicy.parse(evidence_policy())
-    assert policy is not None
+    policy_payload = evidence_policy()
     evidence = recorded_evidence()
+    if conflicting_market_capture:
+        requests = policy_payload["requests"]
+        items = evidence["items"]
+        assert isinstance(requests, list)
+        assert isinstance(items, list)
+        second_request = deepcopy(requests[0])
+        second_item = deepcopy(items[0])
+        assert isinstance(second_request, dict)
+        assert isinstance(second_item, dict)
+        second_request["retrieval_identity"] = "market-session-bars-secondary"
+        second_item["retrieval_identity"] = "market-session-bars-secondary"
+        content = second_item["content"]
+        assert isinstance(content, dict)
+        bars = content["bars"]
+        assert isinstance(bars, list)
+        bar = bars[0]
+        assert isinstance(bar, dict)
+        bar["close"] = "226.00"
+        requests.append(second_request)
+        items.append(second_item)
+    policy = EvidencePolicy.parse(policy_payload)
+    assert policy is not None
     vault = FilesystemEvidenceVault(tmp_path / "evidence-vault")
     summary = CaptureEvidence(
         policy=policy,
@@ -211,6 +232,14 @@ def test_builder_derives_price_change_only_from_two_valid_observations(
         expected_feature is AttentionFeature.PRICE_CHANGE
     )
     assert (AttentionFeature.PRICE_CHANGE in aapl.missing_features) is False
+
+
+def test_builder_rejects_conflicting_market_closes_at_the_same_timestamp(
+    tmp_path: Path,
+) -> None:
+    captured = _capture(tmp_path, conflicting_market_capture=True)
+
+    assert captured.build() is AttentionRefusalReason.CONTRADICTORY_EVIDENCE
 
 
 def test_builder_fails_closed_on_checkpoint_and_snapshot_mismatches(tmp_path: Path) -> None:

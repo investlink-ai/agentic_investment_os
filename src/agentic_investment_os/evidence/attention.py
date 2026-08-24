@@ -35,6 +35,7 @@ class _MarketChange(StrEnum):
     CHANGED = "changed"
     UNCHANGED = "unchanged"
     INSUFFICIENT = "insufficient"
+    CONTRADICTORY = "contradictory"
     CORRUPT = "corrupt"
 
 
@@ -163,6 +164,8 @@ def _subject_input(
         record for record in relevant if record.artifact.kind is EvidenceKind.MARKET
     )
     market_change = _has_market_change(subject, market_records)
+    if market_change is _MarketChange.CONTRADICTORY:
+        return AttentionRefusalReason.CONTRADICTORY_EVIDENCE
     if market_change is _MarketChange.CORRUPT:
         return AttentionRefusalReason.CORRUPT_EVIDENCE
     if market_change is _MarketChange.INSUFFICIENT:
@@ -202,7 +205,7 @@ def _has_market_change(  # noqa: PLR0911 - distinguish each corrupt market shape
     subject: UniverseSubject,
     records: tuple[EvidenceStoredRecord, ...],
 ) -> _MarketChange:
-    observations: list[tuple[UtcInstant, Decimal]] = []
+    observations: dict[UtcInstant, Decimal] = {}
     for record in records:
         parsed = _parse_json(record.content)
         if parsed is None:
@@ -223,10 +226,13 @@ def _has_market_change(  # noqa: PLR0911 - distinguish each corrupt market shape
                 return _MarketChange.CORRUPT
             if not close.is_finite():
                 return _MarketChange.CORRUPT
-            observations.append((timestamp, close))
+            prior_close = observations.get(timestamp)
+            if prior_close is not None and prior_close != close:
+                return _MarketChange.CONTRADICTORY
+            observations[timestamp] = close
     if len(observations) < _MINIMUM_MARKET_OBSERVATIONS_FOR_CHANGE:
         return _MarketChange.INSUFFICIENT
-    ordered = sorted(observations, key=lambda item: item[0].value)
+    ordered = sorted(observations.items(), key=lambda item: item[0].value)
     return _MarketChange.CHANGED if ordered[0][1] != ordered[-1][1] else _MarketChange.UNCHANGED
 
 

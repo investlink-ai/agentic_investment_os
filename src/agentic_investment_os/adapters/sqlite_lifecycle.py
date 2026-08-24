@@ -317,6 +317,7 @@ CREATE TABLE lifecycle_status_projection (
     durable_reason TEXT,
     universe_snapshot_cycle TEXT,
     universe_snapshot_id TEXT,
+    attention_artifact_cycle TEXT,
     attention_artifact_id TEXT
 ) STRICT;
 """
@@ -1196,8 +1197,8 @@ def _replace_status_projection(
             configuration_version, configuration_hash, data_regime, evidence_cutoff,
             instrument_snapshot_hash, position_snapshot_hash, eligibility_policy_hash,
             liveness, durable_reason, universe_snapshot_cycle, universe_snapshot_id,
-            attention_artifact_id
-        ) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            attention_artifact_cycle, attention_artifact_id
+        ) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             (
@@ -1226,6 +1227,11 @@ def _replace_status_projection(
                 else _canonical_json(status.universe_snapshot_cycle.to_payload())
             ),
             status.universe_snapshot_id,
+            (
+                None
+                if status.attention_artifact_cycle is None
+                else _canonical_json(status.attention_artifact_cycle.to_payload())
+            ),
             status.attention_artifact_id,
         ),
     )

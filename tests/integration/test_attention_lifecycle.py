@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+from copy import deepcopy
 from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -96,12 +97,22 @@ class _CorruptEvidenceBeforeAttention:
         return decision
 
 
-def _configure(state_root: Path) -> Advance:
+def _configure(
+    state_root: Path,
+    *,
+    configuration: dict[str, object] | None = None,
+    evidence: dict[str, object] | None = None,
+) -> Advance:
     configured = configure_advance(
-        (ConfigurationSource("test", runtime_configuration(state_root)),),
+        (
+            ConfigurationSource(
+                "test",
+                runtime_configuration(state_root) if configuration is None else configuration,
+            ),
+        ),
         repository_root=REPOSITORY_ROOT,
         recorded_universe=recorded_universe(),
-        recorded_evidence=recorded_evidence(),
+        recorded_evidence=recorded_evidence() if evidence is None else evidence,
         clock=_FixedClock(),
     )
     assert isinstance(configured, Advance)
@@ -219,3 +230,46 @@ def test_corrupt_vault_content_fails_closed_before_attention_publication_and_rep
         assert connection.execute(
             "SELECT attention_refusal_reason FROM advance_refusals"
         ).fetchall() == [(AttentionRefusalReason.CORRUPT_EVIDENCE.value,)]
+
+
+def test_conflicting_market_captures_fail_closed_before_attention_publication(
+    tmp_path: Path,
+) -> None:
+    state_root = tmp_path / "contradictory-market"
+    configuration = runtime_configuration(state_root)
+    evidence = recorded_evidence()
+    policy = configuration["evidence_policy"]
+    items = evidence["items"]
+    assert isinstance(policy, dict)
+    requests = policy["requests"]
+    assert isinstance(requests, list)
+    assert isinstance(items, list)
+    second_request = deepcopy(requests[0])
+    second_item = deepcopy(items[0])
+    assert isinstance(second_request, dict)
+    assert isinstance(second_item, dict)
+    second_request["retrieval_identity"] = "market-session-bars-secondary"
+    second_item["retrieval_identity"] = "market-session-bars-secondary"
+    content = second_item["content"]
+    assert isinstance(content, dict)
+    bars = content["bars"]
+    assert isinstance(bars, list)
+    bar = bars[0]
+    assert isinstance(bar, dict)
+    bar["close"] = "226.00"
+    requests.append(second_request)
+    items.append(second_item)
+    capability = _configure(state_root, configuration=configuration, evidence=evidence)
+
+    receipt = _advance(capability, date(2026, 8, 21), "attention-contradictory-market")
+    replay = _advance(capability, date(2026, 8, 21), "attention-contradictory-market")
+
+    assert receipt.disposition is AdvanceDisposition.FAILED_CLOSED
+    assert receipt.failure_reason is AdvanceFailureReason.ATTENTION_SELECTION_FAILED
+    assert receipt.attention_refusal_reason is AttentionRefusalReason.CONTRADICTORY_EVIDENCE
+    assert receipt.attention_artifact is None
+    assert replay == receipt
+    with sqlite3.connect(state_root / "lifecycle.sqlite3") as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM lifecycle_events WHERE event_kind = 'attention_selected'"
+        ).fetchone() == (0,)

@@ -969,6 +969,7 @@ class LifecycleStatus:
     liveness: LifecycleLiveness
     durable_reason: AdvanceFailureReason | None
     universe_snapshot_id: str | None
+    attention_artifact_cycle: DecisionCycleIdentity | None = None
     attention_artifact_id: str | None = None
 
     @classmethod
@@ -1890,6 +1891,7 @@ def derive_lifecycle_status(history: LifecycleHistory) -> LifecycleStatus:
             liveness=LifecycleLiveness.FAILED_CLOSED,
             durable_reason=history.refusals[-1].reason,
             universe_snapshot_id=None,
+            attention_artifact_cycle=None,
             attention_artifact_id=None,
         )
 
@@ -1905,6 +1907,7 @@ def derive_lifecycle_status(history: LifecycleHistory) -> LifecycleStatus:
         ),
         None,
     )
+    attention_artifact_cycle, attention_artifact_id = _latest_attention_reference(progresses)
     if matching_refusal is not None:
         return LifecycleStatus(
             active_phase=None,
@@ -1914,7 +1917,8 @@ def derive_lifecycle_status(history: LifecycleHistory) -> LifecycleStatus:
             liveness=LifecycleLiveness.FAILED_CLOSED,
             durable_reason=matching_refusal.reason,
             universe_snapshot_id=_latest_universe_snapshot_id(progresses),
-            attention_artifact_id=_latest_attention_artifact_id(progresses),
+            attention_artifact_cycle=attention_artifact_cycle,
+            attention_artifact_id=attention_artifact_id,
         )
 
     next_phase = None if current.is_complete else _EVENT_SEQUENCE[current.sequence + 1][1]
@@ -1930,7 +1934,8 @@ def derive_lifecycle_status(history: LifecycleHistory) -> LifecycleStatus:
             conflicts=history.conflicts,
         ),
         universe_snapshot_id=_latest_universe_snapshot_id(progresses),
-        attention_artifact_id=_latest_attention_artifact_id(progresses),
+        attention_artifact_cycle=attention_artifact_cycle,
+        attention_artifact_id=attention_artifact_id,
     )
 
 
@@ -1966,16 +1971,16 @@ def _latest_universe_snapshot_id(progresses: tuple[LifecycleProgress, ...]) -> s
     return progress.universe_snapshot.snapshot_id
 
 
-def _latest_attention_artifact_id(
+def _latest_attention_reference(
     progresses: tuple[LifecycleProgress, ...],
-) -> str | None:
+) -> tuple[DecisionCycleIdentity | None, str | None]:
     published = tuple(
         progress for progress in progresses if progress.attention_artifact is not None
     )
     if not published:
-        return None
+        return None, None
     latest = max(published, key=lambda progress: progress.request.session.trading_date)
-    return latest.require_attention_artifact().artifact_id
+    return latest.pinned_run_identity.cycle, latest.require_attention_artifact().artifact_id
 
 
 def _reported_reason(
