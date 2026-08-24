@@ -633,10 +633,12 @@ adapter-quota counts.
 The Attention Artifact carries the complete policy preimage, the ordered history fingerprint used for
 state transitions, and the exact observed features supporting each card reason. Its `relevant_at` is
 the evidence cutoff, while `available_at` is the lifecycle event time at which the selection became
-observable. The artifact identifier hashes every material input and output, so subject ordering,
-retry, interruption, and reopen reproduce the same result. History reconstruction checks every
-artifact against its preceding chain and refuses an older interrupted cycle after a later cycle has
-already published; inserting that cycle retroactively would rewrite the later transition context.
+observable. The artifact identifier hashes every deterministic selection input and output; the
+separate envelope content hash also binds that truthful observation time. Subject ordering, retry,
+interruption, and reopen therefore preserve selection identity even when an interrupted publication
+resumes at a later wall-clock time. History reconstruction checks every artifact against its preceding
+chain and refuses an older interrupted cycle after a later cycle has already published; inserting that
+cycle retroactively would rewrite the later transition context.
 Missing, stale, contradictory, corrupt, or inconsistent evidence or history appends
 `attention_selection_failed` with a typed reason and publishes no Attention Artifact.
 

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 from dataclasses import replace
-from datetime import date
+from datetime import date, timedelta
 
 import pytest
 from hypothesis import given
@@ -581,6 +581,21 @@ def test_artifact_creation_enforces_the_policy_preimage_and_truthful_availabilit
             holding_refreshes=artifact.holding_refreshes,
             resource_accounting=artifact.resource_accounting,
         )
+
+
+def test_publication_time_changes_content_but_not_selection_identity() -> None:
+    inputs = _inputs(date(2026, 8, 24), (_subject(1), _subject(2)))
+    first = select_attention(_policy(), inputs, (), available_at=_CUTOFF)
+    later = select_attention(
+        _policy(),
+        inputs,
+        (),
+        available_at=UtcInstant(_CUTOFF.value + timedelta(seconds=1)),
+    )
+
+    assert later.artifact_id == first.artifact_id
+    assert later.content_hash != first.content_hash
+    assert later.available_at != first.available_at
 
 
 def test_selection_rejects_duplicate_or_future_history_before_publishing() -> None:

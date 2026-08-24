@@ -10,6 +10,7 @@ from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
+from shutil import copytree
 from tempfile import TemporaryDirectory
 from typing import Literal, override
 
@@ -1536,6 +1537,64 @@ def test_fresh_process_resumes_at_every_universe_snapshot_write_boundary(
     assert recovery == expected_recovery.value
     assert len(run_id) == SHA256_HEX_LENGTH
     assert len(_events(database)) == PINNED_EVENT_COUNT
+
+
+def test_attention_retry_keeps_selection_identity_when_publication_time_changes(
+    tmp_path: Path,
+) -> None:
+    state_root = tmp_path / "partial"
+    capability = _configure(state_root)
+    ledger = capability.ledger
+    assert isinstance(ledger, SQLiteLifecycleLedger)
+    interrupted = replace(
+        capability,
+        ledger=InterruptingLedger(ledger, "attention", "before"),
+    )
+    cycle = _cycle_payload("2026-08-21")
+
+    with pytest.raises(SimulatedInterruptionError):
+        interrupted(
+            cycle=cycle,
+            mode="champion",
+            idempotency_key="changing-clock-retry",
+        )
+
+    first_root = copytree(state_root, tmp_path / "first-publication")
+    later_root = copytree(state_root, tmp_path / "later-publication")
+    first_time = RECORDED_AT
+    later_time = RECORDED_AT + timedelta(seconds=1)
+    first = replace(
+        capability,
+        ledger=SQLiteLifecycleLedger(first_root / "lifecycle.sqlite3"),
+        clock=FixedClock(first_time),
+    )(
+        cycle=cycle,
+        mode="champion",
+        idempotency_key="changing-clock-retry",
+    )
+    later = replace(
+        capability,
+        ledger=SQLiteLifecycleLedger(later_root / "lifecycle.sqlite3"),
+        clock=FixedClock(later_time),
+    )(
+        cycle=cycle,
+        mode="champion",
+        idempotency_key="changing-clock-retry",
+    )
+
+    assert first.recovery is AdvanceRecovery.RESUMED
+    assert later.recovery is AdvanceRecovery.RESUMED
+    assert first.attention_artifact is not None
+    assert later.attention_artifact is not None
+    assert later.attention_artifact.artifact_id == first.attention_artifact.artifact_id
+    assert later.attention_artifact.content_hash != first.attention_artifact.content_hash
+    assert later.attention_artifact.available_at == UtcInstant.from_datetime(later_time)
+    assert first.attention_artifact.available_at == UtcInstant.from_datetime(first_time)
+    assert later.attention_artifact.candidate_cards == first.attention_artifact.candidate_cards
+    assert later.attention_artifact.dossier_requests == first.attention_artifact.dossier_requests
+    assert (
+        later.attention_artifact.resource_accounting == first.attention_artifact.resource_accounting
+    )
 
 
 @pytest.mark.parametrize(
