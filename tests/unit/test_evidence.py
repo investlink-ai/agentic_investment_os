@@ -21,6 +21,7 @@ from agentic_investment_os.evidence.capture import (
     EvidenceEntityMapping,
     EvidenceFeed,
     EvidenceKind,
+    EvidenceMappingDisposition,
     EvidencePolicy,
     EvidenceQuery,
     EvidenceRefusalReason,
@@ -100,7 +101,10 @@ def _captured_outcome() -> CaptureOutcome:
         intent.intent_id,
         EvidenceCaptureStatus.CAPTURED,
         None,
-        EvidenceArtifact.from_candidate(_market_candidate(first_observed_at=_instant(19, 5))),
+        EvidenceArtifact.from_candidate(
+            _market_candidate(first_observed_at=_instant(19, 5)),
+            observation_id=intent.intent_id,
+        ),
     )
 
 
@@ -150,9 +154,13 @@ class _FixedSource:
 
 
 def test_content_identity_is_stable_while_distinct_observations_use_availability() -> None:
-    first = EvidenceArtifact.from_candidate(_market_candidate(first_observed_at=_instant(19, 5)))
+    first = EvidenceArtifact.from_candidate(
+        _market_candidate(first_observed_at=_instant(19, 5)),
+        observation_id="1" * 64,
+    )
     repeated = EvidenceArtifact.from_candidate(
-        _market_candidate(first_observed_at=_instant(19, 20))
+        _market_candidate(first_observed_at=_instant(19, 20)),
+        observation_id="2" * 64,
     )
 
     assert first.content_hash == repeated.content_hash
@@ -192,7 +200,8 @@ def test_evidence_identifiers_pin_canonical_json_serialization() -> None:
         "0d7610360d7ffbcd9e13f275ad6e3e107709e33affa8c3f7176b4f02c86dd5cf"
     )
     artifact_payload = artifact.to_payload()
-    assert artifact.artifact_id == artifact.observation_id
+    assert artifact.observation_id == intent.intent_id
+    assert artifact.artifact_id != artifact.observation_id
     assert artifact_payload["record_kind"] == "evidence_snapshot"
     assert artifact_payload["payload_discriminator"] == "alpaca_market_evidence"
     assert artifact_payload["authority_scope"] == "research_evidence"
@@ -201,7 +210,7 @@ def test_evidence_identifiers_pin_canonical_json_serialization() -> None:
     assert isinstance(fingerprints, dict)
     assert fingerprints["source_content"] == artifact.content_hash
     assert outcome.to_payload()["content_hash"] == (
-        "8dd5fcd4293216b274b02346198bc0cca1d07253a720c3e74552d3567bf85deb"
+        "97e45be63d9096cdeec23d33cd23ccb33446646789af92f0af405a37b45285ee"
     )
 
 
@@ -257,10 +266,16 @@ def test_source_disposition_accepts_only_owner_defined_status_reason_shapes() ->
     for status in EvidenceCaptureStatus:
         for reason in EvidenceRefusalReason:
             if (status, reason) in allowed:
+                mapping = (
+                    EvidenceMappingDisposition("issuer-map-v1", _instant(19))
+                    if status is EvidenceCaptureStatus.AMBIGUOUS
+                    else None
+                )
                 disposition = EvidenceSourceDisposition(
                     status,
                     reason,
                     "alpaca-basic-iex-v1",
+                    mapping,
                 )
                 assert disposition.data_regime == "alpaca-basic-iex-v1"
             else:
@@ -290,48 +305,75 @@ def test_capture_outcome_accepts_only_owner_defined_status_reason_artifact_shape
     artifact = _captured_outcome().artifact
     assert artifact is not None
     allowed = {
-        (EvidenceCaptureStatus.CAPTURED, None, True),
-        (EvidenceCaptureStatus.UNAVAILABLE, EvidenceRefusalReason.SOURCE_UNAVAILABLE, False),
-        (EvidenceCaptureStatus.STALE, EvidenceRefusalReason.SOURCE_STALE, False),
-        (EvidenceCaptureStatus.STALE, EvidenceRefusalReason.STALE_AT_CUTOFF, True),
-        (EvidenceCaptureStatus.REFUSED, EvidenceRefusalReason.SOURCE_REFUSED, False),
+        (EvidenceCaptureStatus.CAPTURED, None, True, False),
+        (
+            EvidenceCaptureStatus.UNAVAILABLE,
+            EvidenceRefusalReason.SOURCE_UNAVAILABLE,
+            False,
+            False,
+        ),
+        (
+            EvidenceCaptureStatus.UNAVAILABLE,
+            EvidenceRefusalReason.AFTER_CUTOFF,
+            False,
+            True,
+        ),
+        (EvidenceCaptureStatus.STALE, EvidenceRefusalReason.SOURCE_STALE, False, False),
+        (EvidenceCaptureStatus.STALE, EvidenceRefusalReason.STALE_AT_CUTOFF, True, False),
+        (EvidenceCaptureStatus.REFUSED, EvidenceRefusalReason.SOURCE_REFUSED, False, False),
         (
             EvidenceCaptureStatus.REFUSED,
             EvidenceRefusalReason.INVALID_RECORDED_INPUT,
             False,
+            False,
         ),
-        (EvidenceCaptureStatus.REFUSED, EvidenceRefusalReason.UNSUPPORTED_CONTRACT, False),
-        (EvidenceCaptureStatus.REFUSED, EvidenceRefusalReason.AFTER_CUTOFF, True),
+        (
+            EvidenceCaptureStatus.REFUSED,
+            EvidenceRefusalReason.UNSUPPORTED_CONTRACT,
+            False,
+            False,
+        ),
+        (EvidenceCaptureStatus.REFUSED, EvidenceRefusalReason.AFTER_CUTOFF, True, False),
         (
             EvidenceCaptureStatus.INVALID,
             EvidenceRefusalReason.INVALID_RECORDED_INPUT,
+            False,
             False,
         ),
         (
             EvidenceCaptureStatus.AMBIGUOUS,
             EvidenceRefusalReason.AMBIGUOUS_ENTITY_MAPPING,
             False,
+            True,
         ),
     }
     for status in EvidenceCaptureStatus:
         for reason in (None, *EvidenceRefusalReason):
             for has_artifact in (False, True):
-                if (status, reason, has_artifact) in allowed:
-                    outcome = CaptureOutcome(
-                        _intent().intent_id,
-                        status,
-                        reason,
-                        artifact if has_artifact else None,
+                for has_mapping in (False, True):
+                    mapping = (
+                        EvidenceMappingDisposition("issuer-map-v1", _instant(19))
+                        if has_mapping
+                        else None
                     )
-                    assert outcome.status is status
-                else:
-                    with pytest.raises(InvalidEvidenceError):
-                        CaptureOutcome(
+                    if (status, reason, has_artifact, has_mapping) in allowed:
+                        outcome = CaptureOutcome(
                             _intent().intent_id,
                             status,
                             reason,
                             artifact if has_artifact else None,
+                            mapping,
                         )
+                        assert outcome.status is status
+                    else:
+                        with pytest.raises(InvalidEvidenceError):
+                            CaptureOutcome(
+                                _intent().intent_id,
+                                status,
+                                reason,
+                                artifact if has_artifact else None,
+                                mapping,
+                            )
 
 
 @pytest.mark.parametrize(
@@ -615,7 +657,7 @@ def test_capture_outcome_parser_rejects_hostile_artifact_shapes() -> None:
         _artifact_payload(changed)[field] = value
         variants.append(changed)
 
-    variant("envelope_schema_version", 2)
+    variant("envelope_schema_version", 3)
     variant("record_kind", "unknown")
     variant("payload_discriminator", "unknown")
     variant("payload_schema_version", 3)
@@ -714,12 +756,15 @@ def test_capture_outcome_rejects_resealed_news_feed_contract_mismatches(
 
 
 def test_as_of_lookup_orders_equal_availability_and_applies_limit() -> None:
-    first = EvidenceArtifact.from_candidate(_market_candidate(first_observed_at=_instant(19, 5)))
+    first = EvidenceArtifact.from_candidate(
+        _market_candidate(first_observed_at=_instant(19, 5)),
+        observation_id="1" * 64,
+    )
     second_candidate = replace(
         _market_candidate(first_observed_at=_instant(19, 5)),
         content=SECOND_MARKET_CONTENT,
     )
-    second = EvidenceArtifact.from_candidate(second_candidate)
+    second = EvidenceArtifact.from_candidate(second_candidate, observation_id="2" * 64)
     records = (
         EvidenceStoredRecord(first, MARKET_CONTENT),
         EvidenceStoredRecord(second, second_candidate.content),

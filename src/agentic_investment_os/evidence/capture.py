@@ -36,6 +36,7 @@ __all__ = (
     "EvidenceFeed",
     "EvidenceKind",
     "EvidenceLookup",
+    "EvidenceMappingDisposition",
     "EvidencePersistenceError",
     "EvidencePolicy",
     "EvidenceQuery",
@@ -52,6 +53,7 @@ __all__ = (
     "parse_capture_intent",
     "parse_capture_outcome",
     "select_evidence_as_of",
+    "source_identity_is_consistent",
     "validate_capture_outcome_association",
 )
 
@@ -64,10 +66,11 @@ _NORMALIZED_IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\Z")
 _NORMALIZED_PRICE = re.compile(r"[0-9]+(?:\.[0-9]{1,9})?\Z")
 _NORMALIZATION_VERSION = "canonical-json-v1"
 _EVIDENCE_AUTHORITY_SCOPE = "research_evidence"
-_EVIDENCE_ENVELOPE_SCHEMA_VERSION = 1
+_EVIDENCE_ENVELOPE_SCHEMA_VERSION = 2
 _EVIDENCE_PAYLOAD_SCHEMA_VERSION = 2
 _EVIDENCE_POLICY_SCHEMA_VERSION = 2
 _CAPTURE_INTENT_SCHEMA_VERSION = 2
+_CAPTURE_OUTCOME_SCHEMA_VERSION = 2
 _MAXIMUM_CONTENT_BYTES = 1_000_000
 _MAXIMUM_QUERY_RESULTS = 100
 _MAXIMUM_AGE_SECONDS = 86_399_999_999_999
@@ -100,6 +103,7 @@ _ARTIFACT_FIELDS = frozenset(
         "available_at",
         "data_regime",
         "authority_scope",
+        "observation_id",
         "material_fingerprints",
         "payload",
         "content_hash",
@@ -136,10 +140,12 @@ _OUTCOME_FIELDS = frozenset(
         "status",
         "refusal_reason",
         "artifact",
+        "mapping_disposition",
         "content_hash",
     }
 )
 _MAPPING_FIELDS = frozenset({"identity", "confidence", "mapping_version", "available_at"})
+_MAPPING_DISPOSITION_FIELDS = frozenset({"mapping_version", "available_at"})
 _MARKET_CONTENT_FIELDS = frozenset({"bars"})
 _MARKET_BAR_FIELDS = frozenset({"asset_id", "close", "timestamp"})
 _NEWS_CONTENT_FIELDS = frozenset({"headline", "id", "summary"})
@@ -386,6 +392,11 @@ class EvidencePolicy:
         """Return whether every V0 evidence authority has a scheduled retrieval."""
         return {request.source for request in self.requests} == set(EvidenceFeed)
 
+    @property
+    def has_required_retrieval(self) -> bool:
+        """Return whether runtime capture has at least one fail-closed requirement."""
+        return any(request.required for request in self.requests)
+
 
 @dataclass(frozen=True, slots=True)
 class EvidenceCandidate:
@@ -511,14 +522,21 @@ class EvidenceArtifact:
     content_hash: str
 
     @classmethod
-    def from_candidate(cls, candidate: EvidenceCandidate) -> EvidenceArtifact:
+    def from_candidate(
+        cls,
+        candidate: EvidenceCandidate,
+        *,
+        observation_id: str,
+    ) -> EvidenceArtifact:
         candidate.__post_init__()
+        if not is_sha256(observation_id):
+            raise InvalidEvidenceError(_INVALID_ARTIFACT)
         content_hash = hashlib.sha256(candidate.content).hexdigest()
-        material = _artifact_material(candidate, content_hash)
+        material = _artifact_material(candidate, content_hash, observation_id)
         artifact_id = _content_hash(material)
         return cls(
             artifact_id=artifact_id,
-            observation_id=artifact_id,
+            observation_id=observation_id,
             retrieval_identity=candidate.retrieval_identity,
             source_identity=candidate.source_identity,
             kind=candidate.kind,
@@ -542,12 +560,35 @@ class EvidenceArtifact:
 
 
 @dataclass(frozen=True, slots=True)
+class EvidenceMappingDisposition:
+    """Preserve the version and availability of one explicit mapping ambiguity."""
+
+    mapping_version: str
+    available_at: UtcInstant
+
+    def __post_init__(self) -> None:
+        if (
+            type(self.mapping_version) is not str
+            or _MAPPING_VERSION.fullmatch(self.mapping_version) is None
+            or type(self.available_at) is not UtcInstant
+        ):
+            raise InvalidEvidenceError(_INVALID_CAPTURE)
+
+    def to_payload(self) -> dict[str, object]:
+        return {
+            "mapping_version": self.mapping_version,
+            "available_at": self.available_at.isoformat(),
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class EvidenceSourceDisposition:
     """Return one bounded recorded-source failure before publication."""
 
     status: EvidenceCaptureStatus
     reason: EvidenceRefusalReason
     data_regime: str | None
+    mapping: EvidenceMappingDisposition | None = None
 
     def __post_init__(self) -> None:
         allowed = {
@@ -569,6 +610,10 @@ class EvidenceSourceDisposition:
                 and self.reason is not EvidenceRefusalReason.INVALID_RECORDED_INPUT
             )
             or (self.data_regime is not None and not is_data_regime(self.data_regime))
+            or (
+                (self.status is EvidenceCaptureStatus.AMBIGUOUS)
+                != (type(self.mapping) is EvidenceMappingDisposition)
+            )
         ):
             raise InvalidEvidenceError(_INVALID_CAPTURE)
 
@@ -635,52 +680,79 @@ class CaptureOutcome:
     status: EvidenceCaptureStatus
     refusal_reason: EvidenceRefusalReason | None
     artifact: EvidenceArtifact | None
+    mapping_disposition: EvidenceMappingDisposition | None = None
 
     def __post_init__(self) -> None:
-        shape = (self.status, self.refusal_reason, self.artifact is not None)
+        shape = (
+            self.status,
+            self.refusal_reason,
+            self.artifact is not None,
+            self.mapping_disposition is not None,
+        )
         allowed_shapes = (
-            (EvidenceCaptureStatus.CAPTURED, None, True),
+            (EvidenceCaptureStatus.CAPTURED, None, True, False),
             (
                 EvidenceCaptureStatus.UNAVAILABLE,
                 EvidenceRefusalReason.SOURCE_UNAVAILABLE,
                 False,
+                False,
             ),
-            (EvidenceCaptureStatus.STALE, EvidenceRefusalReason.SOURCE_STALE, False),
-            (EvidenceCaptureStatus.STALE, EvidenceRefusalReason.STALE_AT_CUTOFF, True),
+            (
+                EvidenceCaptureStatus.UNAVAILABLE,
+                EvidenceRefusalReason.AFTER_CUTOFF,
+                False,
+                True,
+            ),
+            (EvidenceCaptureStatus.STALE, EvidenceRefusalReason.SOURCE_STALE, False, False),
+            (EvidenceCaptureStatus.STALE, EvidenceRefusalReason.STALE_AT_CUTOFF, True, False),
             (
                 EvidenceCaptureStatus.INVALID,
                 EvidenceRefusalReason.INVALID_RECORDED_INPUT,
+                False,
                 False,
             ),
             (
                 EvidenceCaptureStatus.AMBIGUOUS,
                 EvidenceRefusalReason.AMBIGUOUS_ENTITY_MAPPING,
                 False,
+                True,
             ),
-            (EvidenceCaptureStatus.REFUSED, EvidenceRefusalReason.SOURCE_REFUSED, False),
+            (EvidenceCaptureStatus.REFUSED, EvidenceRefusalReason.SOURCE_REFUSED, False, False),
             (
                 EvidenceCaptureStatus.REFUSED,
                 EvidenceRefusalReason.INVALID_RECORDED_INPUT,
+                False,
                 False,
             ),
             (
                 EvidenceCaptureStatus.REFUSED,
                 EvidenceRefusalReason.UNSUPPORTED_CONTRACT,
                 False,
+                False,
             ),
-            (EvidenceCaptureStatus.REFUSED, EvidenceRefusalReason.AFTER_CUTOFF, True),
+            (EvidenceCaptureStatus.REFUSED, EvidenceRefusalReason.AFTER_CUTOFF, True, False),
         )
-        if not is_sha256(self.intent_id) or shape not in allowed_shapes:
+        if (
+            not is_sha256(self.intent_id)
+            or shape not in allowed_shapes
+            or (
+                self.mapping_disposition is not None
+                and type(self.mapping_disposition) is not EvidenceMappingDisposition
+            )
+        ):
             raise InvalidEvidenceError(_INVALID_CAPTURE)
 
     def to_payload(self) -> dict[str, object]:
         material = {
-            "schema_version": 1,
+            "schema_version": _CAPTURE_OUTCOME_SCHEMA_VERSION,
             "record_kind": "evidence_capture_outcome",
             "intent_id": self.intent_id,
             "status": self.status.value,
             "refusal_reason": (None if self.refusal_reason is None else self.refusal_reason.value),
             "artifact": None if self.artifact is None else self.artifact.to_payload(),
+            "mapping_disposition": (
+                None if self.mapping_disposition is None else self.mapping_disposition.to_payload()
+            ),
         }
         return {**material, "content_hash": _content_hash(material)}
 
@@ -695,9 +767,26 @@ def validate_capture_outcome_association(
         raise InvalidEvidenceError(_INVALID_CAPTURE)
     artifact = outcome.artifact
     if artifact is None:
+        mapping_disposition = outcome.mapping_disposition
+        if mapping_disposition is None:
+            return
+        expected_mapping_outcome = (
+            (
+                EvidenceCaptureStatus.UNAVAILABLE,
+                EvidenceRefusalReason.AFTER_CUTOFF,
+            )
+            if mapping_disposition.available_at.value > intent.cutoff.value
+            else (
+                EvidenceCaptureStatus.AMBIGUOUS,
+                EvidenceRefusalReason.AMBIGUOUS_ENTITY_MAPPING,
+            )
+        )
+        if (outcome.status, outcome.refusal_reason) != expected_mapping_outcome:
+            raise InvalidEvidenceError(_INVALID_CAPTURE)
         return
     if (
-        artifact.retrieval_identity != intent.request.retrieval_identity
+        artifact.observation_id != intent.intent_id
+        or artifact.retrieval_identity != intent.request.retrieval_identity
         or artifact.kind is not intent.request.kind
         or artifact.feed is not intent.request.source
         or artifact.data_regime != intent.data_regime
@@ -766,7 +855,8 @@ class EvidenceCaptureSummary:
                 {
                     outcome.artifact.artifact_id
                     for outcome in self.outcomes
-                    if outcome.artifact is not None
+                    if outcome.status is EvidenceCaptureStatus.CAPTURED
+                    and outcome.artifact is not None
                 }
             )
         )
@@ -943,6 +1033,17 @@ class CaptureEvidence:
             self.vault.append_intent(intent)
             source_result = self.source.retrieve(request)
             outcome, content = _capture_outcome(intent, request, source_result, cutoff, data_regime)
+            if outcome.artifact is not None and not source_identity_is_consistent(
+                outcome.artifact,
+                self.vault.stored_records(),
+            ):
+                outcome = CaptureOutcome(
+                    intent.intent_id,
+                    EvidenceCaptureStatus.INVALID,
+                    EvidenceRefusalReason.INVALID_RECORDED_INPUT,
+                    None,
+                )
+                content = None
             self.vault.append_outcome(intent, outcome, content)
             outcomes.append(outcome)
         return EvidenceCaptureSummary.from_policy(self.policy, tuple(outcomes))
@@ -1021,6 +1122,31 @@ def select_evidence_as_of(
     return tuple(ordered[: query.limit])
 
 
+def source_identity_is_consistent(
+    artifact: EvidenceArtifact,
+    records: tuple[EvidenceStoredRecord, ...],
+) -> bool:
+    """Return whether an official source identity retains its immutable source facts."""
+    official_sources = (
+        EvidenceFeed.SEC_EDGAR,
+        EvidenceFeed.ISSUER_INVESTOR_RELATIONS,
+        EvidenceFeed.FEDERAL_RESERVE,
+        EvidenceFeed.BLS,
+        EvidenceFeed.BEA,
+    )
+    if artifact.feed not in official_sources:
+        return True
+    return all(
+        existing.artifact.feed is not artifact.feed
+        or existing.artifact.source_identity != artifact.source_identity
+        or (
+            existing.artifact.content_hash == artifact.content_hash
+            and existing.artifact.published_at == artifact.published_at
+        )
+        for existing in records
+    )
+
+
 def parse_capture_intent(  # noqa: PLR0911,PLR0912 - reject hostile fields independently.
     value: object,
 ) -> CaptureIntent | None:
@@ -1085,7 +1211,7 @@ def parse_capture_outcome(  # noqa: PLR0911 - reject hostile fields independentl
     root = _exact_mapping(value, _OUTCOME_FIELDS)
     if root is None:
         return None
-    if root["schema_version"] != 1:
+    if root["schema_version"] != _CAPTURE_OUTCOME_SCHEMA_VERSION:
         return None
     if root["record_kind"] != "evidence_capture_outcome":
         return None
@@ -1108,11 +1234,33 @@ def parse_capture_outcome(  # noqa: PLR0911 - reject hostile fields independentl
     artifact = None if artifact_value is None else _parse_artifact(artifact_value)
     if artifact_value is not None and artifact is None:
         return None
+    mapping_value = root["mapping_disposition"]
+    mapping_disposition = _parse_mapping_disposition(mapping_value)
+    if mapping_value is not None and mapping_disposition is None:
+        return None
     try:
-        outcome = CaptureOutcome(intent_id, status, reason, artifact)
+        outcome = CaptureOutcome(intent_id, status, reason, artifact, mapping_disposition)
     except InvalidEvidenceError:
         return None
     return outcome if outcome.to_payload() == root else None
+
+
+def _parse_mapping_disposition(value: object) -> EvidenceMappingDisposition | None:
+    if value is None:
+        return None
+    fields = _exact_mapping(value, _MAPPING_DISPOSITION_FIELDS)
+    if fields is None:
+        return None
+    mapping_version = _text(fields["mapping_version"])
+    if mapping_version is None:
+        return None
+    try:
+        return EvidenceMappingDisposition(
+            mapping_version,
+            UtcInstant.parse(fields["available_at"]),
+        )
+    except (InvalidEvidenceError, InvalidUtcInstantError, TypeError):
+        return None
 
 
 def _parse_artifact(value: object) -> EvidenceArtifact | None:  # noqa: PLR0911, PLR0912
@@ -1133,6 +1281,7 @@ def _parse_artifact(value: object) -> EvidenceArtifact | None:  # noqa: PLR0911,
         "available_at",
         "data_regime",
         "authority_scope",
+        "observation_id",
         "content_hash",
     )
     text_values = _required_text_values(root, required_text)
@@ -1167,6 +1316,7 @@ def _parse_artifact(value: object) -> EvidenceArtifact | None:  # noqa: PLR0911,
         available_at_text,
         data_regime,
         authority_scope,
+        observation_id,
         artifact_id,
     ) = text_values
     (
@@ -1210,7 +1360,7 @@ def _parse_artifact(value: object) -> EvidenceArtifact | None:  # noqa: PLR0911,
             )
         artifact = EvidenceArtifact(
             artifact_id=artifact_id,
-            observation_id=artifact_id,
+            observation_id=observation_id,
             retrieval_identity=retrieval_identity,
             source_identity=source_identity,
             kind=kind,
@@ -1240,7 +1390,7 @@ def _artifact_is_valid(  # noqa: PLR0911 - validate provenance contracts indepen
 ) -> bool:
     if not is_sha256(artifact.artifact_id):
         return False
-    if artifact.artifact_id != artifact.observation_id:
+    if not is_sha256(artifact.observation_id):
         return False
     if not is_sha256(artifact.content_hash):
         return False
@@ -1269,7 +1419,7 @@ def _artifact_is_valid(  # noqa: PLR0911 - validate provenance contracts indepen
         )
     except InvalidEvidenceError:
         return False
-    material = _artifact_material(candidate, artifact.content_hash)
+    material = _artifact_material(candidate, artifact.content_hash, artifact.observation_id)
     return artifact.artifact_id == _content_hash(material)
 
 
@@ -1291,7 +1441,28 @@ def _capture_outcome(  # noqa: PLR0911 - preserve distinct capture dispositions.
                 ),
                 None,
             )
-        return CaptureOutcome(intent.intent_id, result.status, result.reason, None), None
+        mapping = result.mapping
+        if mapping is not None and mapping.available_at.value > cutoff.value:
+            return (
+                CaptureOutcome(
+                    intent.intent_id,
+                    EvidenceCaptureStatus.UNAVAILABLE,
+                    EvidenceRefusalReason.AFTER_CUTOFF,
+                    None,
+                    mapping,
+                ),
+                None,
+            )
+        return (
+            CaptureOutcome(
+                intent.intent_id,
+                result.status,
+                result.reason,
+                None,
+                mapping,
+            ),
+            None,
+        )
     if isinstance(result, EvidenceCandidate):
         result.__post_init__()
         if result.retrieval_identity != request.retrieval_identity:
@@ -1324,7 +1495,10 @@ def _capture_outcome(  # noqa: PLR0911 - preserve distinct capture dispositions.
                 ),
                 None,
             )
-        artifact = EvidenceArtifact.from_candidate(result)
+        artifact = EvidenceArtifact.from_candidate(
+            result,
+            observation_id=intent.intent_id,
+        )
         if artifact.available_at.value > cutoff.value:
             return (
                 CaptureOutcome(
@@ -1394,7 +1568,11 @@ def _coverage_for(  # noqa: PLR0911 - keep the closed source contract explicit.
     assert_never(source)  # pragma: no cover - enum is closed.
 
 
-def _artifact_material(candidate: EvidenceCandidate, content_hash: str) -> dict[str, object]:
+def _artifact_material(
+    candidate: EvidenceCandidate,
+    content_hash: str,
+    observation_id: str,
+) -> dict[str, object]:
     relevant_at = _relevant_at(candidate.kind, candidate.source_event_at, candidate.published_at)
     if relevant_at is None:  # pragma: no cover - candidate validation requires the kind's time.
         raise InvalidEvidenceError(_INVALID_ARTIFACT)
@@ -1421,6 +1599,7 @@ def _artifact_material(candidate: EvidenceCandidate, content_hash: str) -> dict[
         "available_at": candidate.available_at.isoformat(),
         "data_regime": candidate.data_regime,
         "authority_scope": _EVIDENCE_AUTHORITY_SCOPE,
+        "observation_id": observation_id,
         "material_fingerprints": {
             "source_content": content_hash,
             "retrieval_contract": _content_hash(retrieval_contract),
@@ -1452,7 +1631,7 @@ def _artifact_envelope_material(artifact: EvidenceArtifact) -> dict[str, object]
         entity_mappings=artifact.entity_mappings,
         content=bytes.fromhex(artifact.content_hash),
     )
-    return _artifact_material(candidate, artifact.content_hash)
+    return _artifact_material(candidate, artifact.content_hash, artifact.observation_id)
 
 
 def is_normalized_evidence_content(  # noqa: PLR0911 - validate closed variants locally.

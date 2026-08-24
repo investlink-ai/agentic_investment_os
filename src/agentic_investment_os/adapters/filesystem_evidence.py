@@ -21,6 +21,7 @@ from agentic_investment_os.evidence.capture import (
     InvalidEvidenceError,
     parse_capture_intent,
     parse_capture_outcome,
+    source_identity_is_consistent,
     validate_capture_outcome_association,
 )
 
@@ -157,6 +158,8 @@ class FilesystemEvidenceVault:
         _validate_association(intent, outcome)
         record = _validated_stored_record(outcome, content)
         if record is not None:
+            if not source_identity_is_consistent(record.artifact, self.stored_records()):
+                raise EvidencePersistenceError(_VAULT_INVALID)
             self._append_bytes(self._contents / record.artifact.content_hash, record.content)
         self._append_bytes(
             self._outcomes / f"{intent.intent_id}.json",

@@ -1,10 +1,21 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from typing import TYPE_CHECKING
 
+from agentic_investment_os.adapters.recorded_evidence import RecordedAlpacaEvidenceSource
 from agentic_investment_os.domain.identity import EquityInstrumentIdentity
 from agentic_investment_os.domain.lifecycle import EvidenceCaptureCheckpoint
-from agentic_investment_os.evidence.capture import EvidencePolicy
+from agentic_investment_os.evidence.capture import (
+    CaptureIntent,
+    EvidenceArtifact,
+    EvidenceCandidate,
+    EvidenceKind,
+    EvidencePolicy,
+)
+
+if TYPE_CHECKING:
+    from agentic_investment_os.domain.temporal import UtcInstant
 
 
 def evidence_capture_checkpoint() -> EvidenceCaptureCheckpoint:
@@ -13,11 +24,41 @@ def evidence_capture_checkpoint() -> EvidenceCaptureCheckpoint:
     return EvidenceCaptureCheckpoint(
         policy.policy_id,
         (
-            "c53a529ea383bc89e1a6b00940644b676e52562fbb30555a12e84ac514e3d650",
-            "ccd27d68162f5b1a879154666cf3ada878776a8cbde200ded56ca3ea53d34830",
+            "4cc6da3f815de5e449c6e31bf113222857dbb6d501e4bb1359c61976b385d77d",
+            "889d9318f9704dbebbeb714ff820c10aa798143f854141f5f39b0e7992d1976d",
         ),
         (),
     )
+
+
+def materialized_evidence_capture_checkpoint(
+    *,
+    run_id: str,
+    universe_snapshot_id: str,
+    cutoff: UtcInstant,
+    data_regime: str,
+) -> EvidenceCaptureCheckpoint:
+    """Derive fixture artifact IDs from the effect-local capture intents."""
+    policy = EvidencePolicy.parse(evidence_policy())
+    assert isinstance(policy, EvidencePolicy)
+    source = RecordedAlpacaEvidenceSource(recorded_evidence())
+    artifact_ids: list[str] = []
+    for request in policy.requests:
+        if request.kind not in (EvidenceKind.MARKET, EvidenceKind.NEWS):
+            continue
+        intent = CaptureIntent.create(
+            run_id=run_id,
+            universe_snapshot_id=universe_snapshot_id,
+            cutoff=cutoff,
+            data_regime=data_regime,
+            request=request,
+        )
+        candidate = source.retrieve(request)
+        assert isinstance(candidate, EvidenceCandidate)
+        artifact_ids.append(
+            EvidenceArtifact.from_candidate(candidate, observation_id=intent.intent_id).artifact_id
+        )
+    return EvidenceCaptureCheckpoint(policy.policy_id, tuple(sorted(artifact_ids)), ())
 
 
 def evidence_policy() -> dict[str, object]:

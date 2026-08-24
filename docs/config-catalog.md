@@ -74,9 +74,10 @@ values are mechanics-calibrated and must not be selected by optimizing investmen
 `evidence_policy` contains the complete recorded-source capture policy for `CaptureEvidence`. Its
 Data Regime must match `universe_policy`; an entitlement, feed, or source change cannot enter an
 existing regime. Runtime composition requires at least one retrieval for each V0 source: IEX market,
-Alpaca news, SEC EDGAR, issuer investor relations, Federal Reserve, BLS, and BEA. Each capture appends
-intent before consulting the recorded source, then persists a typed outcome and any immutable content
-before lifecycle completion. This schema configures offline recorded adapters only; live HTTP
+Alpaca news, SEC EDGAR, issuer investor relations, Federal Reserve, BLS, and BEA, and at least one
+retrieval must be required. Each capture appends intent before consulting the recorded source, then
+persists a typed outcome and any immutable content before lifecycle completion. This schema
+configures offline recorded adapters only; live HTTP
 collection, bulk historical backfill, and LLM online retrieval are outside the implemented boundary.
 
 | Field | Type and validation | Effect |
@@ -89,7 +90,7 @@ collection, bulk historical backfill, and LLM online retrieval are outside the i
 | `requests[].source` | String; `iex`, `alpaca_news`, `sec_edgar`, `issuer_investor_relations`, `federal_reserve`, `bls`, or `bea`, compatible with the selected kind | Pins the authorized provider or official authority; another source cannot substitute |
 | `requests[].retrieval_identity` | Lowercase bounded identifier | Creates a stable idempotent intent identity within the run and cutoff |
 | `requests[].maximum_age_seconds` | Integer from `1` through `86,399,999,999,999` seconds | Marks an otherwise valid observation stale when its derived availability precedes the allowed cutoff window |
-| `requests[].required` | Exact boolean | Makes any non-captured outcome fail closed when true; when false, the typed outcome remains durable without blocking otherwise complete required capture |
+| `requests[].required` | Exact boolean; at least one request must be true in runtime configuration | Makes any non-captured outcome fail closed when true; when false, the typed outcome remains durable without blocking otherwise complete required capture |
 
 The Evidence Vault lives at the fixed `evidence-vault/` child of `state_root`. Its directories and
 files use private modes `0700` and `0600`; those names and modes are safety constants, not tunable

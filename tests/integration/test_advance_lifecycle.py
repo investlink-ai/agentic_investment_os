@@ -62,6 +62,7 @@ from agentic_investment_os.entrypoints.configuration import (
 from agentic_investment_os.entrypoints.lifecycle import SystemClock, configure_advance
 from tests._evidence import (
     evidence_capture_checkpoint,
+    materialized_evidence_capture_checkpoint,
     recorded_evidence,
     recorded_official_evidence,
 )
@@ -1068,6 +1069,13 @@ class _LifecycleReferenceModel:
 
     @staticmethod
     def _advanced(stream: _ReferenceStream, recovery: AdvanceRecovery) -> AdvanceReceipt:
+        identity = stream.pinned_run_identity
+        checkpoint = materialized_evidence_capture_checkpoint(
+            run_id=identity.run_id,
+            universe_snapshot_id=stream.universe_snapshot_id,
+            cutoff=identity.evidence_cutoff,
+            data_regime=identity.data_regime,
+        )
         return AdvanceReceipt(
             disposition=AdvanceDisposition.ADVANCED,
             completed_phase=LifecycleCheckpoint.equity(LifecyclePhase.CAPTURE_EVIDENCE),
@@ -1076,8 +1084,8 @@ class _LifecycleReferenceModel:
             recovery=recovery,
             universe_snapshot_id=stream.universe_snapshot_id,
             recorded_at=UtcInstant.from_datetime(RECORDED_AT),
-            evidence_policy_id=evidence_capture_checkpoint().policy_id,
-            evidence_artifact_ids=evidence_capture_checkpoint().artifact_ids,
+            evidence_policy_id=checkpoint.policy_id,
+            evidence_artifact_ids=checkpoint.artifact_ids,
         )
 
     def _stream(self, session: str, events: int) -> _ReferenceStream:
@@ -1285,6 +1293,42 @@ def test_advance_captures_all_recorded_official_sources_without_network_access(
 
     assert receipt.disposition is AdvanceDisposition.ADVANCED
     assert len(receipt.evidence_artifact_ids) == COMPLETE_EVIDENCE_ARTIFACT_COUNT
+    assert receipt.evidence_refusal_ids == ()
+    assert (
+        len(tuple((state_root / "evidence-vault" / "contents").iterdir()))
+        == COMPLETE_EVIDENCE_ARTIFACT_COUNT
+    )
+
+
+def test_optional_official_artifact_after_cutoff_is_not_published_as_admitted_evidence(
+    tmp_path: Path,
+) -> None:
+    state_root = tmp_path / "runtime"
+    official = recorded_official_evidence()
+    items = official["items"]
+    assert isinstance(items, list)
+    sec = items[0]
+    assert isinstance(sec, dict)
+    sec["published_at"] = "2026-08-21T20:30:00.000000+00:00"
+    sec["first_observed_at"] = "2026-08-21T20:31:00.000000+00:00"
+    configured = configure_advance(
+        (ConfigurationSource("test", runtime_configuration(state_root)),),
+        repository_root=REPOSITORY_ROOT,
+        recorded_universe=recorded_universe(),
+        recorded_evidence=recorded_evidence(),
+        recorded_official_evidence=official,
+        clock=FixedClock(datetime(2026, 8, 21, 22, 0, tzinfo=UTC)),
+    )
+    assert isinstance(configured, Advance)
+
+    receipt = configured(
+        cycle=_cycle_payload("2026-08-21"),
+        mode="champion",
+        idempotency_key="optional-future-official-evidence",
+    )
+
+    assert receipt.disposition is AdvanceDisposition.ADVANCED
+    assert len(receipt.evidence_artifact_ids) == COMPLETE_EVIDENCE_ARTIFACT_COUNT - 1
     assert receipt.evidence_refusal_ids == ()
     assert (
         len(tuple((state_root / "evidence-vault" / "contents").iterdir()))

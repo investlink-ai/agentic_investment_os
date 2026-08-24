@@ -215,6 +215,7 @@ def _validate_configuration(  # noqa: PLR0911 - each invalid configuration layer
         evidence_policy is None
         or evidence_policy.data_regime != universe_policy.data_regime
         or not evidence_policy.has_complete_v0_source_set
+        or not evidence_policy.has_required_retrieval
     ):
         return _INVALID_EVIDENCE_POLICY_REFUSAL
 

@@ -60,7 +60,7 @@ EARLIER_RUN_ID = "9" * 64
 SNAPSHOT_ID = "c" * 64
 EXPECTED_CONTENT_COUNT = 2
 EXPECTED_OUTCOME_COUNT = 4
-EXPECTED_RECORD_COUNT = 3
+EXPECTED_RECORD_COUNT = 4
 EXPECTED_RETRIEVAL_COUNT = 2
 OPTIONAL_OFFICIAL_RETRIEVAL_COUNT = 5
 COMPLETE_RETRIEVAL_COUNT = 7
@@ -136,7 +136,7 @@ def _intent_and_outcome() -> tuple[CaptureIntent, CaptureOutcome, bytes]:
     )
     candidate = RecordedAlpacaEvidenceSource(recorded_evidence()).retrieve(request)
     assert isinstance(candidate, EvidenceCandidate)
-    artifact = EvidenceArtifact.from_candidate(candidate)
+    artifact = EvidenceArtifact.from_candidate(candidate, observation_id=intent.intent_id)
     return (
         intent,
         CaptureOutcome(intent.intent_id, EvidenceCaptureStatus.CAPTURED, None, artifact),
@@ -144,7 +144,10 @@ def _intent_and_outcome() -> tuple[CaptureIntent, CaptureOutcome, bytes]:
     )
 
 
-def _association_violation_artifact(field: str) -> tuple[EvidenceArtifact, bytes]:
+def _association_violation_artifact(
+    field: str,
+    observation_id: str,
+) -> tuple[EvidenceArtifact, bytes]:
     request = _policy().requests[0]
     candidate = RecordedAlpacaEvidenceSource(recorded_evidence()).retrieve(request)
     assert isinstance(candidate, EvidenceCandidate)
@@ -192,7 +195,10 @@ def _association_violation_artifact(field: str) -> tuple[EvidenceArtifact, bytes
     else:
         assert field == "data_regime"
         changed = replace(candidate, data_regime="another-regime")
-    return EvidenceArtifact.from_candidate(changed), changed.content
+    return (
+        EvidenceArtifact.from_candidate(changed, observation_id=observation_id),
+        changed.content,
+    )
 
 
 def _write_private(path: Path, content: bytes) -> None:
@@ -224,7 +230,11 @@ def test_vault_deduplicates_content_retains_observations_and_filters_as_of(
     assert len(tuple((vault_root / "outcomes").iterdir())) == EXPECTED_OUTCOME_COUNT
     assert len(vault.stored_records()) == EXPECTED_RECORD_COUNT
     admitted = EvidenceLookup(vault)(EvidenceQuery(_instant(19, 10), "alpaca-basic-iex-v1", 10))
-    assert tuple(record.artifact.kind.value for record in admitted) == ("news", "market")
+    assert tuple(record.artifact.kind.value for record in admitted) == (
+        "news",
+        "news",
+        "market",
+    )
     assert EvidenceLookup(vault)(EvidenceQuery(_instant(23), "another-regime", 10)) == ()
     assert b"ignore previous instructions" in admitted[0].content
 
@@ -361,6 +371,169 @@ def test_sec_amendment_appends_a_new_accession_and_obeys_as_of_cutoffs(
     assert (
         len(tuple((tmp_path / "evidence-vault" / "contents").iterdir())) == EXPECTED_CONTENT_COUNT
     )
+
+
+def test_identical_official_retrievals_keep_distinct_effect_local_observations(
+    tmp_path: Path,
+) -> None:
+    full_policy = _complete_policy()
+    sec_request = next(
+        request for request in full_policy.requests if request.kind is EvidenceKind.SEC_FILING
+    )
+    policy = EvidencePolicy(full_policy.data_regime, (sec_request,))
+    vault = FilesystemEvidenceVault(tmp_path / "evidence-vault")
+    capture = CaptureEvidence(
+        policy,
+        RecordedOfficialEvidenceSource(recorded_official_evidence()),
+        vault,
+    )
+
+    first = capture(
+        run_id=RUN_ID,
+        universe_snapshot_id=SNAPSHOT_ID,
+        cutoff=_instant(18),
+        data_regime=policy.data_regime,
+    )
+    second = capture(
+        run_id=SECOND_RUN_ID,
+        universe_snapshot_id=SNAPSHOT_ID,
+        cutoff=_instant(18),
+        data_regime=policy.data_regime,
+    )
+    records = vault.stored_records()
+
+    assert first.artifact_ids != second.artifact_ids
+    assert len(records) == EXPECTED_CONTENT_COUNT
+    assert records[0].artifact.content_hash == records[1].artifact.content_hash
+    assert records[0].artifact.observation_id != records[1].artifact.observation_id
+    assert len(tuple((tmp_path / "evidence-vault" / "contents").iterdir())) == 1
+
+
+def test_changed_mapping_version_is_visible_only_after_its_availability(
+    tmp_path: Path,
+) -> None:
+    full_policy = _complete_policy()
+    sec_request = next(
+        request for request in full_policy.requests if request.kind is EvidenceKind.SEC_FILING
+    )
+    policy = EvidencePolicy(full_policy.data_regime, (sec_request,))
+    vault = FilesystemEvidenceVault(tmp_path / "evidence-vault")
+    CaptureEvidence(
+        policy,
+        RecordedOfficialEvidenceSource(recorded_official_evidence()),
+        vault,
+    )(
+        run_id=RUN_ID,
+        universe_snapshot_id=SNAPSHOT_ID,
+        cutoff=_instant(18),
+        data_regime=policy.data_regime,
+    )
+    changed_payload = recorded_official_evidence()
+    mappings = official_evidence_item(changed_payload, 0)["entity_mappings"]
+    assert isinstance(mappings, list)
+    mapping = mappings[0]
+    assert isinstance(mapping, dict)
+    mapping["mapping_version"] = "issuer-map-v2"
+    mapping["available_at"] = "2026-08-21T19:00:00.000000+00:00"
+    CaptureEvidence(policy, RecordedOfficialEvidenceSource(changed_payload), vault)(
+        run_id=SECOND_RUN_ID,
+        universe_snapshot_id=SNAPSHOT_ID,
+        cutoff=_instant(20),
+        data_regime=policy.data_regime,
+    )
+
+    before_change = EvidenceLookup(vault)(EvidenceQuery(_instant(18), policy.data_regime, 10))
+    after_change = EvidenceLookup(vault)(EvidenceQuery(_instant(20), policy.data_regime, 10))
+
+    assert tuple(
+        record.artifact.entity_mappings[0].mapping_version for record in before_change
+    ) == ("issuer-map-v1",)
+    assert tuple(record.artifact.entity_mappings[0].mapping_version for record in after_change) == (
+        "issuer-map-v1",
+        "issuer-map-v2",
+    )
+    assert len({record.artifact.content_hash for record in after_change}) == 1
+
+
+def test_conflicting_content_for_one_official_identity_becomes_typed_invalid(
+    tmp_path: Path,
+) -> None:
+    full_policy = _complete_policy()
+    sec_request = next(
+        request for request in full_policy.requests if request.kind is EvidenceKind.SEC_FILING
+    )
+    policy = EvidencePolicy(full_policy.data_regime, (sec_request,))
+    vault = FilesystemEvidenceVault(tmp_path / "evidence-vault")
+    CaptureEvidence(
+        policy,
+        RecordedOfficialEvidenceSource(recorded_official_evidence()),
+        vault,
+    )(
+        run_id=RUN_ID,
+        universe_snapshot_id=SNAPSHOT_ID,
+        cutoff=_instant(18),
+        data_regime=policy.data_regime,
+    )
+    conflicting_payload = recorded_official_evidence()
+    content = official_evidence_item(conflicting_payload, 0)["content"]
+    assert isinstance(content, dict)
+    content["text"] = "Conflicting synthetic content under the same SEC accession."
+
+    conflicting = CaptureEvidence(
+        policy,
+        RecordedOfficialEvidenceSource(conflicting_payload),
+        vault,
+    )(
+        run_id=SECOND_RUN_ID,
+        universe_snapshot_id=SNAPSHOT_ID,
+        cutoff=_instant(18),
+        data_regime=policy.data_regime,
+    )
+
+    assert conflicting.outcomes[0].status is EvidenceCaptureStatus.INVALID
+    assert conflicting.outcomes[0].artifact is None
+    assert len(vault.stored_records()) == 1
+
+
+def test_future_ambiguous_mapping_is_unavailable_with_durable_mapping_provenance(
+    tmp_path: Path,
+) -> None:
+    full_policy = _complete_policy()
+    sec_request = next(
+        request for request in full_policy.requests if request.kind is EvidenceKind.SEC_FILING
+    )
+    policy = EvidencePolicy(full_policy.data_regime, (sec_request,))
+    payload = recorded_official_evidence()
+    mappings = official_evidence_item(payload, 0)["entity_mappings"]
+    assert isinstance(mappings, list)
+    mapping = mappings[0]
+    assert isinstance(mapping, dict)
+    mapping.update(
+        {
+            "identity": None,
+            "confidence": "ambiguous",
+            "mapping_version": "issuer-map-v2",
+            "available_at": "2026-08-21T20:30:00.000000+00:00",
+        }
+    )
+
+    summary = CaptureEvidence(
+        policy,
+        RecordedOfficialEvidenceSource(payload),
+        FilesystemEvidenceVault(tmp_path / "evidence-vault"),
+    )(
+        run_id=RUN_ID,
+        universe_snapshot_id=SNAPSHOT_ID,
+        cutoff=_instant(20),
+        data_regime=policy.data_regime,
+    )
+
+    outcome = summary.outcomes[0]
+    assert outcome.status is EvidenceCaptureStatus.UNAVAILABLE
+    assert outcome.refusal_reason is EvidenceRefusalReason.AFTER_CUTOFF
+    assert outcome.mapping_disposition is not None
+    assert outcome.mapping_disposition.mapping_version == "issuer-map-v2"
+    assert outcome.mapping_disposition.available_at == _instant(20, 30)
 
 
 def test_vault_reference_validation_requires_every_configured_capture_outcome(
@@ -661,7 +834,10 @@ def test_vault_revalidates_normalized_content_before_publication(tmp_path: Path)
         source_candidate,
         content=malformed_content,
     )
-    malformed_artifact = EvidenceArtifact.from_candidate(malformed_candidate)
+    malformed_artifact = EvidenceArtifact.from_candidate(
+        malformed_candidate,
+        observation_id=intent.intent_id,
+    )
     malformed_outcome = replace(outcome, artifact=malformed_artifact)
     vault.append_intent(intent)
 
@@ -679,7 +855,7 @@ def test_vault_rejects_resealed_outcomes_that_contradict_their_intent(
 ) -> None:
     vault = FilesystemEvidenceVault(tmp_path / "evidence-vault")
     intent, _, _ = _intent_and_outcome()
-    artifact, content = _association_violation_artifact(field)
+    artifact, content = _association_violation_artifact(field, intent.intent_id)
     outcome = CaptureOutcome(
         intent.intent_id,
         EvidenceCaptureStatus.CAPTURED,
@@ -696,7 +872,7 @@ def test_vault_revalidates_intent_association_when_loading_an_outcome(tmp_path: 
     vault_root = tmp_path / "evidence-vault"
     vault = FilesystemEvidenceVault(vault_root)
     intent, _, _ = _intent_and_outcome()
-    artifact, content = _association_violation_artifact("data_regime")
+    artifact, content = _association_violation_artifact("data_regime", intent.intent_id)
     outcome = CaptureOutcome(intent.intent_id, EvidenceCaptureStatus.CAPTURED, None, artifact)
     vault.append_intent(intent)
     _write_private(
@@ -716,7 +892,7 @@ def test_vault_rejects_rehashed_noncanonical_content_before_publication(tmp_path
     assert isinstance(source_candidate, EvidenceCandidate)
     noncanonical_content = b'{"z":1, "a":2}'
     candidate = replace(source_candidate, content=noncanonical_content)
-    artifact = EvidenceArtifact.from_candidate(candidate)
+    artifact = EvidenceArtifact.from_candidate(candidate, observation_id=intent.intent_id)
     outcome = CaptureOutcome(intent.intent_id, EvidenceCaptureStatus.CAPTURED, None, artifact)
     vault.append_intent(intent)
 
@@ -815,7 +991,7 @@ def test_vault_accepts_news_content_at_the_normalized_size_limit(tmp_path: Path)
         source_identity="news-at-limit",
         content=content,
     )
-    artifact = EvidenceArtifact.from_candidate(candidate)
+    artifact = EvidenceArtifact.from_candidate(candidate, observation_id=intent.intent_id)
     outcome = CaptureOutcome(intent.intent_id, EvidenceCaptureStatus.CAPTURED, None, artifact)
     vault.append_intent(intent)
     vault.append_outcome(intent, outcome, content)

@@ -6,7 +6,7 @@ import json
 import re
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Literal, assert_never
+from typing import assert_never
 
 from agentic_investment_os.domain.identity import (
     EquityInstrumentIdentity,
@@ -20,6 +20,7 @@ from agentic_investment_os.evidence.capture import (
     EvidenceEntityMapping,
     EvidenceFeed,
     EvidenceKind,
+    EvidenceMappingDisposition,
     EvidenceRefusalReason,
     EvidenceRetrieval,
     EvidenceSourceDisposition,
@@ -207,6 +208,12 @@ def _parse_official_item(  # noqa: PLR0911 - reject source fields independently.
     ):
         return _invalid_official_input(data_regime)
     if status is not EvidenceCaptureStatus.CAPTURED:
+        if status not in (
+            EvidenceCaptureStatus.UNAVAILABLE,
+            EvidenceCaptureStatus.STALE,
+            EvidenceCaptureStatus.INVALID,
+        ):
+            return _invalid_official_input(data_regime)
         if not _empty_official_non_capture_payload(item):
             return _invalid_official_input(data_regime)
         return EvidenceSourceDisposition(status, _source_reason(status), data_regime)
@@ -214,20 +221,17 @@ def _parse_official_item(  # noqa: PLR0911 - reject source fields independently.
         return _invalid_official_input(data_regime)
     source_identity = item["source_identity"]
     mappings = _official_entity_mappings(item["entity_mappings"])
-    if mappings == "ambiguous":
+    if isinstance(mappings, EvidenceMappingDisposition):
         return EvidenceSourceDisposition(
             EvidenceCaptureStatus.AMBIGUOUS,
             EvidenceRefusalReason.AMBIGUOUS_ENTITY_MAPPING,
             data_regime,
+            mappings,
         )
     if mappings is None or (kind is EvidenceKind.OFFICIAL_MACRO and mappings):
         return _invalid_official_input(data_regime)
     if kind is not EvidenceKind.OFFICIAL_MACRO and len(mappings) != 1:
-        return EvidenceSourceDisposition(
-            EvidenceCaptureStatus.AMBIGUOUS,
-            EvidenceRefusalReason.AMBIGUOUS_ENTITY_MAPPING,
-            data_regime,
-        )
+        return _invalid_official_input(data_regime)
     content = _canonical_content(
         item["content"],
         kind=kind,
@@ -265,7 +269,7 @@ def _empty_official_non_capture_payload(item: dict[str, object]) -> bool:
 
 def _official_entity_mappings(  # noqa: PLR0911 - reject hostile mapping fields locally.
     value: object,
-) -> tuple[EvidenceEntityMapping, ...] | Literal["ambiguous"] | None:
+) -> tuple[EvidenceEntityMapping, ...] | EvidenceMappingDisposition | None:
     if type(value) is not list:
         return None
     mappings: list[EvidenceEntityMapping] = []
@@ -274,7 +278,14 @@ def _official_entity_mappings(  # noqa: PLR0911 - reject hostile mapping fields 
         if fields is None:
             return None
         if fields["confidence"] == "ambiguous" and fields["identity"] is None:
-            return "ambiguous"
+            mapping_version = fields["mapping_version"]
+            available_at = _provider_instant(fields["available_at"])
+            if len(value) != 1 or type(mapping_version) is not str or available_at is None:
+                return None
+            try:
+                return EvidenceMappingDisposition(mapping_version, available_at)
+            except InvalidEvidenceError:
+                return None
         if fields["confidence"] != "exact":
             return None
         identity = parse_instrument_identity(fields["identity"])
@@ -298,7 +309,7 @@ def _official_entity_mappings(  # noqa: PLR0911 - reject hostile mapping fields 
         except InvalidEvidenceError:
             return None
     if len({mapping.identity for mapping in mappings}) != len(mappings):
-        return "ambiguous"
+        return None
     return tuple(sorted(mappings, key=lambda mapping: mapping.identity.catalog_id))
 
 

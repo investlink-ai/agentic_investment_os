@@ -857,3 +857,24 @@ def test_runtime_configuration_refuses_invalid_or_mismatched_evidence_policy(
         ConfigurationRefusalCode.INVALID_EVIDENCE_POLICY,
         ("evidence_policy",),
     )
+
+
+def test_runtime_configuration_requires_at_least_one_fail_closed_evidence_retrieval() -> None:
+    configuration = _with_policy({"schema_version": 1, "state_root": "/runtime/state"})
+    policy = evidence_policy()
+    requests = policy["requests"]
+    assert isinstance(requests, list)
+    for request in requests:
+        assert isinstance(request, dict)
+        request["required"] = False
+    configuration["evidence_policy"] = policy
+
+    resolution = resolve_runtime_configuration(
+        (ConfigurationSource("evidence", configuration),),
+        repository_root=Path(__file__).resolve().parents[2],
+    )
+
+    assert resolution == ConfigurationRefusal(
+        ConfigurationRefusalCode.INVALID_EVIDENCE_POLICY,
+        ("evidence_policy",),
+    )
