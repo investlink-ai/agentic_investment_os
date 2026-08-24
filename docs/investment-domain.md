@@ -83,7 +83,7 @@ Every Evidence Artifact retains, when applicable:
 - publication or filing-acceptance time;
 - first-observed or ingestion time;
 - derived availability time used by as-of reads;
-- retrieval identity and content hash;
+- retrieval identity, observation-specific artifact identity, and source-content hash;
 - source entitlement or feed;
 - parser and normalization version; and
 - entity-mapping confidence.
@@ -95,7 +95,8 @@ date and does not acquire a synthetic midnight instant.
 Availability at the pinned Evidence Cutoff determines whether evidence may enter a decision. A source
 event date alone is insufficient. SEC artifacts are keyed by accession and acceptance time; current
 aggregates, later amendments, or restatements cannot leak into prior contexts. Repeated capture of
-identical content retains each observation time.
+identical content retains each observation time and artifact identity while sharing immutable content
+bytes.
 
 Absent data remains absent:
 

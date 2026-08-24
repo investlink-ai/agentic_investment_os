@@ -17,6 +17,7 @@ flowchart TD
     entrypoints --> domain
     entrypoints --> execution
     entrypoints --> adapters
+    entrypoints --> evidence
 
     application --> evidence
     application --> memory

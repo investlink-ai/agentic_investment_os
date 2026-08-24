@@ -33,6 +33,8 @@ __all__ = (
     "AppendTerminalLifecycleRecord",
     "DurableAdvanceConflict",
     "DurableAdvanceRefusal",
+    "EvidenceCaptureCheckpoint",
+    "EvidenceCaptureReference",
     "IdempotencyKey",
     "InputRefusal",
     "InputRefusalCode",
@@ -49,14 +51,17 @@ __all__ = (
     "LifecycleRecord",
     "LifecycleStatus",
     "LifecycleStatusProjection",
+    "PerformEvidenceCapture",
     "PinnedRunIdentity",
     "decide_advance",
+    "decide_evidence_refusal_replay",
     "decide_invalid_history",
     "decide_terminal_refusal",
     "derive_lifecycle_status",
     "is_sha256",
     "parse_advance_receipt",
     "parse_lifecycle_checkpoint",
+    "reconstruct_evidence_checkpoints",
 )
 
 _IDEMPOTENCY_KEY = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\Z")
@@ -116,6 +121,9 @@ _RECEIPT_PAYLOAD_FIELDS = frozenset(
         "failure_reason",
         "recovery",
         "universe_snapshot_id",
+        "evidence_policy_id",
+        "evidence_artifact_ids",
+        "evidence_refusal_ids",
     }
 )
 _PINNED_IDENTITY_FIELDS = frozenset(
@@ -151,11 +159,12 @@ class SessionMode(StrEnum):
 
 
 class LifecyclePhase(StrEnum):
-    """Name lifecycle checkpoints implemented through universe snapshotting."""
+    """Name lifecycle checkpoints implemented through recorded evidence capture."""
 
     RECONCILE_PRIOR_STATE = "ReconcilePriorState"
     PIN_RUN_INPUTS = "PinRunInputs"
     SNAPSHOT_UNIVERSE = "SnapshotUniverse"
+    CAPTURE_EVIDENCE = "CaptureEvidence"
 
 
 @dataclass(frozen=True, slots=True)
@@ -228,6 +237,7 @@ class LifecycleEventKind(StrEnum):
     PHASE_COMPLETED = "phase_completed"
     RUN_INPUTS_PINNED = "run_inputs_pinned"
     UNIVERSE_SNAPSHOTTED = "universe_snapshotted"
+    EVIDENCE_CAPTURED = "evidence_captured"
 
 
 class LifecycleLiveness(StrEnum):
@@ -279,6 +289,7 @@ class AdvanceFailureReason(StrEnum):
     SESSION_STREAM_CONFLICT = "session_stream_conflict"
     IDEMPOTENCY_KEY_CONFLICT = "idempotency_key_conflict"
     INVALID_DURABLE_STATE = "invalid_durable_state"
+    EVIDENCE_CAPTURE_FAILED = "evidence_capture_failed"
 
 
 @dataclass(frozen=True, slots=True)
@@ -384,6 +395,51 @@ class PinnedRunIdentity:
 
 
 @dataclass(frozen=True, slots=True)
+class EvidenceCaptureCheckpoint:
+    """Carry bounded durable references from the evidence capability into lifecycle state."""
+
+    policy_id: str
+    artifact_ids: tuple[str, ...]
+    refusal_ids: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        if (
+            not is_sha256(self.policy_id)
+            or type(self.artifact_ids) is not tuple
+            or type(self.refusal_ids) is not tuple
+            or any(not is_sha256(value) for value in (*self.artifact_ids, *self.refusal_ids))
+            or tuple(sorted(set(self.artifact_ids))) != self.artifact_ids
+            or tuple(sorted(set(self.refusal_ids))) != self.refusal_ids
+        ):
+            raise ValueError(_INVALID_CHECKPOINT_ORDER)
+
+    @property
+    def is_complete(self) -> bool:
+        return bool(self.artifact_ids) and not self.refusal_ids
+
+
+@dataclass(frozen=True, slots=True)
+class EvidenceCaptureReference:
+    """Bind one durable checkpoint to the exact pinned capture inputs that produced it."""
+
+    run_id: str
+    universe_snapshot_id: str
+    cutoff: UtcInstant
+    data_regime: str
+    checkpoint: EvidenceCaptureCheckpoint
+
+    def __post_init__(self) -> None:
+        if (
+            not is_sha256(self.run_id)
+            or not is_sha256(self.universe_snapshot_id)
+            or type(self.cutoff) is not UtcInstant
+            or not is_data_regime(self.data_regime)
+            or type(self.checkpoint) is not EvidenceCaptureCheckpoint
+        ):
+            raise ValueError(_INVALID_CHECKPOINT_ORDER)
+
+
+@dataclass(frozen=True, slots=True)
 class AdvanceReceipt:
     """Report durable lifecycle facts and how this call observed their completion."""
 
@@ -395,6 +451,9 @@ class AdvanceReceipt:
     universe_snapshot_id: str | None = None
     refused_cycle: DecisionCycleIdentity | None = None
     recorded_at: UtcInstant | None = None
+    evidence_policy_id: str | None = None
+    evidence_artifact_ids: tuple[str, ...] = ()
+    evidence_refusal_ids: tuple[str, ...] = ()
 
     @property
     def cycle(self) -> DecisionCycleIdentity | None:
@@ -452,6 +511,9 @@ class AdvanceReceipt:
                 ),
                 "recovery": None if self.recovery is None else self.recovery.value,
                 "universe_snapshot_id": self.universe_snapshot_id,
+                "evidence_policy_id": self.evidence_policy_id,
+                "evidence_artifact_ids": list(self.evidence_artifact_ids),
+                "evidence_refusal_ids": list(self.evidence_refusal_ids),
             },
         }
         return {**material, "content_hash": _content_hash(material)}
@@ -468,13 +530,17 @@ class AdvanceReceipt:
             except InvalidUtcInstantError as error:
                 raise ValueError(_INVALID_ADVANCED_RECEIPT) from error
             if (
-                self.completed_phase != LifecycleCheckpoint.equity(LifecyclePhase.SNAPSHOT_UNIVERSE)
+                self.completed_phase != LifecycleCheckpoint.equity(LifecyclePhase.CAPTURE_EVIDENCE)
                 or self.failure_reason is not None
                 or self.recovery is None
                 or self.universe_snapshot_id is None
                 or self.refused_cycle is not None
                 or type(identity.cycle) is not MarketSession
                 or recorded_at.value < identity.evidence_cutoff.value
+                or not is_sha256(self.evidence_policy_id)
+                or not self.evidence_artifact_ids
+                or self.evidence_refusal_ids
+                or not _valid_evidence_references(self.evidence_artifact_ids)
             ):
                 raise ValueError(_INVALID_ADVANCED_RECEIPT)
             return
@@ -486,6 +552,24 @@ class AdvanceReceipt:
                 or self.recovery is not None
                 or self.universe_snapshot_id is not None
                 or self.recorded_at is not None
+                or (
+                    self.failure_reason is AdvanceFailureReason.EVIDENCE_CAPTURE_FAILED
+                    and (
+                        not is_sha256(self.evidence_policy_id)
+                        or not self.evidence_refusal_ids
+                        or not _valid_evidence_references(self.evidence_artifact_ids)
+                        or not _valid_evidence_references(self.evidence_refusal_ids)
+                        or type(self.refused_cycle) is not MarketSession
+                    )
+                )
+                or (
+                    self.failure_reason is not AdvanceFailureReason.EVIDENCE_CAPTURE_FAILED
+                    and (
+                        self.evidence_policy_id is not None
+                        or self.evidence_artifact_ids
+                        or self.evidence_refusal_ids
+                    )
+                )
                 or (
                     (self.failure_reason is AdvanceFailureReason.UNSUPPORTED_CYCLE)
                     != (type(self.refused_cycle) is CryptoDecisionWindow)
@@ -507,15 +591,19 @@ class AdvanceReceipt:
         snapshot: UniverseSnapshot,
         recovery: AdvanceRecovery,
         recorded_at: UtcInstant,
+        evidence_capture: EvidenceCaptureCheckpoint,
     ) -> AdvanceReceipt:
         return cls(
             AdvanceDisposition.ADVANCED,
-            LifecycleCheckpoint.equity(LifecyclePhase.SNAPSHOT_UNIVERSE),
+            LifecycleCheckpoint.equity(LifecyclePhase.CAPTURE_EVIDENCE),
             identity,
             None,
             recovery,
             snapshot.snapshot_id,
             recorded_at=recorded_at,
+            evidence_policy_id=evidence_capture.policy_id,
+            evidence_artifact_ids=evidence_capture.artifact_ids,
+            evidence_refusal_ids=evidence_capture.refusal_ids,
         )
 
     @classmethod
@@ -524,11 +612,23 @@ class AdvanceReceipt:
         reason: AdvanceFailureReason,
         *,
         cycle: DecisionCycleIdentity | None = None,
+        evidence_capture: EvidenceCaptureCheckpoint | None = None,
     ) -> AdvanceReceipt:
-        return cls(AdvanceDisposition.FAILED_CLOSED, None, None, reason, refused_cycle=cycle)
+        return cls(
+            AdvanceDisposition.FAILED_CLOSED,
+            None,
+            None,
+            reason,
+            refused_cycle=cycle,
+            evidence_policy_id=(None if evidence_capture is None else evidence_capture.policy_id),
+            evidence_artifact_ids=(
+                () if evidence_capture is None else evidence_capture.artifact_ids
+            ),
+            evidence_refusal_ids=(() if evidence_capture is None else evidence_capture.refusal_ids),
+        )
 
 
-def parse_advance_receipt(  # noqa: PLR0911 - reject each hostile envelope field directly.
+def parse_advance_receipt(  # noqa: PLR0911, PLR0912 - reject hostile fields directly.
     value: object,
 ) -> AdvanceReceipt | None:
     """Validate one hostile common receipt envelope and reconstruct its typed result."""
@@ -583,6 +683,15 @@ def parse_advance_receipt(  # noqa: PLR0911 - reject each hostile envelope field
     snapshot_id = payload["universe_snapshot_id"]
     if snapshot_id is not None and not is_sha256(snapshot_id):
         return None
+    evidence_policy_id = payload["evidence_policy_id"]
+    if evidence_policy_id is not None and not is_sha256(evidence_policy_id):
+        return None
+    evidence_artifact_ids = _parse_hash_tuple(payload["evidence_artifact_ids"])
+    evidence_refusal_ids = _parse_hash_tuple(payload["evidence_refusal_ids"])
+    if evidence_artifact_ids is None:
+        return None
+    if evidence_refusal_ids is None:
+        return None
     if disposition is None or not valid_failure_reason or not valid_recovery:
         return None
     try:
@@ -595,6 +704,9 @@ def parse_advance_receipt(  # noqa: PLR0911 - reject each hostile envelope field
             universe_snapshot_id=snapshot_id,
             refused_cycle=cycle if identity is None else None,
             recorded_at=parsed_available_at if identity is not None else None,
+            evidence_policy_id=evidence_policy_id,
+            evidence_artifact_ids=evidence_artifact_ids,
+            evidence_refusal_ids=evidence_refusal_ids,
         )
     except ValueError:
         return None
@@ -610,6 +722,7 @@ class LifecycleProgress:
     completed_phase: LifecyclePhase | None
     sequence: int
     universe_snapshot: UniverseSnapshot | None = None
+    evidence_capture: EvidenceCaptureCheckpoint | None = None
 
     @property
     def is_complete(self) -> bool:
@@ -621,6 +734,8 @@ class LifecycleProgress:
         if phase is LifecyclePhase.PIN_RUN_INPUTS:
             return False
         if phase is LifecyclePhase.SNAPSHOT_UNIVERSE:
+            return False
+        if phase is LifecyclePhase.CAPTURE_EVIDENCE:
             return True
         # Strict mypy proves this line unreachable; removing it is runtime-equivalent.
         assert_never(phase)  # pragma: no cover
@@ -631,6 +746,13 @@ class LifecycleProgress:
         if snapshot is None:
             raise InvalidLifecycleStateError(_INVALID_CHECKPOINT_ORDER)
         return snapshot
+
+    def require_evidence_capture(self) -> EvidenceCaptureCheckpoint:
+        """Return the durable capture references only after their lifecycle checkpoint."""
+        capture = self.evidence_capture
+        if capture is None:
+            raise InvalidLifecycleStateError(_INVALID_CHECKPOINT_ORDER)
+        return capture
 
 
 @dataclass(frozen=True, slots=True)
@@ -645,6 +767,7 @@ class LifecycleEvent:
     completed_phase: LifecycleCheckpoint | None
     prepared_universe_snapshot: UniverseSnapshot | None = None
     published_universe_snapshot_id: str | None = None
+    evidence_capture: EvidenceCaptureCheckpoint | None = None
 
     @property
     def universe_snapshot_id(self) -> str | None:
@@ -688,6 +811,17 @@ class LifecycleEvent:
                     None if self.completed_phase is None else self.completed_phase.to_payload()
                 ),
                 "universe_snapshot_id": (self.universe_snapshot_id),
+                "evidence_policy_id": (
+                    None if self.evidence_capture is None else self.evidence_capture.policy_id
+                ),
+                "evidence_artifact_ids": (
+                    []
+                    if self.evidence_capture is None
+                    else list(self.evidence_capture.artifact_ids)
+                ),
+                "evidence_refusal_ids": (
+                    [] if self.evidence_capture is None else list(self.evidence_capture.refusal_ids)
+                ),
             },
         }
         return {**material, "content_hash": _content_hash(material)}
@@ -698,6 +832,15 @@ class AdvanceCommand:
     """Request one deterministic lifecycle transition for validated inputs."""
 
     request: AdvanceRequest
+    pinned_run_identity: PinnedRunIdentity
+    universe_snapshot: UniverseSnapshot
+    evidence_capture: EvidenceCaptureCheckpoint | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class PerformEvidenceCapture:
+    """Return control to application orchestration for one intent-first external effect set."""
+
     pinned_run_identity: PinnedRunIdentity
     universe_snapshot: UniverseSnapshot
 
@@ -735,6 +878,7 @@ class DurableAdvanceRefusal:
     idempotency_key: IdempotencyKey | None
     reason: AdvanceFailureReason
     cycle: MarketSession | None = None
+    evidence_capture: EvidenceCaptureCheckpoint | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -805,7 +949,9 @@ class AppendTerminalLifecycleRecord:
     receipt: AdvanceReceipt
 
 
-LifecycleDecision = AppendLifecycleRecord | AppendTerminalLifecycleRecord | AdvanceReceipt
+LifecycleDecision = (
+    AppendLifecycleRecord | AppendTerminalLifecycleRecord | PerformEvidenceCapture | AdvanceReceipt
+)
 
 
 _EVENT_SEQUENCE = (
@@ -813,6 +959,7 @@ _EVENT_SEQUENCE = (
     (LifecycleEventKind.PHASE_COMPLETED, LifecyclePhase.RECONCILE_PRIOR_STATE, False, False),
     (LifecycleEventKind.RUN_INPUTS_PINNED, LifecyclePhase.PIN_RUN_INPUTS, True, False),
     (LifecycleEventKind.UNIVERSE_SNAPSHOTTED, LifecyclePhase.SNAPSHOT_UNIVERSE, False, True),
+    (LifecycleEventKind.EVIDENCE_CAPTURED, LifecyclePhase.CAPTURE_EVIDENCE, False, False),
 )
 
 
@@ -824,7 +971,9 @@ def decide_advance(
 ) -> LifecycleDecision:
     """Reconstruct authoritative history and choose one durable transition or receipt."""
     terminal = decide_terminal_refusal(history.refusals, command)
-    if terminal is not None:
+    if terminal is not None and not (
+        terminal.evidence_artifact_ids or terminal.evidence_refusal_ids
+    ):
         return terminal
     try:
         progresses = reconstruct_lifecycle(history)
@@ -832,6 +981,18 @@ def decide_advance(
         return _invalid_history_decision(history, command)
 
     progress_by_key = {progress.request.idempotency_key.value: progress for progress in progresses}
+    if terminal is not None:
+        if not isinstance(command, AdvanceCommand):  # pragma: no cover - evidence is advance-only.
+            raise InvalidLifecycleStateError(_INVALID_REFUSAL_ASSOCIATION)
+        progress = progress_by_key.get(command.request.idempotency_key.value)
+        if progress is None:  # pragma: no cover - refusal reconstruction requires association.
+            raise InvalidLifecycleStateError(_INVALID_REFUSAL_ASSOCIATION)
+        if not _advance_matches_progress(progress, command):
+            return AdvanceReceipt.failed_closed(
+                AdvanceFailureReason.IDEMPOTENCY_KEY_CONFLICT,
+                cycle=command.request.session,
+            )
+        return terminal
     if isinstance(command, InputRefusal):
         return _decide_input_refusal(history, progress_by_key, command)
     if isinstance(command, AdvanceCommand):
@@ -859,6 +1020,54 @@ def decide_terminal_refusal(
     assert_never(command)  # pragma: no cover
 
 
+def decide_evidence_refusal_replay(
+    history: LifecycleHistory,
+    refusals: tuple[DurableAdvanceRefusal, ...],
+    command: AdvanceCommand,
+) -> AdvanceReceipt:
+    """Validate one evidence refusal against only its owning request stream."""
+    terminal = decide_terminal_refusal(refusals, command)
+    if terminal is None:
+        return AdvanceReceipt.failed_closed(
+            AdvanceFailureReason.INVALID_DURABLE_STATE,
+            cycle=command.request.session,
+        )
+    if not (terminal.evidence_artifact_ids or terminal.evidence_refusal_ids):
+        return terminal
+    try:
+        progresses = reconstruct_lifecycle(history)
+    except InvalidLifecycleStateError:
+        return AdvanceReceipt.failed_closed(
+            AdvanceFailureReason.INVALID_DURABLE_STATE,
+            cycle=command.request.session,
+        )
+    key = command.request.idempotency_key
+    progress = next(
+        (item for item in progresses if item.request.idempotency_key == key),
+        None,
+    )
+    refusal = next((item for item in refusals if item.idempotency_key == key), None)
+    if (
+        progress is None
+        or refusal is None
+        or refusal.reason is not AdvanceFailureReason.EVIDENCE_CAPTURE_FAILED
+        or refusal.cycle != command.request.session
+        or refusal.evidence_capture is None
+        or refusal.evidence_capture.is_complete
+        or progress.completed_phase is not LifecyclePhase.SNAPSHOT_UNIVERSE
+    ):
+        return AdvanceReceipt.failed_closed(
+            AdvanceFailureReason.INVALID_DURABLE_STATE,
+            cycle=command.request.session,
+        )
+    if not _advance_matches_progress(progress, command):
+        return AdvanceReceipt.failed_closed(
+            AdvanceFailureReason.IDEMPOTENCY_KEY_CONFLICT,
+            cycle=command.request.session,
+        )
+    return terminal
+
+
 def _terminal_advance_refusal(
     refusals: tuple[DurableAdvanceRefusal, ...],
     command: AdvanceCommand,
@@ -876,7 +1085,11 @@ def _terminal_advance_refusal(
             AdvanceFailureReason.IDEMPOTENCY_KEY_CONFLICT,
             cycle=current_cycle,
         )
-    return AdvanceReceipt.failed_closed(refusal.reason, cycle=current_cycle)
+    return AdvanceReceipt.failed_closed(
+        refusal.reason,
+        cycle=current_cycle,
+        evidence_capture=refusal.evidence_capture,
+    )
 
 
 def _terminal_input_refusal(
@@ -964,6 +1177,43 @@ def reconstruct_lifecycle(history: LifecycleHistory) -> tuple[LifecycleProgress,
     return progresses
 
 
+def reconstruct_evidence_checkpoints(
+    history: LifecycleHistory,
+) -> tuple[EvidenceCaptureReference, ...]:
+    """Return every Vault checkpoint bound to its reconstructed pinned capture inputs."""
+    progresses = reconstruct_lifecycle(history)
+    progress_by_key = {progress.request.idempotency_key.value: progress for progress in progresses}
+    completed = tuple(
+        _evidence_reference(progress, progress.evidence_capture)
+        for progress in progresses
+        if progress.evidence_capture is not None
+    )
+    refused = tuple(
+        _evidence_reference(
+            progress_by_key[refusal.idempotency_key.value],
+            refusal.evidence_capture,
+        )
+        for refusal in history.refusals
+        if refusal.evidence_capture is not None and refusal.idempotency_key is not None
+    )
+    return (*completed, *refused)
+
+
+def _evidence_reference(
+    progress: LifecycleProgress,
+    checkpoint: EvidenceCaptureCheckpoint,
+) -> EvidenceCaptureReference:
+    snapshot = progress.require_prepared_universe_snapshot()
+    identity = progress.pinned_run_identity
+    return EvidenceCaptureReference(
+        identity.run_id,
+        snapshot.snapshot_id,
+        identity.evidence_cutoff,
+        identity.data_regime,
+        checkpoint,
+    )
+
+
 def _validate_refusals(
     refusals: tuple[DurableAdvanceRefusal, ...],
     progress_by_key: dict[str, LifecycleProgress],
@@ -976,6 +1226,8 @@ def _validate_refusals(
         key = refusal.idempotency_key
         if (key is None) != (refusal.reason is AdvanceFailureReason.INVALID_IDEMPOTENCY_KEY):
             raise InvalidLifecycleStateError(_INVALID_UNKEYED_REASON)
+        if key is None and refusal.evidence_capture is not None:
+            raise InvalidLifecycleStateError(_INVALID_REFUSAL_ASSOCIATION)
         if key is None:
             identity = (refusal.reason, refusal.cycle)
             if identity in unkeyed_identities:
@@ -989,12 +1241,24 @@ def _validate_refusals(
         if associated_progress is None and refusal.reason in (
             AdvanceFailureReason.IDEMPOTENCY_KEY_CONFLICT,
             AdvanceFailureReason.INVALID_DURABLE_STATE,
+            AdvanceFailureReason.EVIDENCE_CAPTURE_FAILED,
         ):
             raise InvalidLifecycleStateError(_INVALID_REFUSAL_ASSOCIATION)
-        if associated_progress is not None and (
-            associated_progress.is_complete
-            or refusal.reason is not AdvanceFailureReason.IDEMPOTENCY_KEY_CONFLICT
-        ):
+        if associated_progress is not None:
+            evidence_failure = (
+                refusal.reason is AdvanceFailureReason.EVIDENCE_CAPTURE_FAILED
+                and associated_progress.completed_phase is LifecyclePhase.SNAPSHOT_UNIVERSE
+                and refusal.evidence_capture is not None
+                and not refusal.evidence_capture.is_complete
+            )
+            idempotency_conflict = (
+                refusal.reason is AdvanceFailureReason.IDEMPOTENCY_KEY_CONFLICT
+                and not associated_progress.is_complete
+                and refusal.evidence_capture is None
+            )
+            if not evidence_failure and not idempotency_conflict:
+                raise InvalidLifecycleStateError(_INVALID_REFUSAL_ASSOCIATION)
+        elif refusal.evidence_capture is not None:
             raise InvalidLifecycleStateError(_INVALID_REFUSAL_ASSOCIATION)
 
 
@@ -1045,6 +1309,7 @@ def _reconstruct_stream(  # noqa: PLR0912 - validate each durable checkpoint inv
     if len(events) > len(_EVENT_SEQUENCE):
         raise InvalidLifecycleStateError(_UNSUPPORTED_LATER_PHASES)
     prepared_snapshot: UniverseSnapshot | None = None
+    evidence_capture: EvidenceCaptureCheckpoint | None = None
     for sequence, event in enumerate(events):
         if event.sequence != sequence:
             raise InvalidLifecycleStateError(_NONCONTIGUOUS_SEQUENCE)
@@ -1066,6 +1331,11 @@ def _reconstruct_stream(  # noqa: PLR0912 - validate each durable checkpoint inv
             raise InvalidLifecycleStateError(_INVALID_CHECKPOINT_ORDER)
         if (event.published_universe_snapshot_id is not None) is not publishes_snapshot:
             raise InvalidLifecycleStateError(_INVALID_CHECKPOINT_ORDER)
+        captures_evidence = expected_phase is LifecyclePhase.CAPTURE_EVIDENCE
+        if (event.evidence_capture is not None) is not captures_evidence or (
+            event.evidence_capture is not None and not event.evidence_capture.is_complete
+        ):
+            raise InvalidLifecycleStateError(_INVALID_CHECKPOINT_ORDER)
         snapshot = event.prepared_universe_snapshot
         if snapshot is not None and (
             snapshot.run_id != identity.run_id
@@ -1085,12 +1355,15 @@ def _reconstruct_stream(  # noqa: PLR0912 - validate each durable checkpoint inv
             or event.published_universe_snapshot_id != prepared_snapshot.snapshot_id
         ):
             raise InvalidLifecycleStateError(_CHANGED_PINNED_FACTS)
+        if event.evidence_capture is not None:
+            evidence_capture = event.evidence_capture
     return LifecycleProgress(
         request,
         identity,
         None if events[-1].completed_phase is None else events[-1].completed_phase.phase,
         len(events) - 1,
         prepared_snapshot,
+        evidence_capture,
     )
 
 
@@ -1106,14 +1379,7 @@ def _decide_valid_advance(
     progress = progress_by_key.get(key.value)
     if progress is None:
         return _decide_new_stream(history, tuple(progress_by_key.values()), command, attempt)
-    if (
-        progress.request != request
-        or progress.pinned_run_identity != command.pinned_run_identity
-        or (
-            progress.universe_snapshot is not None
-            and progress.universe_snapshot.snapshot_id != command.universe_snapshot.snapshot_id
-        )
-    ):
+    if not _advance_matches_progress(progress, command):
         return _decide_idempotency_conflict(history, progress, key, request.session)
     recovery = _recovery_for_progress(progress, attempt)
     if progress.is_complete:
@@ -1124,8 +1390,23 @@ def _decide_valid_advance(
             if progress.sequence != attempt.last_sequence
             else recovery,
             recorded_at,
+            progress.require_evidence_capture(),
         )
-    return _append_next_event(progress, command, recovery, recorded_at)
+    return _append_next_event(history, progress, command, recovery, recorded_at)
+
+
+def _advance_matches_progress(
+    progress: LifecycleProgress,
+    command: AdvanceCommand,
+) -> bool:
+    return (
+        progress.request == command.request
+        and progress.pinned_run_identity == command.pinned_run_identity
+        and (
+            progress.universe_snapshot is None
+            or progress.universe_snapshot.snapshot_id == command.universe_snapshot.snapshot_id
+        )
+    )
 
 
 def _decide_new_stream(
@@ -1226,14 +1507,32 @@ def _decide_idempotency_conflict(
     )
 
 
-def _append_next_event(
+def _append_next_event(  # noqa: PLR0911 - exhaust each lifecycle phase explicitly.
+    history: LifecycleHistory,
     progress: LifecycleProgress,
     command: AdvanceCommand,
     recovery: AdvanceRecovery,
     recorded_at: UtcInstant,
-) -> AppendLifecycleRecord | AppendTerminalLifecycleRecord:
+) -> AppendLifecycleRecord | AppendTerminalLifecycleRecord | PerformEvidenceCapture:
     sequence = progress.sequence + 1
     event_kind, phase, prepares_snapshot, publishes_snapshot = _EVENT_SEQUENCE[sequence]
+    if phase is LifecyclePhase.CAPTURE_EVIDENCE and command.evidence_capture is None:
+        return PerformEvidenceCapture(
+            progress.pinned_run_identity,
+            progress.require_prepared_universe_snapshot(),
+        )
+    if (
+        phase is LifecyclePhase.CAPTURE_EVIDENCE
+        and command.evidence_capture is not None
+        and not command.evidence_capture.is_complete
+    ):
+        return _append_refusal(
+            history,
+            command.request.idempotency_key,
+            AdvanceFailureReason.EVIDENCE_CAPTURE_FAILED,
+            command.request.session,
+            evidence_capture=command.evidence_capture,
+        )
     prepared_snapshot = command.universe_snapshot if prepares_snapshot else None
     published_snapshot = (
         progress.require_prepared_universe_snapshot() if publishes_snapshot else None
@@ -1248,6 +1547,9 @@ def _append_next_event(
         completed_phase=None if phase is None else LifecycleCheckpoint.equity(phase),
         prepared_universe_snapshot=prepared_snapshot,
         published_universe_snapshot_id=published_snapshot_id,
+        evidence_capture=(
+            command.evidence_capture if phase is LifecyclePhase.CAPTURE_EVIDENCE else None
+        ),
     )
     next_attempt = AdvanceAttempt(recovery, sequence)
     # Existing progress contains event zero, so its next phase cannot be absent.
@@ -1258,6 +1560,11 @@ def _append_next_event(
     if phase is LifecyclePhase.PIN_RUN_INPUTS:
         return AppendLifecycleRecord(event, next_attempt)
     if phase is LifecyclePhase.SNAPSHOT_UNIVERSE:
+        return AppendLifecycleRecord(event, next_attempt)
+    if phase is LifecyclePhase.CAPTURE_EVIDENCE:
+        evidence_capture = command.evidence_capture
+        if evidence_capture is None:  # pragma: no cover - handled before event construction.
+            raise InvalidLifecycleStateError(_INVALID_CHECKPOINT_ORDER)
         return AppendTerminalLifecycleRecord(
             event,
             AdvanceReceipt.advanced(
@@ -1265,6 +1572,7 @@ def _append_next_event(
                 progress.require_prepared_universe_snapshot(),
                 recovery,
                 recorded_at,
+                evidence_capture,
             ),
         )
     # Strict mypy proves this line unreachable; removing it is runtime-equivalent.
@@ -1276,15 +1584,21 @@ def _append_refusal(
     key: IdempotencyKey | None,
     reason: AdvanceFailureReason,
     cycle: MarketSession | None = None,
+    *,
+    evidence_capture: EvidenceCaptureCheckpoint | None = None,
 ) -> AppendTerminalLifecycleRecord:
-    receipt = AdvanceReceipt.failed_closed(reason, cycle=cycle)
+    receipt = AdvanceReceipt.failed_closed(
+        reason,
+        cycle=cycle,
+        evidence_capture=evidence_capture,
+    )
     sequence = (
         len(history.refusals) + 1
         if history.next_refusal_sequence is None
         else history.next_refusal_sequence
     )
     return AppendTerminalLifecycleRecord(
-        DurableAdvanceRefusal(sequence, key, reason, cycle),
+        DurableAdvanceRefusal(sequence, key, reason, cycle, evidence_capture),
         receipt,
     )
 
@@ -1369,10 +1683,15 @@ def derive_lifecycle_status(history: LifecycleHistory) -> LifecycleStatus:
 def _latest_universe_progress(
     progresses: tuple[LifecycleProgress, ...],
 ) -> LifecycleProgress | None:
-    completed = tuple(progress for progress in progresses if progress.is_complete)
-    if not completed:
+    published = tuple(
+        progress
+        for progress in progresses
+        if progress.completed_phase
+        in (LifecyclePhase.SNAPSHOT_UNIVERSE, LifecyclePhase.CAPTURE_EVIDENCE)
+    )
+    if not published:
         return None
-    return max(completed, key=lambda progress: progress.request.session.trading_date)
+    return max(published, key=lambda progress: progress.request.session.trading_date)
 
 
 def _latest_universe_cycle(
@@ -1415,9 +1734,26 @@ class LifecycleStatusProjection(Protocol):
 
     def rebuild_status(self) -> LifecycleStatus: ...
 
+    def rebuild_evidence_checkpoints(self) -> tuple[EvidenceCaptureReference, ...]: ...
+
 
 def is_sha256(value: object) -> TypeGuard[str]:
     return type(value) is str and _SHA256.fullmatch(value) is not None
+
+
+def _valid_evidence_references(values: tuple[str, ...]) -> bool:
+    if tuple(sorted(set(values))) != values:
+        return False
+    return all(is_sha256(value) for value in values)
+
+
+def _parse_hash_tuple(value: object) -> tuple[str, ...] | None:
+    if type(value) is not list:
+        return None
+    if any(not is_sha256(item) for item in value):
+        return None
+    result = tuple(value)
+    return result if _valid_evidence_references(result) else None
 
 
 def _exact_mapping(

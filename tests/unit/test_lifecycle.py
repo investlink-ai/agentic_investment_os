@@ -5,7 +5,7 @@ import json
 from copy import deepcopy
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
-from typing import cast, override
+from typing import TYPE_CHECKING, cast, override
 
 import pytest
 
@@ -21,6 +21,8 @@ from agentic_investment_os.domain.lifecycle import (
     AdvanceRecovery,
     AdvanceRequest,
     AppendLifecycleRecord,
+    EvidenceCaptureCheckpoint,
+    EvidenceCaptureReference,
     InputRefusal,
     InputRefusalCode,
     InvalidLifecycleStateError,
@@ -29,13 +31,16 @@ from agentic_investment_os.domain.lifecycle import (
     LifecycleDecision,
     LifecycleEvent,
     LifecycleEventKind,
+    LifecycleLedger,
     LifecyclePhase,
+    PerformEvidenceCapture,
     PinnedRunIdentity,
     parse_advance_receipt,
     parse_lifecycle_checkpoint,
 )
 from agentic_investment_os.domain.temporal import InvalidUtcInstantError, UtcInstant
-from agentic_investment_os.domain.universe import UniverseInputIdentity
+from agentic_investment_os.domain.universe import UniverseInputIdentity, UniverseSnapshot
+from tests._evidence import evidence_capture_checkpoint
 from tests._universe import (
     exact_text,
     pinned_run_identity,
@@ -47,6 +52,10 @@ from tests._universe import (
 SHA256_HEX_LENGTH = 64
 PINNED_SEQUENCE = 2
 RECEIPT_RECORDED_AT = UtcInstant.from_datetime(datetime(2026, 8, 21, 22, 0, tzinfo=UTC))
+UNEXPECTED_EVIDENCE_CAPTURE = "test ledger should terminate before evidence capture"
+
+if TYPE_CHECKING:
+    from agentic_investment_os.evidence.capture import EvidenceCaptureSummary
 
 
 class _StringSubclass(str):
@@ -77,7 +86,7 @@ def _request(key: str = "concurrent-request") -> AdvanceRequest:
     return parsed
 
 
-def _advance(ledger: ConcurrentCompletionLedger) -> Advance:
+def _advance(ledger: LifecycleLedger) -> Advance:
     return Advance(
         ledger=ledger,
         configuration_version=1,
@@ -85,7 +94,24 @@ def _advance(ledger: ConcurrentCompletionLedger) -> Advance:
         universe_source=RecordedUniverseSource(recorded_universe()),
         enabled_asset_classes=(AssetClass.US_EQUITY,),
         universe_policy=typed_universe_policy(),
+        evidence_capture=_UnusedEvidenceCapture(),
         clock=FixedClock(),
+    )
+
+
+def _advanced_receipt(
+    identity: PinnedRunIdentity,
+    snapshot: UniverseSnapshot,
+    recovery: AdvanceRecovery,
+    recorded_at: UtcInstant,
+    evidence_capture: EvidenceCaptureCheckpoint | None = None,
+) -> AdvanceReceipt:
+    return AdvanceReceipt.advanced(
+        identity,
+        snapshot,
+        recovery,
+        recorded_at,
+        evidence_capture_checkpoint() if evidence_capture is None else evidence_capture,
     )
 
 
@@ -121,6 +147,35 @@ def _reseal_receipt_with_pinned_identity(envelope: dict[str, object]) -> None:
 class FixedClock:
     def now(self) -> datetime:
         return datetime(2026, 8, 21, 22, 0, tzinfo=UTC)
+
+
+@dataclass(frozen=True)
+class _UnusedEvidenceCapture:
+    @property
+    def policy_id(self) -> str:
+        return evidence_capture_checkpoint().policy_id
+
+    def __call__(
+        self,
+        *,
+        run_id: str,
+        universe_snapshot_id: str,
+        cutoff: UtcInstant,
+        data_regime: str,
+    ) -> EvidenceCaptureSummary:
+        _ = (run_id, universe_snapshot_id, cutoff, data_regime)
+        raise AssertionError(UNEXPECTED_EVIDENCE_CAPTURE)
+
+    def validate_checkpoint(
+        self,
+        *,
+        run_id: str,
+        universe_snapshot_id: str,
+        cutoff: UtcInstant,
+        data_regime: str,
+        checkpoint: EvidenceCaptureCheckpoint,
+    ) -> None:
+        _ = (run_id, universe_snapshot_id, cutoff, data_regime, checkpoint)
 
 
 @dataclass
@@ -173,6 +228,20 @@ class ConcurrentCompletionLedger:
         )
         self.steps += 1
         return decision
+
+
+@dataclass(frozen=True)
+class _DecisionOnRefusalLedger:
+    decision: LifecycleDecision
+
+    def advance_step(
+        self,
+        command: LifecycleCommand,
+        attempt: AdvanceAttempt,
+        recorded_at: UtcInstant,
+    ) -> LifecycleDecision:
+        _ = (command, attempt, recorded_at)
+        return self.decision
 
 
 def test_advance_request_validates_the_complete_boundary() -> None:
@@ -402,11 +471,36 @@ def test_advance_receipt_rejects_incomplete_success_and_failure_shapes() -> None
         )
 
     assert (
-        AdvanceReceipt.advanced(
-            identity, snapshot, AdvanceRecovery.FRESH, RECEIPT_RECORDED_AT
-        ).recovery
+        _advanced_receipt(identity, snapshot, AdvanceRecovery.FRESH, RECEIPT_RECORDED_AT).recovery
         is AdvanceRecovery.FRESH
     )
+
+
+def test_evidence_capture_checkpoint_rejects_invalid_or_duplicate_references() -> None:
+    with pytest.raises(ValueError, match="lifecycle stream checkpoint order is invalid"):
+        EvidenceCaptureCheckpoint("invalid", (), ())
+    invalid_references = (
+        (("invalid",), ()),
+        (("a" * SHA256_HEX_LENGTH,) * 2, ()),
+        (("b" * SHA256_HEX_LENGTH, "a" * SHA256_HEX_LENGTH), ()),
+        ((), ("invalid",)),
+        ((), ("a" * SHA256_HEX_LENGTH,) * 2),
+        ((), ("b" * SHA256_HEX_LENGTH, "a" * SHA256_HEX_LENGTH)),
+    )
+    for artifact_ids, refusal_ids in invalid_references:
+        with pytest.raises(ValueError, match="lifecycle stream checkpoint order is invalid"):
+            EvidenceCaptureCheckpoint("c" * SHA256_HEX_LENGTH, artifact_ids, refusal_ids)
+
+
+def test_evidence_capture_reference_rejects_invalid_pinned_identity() -> None:
+    with pytest.raises(ValueError, match="lifecycle stream checkpoint order is invalid"):
+        EvidenceCaptureReference(
+            "invalid",
+            "b" * SHA256_HEX_LENGTH,
+            RECEIPT_RECORDED_AT,
+            "alpaca-basic-iex-v1",
+            evidence_capture_checkpoint(),
+        )
 
 
 def test_advance_receipts_round_trip_through_one_versioned_public_envelope() -> None:
@@ -417,7 +511,7 @@ def test_advance_receipts_round_trip_through_one_versioned_public_envelope() -> 
         UtcInstant.from_datetime(datetime(2026, 8, 22, tzinfo=UTC) + timedelta(hours=1)),
     )
     receipts = (
-        AdvanceReceipt.advanced(identity, snapshot, AdvanceRecovery.FRESH, RECEIPT_RECORDED_AT),
+        _advanced_receipt(identity, snapshot, AdvanceRecovery.FRESH, RECEIPT_RECORDED_AT),
         AdvanceReceipt.failed_closed(AdvanceFailureReason.INVALID_IDEMPOTENCY_KEY),
         AdvanceReceipt.failed_closed(
             AdvanceFailureReason.STALE_UNIVERSE_INPUT,
@@ -450,7 +544,7 @@ def test_advance_receipts_round_trip_through_one_versioned_public_envelope() -> 
 def test_advance_receipt_parser_rejects_crypto_as_success_even_when_resealed() -> None:
     identity = pinned_run_identity(_request())
     snapshot = universe_snapshot(identity)
-    envelope = AdvanceReceipt.advanced(
+    envelope = _advanced_receipt(
         identity, snapshot, AdvanceRecovery.FRESH, RECEIPT_RECORDED_AT
     ).to_payload()
     crypto_cycle = CryptoDecisionWindow(
@@ -471,7 +565,7 @@ def test_advance_receipt_parser_rejects_crypto_as_success_even_when_resealed() -
 def test_advance_receipt_round_trips_the_universe_owned_data_regime_grammar() -> None:
     identity = pinned_run_identity(_request())
     snapshot = universe_snapshot(identity)
-    envelope = AdvanceReceipt.advanced(
+    envelope = _advanced_receipt(
         identity, snapshot, AdvanceRecovery.FRESH, RECEIPT_RECORDED_AT
     ).to_payload()
     envelope["data_regime"] = "alpaca:iex"
@@ -494,7 +588,7 @@ def test_advance_receipt_rejects_a_completion_time_before_its_evidence_cutoff() 
     snapshot = universe_snapshot(identity)
 
     with pytest.raises(ValueError, match="advanced receipt requires completed recovery facts"):
-        AdvanceReceipt.advanced(
+        _advanced_receipt(
             identity,
             snapshot,
             AdvanceRecovery.FRESH,
@@ -512,6 +606,19 @@ def test_advance_receipt_rejects_a_completion_time_before_its_evidence_cutoff() 
         (("material_fingerprints", "instrument_snapshot"), True),
         (("payload", "disposition"), "unknown"),
         (("payload", "universe_snapshot_id"), "not-a-hash"),
+        (("payload", "evidence_policy_id"), "not-a-hash"),
+        (("payload", "evidence_artifact_ids"), True),
+        (("payload", "evidence_artifact_ids"), ["invalid"]),
+        (
+            ("payload", "evidence_artifact_ids"),
+            ["b" * SHA256_HEX_LENGTH, "a" * SHA256_HEX_LENGTH],
+        ),
+        (("payload", "evidence_refusal_ids"), True),
+        (("payload", "evidence_refusal_ids"), ["invalid"]),
+        (
+            ("payload", "evidence_refusal_ids"),
+            ["b" * SHA256_HEX_LENGTH, "a" * SHA256_HEX_LENGTH],
+        ),
     ],
 )
 def test_advance_receipt_parser_rejects_hostile_or_changed_envelopes(
@@ -521,7 +628,7 @@ def test_advance_receipt_parser_rejects_hostile_or_changed_envelopes(
     identity = pinned_run_identity(_request())
     snapshot = universe_snapshot(identity)
     envelope = deepcopy(
-        AdvanceReceipt.advanced(
+        _advanced_receipt(
             identity, snapshot, AdvanceRecovery.FRESH, RECEIPT_RECORDED_AT
         ).to_payload()
     )
@@ -531,6 +638,25 @@ def test_advance_receipt_parser_rejects_hostile_or_changed_envelopes(
         assert isinstance(nested, dict)
         target = nested
     target[path[-1]] = value
+
+    assert parse_advance_receipt(envelope) is None
+
+
+def test_advance_receipt_parser_rejects_resealed_unsorted_evidence_references() -> None:
+    identity = pinned_run_identity(_request())
+    snapshot = universe_snapshot(identity)
+    envelope = deepcopy(
+        _advanced_receipt(
+            identity, snapshot, AdvanceRecovery.FRESH, RECEIPT_RECORDED_AT
+        ).to_payload()
+    )
+    payload = envelope["payload"]
+    assert isinstance(payload, dict)
+    payload["evidence_artifact_ids"] = [
+        "b" * SHA256_HEX_LENGTH,
+        "a" * SHA256_HEX_LENGTH,
+    ]
+    _reseal_receipt_with_pinned_identity(envelope)
 
     assert parse_advance_receipt(envelope) is None
 
@@ -577,7 +703,7 @@ def test_advance_receipt_parser_rejects_hostile_shapes(  # noqa: PLR0912, PLR091
     identity = pinned_run_identity(_request())
     snapshot = universe_snapshot(identity)
     value: object = deepcopy(
-        AdvanceReceipt.advanced(
+        _advanced_receipt(
             identity, snapshot, AdvanceRecovery.FRESH, RECEIPT_RECORDED_AT
         ).to_payload()
     )
@@ -680,7 +806,7 @@ def test_advance_receipt_parser_rejects_equivalent_pinned_text_subclasses(field:
     identity = pinned_run_identity(_request())
     snapshot = universe_snapshot(identity)
     envelope = deepcopy(
-        AdvanceReceipt.advanced(
+        _advanced_receipt(
             identity, snapshot, AdvanceRecovery.FRESH, RECEIPT_RECORDED_AT
         ).to_payload()
     )
@@ -697,7 +823,7 @@ def test_advance_receipt_parser_rejects_an_equivalent_configuration_version_subc
     identity = pinned_run_identity(_request())
     snapshot = universe_snapshot(identity)
     envelope = deepcopy(
-        AdvanceReceipt.advanced(
+        _advanced_receipt(
             identity, snapshot, AdvanceRecovery.FRESH, RECEIPT_RECORDED_AT
         ).to_payload()
     )
@@ -714,7 +840,7 @@ def test_advance_receipt_parser_rejects_a_self_consistent_naive_cutoff() -> None
     identity = pinned_run_identity(_request())
     snapshot = universe_snapshot(identity)
     envelope = deepcopy(
-        AdvanceReceipt.advanced(
+        _advanced_receipt(
             identity, snapshot, AdvanceRecovery.FRESH, RECEIPT_RECORDED_AT
         ).to_payload()
     )
@@ -735,14 +861,11 @@ def test_advance_receipt_parser_rejects_a_self_consistent_naive_cutoff() -> None
 def test_advance_returns_a_concurrent_checkpoint_receipt(completion_point: str) -> None:
     identity = pinned_run_identity(_request())
     snapshot = universe_snapshot(identity)
-    receipt = AdvanceReceipt(
-        AdvanceDisposition.ADVANCED,
-        completed_phase=LifecycleCheckpoint.equity(LifecyclePhase.SNAPSHOT_UNIVERSE),
-        pinned_run_identity=identity,
-        failure_reason=None,
-        recovery=AdvanceRecovery.PREVIOUSLY_COMPLETED,
-        universe_snapshot_id=snapshot.snapshot_id,
-        recorded_at=RECEIPT_RECORDED_AT,
+    receipt = _advanced_receipt(
+        identity,
+        snapshot,
+        AdvanceRecovery.PREVIOUSLY_COMPLETED,
+        RECEIPT_RECORDED_AT,
     )
     capability = _advance(ConcurrentCompletionLedger(completion_point, receipt))
 
@@ -765,7 +888,7 @@ def test_advance_returns_a_durable_checkpoint_failure(failure_point: str) -> Non
     capability = _advance(
         ConcurrentCompletionLedger(
             failure_point,
-            AdvanceReceipt.advanced(
+            _advanced_receipt(
                 identity,
                 snapshot,
                 AdvanceRecovery.PREVIOUSLY_COMPLETED,
@@ -789,7 +912,7 @@ def test_advance_reports_a_checkpoint_completed_during_pinning() -> None:
     capability = _advance(
         ConcurrentCompletionLedger(
             "pin_observed",
-            AdvanceReceipt.advanced(
+            _advanced_receipt(
                 identity,
                 snapshot,
                 AdvanceRecovery.PREVIOUSLY_COMPLETED,
@@ -804,7 +927,7 @@ def test_advance_reports_a_checkpoint_completed_during_pinning() -> None:
         idempotency_key="concurrent-request",
     )
 
-    assert observed == AdvanceReceipt.advanced(
+    assert observed == _advanced_receipt(
         identity,
         snapshot,
         AdvanceRecovery.PREVIOUSLY_COMPLETED,
@@ -818,7 +941,7 @@ def test_advance_rejects_an_incomplete_checkpoint_result() -> None:
     capability = _advance(
         ConcurrentCompletionLedger(
             "incomplete_reconcile",
-            AdvanceReceipt.advanced(
+            _advanced_receipt(
                 identity,
                 snapshot,
                 AdvanceRecovery.PREVIOUSLY_COMPLETED,
@@ -834,5 +957,49 @@ def test_advance_rejects_an_incomplete_checkpoint_result() -> None:
         capability(
             cycle=_cycle(),
             mode="champion",
+            idempotency_key="concurrent-request",
+        )
+
+
+def test_advance_rejects_evidence_effect_for_an_input_refusal() -> None:
+    identity = pinned_run_identity(_request())
+    capability = _advance(
+        _DecisionOnRefusalLedger(
+            PerformEvidenceCapture(identity, universe_snapshot(identity)),
+        )
+    )
+
+    with pytest.raises(
+        InvalidLifecycleStateError,
+        match="lifecycle ledger returned an incomplete checkpoint result",
+    ):
+        capability(
+            cycle=_cycle(),
+            mode="invalid",
+            idempotency_key="concurrent-request",
+        )
+
+
+def test_advance_rejects_evidence_receipt_for_an_input_refusal() -> None:
+    identity = pinned_run_identity(_request())
+    snapshot = universe_snapshot(identity)
+    capability = _advance(
+        _DecisionOnRefusalLedger(
+            _advanced_receipt(
+                identity,
+                snapshot,
+                AdvanceRecovery.PREVIOUSLY_COMPLETED,
+                RECEIPT_RECORDED_AT,
+            )
+        )
+    )
+
+    with pytest.raises(
+        InvalidLifecycleStateError,
+        match="lifecycle ledger returned an incomplete checkpoint result",
+    ):
+        capability(
+            cycle=_cycle(),
+            mode="invalid",
             idempotency_key="concurrent-request",
         )

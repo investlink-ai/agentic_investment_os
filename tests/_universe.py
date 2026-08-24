@@ -20,6 +20,7 @@ from agentic_investment_os.domain.universe import (
     UniverseSnapshot,
     build_universe_snapshot,
 )
+from tests._evidence import evidence_policy
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -144,6 +145,7 @@ def runtime_configuration(state_root: Path) -> dict[str, object]:
         "state_root": str(state_root),
         "enabled_asset_classes": ["us_equity"],
         "universe_policy": universe_policy(),
+        "evidence_policy": evidence_policy(),
     }
 
 

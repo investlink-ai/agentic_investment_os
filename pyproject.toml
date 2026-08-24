@@ -290,9 +290,12 @@ critical_paths = [
   "portfolio/**/*.py",
 ]
 safety_supporting_paths = [
+  "adapters/filesystem_evidence.py",
+  "adapters/recorded_evidence.py",
   "adapters/recorded_universe.py",
   "domain/identity.py",
   "domain/temporal.py",
+  "evidence/capture.py",
   "entrypoints/lifecycle.py",
 ]
 
