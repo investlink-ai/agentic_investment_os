@@ -5,6 +5,14 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Protocol, assert_never
 
+from agentic_investment_os.domain.attention import (
+    AttentionArtifact,
+    AttentionInputs,
+    AttentionPolicy,
+    AttentionRefusalReason,
+    InvalidAttentionError,
+    select_attention,
+)
 from agentic_investment_os.domain.identity import (
     AssetClass,
     CryptoDecisionWindow,
@@ -28,6 +36,7 @@ from agentic_investment_os.domain.lifecycle import (
     LifecyclePersistenceError,
     LifecycleStatus,
     LifecycleStatusProjection,
+    PerformAttentionSelection,
     PerformEvidenceCapture,
     PinnedRunIdentity,
 )
@@ -42,6 +51,7 @@ from agentic_investment_os.domain.universe import (
     UniverseSnapshot,
     build_universe_snapshot,
 )
+from agentic_investment_os.evidence.capture import EvidencePersistenceError
 
 if TYPE_CHECKING:
     from datetime import datetime
@@ -65,9 +75,25 @@ class Clock(Protocol):
     def now(self) -> datetime: ...
 
 
+class AttentionInputsCapability(Protocol):
+    """Derive the approved local feature set from one captured evidence checkpoint."""
+
+    def __call__(  # noqa: PLR0913 - every pinned evidence fact remains explicit.
+        self,
+        *,
+        run_id: str,
+        cycle: MarketSession,
+        universe_snapshot: UniverseSnapshot,
+        cutoff: UtcInstant,
+        data_regime: str,
+        evidence_policy_id: str,
+        evidence_artifact_ids: tuple[str, ...],
+    ) -> AttentionInputs | AttentionRefusalReason: ...
+
+
 @dataclass(frozen=True, slots=True)
 class Advance:
-    """Advance or resume one validated Decision Cycle through evidence capture."""
+    """Advance or resume one validated Decision Cycle through bounded attention."""
 
     ledger: LifecycleLedger
     configuration_version: int
@@ -76,9 +102,11 @@ class Advance:
     enabled_asset_classes: tuple[AssetClass, ...]
     universe_policy: EquityUniversePolicy
     evidence_capture: EvidenceCaptureCapability
+    attention_policy: AttentionPolicy
+    attention_inputs: AttentionInputsCapability
     clock: Clock
 
-    def __call__(
+    def __call__(  # noqa: PLR0912 - exhaust each typed lifecycle decision.
         self,
         *,
         cycle: object,
@@ -138,6 +166,35 @@ class Advance:
                     ),
                 )
                 continue
+            if isinstance(decision, PerformAttentionSelection):
+                if not isinstance(command, AdvanceCommand):
+                    raise InvalidLifecycleStateError(_INCOMPLETE_CHECKPOINT_RESULT)
+                try:
+                    attention_inputs = self.attention_inputs(
+                        run_id=decision.pinned_run_identity.run_id,
+                        cycle=command.request.session,
+                        universe_snapshot=decision.universe_snapshot,
+                        cutoff=decision.pinned_run_identity.evidence_cutoff,
+                        data_regime=decision.pinned_run_identity.data_regime,
+                        evidence_policy_id=decision.evidence_capture.policy_id,
+                        evidence_artifact_ids=decision.evidence_capture.artifact_ids,
+                    )
+                except EvidencePersistenceError:
+                    attention_inputs = AttentionRefusalReason.CORRUPT_EVIDENCE
+                attention_selection: AttentionArtifact | AttentionRefusalReason
+                if isinstance(attention_inputs, AttentionInputs):
+                    try:
+                        attention_selection = select_attention(
+                            self.attention_policy,
+                            attention_inputs,
+                            decision.attention_history,
+                        )
+                    except InvalidAttentionError:
+                        attention_selection = AttentionRefusalReason.CONTRADICTORY_EVIDENCE
+                else:
+                    attention_selection = attention_inputs
+                command = replace(command, attention_selection=attention_selection)
+                continue
             # Strict mypy proves this line unreachable; removing it is runtime-equivalent.
             assert_never(decision)  # pragma: no cover
 
@@ -164,6 +221,27 @@ class Advance:
                 receipt.evidence_refusal_ids,
             ),
         )
+        attention_artifact = receipt.attention_artifact
+        if attention_artifact is None:
+            return
+        try:
+            attention_inputs = self.attention_inputs(
+                run_id=command.pinned_run_identity.run_id,
+                cycle=command.request.session,
+                universe_snapshot=command.universe_snapshot,
+                cutoff=command.pinned_run_identity.evidence_cutoff,
+                data_regime=command.pinned_run_identity.data_regime,
+                evidence_policy_id=policy_id,
+                evidence_artifact_ids=receipt.evidence_artifact_ids,
+            )
+        except EvidencePersistenceError as error:
+            raise InvalidLifecycleStateError(_INCOMPLETE_CHECKPOINT_RESULT) from error
+        if (
+            not isinstance(attention_inputs, AttentionInputs)
+            or attention_artifact.input_fingerprint != attention_inputs.fingerprint
+            or attention_artifact.attention_policy_id != self.attention_policy.policy_id
+        ):
+            raise InvalidLifecycleStateError(_INCOMPLETE_CHECKPOINT_RESULT)
 
     def _prepare_command(
         self,

@@ -10,6 +10,11 @@ from datetime import date
 from enum import StrEnum
 from typing import TYPE_CHECKING, Protocol, TypeGuard, assert_never
 
+from agentic_investment_os.domain.attention import (
+    AttentionArtifact,
+    AttentionRefusalReason,
+    parse_attention_artifact,
+)
 from agentic_investment_os.domain.identity import (
     CryptoDecisionWindow,
     DecisionCycleIdentity,
@@ -51,6 +56,7 @@ __all__ = (
     "LifecycleRecord",
     "LifecycleStatus",
     "LifecycleStatusProjection",
+    "PerformAttentionSelection",
     "PerformEvidenceCapture",
     "PinnedRunIdentity",
     "decide_advance",
@@ -124,6 +130,8 @@ _RECEIPT_PAYLOAD_FIELDS = frozenset(
         "evidence_policy_id",
         "evidence_artifact_ids",
         "evidence_refusal_ids",
+        "attention_artifact",
+        "attention_refusal_reason",
     }
 )
 _PINNED_IDENTITY_FIELDS = frozenset(
@@ -159,12 +167,13 @@ class SessionMode(StrEnum):
 
 
 class LifecyclePhase(StrEnum):
-    """Name lifecycle checkpoints implemented through recorded evidence capture."""
+    """Name lifecycle checkpoints implemented through bounded attention selection."""
 
     RECONCILE_PRIOR_STATE = "ReconcilePriorState"
     PIN_RUN_INPUTS = "PinRunInputs"
     SNAPSHOT_UNIVERSE = "SnapshotUniverse"
     CAPTURE_EVIDENCE = "CaptureEvidence"
+    SELECT_ATTENTION = "SelectAttention"
 
 
 @dataclass(frozen=True, slots=True)
@@ -238,6 +247,7 @@ class LifecycleEventKind(StrEnum):
     RUN_INPUTS_PINNED = "run_inputs_pinned"
     UNIVERSE_SNAPSHOTTED = "universe_snapshotted"
     EVIDENCE_CAPTURED = "evidence_captured"
+    ATTENTION_SELECTED = "attention_selected"
 
 
 class LifecycleLiveness(StrEnum):
@@ -290,6 +300,7 @@ class AdvanceFailureReason(StrEnum):
     IDEMPOTENCY_KEY_CONFLICT = "idempotency_key_conflict"
     INVALID_DURABLE_STATE = "invalid_durable_state"
     EVIDENCE_CAPTURE_FAILED = "evidence_capture_failed"
+    ATTENTION_SELECTION_FAILED = "attention_selection_failed"
 
 
 @dataclass(frozen=True, slots=True)
@@ -454,6 +465,8 @@ class AdvanceReceipt:
     evidence_policy_id: str | None = None
     evidence_artifact_ids: tuple[str, ...] = ()
     evidence_refusal_ids: tuple[str, ...] = ()
+    attention_artifact: AttentionArtifact | None = None
+    attention_refusal_reason: AttentionRefusalReason | None = None
 
     @property
     def cycle(self) -> DecisionCycleIdentity | None:
@@ -514,6 +527,16 @@ class AdvanceReceipt:
                 "evidence_policy_id": self.evidence_policy_id,
                 "evidence_artifact_ids": list(self.evidence_artifact_ids),
                 "evidence_refusal_ids": list(self.evidence_refusal_ids),
+                "attention_artifact": (
+                    None
+                    if self.attention_artifact is None
+                    else self.attention_artifact.to_payload()
+                ),
+                "attention_refusal_reason": (
+                    None
+                    if self.attention_refusal_reason is None
+                    else self.attention_refusal_reason.value
+                ),
             },
         }
         return {**material, "content_hash": _content_hash(material)}
@@ -530,7 +553,7 @@ class AdvanceReceipt:
             except InvalidUtcInstantError as error:
                 raise ValueError(_INVALID_ADVANCED_RECEIPT) from error
             if (
-                self.completed_phase != LifecycleCheckpoint.equity(LifecyclePhase.CAPTURE_EVIDENCE)
+                self.completed_phase != LifecycleCheckpoint.equity(LifecyclePhase.SELECT_ATTENTION)
                 or self.failure_reason is not None
                 or self.recovery is None
                 or self.universe_snapshot_id is None
@@ -541,6 +564,15 @@ class AdvanceReceipt:
                 or not self.evidence_artifact_ids
                 or self.evidence_refusal_ids
                 or not _valid_evidence_references(self.evidence_artifact_ids)
+                or self.attention_artifact is None
+                or self.attention_refusal_reason is not None
+                or self.attention_artifact.run_id != identity.run_id
+                or self.attention_artifact.cycle != identity.cycle
+                or self.attention_artifact.universe_snapshot_id != self.universe_snapshot_id
+                or self.attention_artifact.evidence_policy_id != self.evidence_policy_id
+                or self.attention_artifact.evidence_artifact_ids != self.evidence_artifact_ids
+                or parse_attention_artifact(self.attention_artifact.to_payload())
+                != self.attention_artifact
             ):
                 raise ValueError(_INVALID_ADVANCED_RECEIPT)
             return
@@ -563,12 +595,31 @@ class AdvanceReceipt:
                     )
                 )
                 or (
-                    self.failure_reason is not AdvanceFailureReason.EVIDENCE_CAPTURE_FAILED
+                    self.failure_reason
+                    not in (
+                        AdvanceFailureReason.EVIDENCE_CAPTURE_FAILED,
+                        AdvanceFailureReason.ATTENTION_SELECTION_FAILED,
+                    )
                     and (
                         self.evidence_policy_id is not None
                         or self.evidence_artifact_ids
                         or self.evidence_refusal_ids
                     )
+                )
+                or (
+                    self.failure_reason is AdvanceFailureReason.ATTENTION_SELECTION_FAILED
+                    and (
+                        not is_sha256(self.evidence_policy_id)
+                        or not self.evidence_artifact_ids
+                        or self.evidence_refusal_ids
+                        or type(self.refused_cycle) is not MarketSession
+                        or self.attention_refusal_reason is None
+                    )
+                )
+                or self.attention_artifact is not None
+                or (
+                    (self.failure_reason is AdvanceFailureReason.ATTENTION_SELECTION_FAILED)
+                    != (self.attention_refusal_reason is not None)
                 )
                 or (
                     (self.failure_reason is AdvanceFailureReason.UNSUPPORTED_CYCLE)
@@ -585,17 +636,18 @@ class AdvanceReceipt:
         assert_never(self.disposition)  # pragma: no cover
 
     @classmethod
-    def advanced(
+    def advanced(  # noqa: PLR0913, PLR0917 - success binds every durable checkpoint.
         cls,
         identity: PinnedRunIdentity,
         snapshot: UniverseSnapshot,
         recovery: AdvanceRecovery,
         recorded_at: UtcInstant,
         evidence_capture: EvidenceCaptureCheckpoint,
+        attention_artifact: AttentionArtifact,
     ) -> AdvanceReceipt:
         return cls(
             AdvanceDisposition.ADVANCED,
-            LifecycleCheckpoint.equity(LifecyclePhase.CAPTURE_EVIDENCE),
+            LifecycleCheckpoint.equity(LifecyclePhase.SELECT_ATTENTION),
             identity,
             None,
             recovery,
@@ -604,6 +656,7 @@ class AdvanceReceipt:
             evidence_policy_id=evidence_capture.policy_id,
             evidence_artifact_ids=evidence_capture.artifact_ids,
             evidence_refusal_ids=evidence_capture.refusal_ids,
+            attention_artifact=attention_artifact,
         )
 
     @classmethod
@@ -613,6 +666,7 @@ class AdvanceReceipt:
         *,
         cycle: DecisionCycleIdentity | None = None,
         evidence_capture: EvidenceCaptureCheckpoint | None = None,
+        attention_refusal_reason: AttentionRefusalReason | None = None,
     ) -> AdvanceReceipt:
         return cls(
             AdvanceDisposition.FAILED_CLOSED,
@@ -625,6 +679,7 @@ class AdvanceReceipt:
                 () if evidence_capture is None else evidence_capture.artifact_ids
             ),
             evidence_refusal_ids=(() if evidence_capture is None else evidence_capture.refusal_ids),
+            attention_refusal_reason=attention_refusal_reason,
         )
 
 
@@ -692,7 +747,22 @@ def parse_advance_receipt(  # noqa: PLR0911, PLR0912 - reject hostile fields dir
         return None
     if evidence_refusal_ids is None:
         return None
-    if disposition is None or not valid_failure_reason or not valid_recovery:
+    attention_value = payload["attention_artifact"]
+    attention_artifact = (
+        None if attention_value is None else parse_attention_artifact(attention_value)
+    )
+    if attention_value is not None and attention_artifact is None:
+        return None
+    valid_attention_refusal, attention_refusal_reason = _optional_enum(
+        AttentionRefusalReason,
+        payload["attention_refusal_reason"],
+    )
+    if (
+        disposition is None
+        or not valid_failure_reason
+        or not valid_recovery
+        or not valid_attention_refusal
+    ):
         return None
     try:
         receipt = AdvanceReceipt(
@@ -707,6 +777,8 @@ def parse_advance_receipt(  # noqa: PLR0911, PLR0912 - reject hostile fields dir
             evidence_policy_id=evidence_policy_id,
             evidence_artifact_ids=evidence_artifact_ids,
             evidence_refusal_ids=evidence_refusal_ids,
+            attention_artifact=attention_artifact,
+            attention_refusal_reason=attention_refusal_reason,
         )
     except ValueError:
         return None
@@ -723,6 +795,7 @@ class LifecycleProgress:
     sequence: int
     universe_snapshot: UniverseSnapshot | None = None
     evidence_capture: EvidenceCaptureCheckpoint | None = None
+    attention_artifact: AttentionArtifact | None = None
 
     @property
     def is_complete(self) -> bool:
@@ -736,6 +809,8 @@ class LifecycleProgress:
         if phase is LifecyclePhase.SNAPSHOT_UNIVERSE:
             return False
         if phase is LifecyclePhase.CAPTURE_EVIDENCE:
+            return False
+        if phase is LifecyclePhase.SELECT_ATTENTION:
             return True
         # Strict mypy proves this line unreachable; removing it is runtime-equivalent.
         assert_never(phase)  # pragma: no cover
@@ -754,6 +829,13 @@ class LifecycleProgress:
             raise InvalidLifecycleStateError(_INVALID_CHECKPOINT_ORDER)
         return capture
 
+    def require_attention_artifact(self) -> AttentionArtifact:
+        """Return the durable attention artifact only after its lifecycle checkpoint."""
+        artifact = self.attention_artifact
+        if artifact is None:
+            raise InvalidLifecycleStateError(_INVALID_CHECKPOINT_ORDER)
+        return artifact
+
 
 @dataclass(frozen=True, slots=True)
 class LifecycleEvent:
@@ -768,6 +850,7 @@ class LifecycleEvent:
     prepared_universe_snapshot: UniverseSnapshot | None = None
     published_universe_snapshot_id: str | None = None
     evidence_capture: EvidenceCaptureCheckpoint | None = None
+    attention_artifact: AttentionArtifact | None = None
 
     @property
     def universe_snapshot_id(self) -> str | None:
@@ -822,6 +905,11 @@ class LifecycleEvent:
                 "evidence_refusal_ids": (
                     [] if self.evidence_capture is None else list(self.evidence_capture.refusal_ids)
                 ),
+                "attention_artifact": (
+                    None
+                    if self.attention_artifact is None
+                    else self.attention_artifact.to_payload()
+                ),
             },
         }
         return {**material, "content_hash": _content_hash(material)}
@@ -835,6 +923,7 @@ class AdvanceCommand:
     pinned_run_identity: PinnedRunIdentity
     universe_snapshot: UniverseSnapshot
     evidence_capture: EvidenceCaptureCheckpoint | None = None
+    attention_selection: AttentionArtifact | AttentionRefusalReason | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -843,6 +932,16 @@ class PerformEvidenceCapture:
 
     pinned_run_identity: PinnedRunIdentity
     universe_snapshot: UniverseSnapshot
+
+
+@dataclass(frozen=True, slots=True)
+class PerformAttentionSelection:
+    """Return control for one pure scan over pinned evidence and prior attention history."""
+
+    pinned_run_identity: PinnedRunIdentity
+    universe_snapshot: UniverseSnapshot
+    evidence_capture: EvidenceCaptureCheckpoint
+    attention_history: tuple[AttentionArtifact, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -864,6 +963,7 @@ class LifecycleStatus:
     liveness: LifecycleLiveness
     durable_reason: AdvanceFailureReason | None
     universe_snapshot_id: str | None
+    attention_artifact_id: str | None = None
 
     @classmethod
     def not_started(cls) -> LifecycleStatus:
@@ -879,6 +979,7 @@ class DurableAdvanceRefusal:
     reason: AdvanceFailureReason
     cycle: MarketSession | None = None
     evidence_capture: EvidenceCaptureCheckpoint | None = None
+    attention_refusal_reason: AttentionRefusalReason | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -950,7 +1051,11 @@ class AppendTerminalLifecycleRecord:
 
 
 LifecycleDecision = (
-    AppendLifecycleRecord | AppendTerminalLifecycleRecord | PerformEvidenceCapture | AdvanceReceipt
+    AppendLifecycleRecord
+    | AppendTerminalLifecycleRecord
+    | PerformEvidenceCapture
+    | PerformAttentionSelection
+    | AdvanceReceipt
 )
 
 
@@ -960,6 +1065,7 @@ _EVENT_SEQUENCE = (
     (LifecycleEventKind.RUN_INPUTS_PINNED, LifecyclePhase.PIN_RUN_INPUTS, True, False),
     (LifecycleEventKind.UNIVERSE_SNAPSHOTTED, LifecyclePhase.SNAPSHOT_UNIVERSE, False, True),
     (LifecycleEventKind.EVIDENCE_CAPTURED, LifecyclePhase.CAPTURE_EVIDENCE, False, False),
+    (LifecycleEventKind.ATTENTION_SELECTED, LifecyclePhase.SELECT_ATTENTION, False, False),
 )
 
 
@@ -1047,14 +1153,30 @@ def decide_evidence_refusal_replay(
         None,
     )
     refusal = next((item for item in refusals if item.idempotency_key == key), None)
+    evidence_failure = (
+        refusal is not None
+        and refusal.reason is AdvanceFailureReason.EVIDENCE_CAPTURE_FAILED
+        and refusal.evidence_capture is not None
+        and not refusal.evidence_capture.is_complete
+        and refusal.attention_refusal_reason is None
+        and progress is not None
+        and progress.completed_phase is LifecyclePhase.SNAPSHOT_UNIVERSE
+    )
+    attention_failure = (
+        refusal is not None
+        and refusal.reason is AdvanceFailureReason.ATTENTION_SELECTION_FAILED
+        and refusal.evidence_capture is not None
+        and refusal.evidence_capture.is_complete
+        and refusal.attention_refusal_reason is not None
+        and progress is not None
+        and progress.completed_phase is LifecyclePhase.CAPTURE_EVIDENCE
+        and refusal.evidence_capture == progress.evidence_capture
+    )
     if (
         progress is None
         or refusal is None
-        or refusal.reason is not AdvanceFailureReason.EVIDENCE_CAPTURE_FAILED
         or refusal.cycle != command.request.session
-        or refusal.evidence_capture is None
-        or refusal.evidence_capture.is_complete
-        or progress.completed_phase is not LifecyclePhase.SNAPSHOT_UNIVERSE
+        or not (evidence_failure or attention_failure)
     ):
         return AdvanceReceipt.failed_closed(
             AdvanceFailureReason.INVALID_DURABLE_STATE,
@@ -1089,6 +1211,7 @@ def _terminal_advance_refusal(
         refusal.reason,
         cycle=current_cycle,
         evidence_capture=refusal.evidence_capture,
+        attention_refusal_reason=refusal.attention_refusal_reason,
     )
 
 
@@ -1226,7 +1349,9 @@ def _validate_refusals(
         key = refusal.idempotency_key
         if (key is None) != (refusal.reason is AdvanceFailureReason.INVALID_IDEMPOTENCY_KEY):
             raise InvalidLifecycleStateError(_INVALID_UNKEYED_REASON)
-        if key is None and refusal.evidence_capture is not None:
+        if key is None and (
+            refusal.evidence_capture is not None or refusal.attention_refusal_reason is not None
+        ):
             raise InvalidLifecycleStateError(_INVALID_REFUSAL_ASSOCIATION)
         if key is None:
             identity = (refusal.reason, refusal.cycle)
@@ -1242,6 +1367,7 @@ def _validate_refusals(
             AdvanceFailureReason.IDEMPOTENCY_KEY_CONFLICT,
             AdvanceFailureReason.INVALID_DURABLE_STATE,
             AdvanceFailureReason.EVIDENCE_CAPTURE_FAILED,
+            AdvanceFailureReason.ATTENTION_SELECTION_FAILED,
         ):
             raise InvalidLifecycleStateError(_INVALID_REFUSAL_ASSOCIATION)
         if associated_progress is not None:
@@ -1250,15 +1376,23 @@ def _validate_refusals(
                 and associated_progress.completed_phase is LifecyclePhase.SNAPSHOT_UNIVERSE
                 and refusal.evidence_capture is not None
                 and not refusal.evidence_capture.is_complete
+                and refusal.attention_refusal_reason is None
+            )
+            attention_failure = (
+                refusal.reason is AdvanceFailureReason.ATTENTION_SELECTION_FAILED
+                and associated_progress.completed_phase is LifecyclePhase.CAPTURE_EVIDENCE
+                and refusal.evidence_capture == associated_progress.require_evidence_capture()
+                and refusal.attention_refusal_reason is not None
             )
             idempotency_conflict = (
                 refusal.reason is AdvanceFailureReason.IDEMPOTENCY_KEY_CONFLICT
                 and not associated_progress.is_complete
                 and refusal.evidence_capture is None
+                and refusal.attention_refusal_reason is None
             )
-            if not evidence_failure and not idempotency_conflict:
+            if not evidence_failure and not attention_failure and not idempotency_conflict:
                 raise InvalidLifecycleStateError(_INVALID_REFUSAL_ASSOCIATION)
-        elif refusal.evidence_capture is not None:
+        elif refusal.evidence_capture is not None or refusal.attention_refusal_reason is not None:
             raise InvalidLifecycleStateError(_INVALID_REFUSAL_ASSOCIATION)
 
 
@@ -1310,6 +1444,7 @@ def _reconstruct_stream(  # noqa: PLR0912 - validate each durable checkpoint inv
         raise InvalidLifecycleStateError(_UNSUPPORTED_LATER_PHASES)
     prepared_snapshot: UniverseSnapshot | None = None
     evidence_capture: EvidenceCaptureCheckpoint | None = None
+    attention_artifact: AttentionArtifact | None = None
     for sequence, event in enumerate(events):
         if event.sequence != sequence:
             raise InvalidLifecycleStateError(_NONCONTIGUOUS_SEQUENCE)
@@ -1357,6 +1492,25 @@ def _reconstruct_stream(  # noqa: PLR0912 - validate each durable checkpoint inv
             raise InvalidLifecycleStateError(_CHANGED_PINNED_FACTS)
         if event.evidence_capture is not None:
             evidence_capture = event.evidence_capture
+        selects_attention = expected_phase is LifecyclePhase.SELECT_ATTENTION
+        if (event.attention_artifact is not None) is not selects_attention:
+            raise InvalidLifecycleStateError(_INVALID_CHECKPOINT_ORDER)
+        if event.attention_artifact is not None:
+            artifact = event.attention_artifact
+            if (
+                prepared_snapshot is None
+                or evidence_capture is None
+                or artifact.run_id != identity.run_id
+                or artifact.cycle != identity.cycle
+                or artifact.universe_snapshot_id != prepared_snapshot.snapshot_id
+                or artifact.cutoff != identity.evidence_cutoff
+                or artifact.data_regime != identity.data_regime
+                or artifact.evidence_policy_id != evidence_capture.policy_id
+                or artifact.evidence_artifact_ids != evidence_capture.artifact_ids
+                or parse_attention_artifact(artifact.to_payload()) != artifact
+            ):
+                raise InvalidLifecycleStateError(_CHANGED_PINNED_FACTS)
+            attention_artifact = artifact
     return LifecycleProgress(
         request,
         identity,
@@ -1364,6 +1518,7 @@ def _reconstruct_stream(  # noqa: PLR0912 - validate each durable checkpoint inv
         len(events) - 1,
         prepared_snapshot,
         evidence_capture,
+        attention_artifact,
     )
 
 
@@ -1391,6 +1546,7 @@ def _decide_valid_advance(
             else recovery,
             recorded_at,
             progress.require_evidence_capture(),
+            progress.require_attention_artifact(),
         )
     return _append_next_event(history, progress, command, recovery, recorded_at)
 
@@ -1513,7 +1669,12 @@ def _append_next_event(  # noqa: PLR0911 - exhaust each lifecycle phase explicit
     command: AdvanceCommand,
     recovery: AdvanceRecovery,
     recorded_at: UtcInstant,
-) -> AppendLifecycleRecord | AppendTerminalLifecycleRecord | PerformEvidenceCapture:
+) -> (
+    AppendLifecycleRecord
+    | AppendTerminalLifecycleRecord
+    | PerformEvidenceCapture
+    | PerformAttentionSelection
+):
     sequence = progress.sequence + 1
     event_kind, phase, prepares_snapshot, publishes_snapshot = _EVENT_SEQUENCE[sequence]
     if phase is LifecyclePhase.CAPTURE_EVIDENCE and command.evidence_capture is None:
@@ -1533,6 +1694,29 @@ def _append_next_event(  # noqa: PLR0911 - exhaust each lifecycle phase explicit
             command.request.session,
             evidence_capture=command.evidence_capture,
         )
+    if phase is LifecyclePhase.SELECT_ATTENTION and command.attention_selection is None:
+        return PerformAttentionSelection(
+            progress.pinned_run_identity,
+            progress.require_prepared_universe_snapshot(),
+            progress.require_evidence_capture(),
+            tuple(
+                item.require_attention_artifact()
+                for item in reconstruct_lifecycle(history)
+                if item.attention_artifact is not None
+                and item.request.session.trading_date < command.request.session.trading_date
+            ),
+        )
+    if phase is LifecyclePhase.SELECT_ATTENTION and isinstance(
+        command.attention_selection, AttentionRefusalReason
+    ):
+        return _append_refusal(
+            history,
+            command.request.idempotency_key,
+            AdvanceFailureReason.ATTENTION_SELECTION_FAILED,
+            command.request.session,
+            evidence_capture=progress.require_evidence_capture(),
+            attention_refusal_reason=command.attention_selection,
+        )
     prepared_snapshot = command.universe_snapshot if prepares_snapshot else None
     published_snapshot = (
         progress.require_prepared_universe_snapshot() if publishes_snapshot else None
@@ -1550,6 +1734,12 @@ def _append_next_event(  # noqa: PLR0911 - exhaust each lifecycle phase explicit
         evidence_capture=(
             command.evidence_capture if phase is LifecyclePhase.CAPTURE_EVIDENCE else None
         ),
+        attention_artifact=(
+            command.attention_selection
+            if phase is LifecyclePhase.SELECT_ATTENTION
+            and isinstance(command.attention_selection, AttentionArtifact)
+            else None
+        ),
     )
     next_attempt = AdvanceAttempt(recovery, sequence)
     # Existing progress contains event zero, so its next phase cannot be absent.
@@ -1562,8 +1752,21 @@ def _append_next_event(  # noqa: PLR0911 - exhaust each lifecycle phase explicit
     if phase is LifecyclePhase.SNAPSHOT_UNIVERSE:
         return AppendLifecycleRecord(event, next_attempt)
     if phase is LifecyclePhase.CAPTURE_EVIDENCE:
-        evidence_capture = command.evidence_capture
-        if evidence_capture is None:  # pragma: no cover - handled before event construction.
+        return AppendLifecycleRecord(event, next_attempt)
+    if phase is LifecyclePhase.SELECT_ATTENTION:
+        attention_artifact = command.attention_selection
+        if not isinstance(attention_artifact, AttentionArtifact):
+            raise InvalidLifecycleStateError(_INVALID_CHECKPOINT_ORDER)
+        evidence_capture = progress.require_evidence_capture()
+        if (
+            attention_artifact.run_id != progress.pinned_run_identity.run_id
+            or attention_artifact.cycle != progress.pinned_run_identity.cycle
+            or attention_artifact.universe_snapshot_id
+            != progress.require_prepared_universe_snapshot().snapshot_id
+            or attention_artifact.evidence_policy_id != evidence_capture.policy_id
+            or attention_artifact.evidence_artifact_ids != evidence_capture.artifact_ids
+            or parse_attention_artifact(attention_artifact.to_payload()) != attention_artifact
+        ):
             raise InvalidLifecycleStateError(_INVALID_CHECKPOINT_ORDER)
         return AppendTerminalLifecycleRecord(
             event,
@@ -1573,24 +1776,27 @@ def _append_next_event(  # noqa: PLR0911 - exhaust each lifecycle phase explicit
                 recovery,
                 recorded_at,
                 evidence_capture,
+                attention_artifact,
             ),
         )
     # Strict mypy proves this line unreachable; removing it is runtime-equivalent.
     assert_never(phase)  # pragma: no cover
 
 
-def _append_refusal(
+def _append_refusal(  # noqa: PLR0913 - refusal evidence remains explicit.
     history: LifecycleHistory,
     key: IdempotencyKey | None,
     reason: AdvanceFailureReason,
     cycle: MarketSession | None = None,
     *,
     evidence_capture: EvidenceCaptureCheckpoint | None = None,
+    attention_refusal_reason: AttentionRefusalReason | None = None,
 ) -> AppendTerminalLifecycleRecord:
     receipt = AdvanceReceipt.failed_closed(
         reason,
         cycle=cycle,
         evidence_capture=evidence_capture,
+        attention_refusal_reason=attention_refusal_reason,
     )
     sequence = (
         len(history.refusals) + 1
@@ -1598,7 +1804,14 @@ def _append_refusal(
         else history.next_refusal_sequence
     )
     return AppendTerminalLifecycleRecord(
-        DurableAdvanceRefusal(sequence, key, reason, cycle, evidence_capture),
+        DurableAdvanceRefusal(
+            sequence,
+            key,
+            reason,
+            cycle,
+            evidence_capture,
+            attention_refusal_reason,
+        ),
         receipt,
     )
 
@@ -1639,6 +1852,7 @@ def derive_lifecycle_status(history: LifecycleHistory) -> LifecycleStatus:
             liveness=LifecycleLiveness.FAILED_CLOSED,
             durable_reason=history.refusals[-1].reason,
             universe_snapshot_id=None,
+            attention_artifact_id=None,
         )
 
     current = max(
@@ -1662,6 +1876,7 @@ def derive_lifecycle_status(history: LifecycleHistory) -> LifecycleStatus:
             liveness=LifecycleLiveness.FAILED_CLOSED,
             durable_reason=matching_refusal.reason,
             universe_snapshot_id=_latest_universe_snapshot_id(progresses),
+            attention_artifact_id=_latest_attention_artifact_id(progresses),
         )
 
     next_phase = None if current.is_complete else _EVENT_SEQUENCE[current.sequence + 1][1]
@@ -1677,6 +1892,7 @@ def derive_lifecycle_status(history: LifecycleHistory) -> LifecycleStatus:
             conflicts=history.conflicts,
         ),
         universe_snapshot_id=_latest_universe_snapshot_id(progresses),
+        attention_artifact_id=_latest_attention_artifact_id(progresses),
     )
 
 
@@ -1687,7 +1903,11 @@ def _latest_universe_progress(
         progress
         for progress in progresses
         if progress.completed_phase
-        in (LifecyclePhase.SNAPSHOT_UNIVERSE, LifecyclePhase.CAPTURE_EVIDENCE)
+        in (
+            LifecyclePhase.SNAPSHOT_UNIVERSE,
+            LifecyclePhase.CAPTURE_EVIDENCE,
+            LifecyclePhase.SELECT_ATTENTION,
+        )
     )
     if not published:
         return None
@@ -1706,6 +1926,18 @@ def _latest_universe_snapshot_id(progresses: tuple[LifecycleProgress, ...]) -> s
     if progress is None or progress.universe_snapshot is None:
         return None
     return progress.universe_snapshot.snapshot_id
+
+
+def _latest_attention_artifact_id(
+    progresses: tuple[LifecycleProgress, ...],
+) -> str | None:
+    published = tuple(
+        progress for progress in progresses if progress.attention_artifact is not None
+    )
+    if not published:
+        return None
+    latest = max(published, key=lambda progress: progress.request.session.trading_date)
+    return latest.require_attention_artifact().artifact_id
 
 
 def _reported_reason(

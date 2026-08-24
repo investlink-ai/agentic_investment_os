@@ -24,6 +24,7 @@ from agentic_investment_os.entrypoints.configuration import (
     RuntimeConfiguration,
     resolve_runtime_configuration,
 )
+from agentic_investment_os.evidence.attention import BuildAttentionInputs
 from agentic_investment_os.evidence.capture import CaptureEvidence
 
 if TYPE_CHECKING:
@@ -68,6 +69,7 @@ def configure_advance(  # noqa: PLR0913 - composition names each untrusted bound
             fields=("state_root",),
         )
     if isinstance(database, PreparedRuntimeDatabase):
+        evidence_vault = FilesystemEvidenceVault(resolution.state_root / "evidence-vault")
         return Advance(
             ledger=SQLiteLifecycleLedger(database.path),
             configuration_version=resolution.schema_version,
@@ -82,8 +84,10 @@ def configure_advance(  # noqa: PLR0913 - composition names each untrusted bound
                     recorded_official_evidence,
                     resolution.evidence_policy.data_regime,
                 ),
-                vault=FilesystemEvidenceVault(resolution.state_root / "evidence-vault"),
+                vault=evidence_vault,
             ),
+            attention_policy=resolution.attention_policy,
+            attention_inputs=BuildAttentionInputs(evidence_vault),
             clock=clock if clock is not None else SystemClock(),
         )
     # Strict mypy proves this line unreachable; removing it is runtime-equivalent.

@@ -955,6 +955,11 @@ class EvidenceVault(Protocol):
 
     def stored_records(self) -> tuple[EvidenceStoredRecord, ...]: ...
 
+    def stored_records_for_artifacts(
+        self,
+        artifact_ids: tuple[str, ...],
+    ) -> tuple[EvidenceStoredRecord, ...]: ...
+
 
 class EvidenceReferenceValidator(Protocol):
     """Validate lifecycle evidence references against authoritative Vault records."""

@@ -173,6 +173,8 @@ def _interrupt_after_reconcile(state_root: Path) -> None:
         enabled_asset_classes=configured.enabled_asset_classes,
         universe_policy=configured.universe_policy,
         evidence_capture=configured.evidence_capture,
+        attention_policy=configured.attention_policy,
+        attention_inputs=configured.attention_inputs,
         clock=configured.clock,
     )
     interrupted(

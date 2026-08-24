@@ -33,6 +33,8 @@ from tests._universe import (
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 REQUIRED_EVIDENCE_ARTIFACTS = 2
 EXPECTED_HISTORICAL_POLICIES = 2
+MAXIMUM_CANDIDATE_CARDS = 20
+MAXIMUM_NEW_DOSSIERS = 5
 
 
 @dataclass(frozen=True, slots=True)
@@ -62,14 +64,22 @@ def test_advance_captures_market_and_news_after_the_pinned_universe(
 
     assert receipt.disposition is AdvanceDisposition.ADVANCED
     assert receipt.completed_phase is not None
-    assert receipt.completed_phase.phase is LifecyclePhase.CAPTURE_EVIDENCE
+    assert receipt.completed_phase.phase is LifecyclePhase.SELECT_ATTENTION
     assert len(receipt.evidence_artifact_ids) == REQUIRED_EVIDENCE_ARTIFACTS
     assert receipt.evidence_refusal_ids == ()
+    assert receipt.attention_artifact is not None
+    assert (
+        receipt.attention_artifact.resource_accounting.candidate_card_count
+        <= MAXIMUM_CANDIDATE_CARDS
+    )
+    assert receipt.attention_artifact.resource_accounting.new_dossier_count <= MAXIMUM_NEW_DOSSIERS
+    assert receipt.attention_artifact.resource_accounting.model_tokens == 0
+    assert receipt.attention_artifact.resource_accounting.model_turns == 0
     with sqlite3.connect(state_root / "lifecycle.sqlite3") as connection:
         events = connection.execute(
             "SELECT event_kind FROM lifecycle_events ORDER BY sequence"
         ).fetchall()
-    assert events[-1] == ("evidence_captured",)
+    assert events[-1] == ("attention_selected",)
     assert sorted(path.name for path in state_root.iterdir()) == [
         "evidence-vault",
         "lifecycle.sqlite3",
@@ -563,7 +573,8 @@ def test_evidence_failure_row_cannot_claim_a_complete_capture(tmp_path: Path) ->
     with sqlite3.connect(database) as connection:
         row = connection.execute(
             "SELECT refusal_id, idempotency_key, cycle_identity, reason_code, "
-            "evidence_policy_id, evidence_artifact_ids, evidence_refusal_ids, recorded_at "
+            "evidence_policy_id, evidence_artifact_ids, evidence_refusal_ids, "
+            "attention_refusal_reason, recorded_at "
             "FROM advance_refusals"
         ).fetchone()
         assert row is not None
@@ -571,11 +582,12 @@ def test_evidence_failure_row_cannot_claim_a_complete_capture(tmp_path: Path) ->
         connection.execute(
             "CREATE TABLE advance_refusals "
             "(refusal_id, idempotency_key, cycle_identity, reason_code, "
-            "evidence_policy_id, evidence_artifact_ids, evidence_refusal_ids, recorded_at)"
+            "evidence_policy_id, evidence_artifact_ids, evidence_refusal_ids, "
+            "attention_refusal_reason, recorded_at)"
         )
         connection.execute(
-            "INSERT INTO advance_refusals VALUES (?, ?, ?, ?, ?, ?, '[]', ?)",
-            (row[0], row[1], row[2], row[3], row[4], row[5], row[7]),
+            "INSERT INTO advance_refusals VALUES (?, ?, ?, ?, ?, ?, '[]', ?, ?)",
+            (row[0], row[1], row[2], row[3], row[4], row[5], row[7], row[8]),
         )
 
     ledger = configured.ledger

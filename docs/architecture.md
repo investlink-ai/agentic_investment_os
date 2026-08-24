@@ -276,8 +276,9 @@ Normal production callers see six capabilities:
 - **Advance** resolves or resumes a `DecisionCycleIdentity`. V0 accepts only its `MarketSession`
   variant; its common versioned receipt envelope contains the disposition, a versioned
   `LifecycleCheckpoint` whose discriminator selects the equity phase, exact cycle and pinned inputs,
-  eligible-universe snapshot identifier, fail-closed reason, and whether the call advanced fresh
-  work, resumed committed progress, or replayed prior completion. A successful receipt's relevant
+  eligible-universe snapshot identifier, evidence references, bounded Attention Artifact or typed
+  attention refusal, fail-closed reason, and whether the call advanced fresh work, resumed committed
+  progress, or replayed prior completion. A successful receipt's relevant
   and availability times identify when that call's result was recorded; the Evidence Cutoff remains
   a separate pinned input. A recognized disabled cycle or malformed cycle is returned as a bounded
   refusal before the clock, adapter, or authoritative lifecycle ledger is entered. A valid
@@ -333,7 +334,8 @@ stateDiagram-v2
     ReconcilePriorState --> PinRunInputs
     PinRunInputs --> SnapshotUniverse
     SnapshotUniverse --> CaptureEvidence
-    CaptureEvidence --> BuildDossiers
+    CaptureEvidence --> SelectAttention
+    SelectAttention --> BuildDossiers
     BuildDossiers --> RunResearch
     RunResearch --> UpdateMemory
     UpdateMemory --> ConstructPortfolio
@@ -345,7 +347,7 @@ stateDiagram-v2
     Complete --> [*]
 
     ReconcilePriorState --> NoAction: ineligible or already complete
-    BuildDossiers --> NoAction: no investable attention
+    SelectAttention --> NoAction: no eligible attention
     RunResearch --> NoAction: abstain or no valid thesis
     ConstructPortfolio --> NoAction: deterministic rejection
     NoAction --> PublishDigest
@@ -354,6 +356,7 @@ stateDiagram-v2
     PinRunInputs --> FailedClosed: incomplete or conflicting inputs
     SnapshotUniverse --> FailedClosed: missing, stale, or contradictory recorded inputs
     CaptureEvidence --> FailedClosed: unavailable or stale evidence
+    SelectAttention --> FailedClosed: incomplete or contradictory pinned inputs
     RunResearch --> FailedClosed: invalid output or missing role
     ConstructPortfolio --> FailedClosed: invariant failure
     PublishDecision --> FailedClosed: persistence failure
@@ -380,8 +383,12 @@ The V0 scheduler resolves an NYSE trading date and exchange-relative deadlines i
 configuration, instrument catalog, position snapshot, and policy fingerprints; the current Basic
 entitlement uses IEX, while a later SIP entitlement is a different regime. `SnapshotUniverse`
 publishes the eligible universe before `CaptureEvidence` appends intent-first market, news, SEC,
-issuer, and official-macro capture outcomes to the Evidence Vault. The remaining phases run once and
-publish at most one Champion decision and packet for that cycle. A non-equity activation
+issuer, and official-macro capture outcomes to the Evidence Vault. `SelectAttention` derives only the
+approved local features from that exact checkpoint, publishes bounded Candidate Cards and Dossier
+requests, and records due-holding refreshes outside the new-Dossier cap. It consumes neither a model
+nor an external adapter and cannot publish a Dossier, Thesis, portfolio weight, packet, or order. The
+remaining phases run once and publish at most one Champion decision and packet for that cycle. A
+non-equity activation
 request or position is refused before evidence or research; an NYSE holiday produces the existing
 durable no-action path rather than a synthetic session.
 
@@ -555,6 +562,7 @@ captured evidence -> validated research -> HouseView -> deterministic portfolio
 | Order intent and receipts | Executor ledger | Persist intent before effect; append observations |
 | Lifecycle checkpoints and refusals | Lifecycle event ledger | Append transitions and bounded conflict or refusal records under stable idempotency keys |
 | Eligible-universe snapshots | Lifecycle event ledger | Append one complete asset-neutral envelope with typed instrument and position variants, applied policy, dispositions, and immutable identity |
+| Attention Artifacts | Lifecycle event ledger | Append one content-addressed zero-token selection or a typed terminal refusal; never rewrite subject transitions |
 | Graphs, reports, indexes | Projection stores | Replace only by deterministic rebuild |
 | Executable packets | Atomic packet store | Publish complete validated artifacts only |
 
@@ -611,6 +619,16 @@ event and `Advance` receipt expose only bounded policy, artifact, and refusal id
 refusal prevents the final event and appends an
 `evidence_capture_failed` terminal refusal without erasing valid observations captured in the same
 attempt.
+
+`SelectAttention` loads only the artifact identifiers named by the completed evidence checkpoint and
+revalidates their immutable content, source bindings, Data Regime, availability, universe identity,
+and cutoff before deriving typed local features. The versioned attention policy fixes per-cycle and
+weekly capacity plus a deterministic exploration seed. Selection advances an active subject by at
+most one funnel state, places holding refreshes outside new-research capacity, and records exact card,
+Dossier-request, refresh, weekly exploration, model-token, model-turn, and adapter-quota counts. The
+artifact identifier hashes every material input and output, so subject ordering, retry, interruption,
+and reopen reproduce the same result. Missing, stale, contradictory, corrupt, or inconsistent history
+appends `attention_selection_failed` with a typed reason and publishes no Attention Artifact.
 
 SQLite is the initial event and checkpoint store, while the filesystem holds content-addressed
 artifacts and atomic publications. Runtime state uses ignored, configurable roots such as `var/`,

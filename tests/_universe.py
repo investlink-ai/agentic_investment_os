@@ -139,6 +139,18 @@ def universe_policy() -> dict[str, object]:
     }
 
 
+def attention_policy() -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "policy_type": "v0_attention",
+        "candidate_card_limit": 20,
+        "new_dossier_limit": 5,
+        "weekly_dossier_budget": 10,
+        "weekly_exploration_budget": 1,
+        "exploration_seed": "baseline-attention-v1",
+    }
+
+
 def runtime_configuration(state_root: Path) -> dict[str, object]:
     return {
         "schema_version": 1,
@@ -146,6 +158,7 @@ def runtime_configuration(state_root: Path) -> dict[str, object]:
         "enabled_asset_classes": ["us_equity"],
         "universe_policy": universe_policy(),
         "evidence_policy": evidence_policy(),
+        "attention_policy": attention_policy(),
     }
 
 

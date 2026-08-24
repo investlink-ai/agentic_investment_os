@@ -10,18 +10,18 @@ isolated Research Lab.
 
 ## Status
 
-Stage 2 implements `Advance` through a durable `SnapshotUniverse` checkpoint and rebuildable operator
-`Status` over validated append-only SQLite lifecycle history. Deterministic equity policy evaluates
-complete recorded instrument and position snapshots at a pinned Evidence Cutoff and Data Regime,
-retains ineligible equity positions for refresh attention, and preserves disabled crypto or option
-positions as explicit portfolio mismatches. Canonical asset-neutral identities, common hashed input
-and lifecycle envelopes, explicit position valuation provenance, and exact cycle-to-snapshot Status
+Stage 2 implements `Advance` through durable `SnapshotUniverse`, `CaptureEvidence`, and
+`SelectAttention` checkpoints, with rebuildable operator `Status` over validated append-only SQLite
+lifecycle history. The zero-token attention scan publishes at most twenty reconstructable Candidate
+Cards and five new Dossier requests, reserves a pinned weekly exploration share, and refreshes every
+retained holding outside that research cap. Exact evidence and policy fingerprints bind the artifact;
+retry and reopen reproduce its identifiers, counts, transitions, and refusal reasons without model,
+network, credential, portfolio, packet, or broker authority. Canonical asset-neutral identities,
+common hashed envelopes, explicit position valuation provenance, and exact cycle-to-snapshot Status
 identity keep future variants additive without activating non-equity behavior in V0. The lifecycle
 ledger accepts one current database-wide schema, while the status projection is disposable and never
-substitutes for invalid authoritative records. Absolute instants use canonical UTC text while Market
-Sessions retain NYSE-date meaning. A pure domain kernel owns reconstruction and transition decisions
-while SQLite validates representations and atomically appends the selected record. Evidence capture,
-research, portfolio, execution, evaluation, and later lifecycle phases remain scaffolds.
+substitutes for invalid authoritative records. Research beyond the Dossier request, portfolio,
+execution, evaluation, and later lifecycle phases remain scaffolds.
 Active repository documentation owns implementation authority, and the runtime has no dependency on
 the design's Second Brain origin.
 

@@ -35,6 +35,7 @@ required and have no default.
 | `enabled_asset_classes` | Exact JSON list `["us_equity"]`; no empty, duplicate, unknown, crypto, option, or multi-class activation is accepted in V0 | Included canonically | Resolved at process composition; it authorizes only the implemented equity lifecycle and policy | Safe to log or expose to a model after validation |
 | `universe_policy` | Complete object matching the schema below | Included canonically; its own content hash is also pinned into the run identity | Resolved at process composition; changes activate through a later run identity | Safe to log or expose to a model after validation |
 | `evidence_policy` | Complete object matching the schema below | Included canonically | Resolved at process composition; it authorizes the configured market, news, SEC, issuer, and official-macro captures for the pinned Data Regime | Safe to log or expose to a model after validation |
+| `attention_policy` | Complete object matching the schema below | Included canonically; its own content hash binds every Attention Artifact | Resolved at process composition; it bounds research admission without granting research or execution authority | Safe to log or expose to a model after validation |
 
 The resolver hashes canonical JSON containing exactly these validated fields with SHA-256. The state
 root is created with mode `0700`; the fixed `lifecycle.sqlite3` file is created with mode `0600`.
@@ -95,6 +96,22 @@ collection, bulk historical backfill, and LLM online retrieval are outside the i
 The Evidence Vault lives at the fixed `evidence-vault/` child of `state_root`. Its directories and
 files use private modes `0700` and `0600`; those names and modes are safety constants, not tunable
 configuration.
+
+### Attention policy
+
+`attention_policy` contains every tunable used by the local `SelectAttention` scan. The scan uses no
+model, credential, network call, or ambient randomness. Values outside the fixed product ceilings or
+the approved weekly exploration ratio fail configuration before runtime storage is prepared.
+
+| Field | Type and validation | Effect |
+| --- | --- | --- |
+| `schema_version` | Integer; must equal `1` | Versions the policy representation |
+| `policy_type` | String; must equal `v0_attention` | Discriminates the implemented local selector |
+| `candidate_card_limit` | Integer from `1` through `20` | Caps Candidate Cards published by one cycle |
+| `new_dossier_limit` | Integer from `1` through `5`, no greater than `candidate_card_limit` or `weekly_dossier_budget` | Caps new Dossier requests in one cycle; holding refreshes do not consume it |
+| `weekly_dossier_budget` | Integer from `new_dossier_limit` through `25` | Caps all new Dossier requests in one ISO week |
+| `weekly_exploration_budget` | Positive integer below `weekly_dossier_budget` and exactly 10–20 percent of it | Reserves weekly capacity for otherwise eligible exploration subjects without bypassing later gates |
+| `exploration_seed` | Lowercase bounded identifier | Pins deterministic weekly exploration selection; it is policy material, not ambient randomness |
 
 ## Repository tooling configuration
 

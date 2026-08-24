@@ -35,6 +35,8 @@ not implementation structure, field schemas, or configurable values.
   attention funnel.
 - **Candidate Card:** a compact, locally produced explanation of why an Attention Subject does or does
   not merit expensive research.
+- **Attention Artifact:** the immutable result of one zero-token attention scan, binding Candidate
+  Cards, due-holding refreshes, bounded Dossier requests, and resource accounting to pinned inputs.
 - **Dossier:** a bounded evidence bundle for one Attention Subject, including contradicting and missing
   evidence.
 - **Thesis:** a causal, horizon-bound investment argument containing the apparent expectation, variant

@@ -247,6 +247,23 @@ def test_vault_deduplicates_content_retains_observations_and_filters_as_of(
             assert stat.S_IMODE(path.stat().st_mode) == PRIVATE_FILE_MODE
 
 
+def test_vault_reconstructs_only_the_exact_checkpoint_artifact_set(tmp_path: Path) -> None:
+    vault = FilesystemEvidenceVault(tmp_path / "evidence-vault")
+    summary = _capture(vault, recorded_evidence())
+    all_records = vault.stored_records()
+    selected_id = summary.artifact_ids[0]
+
+    selected = vault.stored_records_for_artifacts((selected_id,))
+
+    assert selected == tuple(
+        record for record in all_records if record.artifact.artifact_id == selected_id
+    )
+    assert vault.stored_records_for_artifacts(("f" * 64,)) == ()
+    for invalid in ((selected_id, selected_id), ("invalid",)):
+        with pytest.raises(EvidencePersistenceError, match="Evidence Vault state is invalid"):
+            vault.stored_records_for_artifacts(invalid)
+
+
 def test_optional_official_absence_is_durable_without_blocking_required_capture(
     tmp_path: Path,
 ) -> None:
