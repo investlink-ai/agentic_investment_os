@@ -169,6 +169,23 @@ for beliefs; its events preserve modeled valid time, transaction time, confidenc
 falsifiers, and status. Beliefs may become active, weakened, contradicted, superseded, refuted,
 expired, dormant, or archived without deleting prior states.
 
+A belief stream begins only with `active`. Every later event must name the current event as
+`transition_from_event_id`, preserve the canonical subject and claim kind, and use a transaction time
+no earlier than the current event. The allowed status transitions are:
+
+| Current status | Allowed next status |
+| --- | --- |
+| `active`, `weakened`, `contradicted`, or `dormant` | Any defined belief status |
+| `expired` | `active`, `superseded`, or `archived` |
+| `refuted` | `superseded` or `archived` |
+| `superseded` | `archived` |
+| `archived` | None |
+
+When `supersedes_event_id` is present, it must identify an existing event in the same belief stream.
+Corrections therefore append a traceable transition; they never replace prior material.
+Exact redelivery of an accepted event returns its original durable receipt after authoritative
+history validation. The current record clock bounds a new append but cannot invalidate that replay.
+
 The Belief Graph is a bounded as-of projection. It may connect entities, artifacts, assertions,
 beliefs, contradictions, catalysts, theses, decisions, outcomes, and lessons, but it never becomes a
 second source of truth. Corruption or schema change triggers deterministic rebuild from authoritative

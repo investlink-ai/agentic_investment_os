@@ -292,8 +292,11 @@ Normal production callers see six capabilities:
   paired cycle fields prevent that history from being attributed to the active cycle. In V0 each
   exposed cycle is a `MarketSession` and the checkpoint payload is an equity phase; neither public
   result exposes a bare equity-only phase as the stable contract.
-- **Record** appends due market, forecast, thesis, and execution observations without changing the
-  original decision.
+- **Record** validates and atomically appends or replays one schema-versioned, evidence-bound Belief
+  Event. Its graph query rebuilds a deterministic as-of Belief Graph under explicit subject and node
+  bounds; returned provenance includes the authoritative-history hash, selected Vault references,
+  and omission counts. Later outcome-recording slices extend the capability without changing prior
+  decision records.
 - **Govern** schedules a signed, operator-approved Constitution, champion, or controlled-policy
   change for a future Market Session boundary.
 - **Apply** independently validates one published `DecisionPacket`, manages only its permitted paper
@@ -573,6 +576,24 @@ Every model-visible input and material decision is reconstructable from content 
 dimensions, configuration, prompt and model identity, and durable records. Corrections name what they
 supersede; they do not rewrite prior financial history.
 
+The Belief Ledger stores the exact canonical Belief Event, its bitemporal instants, trusted durable
+record time, immutable Evidence Vault references, an append-chain projection identity, and a
+separately stored append-only commitment chain. A singleton integrity anchor records the expected
+terminal ledger position and commitment. Each append writes the event and commitment before advancing
+that anchor from its exact predecessor in the same transaction; the anchor can start only at position
+one, advance only one position, and cannot be deleted. Reconstruction requires the anchor to match the
+validated chain terminal, so removing the same suffix from both append-only relations leaves a
+detectable mismatch instead of a valid shorter history. The anchor is integrity metadata, never
+financial history or a projection.
+
+The pure memory reducer admits only a new active belief or a transition from the current head,
+preserves every prior status, and treats exact redelivery as replay while refusing changed material
+under an existing event identity. SQLite resolves every referenced artifact and its availability
+against the event's Evidence Cutoff before the selected append commits. `Record.graph` reconstructs
+from validated authoritative rows and Vault facts admitted by the requested subjects and as-of
+cutoff. It excludes events not yet durably known, never trusts the disposable belief-graph projection,
+and fails closed on corrupt history or admitted evidence.
+
 `PinRunInputs` records the canonical Decision Cycle identity, configuration, Data Regime, Evidence
 Cutoff, instrument-snapshot, position-snapshot, and eligibility-policy fingerprints in the run
 identity. It also persists the first complete normalized universe envelope as prepared provenance,
@@ -656,11 +677,11 @@ The SQLite database carries one database-wide physical schema version independen
 configuration and durable-record schema versions. The adapter owns one current schema definition. It
 atomically initializes an empty, unversioned database or validates a database already carrying the
 current version and exact schema; every other non-empty shape or version fails before lifecycle
-writes. The disposable lifecycle-status projection table and its indexes or triggers are outside the
-authoritative schema signature and remain replaceable by Status from validated ledgers; views and
-same-named objects attached to authoritative tables remain inside the signature.
-Startup runs the full SQLite integrity check with a recognized projection temporarily removed under
-a rolled-back savepoint, so projection-only corruption remains rebuildable without masking damage to
+writes. The disposable lifecycle-status and belief-graph projection tables and their indexes or
+triggers are outside the authoritative schema signature and remain replaceable from validated
+ledgers; views and same-named objects attached to authoritative tables remain inside the signature.
+Startup runs the full SQLite integrity check with recognized projections temporarily removed under a
+rolled-back savepoint, so projection-only corruption remains rebuildable without masking damage to
 authoritative or global database structures.
 Current-schema ownership is recorded in [ADR 0004](adr/0004-require-current-sqlite-schema.md).
 
