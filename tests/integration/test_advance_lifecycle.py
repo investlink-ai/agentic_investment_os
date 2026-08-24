@@ -25,6 +25,7 @@ from agentic_investment_os.adapters.sqlite_lifecycle import (
 )
 from agentic_investment_os.application.lifecycle import Advance
 from agentic_investment_os.domain.attention import AttentionRefusalReason
+from agentic_investment_os.domain.governance import ACTIVE_CONSTITUTION
 from agentic_investment_os.domain.identity import (
     CryptoDecisionWindow,
     EquityInstrumentIdentity,
@@ -183,7 +184,8 @@ CORRUPTIONS = {
             """
             INSERT INTO lifecycle_events
             SELECT stream_id, 3, idempotency_key, cycle_identity, mode,
-                   configuration_version, configuration_hash, run_id,
+                   configuration_version, configuration_hash,
+                   constitution_version, constitution_hash, run_id,
                    data_regime, evidence_cutoff, instrument_snapshot_hash,
                    position_snapshot_hash, eligibility_policy_hash,
                    event_kind, completed_phase, universe_snapshot_id,
@@ -233,6 +235,10 @@ CORRUPTIONS = {
     "non_integer_version": (
         ("UPDATE lifecycle_events SET configuration_version = 'invalid'",),
         "invalid configuration_version in lifecycle ledger",
+    ),
+    "invalid_constitution_version": (
+        ("UPDATE lifecycle_events SET constitution_version = 0",),
+        "lifecycle stream checkpoint order is invalid",
     ),
     "non_integer_sequence": (
         ("UPDATE lifecycle_events SET sequence = 'invalid'",),
@@ -1194,6 +1200,8 @@ class _LifecycleReferenceModel:
             (
                 self.configuration_hash,
                 self.configuration_version,
+                ACTIVE_CONSTITUTION.content_hash,
+                ACTIVE_CONSTITUTION.version,
                 "champion",
                 cycle_text,
                 data_regime,
@@ -1208,6 +1216,8 @@ class _LifecycleReferenceModel:
             cycle=cycle,
             configuration_version=self.configuration_version,
             configuration_hash=self.configuration_hash,
+            constitution_version=ACTIVE_CONSTITUTION.version,
+            constitution_hash=ACTIVE_CONSTITUTION.content_hash,
             data_regime=data_regime,
             evidence_cutoff=UtcInstant.parse(cutoff_text),
             instrument_snapshot_hash=instrument_snapshot_hash,
@@ -3686,7 +3696,8 @@ def _replace_with_corrupt_events(
         rows = connection.execute(
             """
             SELECT stream_id, sequence, idempotency_key, cycle_identity, mode,
-                   configuration_version, configuration_hash, run_id,
+                   configuration_version, configuration_hash,
+                   constitution_version, constitution_hash, run_id,
                    data_regime, evidence_cutoff, instrument_snapshot_hash,
                    position_snapshot_hash, eligibility_policy_hash,
                    event_kind, completed_phase, universe_snapshot_id,
@@ -3702,7 +3713,8 @@ def _replace_with_corrupt_events(
             """
             CREATE TABLE lifecycle_events (
                 stream_id, sequence, idempotency_key, cycle_identity, mode,
-                configuration_version, configuration_hash, run_id,
+                configuration_version, configuration_hash,
+                constitution_version, constitution_hash, run_id,
                 data_regime, evidence_cutoff, instrument_snapshot_hash,
                 position_snapshot_hash, eligibility_policy_hash,
                 event_kind, completed_phase, universe_snapshot_id,

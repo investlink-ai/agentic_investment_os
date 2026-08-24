@@ -252,6 +252,8 @@ def test_status_reports_empty_incomplete_and_universe_snapshot_history(tmp_path:
             receipt.pinned_run_identity.run_id,
             receipt.pinned_run_identity.configuration_version,
             receipt.pinned_run_identity.configuration_hash,
+            receipt.pinned_run_identity.constitution_version,
+            receipt.pinned_run_identity.constitution_hash,
             receipt.pinned_run_identity.data_regime,
             receipt.pinned_run_identity.evidence_cutoff.isoformat(),
             receipt.pinned_run_identity.instrument_snapshot_hash,
@@ -529,7 +531,8 @@ def test_status_rejects_corrupt_authoritative_history_instead_of_using_projectio
         rows = connection.execute(
             """
             SELECT stream_id, sequence, idempotency_key, cycle_identity, mode,
-                   configuration_version, configuration_hash, run_id,
+                   configuration_version, configuration_hash,
+                   constitution_version, constitution_hash, run_id,
                    data_regime, evidence_cutoff, instrument_snapshot_hash,
                    position_snapshot_hash, eligibility_policy_hash,
                    event_kind, completed_phase, universe_snapshot_id,
@@ -545,7 +548,8 @@ def test_status_rejects_corrupt_authoritative_history_instead_of_using_projectio
             """
             CREATE TABLE lifecycle_events (
                 stream_id, sequence, idempotency_key, cycle_identity, mode,
-                configuration_version, configuration_hash, run_id,
+                configuration_version, configuration_hash,
+                constitution_version, constitution_hash, run_id,
                 data_regime, evidence_cutoff, instrument_snapshot_hash,
                 position_snapshot_hash, eligibility_policy_hash,
                 event_kind, completed_phase, universe_snapshot_id,
@@ -956,7 +960,8 @@ def _replace_event_table(database: Path, statement: str) -> None:
         rows = connection.execute(
             """
             SELECT stream_id, sequence, idempotency_key, cycle_identity, mode,
-                   configuration_version, configuration_hash, run_id,
+                   configuration_version, configuration_hash,
+                   constitution_version, constitution_hash, run_id,
                    data_regime, evidence_cutoff, instrument_snapshot_hash,
                    position_snapshot_hash, eligibility_policy_hash,
                    event_kind, completed_phase, universe_snapshot_id,
@@ -972,7 +977,8 @@ def _replace_event_table(database: Path, statement: str) -> None:
             """
             CREATE TABLE lifecycle_events (
                 stream_id, sequence, idempotency_key, cycle_identity, mode,
-                configuration_version, configuration_hash, run_id,
+                configuration_version, configuration_hash,
+                constitution_version, constitution_hash, run_id,
                 data_regime, evidence_cutoff, instrument_snapshot_hash,
                 position_snapshot_hash, eligibility_policy_hash,
                 event_kind, completed_phase, universe_snapshot_id,

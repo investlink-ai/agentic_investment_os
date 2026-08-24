@@ -35,11 +35,13 @@ from agentic_investment_os.domain.lifecycle import (
     LifecycleDecision,
     LifecycleEvent,
     LifecycleEventKind,
+    LifecycleHistory,
     LifecycleLedger,
     LifecyclePhase,
     PerformAttentionSelection,
     PerformEvidenceCapture,
     PinnedRunIdentity,
+    derive_lifecycle_status,
     parse_advance_receipt,
     parse_lifecycle_checkpoint,
 )
@@ -147,6 +149,8 @@ def _reseal_receipt_with_pinned_identity(envelope: dict[str, object]) -> None:
     run_material = (
         pinned["configuration_hash"],
         pinned["configuration_version"],
+        pinned["constitution_hash"],
+        pinned["constitution_version"],
         "champion",
         cycle_text,
         pinned["data_regime"],
@@ -409,7 +413,7 @@ def test_advance_request_validates_the_complete_boundary() -> None:
         request,
         configuration_hash="a" * SHA256_HEX_LENGTH,
     )
-    assert identity.run_id == "0ac44d25caa90c6870877bb8704957ecf837a83e0d3f2587687d5be645bd37db"
+    assert identity.run_id == "7deacf630c9a7b297178f045a3c9d0085d70a9200fbac6fe5dc39ba65038dd5f"
 
     invalid_cases = (
         (
@@ -438,6 +442,22 @@ def test_advance_request_validates_the_complete_boundary() -> None:
         refusal = AdvanceRequest.parse(**values)
         assert isinstance(refusal, InputRefusal)
         assert refusal.code is expected_code
+
+
+def test_lifecycle_reconstruction_rejects_an_invalid_pinned_constitution_reference() -> None:
+    request = _request()
+    identity = replace(pinned_run_identity(request), constitution_version=0)
+    event = LifecycleEvent(
+        request.stream_id,
+        0,
+        request,
+        identity,
+        LifecycleEventKind.ADVANCE_REQUESTED,
+        None,
+    )
+
+    with pytest.raises(InvalidLifecycleStateError, match="derived identity is invalid"):
+        derive_lifecycle_status(LifecycleHistory(events=(event,)))
 
 
 @pytest.mark.parametrize(

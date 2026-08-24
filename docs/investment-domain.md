@@ -40,6 +40,12 @@ Market Session boundary.
 11. Update beliefs when evidence changes while preserving the prior record.
 12. Separate process quality from outcome luck and never force activity.
 
+These twelve clauses are the immutable version-1 baseline. A later artifact may change their content
+only through operator-approved `Govern`: its declared hash and approval proof bind a stable request
+identity to one exact future Market Session. A pending version does not affect an earlier or
+in-progress run. Activation at the eligible boundary starts a new regime without rewriting the
+baseline or any superseded version, and Advance pins the selected version and hash before model work.
+
 ## Decision flow
 
 ```mermaid

@@ -282,23 +282,29 @@ Normal production callers see six capabilities:
   and availability times identify when that call's result was recorded; the Evidence Cutoff remains
   a separate pinned input. A recognized disabled cycle or malformed cycle is returned as a bounded
   refusal before the clock, adapter, or authoritative lifecycle ledger is entered. A valid
-  `MarketSession` remains explicit in any later durable refusal and its replay.
+  `MarketSession` remains explicit in any later durable refusal and its replay. Before universe,
+  evidence, or model work, Advance resolves the Constitution regime for that session and pins its
+  version and content hash in the run identity.
 - **Status** validates authoritative lifecycle history, replaces its disposable projection, and returns
   the active `LifecycleCheckpoint`, `last_completed_cycle` as a `DecisionCycleIdentity`, the latest
   eligible-universe checkpoint as an exact `universe_snapshot_cycle` and snapshot-identifier pair,
   the latest bounded selection as an exact `attention_artifact_cycle` and artifact-identifier pair,
-  pinned run identity, lifecycle liveness, and any available durable terminal reason. Snapshot and
-  attention references may belong to an earlier completed cycle than the current pinned run; their
-  paired cycle fields prevent that history from being attributed to the active cycle. In V0 each
-  exposed cycle is a `MarketSession` and the checkpoint payload is an equity phase; neither public
-  result exposes a bare equity-only phase as the stable contract.
+  pinned run identity, lifecycle liveness, any available durable terminal reason, and bounded active,
+  pending, superseded, refused, and conflicting Constitution governance state. Snapshot and attention
+  references may belong to an earlier completed cycle than the current pinned run; their paired cycle
+  fields prevent that history from being attributed to the active cycle. In V0 each exposed cycle is
+  a `MarketSession` and the checkpoint payload is an equity phase; neither public result exposes a
+  bare equity-only phase as the stable contract.
 - **Record** validates and atomically appends or replays one schema-versioned, evidence-bound Belief
   Event. Its graph query rebuilds a deterministic as-of Belief Graph under explicit subject and node
   bounds; returned provenance includes the authoritative-history hash, selected Vault references,
   and omission counts. Later outcome-recording slices extend the capability without changing prior
   decision records.
-- **Govern** schedules a signed, operator-approved Constitution, champion, or controlled-policy
-  change for a future Market Session boundary.
+- **Govern** currently validates and schedules one immutable, signed, operator-approved Constitution
+  artifact for one exact eligible future Market Session. Stable request identity makes exact retries
+  idempotent and changed material conflicting. Its receipt exposes only bounded disposition,
+  reference, boundary, reason, and time fields; approval signatures remain in authoritative history.
+  Champion and controlled-policy governance remain later capabilities behind this interface.
 - **Apply** independently validates one published `DecisionPacket`, manages only its permitted paper
   orders, and returns an `ExecutionReceipt`.
 - **Reconcile** observes broker orders and positions, matches stable client order identifiers, and
@@ -385,15 +391,20 @@ complete; asset-owned policy interprets the activity.
 
 The V0 scheduler resolves an NYSE trading date and exchange-relative deadlines into an equity
 `MarketSession`. `ReconcilePriorState` proves cash, positions, pending orders, and prior receipts agree.
+Before any of those checks reach universe, evidence, attention, or model work, Advance reconstructs
+Constitution governance, activates a due amendment only when the requested session is its exact
+approved boundary, and fails closed if that boundary was missed or its history or proof cannot be
+validated.
 `PinRunInputs` records the equity cycle identity, equity-feed Data Regime and Evidence Cutoff,
-configuration, instrument catalog, position snapshot, and policy fingerprints; the current Basic
-entitlement uses IEX, while a later SIP entitlement is a different regime. `SnapshotUniverse`
-publishes the eligible universe before `CaptureEvidence` appends intent-first market, news, SEC,
-issuer, and official-macro capture outcomes to the Evidence Vault. `SelectAttention` derives only the
-approved local features from that exact checkpoint, publishes bounded Candidate Cards and Dossier
-requests, and records due-holding refreshes outside the new-Dossier cap. It consumes neither a model
-nor an external adapter and cannot publish a Dossier, Thesis, portfolio weight, packet, or order. The
-remaining phases run once and publish at most one Champion decision and packet for that cycle. A
+Constitution version and hash, configuration, instrument catalog, position snapshot, and policy
+fingerprints; the current Basic entitlement uses IEX, while a later SIP entitlement is a different
+regime. `SnapshotUniverse` publishes the eligible universe before `CaptureEvidence` appends
+intent-first market, news, SEC, issuer, and official-macro capture outcomes to the Evidence Vault.
+`SelectAttention` derives only the approved local features from that exact checkpoint, publishes
+bounded Candidate Cards and Dossier requests, and records due-holding refreshes outside the
+new-Dossier cap. It consumes neither a model nor an external adapter and cannot publish a Dossier,
+Thesis, portfolio weight, packet, or order. The remaining phases run once and publish at most one
+Champion decision and packet for that cycle. A
 non-equity activation
 request or position is refused before evidence or research; an NYSE holiday produces the existing
 durable no-action path rather than a synthetic session.
@@ -549,7 +560,8 @@ captured evidence -> validated research -> HouseView -> deterministic portfolio
   validation succeeds.
 - Codex may propose evidence assertions, beliefs, theses, scenarios, stance, and challengers. It has
   no broker credentials and cannot choose accepted weights, construct executable packets, create
-  orders, change lifecycle control, or activate policy.
+  orders, change lifecycle control, govern a Constitution, supply operator approval, or activate
+  policy.
 - `portfolio` alone owns deterministic sizing and risk clamps. `execution` alone owns broker actions
   and cannot change the packet's portfolio intent.
 - The executor process receives broker credentials and validated packets but no model capability.
@@ -566,6 +578,7 @@ captured evidence -> validated research -> HouseView -> deterministic portfolio
 | Beliefs | Bitemporal Belief Ledger | Append transitions and corrections |
 | Decisions | Decision Journal | Freeze ex-ante record; append later observations |
 | Order intent and receipts | Executor ledger | Persist intent before effect; append observations |
+| Constitution governance | Governance event ledger | Append scheduled, activated, refused, and conflicting facts; never alter a prior version or approval record |
 | Lifecycle checkpoints and refusals | Lifecycle event ledger | Append transitions and bounded conflict or refusal records under stable idempotency keys |
 | Eligible-universe snapshots | Lifecycle event ledger | Append one complete asset-neutral envelope with typed instrument and position variants, applied policy, dispositions, and immutable identity |
 | Attention Artifacts | Lifecycle event ledger | Append one content-addressed zero-token selection or a typed terminal refusal; never rewrite subject transitions |
@@ -594,9 +607,12 @@ from validated authoritative rows and Vault facts admitted by the requested subj
 cutoff. It excludes events not yet durably known, never trusts the disposable belief-graph projection,
 and fails closed on corrupt history or admitted evidence.
 
-`PinRunInputs` records the canonical Decision Cycle identity, configuration, Data Regime, Evidence
-Cutoff, instrument-snapshot, position-snapshot, and eligibility-policy fingerprints in the run
-identity. It also persists the first complete normalized universe envelope as prepared provenance,
+`PinRunInputs` records the canonical Decision Cycle identity, Constitution version and content hash,
+configuration, Data Regime, Evidence Cutoff, instrument-snapshot, position-snapshot, and
+eligibility-policy fingerprints in the run identity. The Constitution selection is reconstructed for
+the requested session before the run exists, so a later governance change cannot silently move an
+in-progress cycle. It also persists the first complete normalized universe envelope as prepared
+provenance,
 including aliases that do not participate in authority identity. `SnapshotUniverse` publishes that
 prepared envelope by immutable identifier rather than rebuilding it from later adapter input. Its
 event and `Advance` receipt carry the same identifier; the complete envelope exists once in
@@ -672,6 +688,13 @@ Missing, stale, contradictory, corrupt, or inconsistent evidence or history appe
 SQLite is the initial event and checkpoint store, while the filesystem holds content-addressed
 artifacts and atomic publications. Runtime state uses ignored, configurable roots such as `var/`,
 `data/`, and `artifacts/`; source directories never serve as runtime storage.
+
+The Constitution governance ledger stores canonical event envelopes and public approval proofs as
+append-only authority. Reopen, Advance, and Status revalidate every artifact hash, envelope hash, and
+stored signature before selecting a regime. A missing verifier in the presence of governed history,
+corrupt proof, conflicting identity, or skipped activation boundary fails closed before downstream
+work. The baseline remains the document-owned version 1 when no governed event exists. A projection
+may summarize governance state but never authorizes activation or substitutes for the event ledger.
 
 The SQLite database carries one database-wide physical schema version independent of run
 configuration and durable-record schema versions. The adapter owns one current schema definition. It

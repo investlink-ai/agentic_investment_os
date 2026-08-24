@@ -13,6 +13,7 @@ from agentic_investment_os.domain.attention import (
     InvalidAttentionError,
     select_attention,
 )
+from agentic_investment_os.domain.governance import ACTIVE_CONSTITUTION, ConstitutionArtifact
 from agentic_investment_os.domain.identity import (
     AssetClass,
     CryptoDecisionWindow,
@@ -59,12 +60,13 @@ from agentic_investment_os.evidence.capture import (
 if TYPE_CHECKING:
     from datetime import datetime
 
+    from agentic_investment_os.application.governance import ConstitutionStatus
     from agentic_investment_os.evidence.capture import (
         EvidenceCaptureCapability,
         EvidenceReferenceValidator,
     )
 
-__all__ = ("Advance", "Clock", "Status")
+__all__ = ("Advance", "Clock", "ConstitutionResolver", "Status")
 
 
 _INCOMPLETE_CHECKPOINT_RESULT = "lifecycle ledger returned an incomplete checkpoint result"
@@ -94,6 +96,19 @@ class AttentionInputsCapability(Protocol):
     ) -> AttentionInputs | AttentionRefusalReason: ...
 
 
+class ConstitutionResolver(Protocol):
+    """Resolve the exact immutable Constitution for one Market Session."""
+
+    def resolve(self, session: MarketSession, recorded_at: UtcInstant) -> ConstitutionArtifact: ...
+
+
+@dataclass(frozen=True, slots=True)
+class _ActiveDocumentConstitution:
+    def resolve(self, session: MarketSession, recorded_at: UtcInstant) -> ConstitutionArtifact:
+        del session, recorded_at
+        return ACTIVE_CONSTITUTION
+
+
 @dataclass(frozen=True, slots=True)
 class Advance:
     """Advance or resume one validated Decision Cycle through bounded attention."""
@@ -108,6 +123,7 @@ class Advance:
     attention_policy: AttentionPolicy
     attention_inputs: AttentionInputsCapability
     clock: Clock
+    constitution_registry: ConstitutionResolver = _ActiveDocumentConstitution()
 
     def __call__(  # noqa: PLR0912 - exhaust each typed lifecycle decision.
         self,
@@ -270,6 +286,7 @@ class Advance:
         if isinstance(parsed, InputRefusal):
             return parsed
         if isinstance(parsed, AdvanceRequest):
+            constitution = self.constitution_registry.resolve(parsed.session, recorded_at)
             loaded = self.universe_source.load()
             if isinstance(loaded, UniverseRefusal):
                 return InputRefusal(
@@ -289,6 +306,7 @@ class Advance:
                     configuration_version=self.configuration_version,
                     configuration_hash=self.configuration_hash,
                     universe_inputs=universe_identity,
+                    constitution=constitution.reference,
                 )
                 snapshot = build_universe_snapshot(
                     identity.run_id,
@@ -333,8 +351,9 @@ class Status:
 
     projection: LifecycleStatusProjection
     evidence_validator: EvidenceReferenceValidator
+    constitution_status: ConstitutionStatus
 
     def __call__(self) -> LifecycleStatus:
         status = self.projection.rebuild_status()
         self.evidence_validator.validate_references(self.projection.rebuild_evidence_checkpoints())
-        return status
+        return replace(status, constitution_governance=self.constitution_status())
