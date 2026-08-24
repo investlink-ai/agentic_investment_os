@@ -401,10 +401,12 @@ evidence. A scenario becomes mandatory when its owning behavior is implemented.
 ## Project skill catalog
 
 Project skill frontmatter is routing metadata, not a duplicate workflow contract. Every
-`.agents/skills/*/SKILL.md` has one non-empty, single-line `description` of at most 320 characters,
-and all project descriptions together use at most 3,200 characters. The detailed positive triggers,
-exclusions, delegation rules, approvals, safety boundaries, and terminal outcomes remain in the skill
-body.
+`.agents/skills/*/SKILL.md` frontmatter uses canonical unquoted top-level keys and has one unquoted,
+non-empty, single-line printable-ASCII YAML plain-text `description` of at most 320 characters. All
+project descriptions together use at most 3,200 characters. Alternate key spellings, control
+characters, and quoted, block, folded, collection, typed, or continued YAML values are outside this
+deliberately narrow catalog format. The detailed positive triggers, exclusions, delegation rules,
+approvals, safety boundaries, and terminal outcomes remain in the skill body.
 
 `make harness` runs `scripts.check_skill_catalog` and its integration fixtures. The checker fails
 closed on missing or malformed descriptions and reports the path of each individual overage; an

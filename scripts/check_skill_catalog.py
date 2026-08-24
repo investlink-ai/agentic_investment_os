@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import json
 import re
 import sys
 from dataclasses import dataclass
@@ -17,6 +16,8 @@ if TYPE_CHECKING:
 MAX_SKILL_DESCRIPTION_CHARS = 320
 MAX_CATALOG_DESCRIPTION_CHARS = 3_200
 _FRONTMATTER_BOUNDARY = "---"
+_FRONTMATTER_FIELD = re.compile(r"^[a-z][a-z0-9-]*:(?: .*)?$")
+_PRINTABLE_ASCII = re.compile(r"^[\x20-\x7e]*$")
 _YAML_NON_STRING_SCALARS = frozenset(
     {
         "~",
@@ -29,7 +30,7 @@ _YAML_NON_STRING_SCALARS = frozenset(
         "yes",
     }
 )
-_YAML_STRUCTURAL_PREFIXES = ("!", "&", "*", "[", "{", "|", ">", "@", "`", "%")
+_YAML_STRUCTURAL_PREFIXES = tuple("!&*[]{},|>@`%\"'")
 _YAML_INDICATOR_SCALAR = re.compile(r"^[-?:](?:\s|$)")
 _YAML_NUMERIC_SCALAR = re.compile(
     r"^[+-]?(?:"
@@ -39,7 +40,12 @@ _YAML_NUMERIC_SCALAR = re.compile(
     r")$",
     re.IGNORECASE,
 )
-_YAML_TIMESTAMP_SCALAR = re.compile(r"^\d{4}-\d{1,2}-\d{1,2}(?:$|[Tt ])")
+_YAML_TIMESTAMP_SCALAR = re.compile(
+    r"^\d{4}-\d{1,2}-\d{1,2}(?:"
+    r"(?:[Tt]|[ \t]+)\d{1,2}:\d{2}:\d{2}(?:\.\d*)?"
+    r"(?:[ \t]*(?:Z|[-+]\d{1,2}(?::?\d{2})?))?"
+    r")?$"
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -71,48 +77,14 @@ def _relative(path: Path, root: Path) -> PurePosixPath:
     return PurePosixPath(path.relative_to(root).as_posix())
 
 
-def _quoted_token(value: str) -> str | None:
-    quote = value[0]
-    index = 1
-    while index < len(value):
-        if quote == "'" and value[index : index + 2] == "''":
-            index += 2
-            continue
-        if quote == '"' and value[index] == "\\":
-            index += 2
-            continue
-        if value[index] == quote:
-            suffix = value[index + 1 :].strip()
-            return value[: index + 1] if not suffix or suffix.startswith("#") else None
-        index += 1
-    return None
-
-
-def _decode_quoted_description(value: str) -> str | None:
-    token = _quoted_token(value)
-    if token is None:
-        return None
-    if token[0] == '"':
-        try:
-            decoded: object = json.loads(token)
-        except json.JSONDecodeError:
-            return None
-        return decoded if isinstance(decoded, str) else None
-    inner = token[1:-1]
-    decoded = inner.replace("''", "'")
-    if decoded.replace("'", "''") != inner:
-        return None
-    return decoded
-
-
 def _decode_description(value: str) -> str | None:
+    if not _PRINTABLE_ASCII.fullmatch(value):
+        return None
     value = value.strip()
     if not value or value.startswith("#"):
         return None
-    if value[0] in {'"', "'"}:
-        return _decode_quoted_description(value)
 
-    value = value.split(" #", maxsplit=1)[0].rstrip()
+    value = re.split(r"[ \t]+#", value, maxsplit=1)[0].rstrip()
     if (
         not value
         or value.lower() in _YAML_NON_STRING_SCALARS
@@ -120,18 +92,17 @@ def _decode_description(value: str) -> str | None:
         or _YAML_INDICATOR_SCALAR.match(value)
         or _YAML_NUMERIC_SCALAR.match(value)
         or _YAML_TIMESTAMP_SCALAR.match(value)
-        or ": " in value
+        or value.endswith(":")
+        or re.search(r":[ \t]", value)
     ):
         return None
     return value
 
 
-def _parse_description(
+def _frontmatter_end(
     lines: Sequence[str],
-    *,
-    name: str,
     relative_path: PurePosixPath,
-) -> tuple[SkillDescription | None, tuple[SkillCatalogViolation, ...]]:
+) -> tuple[int | None, tuple[SkillCatalogViolation, ...]]:
     if not lines or lines[0] != _FRONTMATTER_BOUNDARY:
         violation = SkillCatalogViolation(relative_path, "YAML frontmatter is missing")
         return None, (violation,)
@@ -140,6 +111,32 @@ def _parse_description(
     except ValueError:
         violation = SkillCatalogViolation(relative_path, "YAML frontmatter is not closed")
         return None, (violation,)
+
+    malformed_fields = [
+        line
+        for line in lines[1:end]
+        if line.strip()
+        and not line.lstrip().startswith("#")
+        and not _FRONTMATTER_FIELD.fullmatch(line)
+    ]
+    if malformed_fields:
+        violation = SkillCatalogViolation(
+            relative_path,
+            "YAML frontmatter fields must use canonical unquoted top-level keys",
+        )
+        return None, (violation,)
+    return end, ()
+
+
+def _parse_description(
+    lines: Sequence[str],
+    *,
+    name: str,
+    relative_path: PurePosixPath,
+) -> tuple[SkillDescription | None, tuple[SkillCatalogViolation, ...]]:
+    end, frontmatter_violations = _frontmatter_end(lines, relative_path)
+    if end is None:
+        return None, frontmatter_violations
 
     description_lines = [
         (index, line)
@@ -164,7 +161,7 @@ def _parse_description(
     if description is None or not description or "\n" in description or has_continuation:
         violation = SkillCatalogViolation(
             relative_path,
-            "description must be a non-empty single-line string scalar",
+            "description must be an unquoted non-empty single-line plain-text scalar",
         )
         return None, (violation,)
 

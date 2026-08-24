@@ -12,11 +12,12 @@ used for automatic selection and can blur adjacent project workflows.
 
 ## Decision
 
-Keep each project skill's `description` as concise routing metadata: its positive intent, its nearest
-exclusion or delegation boundary, and any distinction needed from an adjacent skill. Keep the full
-procedure, approval rules, safety contract, and terminal outcomes in the body. Enforce a 320-character
-individual limit and a 3,200-character aggregate project limit through the deterministic
-[`make harness`](../../../Makefile) check documented in
+Keep each project skill's `description` as concise, unquoted, single-line printable-ASCII YAML plain
+text: its positive intent, its nearest exclusion or delegation boundary, and any distinction needed
+from an adjacent skill. Keep the full procedure, approval rules, safety contract, and terminal
+outcomes in the body.
+Enforce a 320-character individual limit and a 3,200-character aggregate project limit through the
+deterministic [`make harness`](../../../Makefile) check documented in
 [`docs/testing.md`](../../../docs/testing.md#project-skill-catalog).
 
 Treat global plugin selection as operator-owned state. The repository documents a minimal supported
