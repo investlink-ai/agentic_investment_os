@@ -1,6 +1,6 @@
 ---
 name: manage-agent-notes
-description: Create, update, implement, reject, consolidate, or delete Agent Notes for agentic-investment-os. Use when a feature, simplification, testing, bug-prevention, or development-process choice has durable alternatives or trade-offs below the ADR threshold; when implementation realizes a proposed note; or when existing notes are superseded, stale, or inconsistent with shipped behavior.
+description: Manage Agent Notes for agentic-investment-os when a durable feature, simplification, testing, prevention, or process trade-off falls below the ADR threshold. Covers proposal through consolidation; not routine work tracking.
 ---
 
 # Manage Agent Notes

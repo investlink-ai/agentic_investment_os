@@ -1,6 +1,6 @@
 ---
 name: code-review
-description: Review a committed agentic-investment-os diff against repository Standards and its originating Spec as two independent axes. Use for every non-empty pull request and when asked to review a branch, commit range, or pull request for correctness, scope, or repository conformance. This general review does not include or replace investment-safety-review.
+description: Review a committed agentic-investment-os diff against repository Standards and its originating Spec as independent axes. Use for non-empty pull requests or requested branch, range, or pull-request reviews. General review does not replace investment-safety-review.
 ---
 
 # Review Code Against Standards and Spec

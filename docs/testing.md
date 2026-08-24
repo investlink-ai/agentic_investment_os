@@ -398,6 +398,23 @@ evidence. A scenario becomes mandatory when its owning behavior is implemented.
   instead asserts exactly its permitted bounded refusal under the configured runtime-state root; a
   configuration refusal before state-root preparation asserts no filesystem change.
 
+## Project skill catalog
+
+Project skill frontmatter is routing metadata, not a duplicate workflow contract. Every
+`.agents/skills/*/SKILL.md` frontmatter uses canonical unquoted top-level keys and has one unquoted,
+non-empty, single-line printable-ASCII YAML plain-text `description` of at most 320 characters. All
+project descriptions together use at most 3,200 characters. Alternate key spellings, control
+characters, and quoted, block, folded, collection, typed, or continued YAML values are outside this
+deliberately narrow catalog format. The detailed positive triggers, exclusions, delegation rules,
+approvals, safety boundaries, and terminal outcomes remain in the skill body.
+
+`make harness` runs `scripts.check_skill_catalog` and its integration fixtures. The checker fails
+closed on missing or malformed descriptions and reports the path of each individual overage; an
+aggregate overage lists every contributing skill and its measured character count. Character counts
+are a deterministic repository guard, not a promise about a particular Codex model's tokenizer or
+the metadata contributed by globally enabled plugins. Use the supported operator baseline in
+[`development.md`](development.md#codex-plugin-baseline) when collecting clean-session evidence.
+
 ## Agent workflow scenarios
 
 Versioned contracts under `.agents/harness/scenarios/` exercise repository agent routing, required

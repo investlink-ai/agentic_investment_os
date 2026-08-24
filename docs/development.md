@@ -22,6 +22,22 @@ make bootstrap
 Bootstrap creates `.venv`, installs the locked development environment, and configures Git to use
 the versioned hooks in `.githooks/`. Setup is complete when `make check` passes.
 
+## Codex plugin baseline
+
+For repository work, keep the project and built-in skills available, enable the GitHub plugin, and
+disable unrelated optional plugins. In the Codex CLI, run `/plugins`, select a plugin, and press
+Space to toggle it; start a new session after changing the selection. This is an operator-controlled
+baseline, not repository configuration. The repository does not encode user-specific skill paths,
+change global Codex settings, or uninstall plugins.
+
+The project skill catalog keeps only automatic-routing cues in each frontmatter `description`; the
+skill body owns the complete workflow. `make harness` enforces the catalog limits described in
+[`testing.md`](testing.md#project-skill-catalog). If Codex still reports that skill descriptions were
+shortened with this baseline, capture the active plugin list and warning in the issue or pull request
+evidence. See the official [Codex plugin browser
+instructions](https://learn.chatgpt.com/docs/plugins#plugin-browser-in-codex-cli) for the current CLI
+controls.
+
 ## Issue authoring
 
 Use the project `create-issue` skill to draft and publish standalone issues or a caller-defined issue

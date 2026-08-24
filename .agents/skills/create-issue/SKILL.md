@@ -1,6 +1,6 @@
 ---
 name: create-issue
-description: Draft, validate, and create one or more actionable GitHub issues for agentic-investment-os. Use when asked to create, open, or file a standalone issue or a caller-defined issue set, and as the issue-format and publication contract delegated by plan-stage-issues. This skill selects the repository template, traces active authority, checks duplicates and existing metadata, previews exact writes for approval, and safely resumes partial publication. It does not select a capability frontier, design a stage graph, start worktrees, implement issues, or create pull requests.
+description: Create actionable standalone or caller-scoped GitHub issues for agentic-investment-os. Use for issue drafting or publication; use plan-stage-issues for frontier selection or decomposition. Does not implement work, create worktrees, or open pull requests.
 ---
 
 # Create an Issue

@@ -37,6 +37,7 @@ harness:
 	test -f scripts/agent_workflow_harness.py
 	test -f scripts/check_capability_dependencies.py
 	test -f scripts/check_coverage_tiers.py
+	test -f scripts/check_skill_catalog.py
 	test -f scripts/check_unit_test_tier.py
 	test -f scripts/run_mutation.py
 	test -x scripts/start-issue.sh
@@ -55,7 +56,9 @@ harness:
 	test ! -d docs/archive
 	test ! -e pytest.ini
 	uv run python -m scripts.check_unit_test_tier --root .
+	uv run python -m scripts.check_skill_catalog --root .
 	uv run python -m scripts.agent_workflow_harness --root . validate
+	uv run pytest -o 'addopts=--strict-config --strict-markers -ra' tests/integration/test_skill_catalog.py
 	uv run pytest -o 'addopts=--strict-config --strict-markers -ra' tests/unit/test_agent_workflow_harness.py
 
 agent-workflow:
