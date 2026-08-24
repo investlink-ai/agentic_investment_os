@@ -86,7 +86,7 @@ Every Evidence Artifact retains, when applicable:
 - retrieval identity, observation-specific artifact identity, and source-content hash;
 - source entitlement or feed;
 - parser and normalization version; and
-- entity-mapping confidence.
+- entity-mapping confidence, mapping version, and mapping availability.
 
 Times that identify a moment follow the architecture's
 [Absolute Instant contract](architecture.md#temporal-semantics); a source-calendar date remains a

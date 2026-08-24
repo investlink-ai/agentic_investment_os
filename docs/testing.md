@@ -324,8 +324,9 @@ evidence. A scenario becomes mandatory when its owning behavior is implemented.
 ### Evidence, memory, and research
 
 - Evidence unavailable at the cutoff is rejected even when its source-event time is earlier.
-- SEC acceptance times, amendments, restatements, duplicate content, and changed entity mappings cannot
-  leak future information into an as-of read.
+- SEC acceptance times, amendments, restatements, duplicate content, and versioned entity mappings
+  cannot leak future information into an as-of read; mapping availability participates in the derived
+  evidence availability.
 - Belief transitions preserve prior values, evidence, falsifiers, and contradiction history.
 - Belief Graph rebuild produces the same as-of projection from the Evidence Vault and Belief Ledger.
 - Attention caps, holding refresh, and weekly exploration budgets remain invariant as universe size
@@ -383,8 +384,11 @@ evidence. A scenario becomes mandatory when its owning behavior is implemented.
 - When current Alpaca references disagree about a field name, activity code, order form, or
   time-in-force, contract evidence pins the accepted capability profile and rejects the unresolved or
   wider interpretation. Tests never choose a provider contract from prose recency alone.
-- SEC and issuer fixtures cover acceptance times, amendments, duplicate content, changed mappings, and
-  hostile embedded instructions.
+- Recorded SEC, issuer, Federal Reserve, BLS, and BEA fixtures cover source and document identities,
+  acceptance or publication times, first observation, derived availability, parser identity,
+  amendments, duplicate content, versioned or ambiguous mappings, required and optional absence, and
+  hostile embedded instructions. These deterministic tests use no network, credentials, metered API,
+  or model retrieval.
 - Scripted model fixtures cover valid output, hallucinated citations, prohibited authority, missing
   Skeptic, conflicting schemas, long output, timeout, and quota exhaustion.
 - Scheduler fixtures cover weekends, exchange holidays, early closes, daylight-saving transitions,

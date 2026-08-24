@@ -211,7 +211,12 @@ def _validate_configuration(  # noqa: PLR0911 - each invalid configuration layer
         # Strict mypy proves this line unreachable; removing it is runtime-equivalent.
         assert_never(universe_policy)  # pragma: no cover
     evidence_policy = EvidencePolicy.parse(merged["evidence_policy"])
-    if evidence_policy is None or evidence_policy.data_regime != universe_policy.data_regime:
+    if (
+        evidence_policy is None
+        or evidence_policy.data_regime != universe_policy.data_regime
+        or not evidence_policy.has_complete_v0_source_set
+        or not evidence_policy.has_required_retrieval
+    ):
         return _INVALID_EVIDENCE_POLICY_REFUSAL
 
     canonical = {

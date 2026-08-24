@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, assert_never
 
 from agentic_investment_os.adapters.filesystem_evidence import FilesystemEvidenceVault
-from agentic_investment_os.adapters.recorded_evidence import RecordedAlpacaEvidenceSource
+from agentic_investment_os.adapters.recorded_evidence import RecordedEvidenceSource
 from agentic_investment_os.adapters.recorded_universe import RecordedUniverseSource
 from agentic_investment_os.adapters.sqlite_lifecycle import (
     PreparedRuntimeDatabase,
@@ -41,12 +41,13 @@ class SystemClock:
         return datetime.now(UTC)
 
 
-def configure_advance(
+def configure_advance(  # noqa: PLR0913 - composition names each untrusted boundary explicitly.
     sources: Sequence[ConfigurationSource],
     *,
     repository_root: Path,
     recorded_universe: object,
     recorded_evidence: object,
+    recorded_official_evidence: object = None,
     clock: Clock | None = None,
 ) -> Advance | ConfigurationRefusal:
     """Validate configuration and compose Advance without credentials or network access.
@@ -76,7 +77,11 @@ def configure_advance(
             universe_policy=resolution.universe_policy,
             evidence_capture=CaptureEvidence(
                 policy=resolution.evidence_policy,
-                source=RecordedAlpacaEvidenceSource(recorded_evidence),
+                source=RecordedEvidenceSource(
+                    recorded_evidence,
+                    recorded_official_evidence,
+                    resolution.evidence_policy.data_regime,
+                ),
                 vault=FilesystemEvidenceVault(resolution.state_root / "evidence-vault"),
             ),
             clock=clock if clock is not None else SystemClock(),
