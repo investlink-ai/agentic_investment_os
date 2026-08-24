@@ -1,6 +1,6 @@
 ---
 name: investment-safety-review
-description: Perform the supplemental domain-safety review for agentic-investment-os changes that can affect investment authority, deterministic portfolio or execution behavior, append-only durability, evidence provenance or as-of time, retry and idempotency, fail-closed operation, credential isolation, or model-visible safety contracts. Use in addition to general code review when a diff, branch, pull request, commit, or implementation changes lifecycle, evidence, research, memory, persistence, runtime or investment configuration, portfolio, execution, evaluation, external adapters, entrypoints, prompts, or model-visible schemas. Do not use this skill as a replacement for complete Standards and Spec review, and do not implement fixes unless the user separately asks for them.
+description: Review agentic-investment-os changes for investment authority, deterministic portfolio or execution, durability, provenance and time, retry and idempotency, fail-closed operation, credential isolation, and model-visible safety. Supplements general code review and never implements fixes.
 ---
 
 # Review Investment-System Safety

@@ -1,6 +1,6 @@
 ---
 name: deliver-issue
-description: Deliver one ready agentic-investment-os GitHub issue through a guarded worktree, context-appropriate implementation, review remediation, verification, and a draft pull request. Use when asked to work on, implement, fix, refactor, document, complete, resume, deliver, or ship a numbered issue. Follow the repository authorization contract for a narrower handoff; never plan a capability stage, merge, deploy, or close an issue or stage from this skill.
+description: Deliver one ready agentic-investment-os issue through its guarded worktree, implementation, verification, independent review, and draft pull request. Use for work on a numbered issue. Does not plan stages, merge, deploy, or close issues.
 ---
 
 # Deliver an Issue

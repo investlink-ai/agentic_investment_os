@@ -1,6 +1,6 @@
 ---
 name: start-issue-worktree
-description: Create or resume the guarded linked worktree for an agentic-investment-os GitHub issue. Use when deliver-issue requests workspace binding or the user explicitly requests only worktree setup or resumption. Return the bound path and branch to deliver-issue; do not use this skill as a standalone implementation workflow.
+description: Create or resume the guarded linked worktree for an open agentic-investment-os issue when deliver-issue routes workspace binding or the user requests setup only. Returns the path and branch; does not implement or publish.
 ---
 
 # Start Issue Worktree

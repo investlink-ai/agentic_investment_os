@@ -1,6 +1,6 @@
 ---
 name: plan-stage-issues
-description: Plan or complete one agentic-investment-os capability stage through a reviewed GitHub issue graph. Use to draft or publish the next requirements frontier as vertical parent and child issues, or to audit and close an existing parent after its children finish. Checks acceptance criteria, dependencies, approval, native relationships, and stage evidence. Do not use to implement an issue or plan the entire roadmap.
+description: Plan or complete one agentic-investment-os capability stage as a reviewed GitHub issue graph. Use for next-frontier drafting or publication and completed-parent audit. Does not implement issues or plan the full roadmap.
 ---
 
 # Plan Stage Issues

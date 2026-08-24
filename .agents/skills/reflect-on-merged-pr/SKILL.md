@@ -1,6 +1,6 @@
 ---
 name: reflect-on-merged-pr
-description: Reflect on a materially significant merged agentic-investment-os pull request after cleanup and identify evidence-backed, high-value follow-up opportunities without changing repository or GitHub state. Use when asked for post-merge reflection, retrospective lessons, or hardening follow-ups for a merged PR; do not use for pre-merge review or implementation.
+description: Reflect on a materially significant merged agentic-investment-os pull request after cleanup. Use for post-merge lessons or hardening follow-ups; remain read-only and do not use for pre-merge review or implementation.
 ---
 
 # Reflect on a Merged Pull Request

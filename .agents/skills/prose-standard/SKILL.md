@@ -1,6 +1,6 @@
 ---
 name: prose-standard
-description: Preserve complete technical and financial contracts while writing, reviewing, trimming, or restructuring prose in agentic-investment-os. Use for Markdown, Python docstrings, comments, commit messages, tests, prompts, model-visible schemas, diagnostics, CLI or report strings, and Agent Notes; also use when prose duplicates an authority document, narrates an authoring session, or is either too sparse or too verbose.
+description: Preserve complete technical and financial contracts while writing or reviewing agentic-investment-os Markdown, docstrings, comments, tests, prompts, schemas, diagnostics, and Agent Notes. Use for substantial, duplicated, sparse, or verbose prose.
 ---
 
 # Prose Standard

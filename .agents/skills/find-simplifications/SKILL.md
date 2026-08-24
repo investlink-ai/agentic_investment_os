@@ -1,6 +1,6 @@
 ---
 name: find-simplifications
-description: Find and prove safe simplifications in agentic-investment-os. Use when asked to simplify, reduce complexity, remove dead code or configuration, collapse shallow modules, challenge overengineering, replace hand-rolled infrastructure, audit unused interfaces, or identify speculative behavior in Python code, tests, documentation, persistence, adapters, and process tooling.
+description: Find and prove safe simplifications in agentic-investment-os code, tests, documentation, configuration, persistence, adapters, or tooling. Use for simplification, dead-code, unused-interface, or overengineering requests.
 ---
 
 # Find Simplifications

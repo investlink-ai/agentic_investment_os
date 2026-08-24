@@ -1,6 +1,6 @@
 ---
 name: implement-spec-slice
-description: Implement one coherent vertical product-behavior slice from active agentic-investment-os requirements as a leaf of deliver-issue. Use when deliver-issue routes an open issue involving lifecycle, persistence, evidence, memory, research, portfolio, execution, evaluation, adapters, entrypoints, or runtime configuration. Return the scoped result to deliver-issue; do not use as a standalone issue-delivery workflow or for explanation, review, or documentation-only requests.
+description: Implement one vertical product-behavior slice from active agentic-investment-os requirements when routed by deliver-issue. Applies from lifecycle through runtime configuration. Not standalone, documentation-only, explanatory, or review work.
 ---
 
 # Implement a Specification Slice
