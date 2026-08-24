@@ -18,14 +18,14 @@ from agentic_investment_os.evidence.capture import (
     EvidenceRetrieval,
     EvidenceSourceDisposition,
 )
-from tests._evidence import evidence_item, evidence_policy, recorded_evidence
+from tests._evidence import alpaca_evidence_policy, evidence_item, recorded_evidence
 
 HOSTILE_BOOLEAN = True
 DATA_REGIME = "alpaca-basic-iex-v1"
 
 
 def _requests() -> tuple[EvidenceRetrieval, EvidenceRetrieval]:
-    policy = EvidencePolicy.parse(evidence_policy())
+    policy = EvidencePolicy.parse(alpaca_evidence_policy())
     assert isinstance(policy, EvidencePolicy)
     market, news = policy.requests
     return market, news

@@ -6,7 +6,7 @@ import hashlib
 import json
 import re
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from enum import StrEnum
 from typing import Protocol, Self, assert_never
@@ -62,18 +62,20 @@ _NORMALIZED_INSTANT = re.compile(
 )
 _NORMALIZED_IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\Z")
 _NORMALIZED_PRICE = re.compile(r"[0-9]+(?:\.[0-9]{1,9})?\Z")
-_PARSER_VERSION = "recorded-alpaca-evidence-v1"
 _NORMALIZATION_VERSION = "canonical-json-v1"
-_ENTITLEMENT = "alpaca-basic"
 _EVIDENCE_AUTHORITY_SCOPE = "research_evidence"
 _EVIDENCE_ENVELOPE_SCHEMA_VERSION = 1
-_EVIDENCE_PAYLOAD_SCHEMA_VERSION = 1
+_EVIDENCE_PAYLOAD_SCHEMA_VERSION = 2
+_EVIDENCE_POLICY_SCHEMA_VERSION = 2
+_CAPTURE_INTENT_SCHEMA_VERSION = 2
 _MAXIMUM_CONTENT_BYTES = 1_000_000
 _MAXIMUM_QUERY_RESULTS = 100
 _MAXIMUM_AGE_SECONDS = 86_399_999_999_999
-_REQUIRED_RETRIEVAL_COUNT = 2
+_MAXIMUM_RETRIEVAL_COUNT = 100
 _POLICY_FIELDS = frozenset({"schema_version", "policy_type", "data_regime", "requests"})
-_REQUEST_FIELDS = frozenset({"kind", "retrieval_identity", "maximum_age_seconds"})
+_REQUEST_FIELDS = frozenset(
+    {"kind", "source", "retrieval_identity", "maximum_age_seconds", "required"}
+)
 _INTENT_FIELDS = frozenset(
     {
         "schema_version",
@@ -114,6 +116,7 @@ _ARTIFACT_FINGERPRINT_FIELDS = frozenset(
 _ARTIFACT_PAYLOAD_FIELDS = frozenset(
     {
         "retrieval_identity",
+        "source_identity",
         "source_event_at",
         "published_at",
         "first_observed_at",
@@ -136,10 +139,15 @@ _OUTCOME_FIELDS = frozenset(
         "content_hash",
     }
 )
-_MAPPING_FIELDS = frozenset({"identity", "confidence"})
+_MAPPING_FIELDS = frozenset({"identity", "confidence", "mapping_version", "available_at"})
 _MARKET_CONTENT_FIELDS = frozenset({"bars"})
 _MARKET_BAR_FIELDS = frozenset({"asset_id", "close", "timestamp"})
 _NEWS_CONTENT_FIELDS = frozenset({"headline", "id", "summary"})
+_SEC_CONTENT_FIELDS = frozenset(
+    {"accession_number", "amends_accession", "filing_period", "form", "restatement", "text"}
+)
+_ISSUER_CONTENT_FIELDS = frozenset({"release_id", "text", "title"})
+_MACRO_CONTENT_FIELDS = frozenset({"artifact_type", "document_id", "text", "title"})
 _INVALID_CANDIDATE = "invalid evidence candidate"
 _INVALID_ARTIFACT = "invalid evidence artifact"
 _INVALID_POLICY = "invalid evidence policy"
@@ -147,6 +155,12 @@ _INVALID_QUERY = "invalid evidence query"
 _INVALID_CAPTURE = "invalid evidence capture state"
 _MAXIMUM_HEADLINE_CHARACTERS = 10_000
 _MAXIMUM_SUMMARY_CHARACTERS = 100_000
+_MAXIMUM_SOURCE_TEXT_CHARACTERS = 900_000
+_ACCESSION_NUMBER = re.compile(r"[0-9]{10}-[0-9]{2}-[0-9]{6}\Z")
+_SOURCE_IDENTITY = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,255}\Z")
+_MAPPING_VERSION = re.compile(r"[a-z0-9][a-z0-9._:-]{0,127}\Z")
+_FILING_PERIOD = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}\Z")
+_FORM = re.compile(r"[A-Z0-9-]+(?:/A)?\Z")
 
 
 class InvalidEvidenceError(ValueError):
@@ -158,24 +172,37 @@ class EvidencePersistenceError(RuntimeError):
 
 
 class EvidenceKind(StrEnum):
-    """Name the recorded Alpaca evidence variants implemented in V0."""
+    """Name the closed recorded evidence variants implemented in V0."""
 
     MARKET = "market"
     NEWS = "news"
+    SEC_FILING = "sec_filing"
+    ISSUER_RELEASE = "issuer_release"
+    OFFICIAL_MACRO = "official_macro"
 
 
 class EvidenceFeed(StrEnum):
-    """Pin the supported provider feed carried by one observation."""
+    """Pin the authorized provider or official source carried by one observation."""
 
     IEX = "iex"
     ALPACA_NEWS = "alpaca_news"
+    SEC_EDGAR = "sec_edgar"
+    ISSUER_INVESTOR_RELATIONS = "issuer_investor_relations"
+    FEDERAL_RESERVE = "federal_reserve"
+    BLS = "bls"
+    BEA = "bea"
 
 
 class EvidenceCoverage(StrEnum):
-    """Make the Basic entitlement's non-interchangeable coverage explicit."""
+    """Make source coverage and entitlement boundaries explicit."""
 
     IEX_BASIC_MARKET_ONLY = "iex_basic_market_only"
     ALPACA_NEWS_ENTITLEMENT = "alpaca_news_entitlement"
+    SEC_EDGAR_PUBLIC = "sec_edgar_public"
+    ISSUER_OFFICIAL_PUBLICATION = "issuer_official_publication"
+    FEDERAL_RESERVE_PUBLIC = "federal_reserve_public"
+    BLS_PUBLIC = "bls_public"
+    BEA_PUBLIC = "bea_public"
 
 
 class EvidenceCaptureStatus(StrEnum):
@@ -184,6 +211,8 @@ class EvidenceCaptureStatus(StrEnum):
     CAPTURED = "captured"
     UNAVAILABLE = "unavailable"
     STALE = "stale"
+    INVALID = "invalid"
+    AMBIGUOUS = "ambiguous"
     REFUSED = "refused"
 
 
@@ -194,6 +223,7 @@ class EvidenceRefusalReason(StrEnum):
     SOURCE_STALE = "source_stale"
     SOURCE_REFUSED = "source_refused"
     INVALID_RECORDED_INPUT = "invalid_recorded_input"
+    AMBIGUOUS_ENTITY_MAPPING = "ambiguous_entity_mapping"
     UNSUPPORTED_CONTRACT = "unsupported_contract"
     AFTER_CUTOFF = "after_cutoff"
     STALE_AT_CUTOFF = "stale_at_cutoff"
@@ -205,17 +235,36 @@ class EvidenceEntityMapping:
 
     identity: EquityInstrumentIdentity
     confidence: str
+    mapping_version: str
+    available_at: UtcInstant
 
     def __post_init__(self) -> None:
-        if type(self.identity) is not EquityInstrumentIdentity or self.confidence != "exact":
+        if (
+            type(self.identity) is not EquityInstrumentIdentity
+            or self.confidence != "exact"
+            or type(self.mapping_version) is not str
+            or _MAPPING_VERSION.fullmatch(self.mapping_version) is None
+            or type(self.available_at) is not UtcInstant
+        ):
             raise InvalidEvidenceError(_INVALID_CANDIDATE)
 
     @classmethod
-    def exact(cls, identity: EquityInstrumentIdentity) -> Self:
-        return cls(identity, "exact")
+    def exact(
+        cls,
+        identity: EquityInstrumentIdentity,
+        *,
+        mapping_version: str,
+        available_at: UtcInstant,
+    ) -> Self:
+        return cls(identity, "exact", mapping_version, available_at)
 
     def to_payload(self) -> dict[str, object]:
-        return {"identity": self.identity.to_payload(), "confidence": self.confidence}
+        return {
+            "identity": self.identity.to_payload(),
+            "confidence": self.confidence,
+            "mapping_version": self.mapping_version,
+            "available_at": self.available_at.isoformat(),
+        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -223,16 +272,21 @@ class EvidenceRetrieval:
     """Describe one required, effect-local recorded retrieval."""
 
     kind: EvidenceKind
+    source: EvidenceFeed
     retrieval_identity: str
     maximum_age_seconds: int
+    required: bool
 
     def __post_init__(self) -> None:
         if (
             type(self.kind) is not EvidenceKind
+            or type(self.source) is not EvidenceFeed
+            or not _source_supports_kind(self.source, self.kind)
             or type(self.retrieval_identity) is not str
             or not self.is_valid_identity(self.retrieval_identity)
             or type(self.maximum_age_seconds) is not int
             or not 1 <= self.maximum_age_seconds <= _MAXIMUM_AGE_SECONDS
+            or type(self.required) is not bool
         ):
             raise InvalidEvidenceError(_INVALID_POLICY)
 
@@ -244,14 +298,16 @@ class EvidenceRetrieval:
     def to_payload(self) -> dict[str, object]:
         return {
             "kind": self.kind.value,
+            "source": self.source.value,
             "retrieval_identity": self.retrieval_identity,
             "maximum_age_seconds": self.maximum_age_seconds,
+            "required": self.required,
         }
 
 
 @dataclass(frozen=True, slots=True)
 class EvidencePolicy:
-    """Carry the complete configured market-and-news retrieval policy."""
+    """Carry one canonical set of authorized recorded retrievals."""
 
     data_regime: str
     requests: tuple[EvidenceRetrieval, ...]
@@ -260,11 +316,9 @@ class EvidencePolicy:
         if (
             not is_data_regime(self.data_regime)
             or type(self.requests) is not tuple
-            or {request.kind for request in self.requests}
-            != {EvidenceKind.MARKET, EvidenceKind.NEWS}
-            or len(self.requests) != _REQUIRED_RETRIEVAL_COUNT
-            or len({request.retrieval_identity for request in self.requests})
-            != _REQUIRED_RETRIEVAL_COUNT
+            or not 1 <= len(self.requests) <= _MAXIMUM_RETRIEVAL_COUNT
+            or any(type(request) is not EvidenceRetrieval for request in self.requests)
+            or len({request.retrieval_identity for request in self.requests}) != len(self.requests)
             or tuple(sorted(self.requests, key=_request_sort_key)) != self.requests
         ):
             raise InvalidEvidenceError(_INVALID_POLICY)
@@ -274,8 +328,8 @@ class EvidencePolicy:
         root = _exact_mapping(value, _POLICY_FIELDS)
         if (
             root is None
-            or root["schema_version"] != 1
-            or root["policy_type"] != "alpaca_market_news"
+            or root["schema_version"] != _EVIDENCE_POLICY_SCHEMA_VERSION
+            or root["policy_type"] != "v0_evidence"
         ):
             return None
         data_regime = root["data_regime"]
@@ -289,15 +343,25 @@ class EvidencePolicy:
                 if fields is None:
                     return None
                 kind = _text(fields["kind"])
+                source = _text(fields["source"])
                 retrieval_identity = _text(fields["retrieval_identity"])
                 maximum_age_seconds = _integer(fields["maximum_age_seconds"])
-                if kind is None or retrieval_identity is None or maximum_age_seconds is None:
+                required = fields["required"]
+                if (
+                    kind is None
+                    or source is None
+                    or retrieval_identity is None
+                    or maximum_age_seconds is None
+                    or type(required) is not bool
+                ):
                     return None
                 requests.append(
                     EvidenceRetrieval(
                         EvidenceKind(kind),
+                        EvidenceFeed(source),
                         retrieval_identity,
                         maximum_age_seconds,
+                        required,
                     )
                 )
             return cls(data_regime, tuple(sorted(requests, key=_request_sort_key)))
@@ -306,8 +370,8 @@ class EvidencePolicy:
 
     def to_payload(self) -> dict[str, object]:
         return {
-            "schema_version": 1,
-            "policy_type": "alpaca_market_news",
+            "schema_version": _EVIDENCE_POLICY_SCHEMA_VERSION,
+            "policy_type": "v0_evidence",
             "data_regime": self.data_regime,
             "requests": [request.to_payload() for request in self.requests],
         }
@@ -317,12 +381,18 @@ class EvidencePolicy:
         """Return the content address of the complete canonical retrieval policy."""
         return _content_hash(self.to_payload())
 
+    @property
+    def has_complete_v0_source_set(self) -> bool:
+        """Return whether every V0 evidence authority has a scheduled retrieval."""
+        return {request.source for request in self.requests} == set(EvidenceFeed)
+
 
 @dataclass(frozen=True, slots=True)
 class EvidenceCandidate:
     """Carry one validated recorded observation before durable publication."""
 
     retrieval_identity: str
+    source_identity: str
     kind: EvidenceKind
     source_event_at: UtcInstant | None
     published_at: UtcInstant | None
@@ -338,8 +408,19 @@ class EvidenceCandidate:
         relevant = tuple(
             value for value in (self.source_event_at, self.published_at) if value is not None
         )
+        mapping_times = (
+            tuple(
+                mapping.available_at
+                for mapping in self.entity_mappings
+                if type(mapping) is EvidenceEntityMapping
+            )
+            if type(self.entity_mappings) is tuple
+            else ()
+        )
         if (
             _RETRIEVAL_ID.fullmatch(self.retrieval_identity) is None
+            or type(self.source_identity) is not str
+            or _SOURCE_IDENTITY.fullmatch(self.source_identity) is None
             or type(self.kind) is not EvidenceKind
             or type(self.first_observed_at) is not UtcInstant
             or type(self.available_at) is not UtcInstant
@@ -347,16 +428,20 @@ class EvidenceCandidate:
             or type(self.feed) is not EvidenceFeed
             or type(self.coverage) is not EvidenceCoverage
             or type(self.entity_mappings) is not tuple
-            or not self.entity_mappings
+            or not _entity_mapping_shape_is_valid(self.kind, self.entity_mappings)
             or len({mapping.identity for mapping in self.entity_mappings})
             != len(self.entity_mappings)
             or type(self.content) is not bytes
             or not self.content
             or len(self.content) > _MAXIMUM_CONTENT_BYTES
             or any(type(value) is not UtcInstant for value in relevant)
+            or any(type(value) is not UtcInstant for value in mapping_times)
             or any(self.first_observed_at.value < value.value for value in relevant)
             or self.available_at.value
-            != max((self.first_observed_at, *relevant), key=lambda item: item.value).value
+            != max(
+                (self.first_observed_at, *relevant, *mapping_times),
+                key=lambda item: item.value,
+            ).value
             or not _kind_contract_is_valid(
                 self.kind,
                 self.feed,
@@ -372,6 +457,7 @@ class EvidenceCandidate:
         cls,
         *,
         retrieval_identity: str,
+        source_identity: str,
         kind: EvidenceKind,
         source_event_at: UtcInstant | None,
         published_at: UtcInstant | None,
@@ -382,9 +468,13 @@ class EvidenceCandidate:
         content: bytes,
     ) -> EvidenceCandidate:
         relevant = tuple(value for value in (source_event_at, published_at) if value is not None)
-        available_at = max((first_observed_at, *relevant), key=lambda item: item.value)
+        mapping_times = tuple(mapping.available_at for mapping in entity_mappings)
+        available_at = max(
+            (first_observed_at, *relevant, *mapping_times), key=lambda item: item.value
+        )
         return cls(
             retrieval_identity=retrieval_identity,
+            source_identity=source_identity,
             kind=kind,
             source_event_at=source_event_at,
             published_at=published_at,
@@ -392,7 +482,7 @@ class EvidenceCandidate:
             available_at=available_at,
             data_regime=data_regime,
             feed=feed,
-            coverage=_coverage_for(kind),
+            coverage=_coverage_for(feed),
             entity_mappings=entity_mappings,
             content=content,
         )
@@ -405,6 +495,7 @@ class EvidenceArtifact:
     artifact_id: str
     observation_id: str
     retrieval_identity: str
+    source_identity: str
     kind: EvidenceKind
     source_event_at: UtcInstant | None
     published_at: UtcInstant | None
@@ -429,16 +520,17 @@ class EvidenceArtifact:
             artifact_id=artifact_id,
             observation_id=artifact_id,
             retrieval_identity=candidate.retrieval_identity,
+            source_identity=candidate.source_identity,
             kind=candidate.kind,
             source_event_at=candidate.source_event_at,
             published_at=candidate.published_at,
             first_observed_at=candidate.first_observed_at,
             available_at=candidate.available_at,
             data_regime=candidate.data_regime,
-            entitlement=_ENTITLEMENT,
+            entitlement=_entitlement_for(candidate.feed),
             feed=candidate.feed,
             coverage=candidate.coverage,
-            parser_version=_PARSER_VERSION,
+            parser_version=_parser_version_for(candidate.feed),
             normalization_version=_NORMALIZATION_VERSION,
             entity_mappings=candidate.entity_mappings,
             content_hash=content_hash,
@@ -461,6 +553,8 @@ class EvidenceSourceDisposition:
         allowed = {
             EvidenceCaptureStatus.UNAVAILABLE: (EvidenceRefusalReason.SOURCE_UNAVAILABLE,),
             EvidenceCaptureStatus.STALE: (EvidenceRefusalReason.SOURCE_STALE,),
+            EvidenceCaptureStatus.INVALID: (EvidenceRefusalReason.INVALID_RECORDED_INPUT,),
+            EvidenceCaptureStatus.AMBIGUOUS: (EvidenceRefusalReason.AMBIGUOUS_ENTITY_MAPPING,),
             EvidenceCaptureStatus.REFUSED: (
                 EvidenceRefusalReason.SOURCE_REFUSED,
                 EvidenceRefusalReason.INVALID_RECORDED_INPUT,
@@ -521,7 +615,7 @@ class CaptureIntent:
 
     def to_payload(self) -> dict[str, object]:
         material = {
-            "schema_version": 1,
+            "schema_version": _CAPTURE_INTENT_SCHEMA_VERSION,
             "record_kind": "evidence_capture_intent",
             "run_id": self.run_id,
             "universe_snapshot_id": self.universe_snapshot_id,
@@ -553,6 +647,16 @@ class CaptureOutcome:
             ),
             (EvidenceCaptureStatus.STALE, EvidenceRefusalReason.SOURCE_STALE, False),
             (EvidenceCaptureStatus.STALE, EvidenceRefusalReason.STALE_AT_CUTOFF, True),
+            (
+                EvidenceCaptureStatus.INVALID,
+                EvidenceRefusalReason.INVALID_RECORDED_INPUT,
+                False,
+            ),
+            (
+                EvidenceCaptureStatus.AMBIGUOUS,
+                EvidenceRefusalReason.AMBIGUOUS_ENTITY_MAPPING,
+                False,
+            ),
             (EvidenceCaptureStatus.REFUSED, EvidenceRefusalReason.SOURCE_REFUSED, False),
             (
                 EvidenceCaptureStatus.REFUSED,
@@ -595,6 +699,7 @@ def validate_capture_outcome_association(
     if (
         artifact.retrieval_identity != intent.request.retrieval_identity
         or artifact.kind is not intent.request.kind
+        or artifact.feed is not intent.request.source
         or artifact.data_regime != intent.data_regime
     ):
         raise InvalidEvidenceError(_INVALID_CAPTURE)
@@ -623,10 +728,36 @@ class EvidenceCaptureSummary:
 
     policy_id: str
     outcomes: tuple[CaptureOutcome, ...]
+    required_refusal_ids: tuple[str, ...]
 
     def __post_init__(self) -> None:
-        if not is_sha256(self.policy_id) or type(self.outcomes) is not tuple:
+        if (
+            not is_sha256(self.policy_id)
+            or type(self.outcomes) is not tuple
+            or type(self.required_refusal_ids) is not tuple
+            or tuple(sorted(set(self.required_refusal_ids))) != self.required_refusal_ids
+            or any(not is_sha256(value) for value in self.required_refusal_ids)
+            or not set(self.required_refusal_ids).issubset(set(self.disposition_ids))
+        ):
             raise InvalidEvidenceError(_INVALID_CAPTURE)
+
+    @classmethod
+    def from_policy(
+        cls,
+        policy: EvidencePolicy,
+        outcomes: tuple[CaptureOutcome, ...],
+    ) -> EvidenceCaptureSummary:
+        """Classify required failures while retaining every durable optional disposition."""
+        if len(outcomes) != len(policy.requests):
+            raise InvalidEvidenceError(_INVALID_CAPTURE)
+        required_refusals = tuple(
+            sorted(
+                outcome.intent_id
+                for request, outcome in zip(policy.requests, outcomes, strict=True)
+                if request.required and outcome.status is not EvidenceCaptureStatus.CAPTURED
+            )
+        )
+        return cls(policy.policy_id, outcomes, required_refusals)
 
     @property
     def artifact_ids(self) -> tuple[str, ...]:
@@ -642,6 +773,12 @@ class EvidenceCaptureSummary:
 
     @property
     def refusal_ids(self) -> tuple[str, ...]:
+        """Return only dispositions that make the configured capture fail closed."""
+        return self.required_refusal_ids
+
+    @property
+    def disposition_ids(self) -> tuple[str, ...]:
+        """Return every non-captured outcome, including explicit optional absence."""
         return tuple(
             sorted(
                 {
@@ -667,6 +804,7 @@ class EvidenceStoredRecord:
             or not is_normalized_evidence_content(
                 self.artifact.kind,
                 self.content,
+                self.artifact.source_identity,
                 self.artifact.source_event_at,
                 self.artifact.entity_mappings,
             )
@@ -807,7 +945,7 @@ class CaptureEvidence:
             outcome, content = _capture_outcome(intent, request, source_result, cutoff, data_regime)
             self.vault.append_outcome(intent, outcome, content)
             outcomes.append(outcome)
-        return EvidenceCaptureSummary(self.policy.policy_id, tuple(outcomes))
+        return EvidenceCaptureSummary.from_policy(self.policy, tuple(outcomes))
 
     def validate_checkpoint(
         self,
@@ -843,7 +981,7 @@ class CaptureEvidence:
             if outcome is None:
                 raise EvidencePersistenceError(_INVALID_CAPTURE)
             outcomes.append(outcome)
-        summary = EvidenceCaptureSummary(self.policy.policy_id, tuple(outcomes))
+        summary = EvidenceCaptureSummary.from_policy(self.policy, tuple(outcomes))
         if (summary.artifact_ids, summary.refusal_ids) != (
             checkpoint.artifact_ids,
             checkpoint.refusal_ids,
@@ -883,13 +1021,13 @@ def select_evidence_as_of(
     return tuple(ordered[: query.limit])
 
 
-def parse_capture_intent(  # noqa: PLR0911 - reject hostile intent fields independently.
+def parse_capture_intent(  # noqa: PLR0911,PLR0912 - reject hostile fields independently.
     value: object,
 ) -> CaptureIntent | None:
     root = _exact_mapping(value, _INTENT_FIELDS)
     if root is None:
         return None
-    if root["schema_version"] != 1:
+    if root["schema_version"] != _CAPTURE_INTENT_SCHEMA_VERSION:
         return None
     if root["record_kind"] != "evidence_capture_intent":
         return None
@@ -897,19 +1035,27 @@ def parse_capture_intent(  # noqa: PLR0911 - reject hostile intent fields indepe
     if request_fields is None:
         return None
     kind = _text(request_fields["kind"])
+    source = _text(request_fields["source"])
     retrieval_identity = _text(request_fields["retrieval_identity"])
     maximum_age_seconds = _integer(request_fields["maximum_age_seconds"])
+    required = request_fields["required"]
     if kind is None:
         return None
     if retrieval_identity is None:
         return None
+    if source is None:
+        return None
     if maximum_age_seconds is None:
+        return None
+    if type(required) is not bool:
         return None
     try:
         request = EvidenceRetrieval(
             EvidenceKind(kind),
+            EvidenceFeed(source),
             retrieval_identity,
             maximum_age_seconds,
+            required,
         )
         cutoff = UtcInstant.parse(root["cutoff"])
     except (InvalidEvidenceError, InvalidUtcInstantError, ValueError):
@@ -994,6 +1140,7 @@ def _parse_artifact(value: object) -> EvidenceArtifact | None:  # noqa: PLR0911,
         payload,
         (
             "retrieval_identity",
+            "source_identity",
             "entitlement",
             "feed",
             "coverage",
@@ -1024,6 +1171,7 @@ def _parse_artifact(value: object) -> EvidenceArtifact | None:  # noqa: PLR0911,
     ) = text_values
     (
         retrieval_identity,
+        source_identity,
         entitlement,
         feed_value,
         coverage_value,
@@ -1033,11 +1181,8 @@ def _parse_artifact(value: object) -> EvidenceArtifact | None:  # noqa: PLR0911,
     ) = payload_text
     if authority_scope != _EVIDENCE_AUTHORITY_SCOPE:
         return None
-    if discriminator == "alpaca_market_evidence":
-        kind = EvidenceKind.MARKET
-    elif discriminator == "alpaca_news_evidence":
-        kind = EvidenceKind.NEWS
-    else:
+    kind = _kind_from_discriminator(discriminator)
+    if kind is None:
         return None
     mappings_value = subject["entity_mappings"]
     if type(mappings_value) is not list:
@@ -1053,11 +1198,21 @@ def _parse_artifact(value: object) -> EvidenceArtifact | None:  # noqa: PLR0911,
             identity = parse_instrument_identity(fields["identity"])
             if type(identity) is not EquityInstrumentIdentity:
                 return None
-            mappings.append(EvidenceEntityMapping.exact(identity))
+            mapping_version = _text(fields["mapping_version"])
+            if mapping_version is None:
+                return None
+            mappings.append(
+                EvidenceEntityMapping.exact(
+                    identity,
+                    mapping_version=mapping_version,
+                    available_at=UtcInstant.parse(fields["available_at"]),
+                )
+            )
         artifact = EvidenceArtifact(
             artifact_id=artifact_id,
             observation_id=artifact_id,
             retrieval_identity=retrieval_identity,
+            source_identity=source_identity,
             kind=kind,
             source_event_at=_parse_optional_instant(payload["source_event_at"]),
             published_at=_parse_optional_instant(payload["published_at"]),
@@ -1074,7 +1229,7 @@ def _parse_artifact(value: object) -> EvidenceArtifact | None:  # noqa: PLR0911,
         )
     except (InvalidEvidenceError, InvalidUtcInstantError, TypeError, ValueError):
         return None
-    relevant_at = artifact.source_event_at if kind is EvidenceKind.MARKET else artifact.published_at
+    relevant_at = _relevant_at(artifact.kind, artifact.source_event_at, artifact.published_at)
     if relevant_at is None or relevant_at.isoformat() != relevant_at_text:
         return None
     return artifact if _artifact_is_valid(artifact) and artifact.to_payload() == root else None
@@ -1089,15 +1244,16 @@ def _artifact_is_valid(  # noqa: PLR0911 - validate provenance contracts indepen
         return False
     if not is_sha256(artifact.content_hash):
         return False
-    if artifact.entitlement != _ENTITLEMENT:
+    if artifact.entitlement != _entitlement_for(artifact.feed):
         return False
-    if artifact.parser_version != _PARSER_VERSION:
+    if artifact.parser_version != _parser_version_for(artifact.feed):
         return False
     if artifact.normalization_version != _NORMALIZATION_VERSION:
         return False
     try:
         candidate = EvidenceCandidate(
             retrieval_identity=artifact.retrieval_identity,
+            source_identity=artifact.source_identity,
             kind=artifact.kind,
             source_event_at=artifact.source_event_at,
             published_at=artifact.published_at,
@@ -1148,7 +1304,7 @@ def _capture_outcome(  # noqa: PLR0911 - preserve distinct capture dispositions.
                 ),
                 None,
             )
-        if result.kind is not request.kind:
+        if result.kind is not request.kind or result.feed is not request.source:
             return (
                 CaptureOutcome(
                     intent.intent_id,
@@ -1197,60 +1353,66 @@ def _capture_outcome(  # noqa: PLR0911 - preserve distinct capture dispositions.
     assert_never(result)  # pragma: no cover - union is closed.
 
 
-def _kind_contract_is_valid(  # noqa: PLR0911 - validate feed contracts independently.
+def _kind_contract_is_valid(
     kind: EvidenceKind,
     feed: EvidenceFeed,
     coverage: EvidenceCoverage,
     source_event_at: UtcInstant | None,
     published_at: UtcInstant | None,
 ) -> bool:
+    if not _source_supports_kind(feed, kind) or coverage is not _coverage_for(feed):
+        return False
     if kind is EvidenceKind.MARKET:
-        if feed is not EvidenceFeed.IEX:
-            return False
-        if coverage is not EvidenceCoverage.IEX_BASIC_MARKET_ONLY:
-            return False
-        if source_event_at is None:
-            return False
-        return published_at is None
-    if kind is EvidenceKind.NEWS:
-        if feed is not EvidenceFeed.ALPACA_NEWS:
-            return False
-        if coverage is not EvidenceCoverage.ALPACA_NEWS_ENTITLEMENT:
-            return False
-        return published_at is not None
+        return source_event_at is not None and published_at is None
+    if kind in (
+        EvidenceKind.NEWS,
+        EvidenceKind.SEC_FILING,
+        EvidenceKind.ISSUER_RELEASE,
+        EvidenceKind.OFFICIAL_MACRO,
+    ):
+        return source_event_at is None and published_at is not None
     assert_never(kind)  # pragma: no cover - enum is closed.
 
 
-def _coverage_for(kind: EvidenceKind) -> EvidenceCoverage:
-    if kind is EvidenceKind.MARKET:
+def _coverage_for(  # noqa: PLR0911 - keep the closed source contract explicit.
+    source: EvidenceFeed,
+) -> EvidenceCoverage:
+    if source is EvidenceFeed.IEX:
         return EvidenceCoverage.IEX_BASIC_MARKET_ONLY
-    if kind is EvidenceKind.NEWS:
+    if source is EvidenceFeed.ALPACA_NEWS:
         return EvidenceCoverage.ALPACA_NEWS_ENTITLEMENT
-    assert_never(kind)  # pragma: no cover - enum is closed.
+    if source is EvidenceFeed.SEC_EDGAR:
+        return EvidenceCoverage.SEC_EDGAR_PUBLIC
+    if source is EvidenceFeed.ISSUER_INVESTOR_RELATIONS:
+        return EvidenceCoverage.ISSUER_OFFICIAL_PUBLICATION
+    if source is EvidenceFeed.FEDERAL_RESERVE:
+        return EvidenceCoverage.FEDERAL_RESERVE_PUBLIC
+    if source is EvidenceFeed.BLS:
+        return EvidenceCoverage.BLS_PUBLIC
+    if source is EvidenceFeed.BEA:
+        return EvidenceCoverage.BEA_PUBLIC
+    assert_never(source)  # pragma: no cover - enum is closed.
 
 
 def _artifact_material(candidate: EvidenceCandidate, content_hash: str) -> dict[str, object]:
-    relevant_at = (
-        candidate.source_event_at
-        if candidate.kind is EvidenceKind.MARKET
-        else candidate.published_at
-    )
+    relevant_at = _relevant_at(candidate.kind, candidate.source_event_at, candidate.published_at)
     if relevant_at is None:  # pragma: no cover - candidate validation requires the kind's time.
         raise InvalidEvidenceError(_INVALID_ARTIFACT)
     retrieval_contract = {
         "retrieval_identity": candidate.retrieval_identity,
-        "entitlement": _ENTITLEMENT,
+        "source_identity": candidate.source_identity,
+        "entitlement": _entitlement_for(candidate.feed),
         "feed": candidate.feed.value,
         "coverage": candidate.coverage.value,
     }
     transformation_contract = {
-        "parser_version": _PARSER_VERSION,
+        "parser_version": _parser_version_for(candidate.feed),
         "normalization_version": _NORMALIZATION_VERSION,
     }
     return {
         "envelope_schema_version": _EVIDENCE_ENVELOPE_SCHEMA_VERSION,
         "record_kind": "evidence_snapshot",
-        "payload_discriminator": f"alpaca_{candidate.kind.value}_evidence",
+        "payload_discriminator": _payload_discriminator(candidate.kind),
         "payload_schema_version": _EVIDENCE_PAYLOAD_SCHEMA_VERSION,
         "subject": {
             "entity_mappings": [mapping.to_payload() for mapping in candidate.entity_mappings]
@@ -1278,6 +1440,7 @@ def _artifact_material(candidate: EvidenceCandidate, content_hash: str) -> dict[
 def _artifact_envelope_material(artifact: EvidenceArtifact) -> dict[str, object]:
     candidate = EvidenceCandidate(
         retrieval_identity=artifact.retrieval_identity,
+        source_identity=artifact.source_identity,
         kind=artifact.kind,
         source_event_at=artifact.source_event_at,
         published_at=artifact.published_at,
@@ -1292,9 +1455,10 @@ def _artifact_envelope_material(artifact: EvidenceArtifact) -> dict[str, object]
     return _artifact_material(candidate, artifact.content_hash)
 
 
-def is_normalized_evidence_content(
+def is_normalized_evidence_content(  # noqa: PLR0911 - validate closed variants locally.
     kind: EvidenceKind,
     content: bytes,
+    source_identity: str,
     source_event_at: UtcInstant | None,
     entity_mappings: tuple[EvidenceEntityMapping, ...],
 ) -> bool:
@@ -1310,7 +1474,13 @@ def is_normalized_evidence_content(
                 entity_mappings,
             )
         if kind is EvidenceKind.NEWS:
-            return _normalized_news_content_is_valid(value)
+            return _normalized_news_content_is_valid(value, source_identity)
+        if kind is EvidenceKind.SEC_FILING:
+            return _normalized_sec_content_is_valid(value, source_identity)
+        if kind is EvidenceKind.ISSUER_RELEASE:
+            return _normalized_issuer_content_is_valid(value, source_identity)
+        if kind is EvidenceKind.OFFICIAL_MACRO:
+            return _normalized_macro_content_is_valid(value, source_identity)
         assert_never(kind)  # pragma: no cover - enum is closed.
     except (UnicodeDecodeError, ValueError, RecursionError):
         return False
@@ -1363,7 +1533,7 @@ def _normalized_market_content_is_valid(  # noqa: PLR0911 - validate hostile fie
     )
 
 
-def _normalized_news_content_is_valid(value: object) -> bool:
+def _normalized_news_content_is_valid(value: object, source_identity: str) -> bool:
     root = _exact_mapping(value, _NEWS_CONTENT_FIELDS)
     if root is None:
         return False
@@ -1375,8 +1545,87 @@ def _normalized_news_content_is_valid(value: object) -> bool:
         and 1 <= len(headline) <= _MAXIMUM_HEADLINE_CHARACTERS
         and type(identifier) is str
         and _NORMALIZED_IDENTIFIER.fullmatch(identifier) is not None
+        and identifier == source_identity
         and type(summary) is str
         and 1 <= len(summary) <= _MAXIMUM_SUMMARY_CHARACTERS
+    )
+
+
+def _normalized_sec_content_is_valid(value: object, source_identity: str) -> bool:
+    root = _exact_mapping(value, _SEC_CONTENT_FIELDS)
+    if root is None:
+        return False
+    accession = root["accession_number"]
+    amended = root["amends_accession"]
+    filing_period = root["filing_period"]
+    form = root["form"]
+    restatement = root["restatement"]
+    text = root["text"]
+    if (
+        type(accession) is not str
+        or _ACCESSION_NUMBER.fullmatch(accession) is None
+        or accession != source_identity
+        or type(filing_period) is not str
+        or _FILING_PERIOD.fullmatch(filing_period) is None
+        or type(form) is not str
+        or _FORM.fullmatch(form) is None
+        or type(restatement) is not bool
+        or type(text) is not str
+        or not 1 <= len(text) <= _MAXIMUM_SOURCE_TEXT_CHARACTERS
+    ):
+        return False
+    try:
+        date.fromisoformat(filing_period)
+    except ValueError:
+        return False
+    if form.endswith("/A"):
+        return (
+            type(amended) is str
+            and _ACCESSION_NUMBER.fullmatch(amended) is not None
+            and amended != accession
+        )
+    return amended is None and not restatement
+
+
+def _normalized_issuer_content_is_valid(value: object, source_identity: str) -> bool:
+    root = _exact_mapping(value, _ISSUER_CONTENT_FIELDS)
+    return root is not None and _normalized_publication_text_is_valid(
+        root,
+        identity_field="release_id",
+        source_identity=source_identity,
+    )
+
+
+def _normalized_macro_content_is_valid(value: object, source_identity: str) -> bool:
+    root = _exact_mapping(value, _MACRO_CONTENT_FIELDS)
+    return (
+        root is not None
+        and root["artifact_type"] in ("release", "schedule")
+        and _normalized_publication_text_is_valid(
+            root,
+            identity_field="document_id",
+            source_identity=source_identity,
+        )
+    )
+
+
+def _normalized_publication_text_is_valid(
+    root: dict[str, object],
+    *,
+    identity_field: str,
+    source_identity: str,
+) -> bool:
+    identity = root[identity_field]
+    title = root["title"]
+    text = root["text"]
+    return (
+        type(identity) is str
+        and identity == source_identity
+        and _SOURCE_IDENTITY.fullmatch(identity) is not None
+        and type(title) is str
+        and 1 <= len(title) <= _MAXIMUM_HEADLINE_CHARACTERS
+        and type(text) is str
+        and 1 <= len(text) <= _MAXIMUM_SOURCE_TEXT_CHARACTERS
     )
 
 
@@ -1399,8 +1648,96 @@ def _is_json_value(value: object) -> bool:
     return False
 
 
-def _request_sort_key(request: EvidenceRetrieval) -> tuple[str, str]:
-    return request.kind.value, request.retrieval_identity
+def _source_supports_kind(source: EvidenceFeed, kind: EvidenceKind) -> bool:
+    allowed = {
+        EvidenceKind.MARKET: (EvidenceFeed.IEX,),
+        EvidenceKind.NEWS: (EvidenceFeed.ALPACA_NEWS,),
+        EvidenceKind.SEC_FILING: (EvidenceFeed.SEC_EDGAR,),
+        EvidenceKind.ISSUER_RELEASE: (EvidenceFeed.ISSUER_INVESTOR_RELATIONS,),
+        EvidenceKind.OFFICIAL_MACRO: (
+            EvidenceFeed.FEDERAL_RESERVE,
+            EvidenceFeed.BLS,
+            EvidenceFeed.BEA,
+        ),
+    }
+    return source in allowed[kind]
+
+
+def _entity_mapping_shape_is_valid(
+    kind: EvidenceKind,
+    mappings: object,
+) -> bool:
+    if type(mappings) is not tuple or any(
+        type(mapping) is not EvidenceEntityMapping for mapping in mappings
+    ):
+        return False
+    if kind is EvidenceKind.OFFICIAL_MACRO:
+        return not mappings
+    return bool(mappings)
+
+
+def _entitlement_for(source: EvidenceFeed) -> str:
+    if source in (EvidenceFeed.IEX, EvidenceFeed.ALPACA_NEWS):
+        return "alpaca-basic"
+    if source in (
+        EvidenceFeed.SEC_EDGAR,
+        EvidenceFeed.ISSUER_INVESTOR_RELATIONS,
+        EvidenceFeed.FEDERAL_RESERVE,
+        EvidenceFeed.BLS,
+        EvidenceFeed.BEA,
+    ):
+        return "keyless-public"
+    assert_never(source)  # pragma: no cover - enum is closed.
+
+
+def _parser_version_for(source: EvidenceFeed) -> str:
+    versions = {
+        EvidenceFeed.IEX: "recorded-alpaca-evidence-v1",
+        EvidenceFeed.ALPACA_NEWS: "recorded-alpaca-evidence-v1",
+        EvidenceFeed.SEC_EDGAR: "recorded-sec-edgar-v1",
+        EvidenceFeed.ISSUER_INVESTOR_RELATIONS: "recorded-issuer-ir-v1",
+        EvidenceFeed.FEDERAL_RESERVE: "recorded-federal-reserve-v1",
+        EvidenceFeed.BLS: "recorded-bls-v1",
+        EvidenceFeed.BEA: "recorded-bea-v1",
+    }
+    return versions[source]
+
+
+def _payload_discriminator(kind: EvidenceKind) -> str:
+    discriminators = {
+        EvidenceKind.MARKET: "alpaca_market_evidence",
+        EvidenceKind.NEWS: "alpaca_news_evidence",
+        EvidenceKind.SEC_FILING: "sec_filing_evidence",
+        EvidenceKind.ISSUER_RELEASE: "issuer_release_evidence",
+        EvidenceKind.OFFICIAL_MACRO: "official_macro_evidence",
+    }
+    return discriminators[kind]
+
+
+def _kind_from_discriminator(value: str) -> EvidenceKind | None:
+    for kind in EvidenceKind:
+        if _payload_discriminator(kind) == value:
+            return kind
+    return None
+
+
+def _relevant_at(
+    kind: EvidenceKind,
+    source_event_at: UtcInstant | None,
+    published_at: UtcInstant | None,
+) -> UtcInstant | None:
+    return source_event_at if kind is EvidenceKind.MARKET else published_at
+
+
+def _request_sort_key(request: EvidenceRetrieval) -> tuple[int, str, str]:
+    order = {
+        EvidenceKind.MARKET: 0,
+        EvidenceKind.NEWS: 1,
+        EvidenceKind.SEC_FILING: 2,
+        EvidenceKind.ISSUER_RELEASE: 3,
+        EvidenceKind.OFFICIAL_MACRO: 4,
+    }
+    return order[request.kind], request.source.value, request.retrieval_identity
 
 
 def _parse_optional_instant(value: object) -> UtcInstant | None:

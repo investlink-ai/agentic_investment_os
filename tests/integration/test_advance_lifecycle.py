@@ -60,7 +60,11 @@ from agentic_investment_os.entrypoints.configuration import (
     ConfigurationSource,
 )
 from agentic_investment_os.entrypoints.lifecycle import SystemClock, configure_advance
-from tests._evidence import evidence_capture_checkpoint, recorded_evidence
+from tests._evidence import (
+    evidence_capture_checkpoint,
+    recorded_evidence,
+    recorded_official_evidence,
+)
 from tests._universe import (
     advance_command,
     pinned_run_identity,
@@ -76,6 +80,8 @@ PRIVATE_DIRECTORY_MODE = 0o700
 PRIVATE_FILE_MODE = 0o600
 PINNED_EVENT_COUNT = 5
 RECEIPT_FIELD_COUNT = 4
+BASE_EVIDENCE_ARTIFACT_COUNT = 2
+COMPLETE_EVIDENCE_ARTIFACT_COUNT = 7
 RECORDED_AT = datetime(2026, 8, 21, 22, 0, tzinfo=UTC)
 SQLiteValue = str | bytes | int | float | None
 NONCANONICAL_CHECKPOINT_SQL = (
@@ -1255,6 +1261,75 @@ def test_advance_pins_one_stream_and_reconstructs_its_receipt_after_reopen(
     ]
     assert stat.S_IMODE(state_root.stat().st_mode) == PRIVATE_DIRECTORY_MODE
     assert stat.S_IMODE((state_root / "lifecycle.sqlite3").stat().st_mode) == PRIVATE_FILE_MODE
+
+
+def test_advance_captures_all_recorded_official_sources_without_network_access(
+    tmp_path: Path,
+) -> None:
+    state_root = tmp_path / "runtime"
+    configured = configure_advance(
+        (ConfigurationSource("test", runtime_configuration(state_root)),),
+        repository_root=REPOSITORY_ROOT,
+        recorded_universe=recorded_universe(),
+        recorded_evidence=recorded_evidence(),
+        recorded_official_evidence=recorded_official_evidence(),
+        clock=FixedClock(datetime(2026, 8, 21, 22, 0, tzinfo=UTC)),
+    )
+    assert isinstance(configured, Advance)
+
+    receipt = configured(
+        cycle=_cycle_payload("2026-08-21"),
+        mode="champion",
+        idempotency_key="advance-with-official-evidence",
+    )
+
+    assert receipt.disposition is AdvanceDisposition.ADVANCED
+    assert len(receipt.evidence_artifact_ids) == COMPLETE_EVIDENCE_ARTIFACT_COUNT
+    assert receipt.evidence_refusal_ids == ()
+    assert (
+        len(tuple((state_root / "evidence-vault" / "contents").iterdir()))
+        == COMPLETE_EVIDENCE_ARTIFACT_COUNT
+    )
+
+
+def test_advance_fails_closed_when_a_required_official_source_is_absent(
+    tmp_path: Path,
+) -> None:
+    state_root = tmp_path / "runtime"
+    configuration = runtime_configuration(state_root)
+    policy = configuration["evidence_policy"]
+    assert isinstance(policy, dict)
+    requests = policy["requests"]
+    assert isinstance(requests, list)
+    sec_request = next(
+        request
+        for request in requests
+        if isinstance(request, dict) and request.get("kind") == "sec_filing"
+    )
+    sec_request["required"] = True
+    configured = configure_advance(
+        (ConfigurationSource("test", configuration),),
+        repository_root=REPOSITORY_ROOT,
+        recorded_universe=recorded_universe(),
+        recorded_evidence=recorded_evidence(),
+        clock=FixedClock(datetime(2026, 8, 21, 22, 0, tzinfo=UTC)),
+    )
+    assert isinstance(configured, Advance)
+
+    receipt = configured(
+        cycle=_cycle_payload("2026-08-21"),
+        mode="champion",
+        idempotency_key="required-official-evidence",
+    )
+
+    assert receipt.disposition is AdvanceDisposition.FAILED_CLOSED
+    assert receipt.failure_reason is AdvanceFailureReason.EVIDENCE_CAPTURE_FAILED
+    assert len(receipt.evidence_artifact_ids) == BASE_EVIDENCE_ARTIFACT_COUNT
+    assert len(receipt.evidence_refusal_ids) == 1
+    assert (
+        len(tuple((state_root / "evidence-vault" / "outcomes").iterdir()))
+        == COMPLETE_EVIDENCE_ARTIFACT_COUNT
+    )
 
 
 def test_disabled_crypto_cycle_is_refused_before_authoritative_state_changes(

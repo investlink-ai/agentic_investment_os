@@ -147,7 +147,7 @@ def test_runtime_configuration_is_complete_immutable_and_deterministically_hashe
         repository_root=Path(__file__).resolve().parents[2],
     )
     assert isinstance(fixed, RuntimeConfiguration)
-    assert fixed.fingerprint == "c92cbb974b6ad1a89c022f645c6c98d0f09e4a74eacd7fa5b63663758f412339"
+    assert fixed.fingerprint == "883e240e86d42c937832cfff7282af539af611b94645689d93a190fbf04c9424"
 
     unicode_path = resolve_runtime_configuration(
         (
@@ -160,7 +160,7 @@ def test_runtime_configuration_is_complete_immutable_and_deterministically_hashe
     assert isinstance(unicode_path, RuntimeConfiguration)
     assert (
         unicode_path.fingerprint
-        == "f25c4a6a68ed477bf962e88954f9f2517afa3fef1f8fabade5f5406bdc30afd2"
+        == "2d8ecf95f3f5fa0f432d6a0078bc7b2ccde4ea737ff74b54097bf3d623ff51d6"
     )
 
 

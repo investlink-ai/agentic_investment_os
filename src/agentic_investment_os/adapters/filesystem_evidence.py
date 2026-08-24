@@ -233,7 +233,7 @@ class FilesystemEvidenceVault:
                 outcome = _load_outcome(outcome_path)
                 _validate_association(intent, outcome)
                 outcomes.append(outcome)
-            summary = EvidenceCaptureSummary(policy.policy_id, tuple(outcomes))
+            summary = EvidenceCaptureSummary.from_policy(policy, tuple(outcomes))
             if (summary.policy_id, summary.artifact_ids, summary.refusal_ids) != (
                 reference.checkpoint.policy_id,
                 reference.checkpoint.artifact_ids,

@@ -4,6 +4,7 @@ import json
 import os
 import stat
 from concurrent.futures import ThreadPoolExecutor
+from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -12,7 +13,11 @@ from typing import TYPE_CHECKING
 import pytest
 
 from agentic_investment_os.adapters.filesystem_evidence import FilesystemEvidenceVault
-from agentic_investment_os.adapters.recorded_evidence import RecordedAlpacaEvidenceSource
+from agentic_investment_os.adapters.recorded_evidence import (
+    RecordedAlpacaEvidenceSource,
+    RecordedEvidenceSource,
+    RecordedOfficialEvidenceSource,
+)
 from agentic_investment_os.domain.lifecycle import (
     EvidenceCaptureCheckpoint,
     EvidenceCaptureReference,
@@ -37,19 +42,28 @@ from agentic_investment_os.evidence.capture import (
     EvidenceSourceResult,
     EvidenceStoredRecord,
 )
-from tests._evidence import evidence_item, evidence_policy, recorded_evidence
+from tests._evidence import (
+    alpaca_evidence_policy,
+    evidence_item,
+    evidence_policy,
+    official_evidence_item,
+    recorded_evidence,
+    recorded_official_evidence,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
 
 RUN_ID = "a" * 64
 SECOND_RUN_ID = "b" * 64
-EARLIER_RUN_ID = "d4735e3a265e16eee03f59718b9b5d03019c07d8b6c51f90da3a666eec13ab35"
+EARLIER_RUN_ID = "9" * 64
 SNAPSHOT_ID = "c" * 64
 EXPECTED_CONTENT_COUNT = 2
 EXPECTED_OUTCOME_COUNT = 4
 EXPECTED_RECORD_COUNT = 3
 EXPECTED_RETRIEVAL_COUNT = 2
+OPTIONAL_OFFICIAL_RETRIEVAL_COUNT = 5
+COMPLETE_RETRIEVAL_COUNT = 7
 SECOND_FSTAT_CALL = 2
 PRIVATE_DIRECTORY_MODE = 0o700
 PRIVATE_FILE_MODE = 0o600
@@ -62,6 +76,12 @@ def _instant(hour: int, minute: int = 0) -> UtcInstant:
 
 
 def _policy() -> EvidencePolicy:
+    policy = EvidencePolicy.parse(alpaca_evidence_policy())
+    assert isinstance(policy, EvidencePolicy)
+    return policy
+
+
+def _complete_policy() -> EvidencePolicy:
     policy = EvidencePolicy.parse(evidence_policy())
     assert isinstance(policy, EvidencePolicy)
     return policy
@@ -131,6 +151,7 @@ def _association_violation_artifact(field: str) -> tuple[EvidenceArtifact, bytes
     if field == "kind":
         changed = EvidenceCandidate.create(
             retrieval_identity=candidate.retrieval_identity,
+            source_identity="news-1",
             kind=EvidenceKind.NEWS,
             source_event_at=None,
             published_at=_instant(19),
@@ -143,6 +164,7 @@ def _association_violation_artifact(field: str) -> tuple[EvidenceArtifact, bytes
     elif field == "after_cutoff":
         changed = EvidenceCandidate.create(
             retrieval_identity=candidate.retrieval_identity,
+            source_identity=candidate.source_identity,
             kind=candidate.kind,
             source_event_at=_instant(21),
             published_at=None,
@@ -155,6 +177,7 @@ def _association_violation_artifact(field: str) -> tuple[EvidenceArtifact, bytes
     elif field == "stale_at_cutoff":
         changed = EvidenceCandidate.create(
             retrieval_identity=candidate.retrieval_identity,
+            source_identity=candidate.source_identity,
             kind=candidate.kind,
             source_event_at=_instant(17),
             published_at=None,
@@ -210,6 +233,134 @@ def test_vault_deduplicates_content_retains_observations_and_filters_as_of(
     for directory_name in ("contents", "intents", "outcomes", "policies"):
         for path in (vault_root / directory_name).iterdir():
             assert stat.S_IMODE(path.stat().st_mode) == PRIVATE_FILE_MODE
+
+
+def test_optional_official_absence_is_durable_without_blocking_required_capture(
+    tmp_path: Path,
+) -> None:
+    vault = FilesystemEvidenceVault(tmp_path / "evidence-vault")
+    policy = _complete_policy()
+
+    summary = CaptureEvidence(
+        policy,
+        RecordedEvidenceSource(recorded_evidence(), None, policy.data_regime),
+        vault,
+    )(
+        run_id=RUN_ID,
+        universe_snapshot_id=SNAPSHOT_ID,
+        cutoff=_instant(20),
+        data_regime=policy.data_regime,
+    )
+
+    official_outcomes = tuple(
+        outcome
+        for request, outcome in zip(policy.requests, summary.outcomes, strict=True)
+        if request.kind not in (EvidenceKind.MARKET, EvidenceKind.NEWS)
+    )
+    assert len(summary.artifact_ids) == EXPECTED_RETRIEVAL_COUNT
+    assert summary.refusal_ids == ()
+    assert len(summary.disposition_ids) == OPTIONAL_OFFICIAL_RETRIEVAL_COUNT
+    assert all(
+        outcome.status is EvidenceCaptureStatus.UNAVAILABLE
+        and outcome.refusal_reason is EvidenceRefusalReason.SOURCE_UNAVAILABLE
+        for outcome in official_outcomes
+    )
+    assert (
+        len(tuple((tmp_path / "evidence-vault" / "outcomes").iterdir())) == COMPLETE_RETRIEVAL_COUNT
+    )
+
+
+def test_required_official_absence_fails_closed_but_retains_other_artifacts(
+    tmp_path: Path,
+) -> None:
+    raw_policy = evidence_policy()
+    requests = raw_policy["requests"]
+    assert isinstance(requests, list)
+    sec_request = next(
+        request
+        for request in requests
+        if isinstance(request, dict) and request.get("kind") == "sec_filing"
+    )
+    sec_request["required"] = True
+    policy = EvidencePolicy.parse(raw_policy)
+    assert isinstance(policy, EvidencePolicy)
+
+    summary = CaptureEvidence(
+        policy,
+        RecordedEvidenceSource(recorded_evidence(), None, policy.data_regime),
+        FilesystemEvidenceVault(tmp_path / "evidence-vault"),
+    )(
+        run_id=RUN_ID,
+        universe_snapshot_id=SNAPSHOT_ID,
+        cutoff=_instant(20),
+        data_regime=policy.data_regime,
+    )
+
+    assert len(summary.artifact_ids) == EXPECTED_RETRIEVAL_COUNT
+    assert len(summary.refusal_ids) == 1
+    assert len(summary.disposition_ids) == OPTIONAL_OFFICIAL_RETRIEVAL_COUNT
+
+
+def test_sec_amendment_appends_a_new_accession_and_obeys_as_of_cutoffs(
+    tmp_path: Path,
+) -> None:
+    full_policy = _complete_policy()
+    sec_request = next(
+        request for request in full_policy.requests if request.kind is EvidenceKind.SEC_FILING
+    )
+    policy = EvidencePolicy(full_policy.data_regime, (sec_request,))
+    vault = FilesystemEvidenceVault(tmp_path / "evidence-vault")
+
+    original = CaptureEvidence(
+        policy,
+        RecordedOfficialEvidenceSource(recorded_official_evidence()),
+        vault,
+    )(
+        run_id=RUN_ID,
+        universe_snapshot_id=SNAPSHOT_ID,
+        cutoff=_instant(18),
+        data_regime=policy.data_regime,
+    )
+    amendment_payload = recorded_official_evidence()
+    amendment_item = official_evidence_item(amendment_payload, 0)
+    amendment_item["source_identity"] = "0000320193-26-000099"
+    amendment_item["published_at"] = "2026-08-21T18:30:00.000000+00:00"
+    amendment_item["first_observed_at"] = "2026-08-21T18:31:00.000000+00:00"
+    amendment_content = deepcopy(amendment_item["content"])
+    assert isinstance(amendment_content, dict)
+    amendment_content.update(
+        {
+            "accession_number": "0000320193-26-000099",
+            "amends_accession": "0000320193-26-000081",
+            "form": "10-Q/A",
+            "restatement": True,
+            "text": "Synthetic SEC amendment; external instructions remain inert evidence.",
+        }
+    )
+    amendment_item["content"] = amendment_content
+    amended = CaptureEvidence(
+        policy,
+        RecordedOfficialEvidenceSource(amendment_payload),
+        vault,
+    )(
+        run_id=SECOND_RUN_ID,
+        universe_snapshot_id=SNAPSHOT_ID,
+        cutoff=_instant(19),
+        data_regime=policy.data_regime,
+    )
+
+    before_amendment = EvidenceLookup(vault)(EvidenceQuery(_instant(18), policy.data_regime, 10))
+    after_amendment = EvidenceLookup(vault)(EvidenceQuery(_instant(19), policy.data_regime, 10))
+    assert len(original.artifact_ids) == 1
+    assert len(amended.artifact_ids) == 1
+    assert len(before_amendment) == 1
+    assert tuple(record.artifact.source_identity for record in after_amendment) == (
+        "0000320193-26-000081",
+        "0000320193-26-000099",
+    )
+    assert (
+        len(tuple((tmp_path / "evidence-vault" / "contents").iterdir())) == EXPECTED_CONTENT_COUNT
+    )
 
 
 def test_vault_reference_validation_requires_every_configured_capture_outcome(
@@ -661,6 +812,7 @@ def test_vault_accepts_news_content_at_the_normalized_size_limit(tmp_path: Path)
     ).encode()
     candidate = replace(
         source_candidate,
+        source_identity="news-at-limit",
         content=content,
     )
     artifact = EvidenceArtifact.from_candidate(candidate)
