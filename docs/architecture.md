@@ -586,8 +586,10 @@ Owner-defined closed
 market, news, SEC filing, issuer release, and official Federal Reserve, BLS, or BEA variants validate
 canonical content at the recorded boundary, Vault publication, and reopen. SEC identity is the
 accession; amendments append their own accession and link to the amended accession rather than
-replacing prior content. The Vault refuses conflicting content or publication facts under an existing
-official source identity. Issuer and official-macro variants retain their source document identity.
+replacing prior content. Before publishing an official observation, the Vault atomically establishes
+an append-only binding from feed and source identity to content and publication facts. Concurrent
+conflicts therefore produce a typed invalid outcome, and reopen revalidates every official artifact
+against that binding. Issuer and official-macro variants retain their source document identity.
 Every artifact pins its source, coverage or entitlement, parser and normalization version, and
 versioned entity mapping when one applies; an ambiguous mapping outcome retains its own version and
 availability for cutoff evaluation. Before the first capture intent, the Vault appends the

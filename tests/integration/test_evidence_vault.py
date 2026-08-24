@@ -8,6 +8,7 @@ from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
+from threading import Barrier
 from typing import TYPE_CHECKING
 
 import pytest
@@ -218,6 +219,7 @@ def test_vault_deduplicates_content_retains_observations_and_filters_as_of(
         "intents",
         "outcomes",
         "policies",
+        "source-bindings",
         "tmp",
     }
 
@@ -240,7 +242,7 @@ def test_vault_deduplicates_content_retains_observations_and_filters_as_of(
 
     for directory in (vault_root, *(path for path in vault_root.iterdir() if path.is_dir())):
         assert stat.S_IMODE(directory.stat().st_mode) == PRIVATE_DIRECTORY_MODE
-    for directory_name in ("contents", "intents", "outcomes", "policies"):
+    for directory_name in ("contents", "intents", "outcomes", "policies", "source-bindings"):
         for path in (vault_root / directory_name).iterdir():
             assert stat.S_IMODE(path.stat().st_mode) == PRIVATE_FILE_MODE
 
@@ -493,6 +495,99 @@ def test_conflicting_content_for_one_official_identity_becomes_typed_invalid(
     assert conflicting.outcomes[0].status is EvidenceCaptureStatus.INVALID
     assert conflicting.outcomes[0].artifact is None
     assert len(vault.stored_records()) == 1
+
+
+def test_concurrent_official_identity_conflict_has_one_typed_invalid_outcome(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    full_policy = _complete_policy()
+    sec_request = next(
+        request for request in full_policy.requests if request.kind is EvidenceKind.SEC_FILING
+    )
+    policy = EvidencePolicy(full_policy.data_regime, (sec_request,))
+    vault_root = tmp_path / "evidence-vault"
+    vault = FilesystemEvidenceVault(vault_root)
+    first_payload = recorded_official_evidence()
+    conflicting_payload = recorded_official_evidence()
+    content = official_evidence_item(conflicting_payload, 0)["content"]
+    assert isinstance(content, dict)
+    content["text"] = "Concurrent conflicting content under the same SEC accession."
+
+    publication_barrier = Barrier(2)
+    append_outcome = FilesystemEvidenceVault.append_outcome
+
+    def synchronized_append(
+        self: FilesystemEvidenceVault,
+        intent: CaptureIntent,
+        outcome: CaptureOutcome,
+        outcome_content: bytes | None,
+    ) -> None:
+        if outcome.artifact is not None:
+            publication_barrier.wait(timeout=5)
+        append_outcome(self, intent, outcome, outcome_content)
+
+    monkeypatch.setattr(FilesystemEvidenceVault, "append_outcome", synchronized_append)
+
+    def capture(run_id: str, payload: object) -> EvidenceCaptureSummary:
+        return CaptureEvidence(
+            policy,
+            RecordedOfficialEvidenceSource(payload),
+            vault,
+        )(
+            run_id=run_id,
+            universe_snapshot_id=SNAPSHOT_ID,
+            cutoff=_instant(18),
+            data_regime=policy.data_regime,
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = (
+            executor.submit(capture, RUN_ID, first_payload),
+            executor.submit(capture, SECOND_RUN_ID, conflicting_payload),
+        )
+        summaries = tuple(future.result() for future in futures)
+
+    outcomes = tuple(summary.outcomes[0] for summary in summaries)
+    assert sorted(outcome.status.value for outcome in outcomes) == ["captured", "invalid"]
+    assert sum(outcome.artifact is not None for outcome in outcomes) == 1
+    reopened = FilesystemEvidenceVault.open_existing(vault_root)
+    assert len(reopened.stored_records()) == 1
+    assert len(tuple((vault_root / "source-bindings").iterdir())) == 1
+
+
+@pytest.mark.parametrize("damage", ["missing", "invalid"])
+def test_vault_reopen_rejects_missing_or_invalid_official_source_binding(
+    tmp_path: Path,
+    damage: str,
+) -> None:
+    full_policy = _complete_policy()
+    sec_request = next(
+        request for request in full_policy.requests if request.kind is EvidenceKind.SEC_FILING
+    )
+    policy = EvidencePolicy(full_policy.data_regime, (sec_request,))
+    vault_root = tmp_path / "evidence-vault"
+    vault = FilesystemEvidenceVault(vault_root)
+    summary = CaptureEvidence(
+        policy,
+        RecordedOfficialEvidenceSource(recorded_official_evidence()),
+        vault,
+    )(
+        run_id=RUN_ID,
+        universe_snapshot_id=SNAPSHOT_ID,
+        cutoff=_instant(18),
+        data_regime=policy.data_regime,
+    )
+    assert summary.outcomes[0].status is EvidenceCaptureStatus.CAPTURED
+    binding_path = next((vault_root / "source-bindings").iterdir())
+    if damage == "missing":
+        binding_path.unlink()
+    else:
+        _write_private(binding_path, b"{}")
+
+    reopened = FilesystemEvidenceVault.open_existing(vault_root)
+    with pytest.raises(EvidencePersistenceError, match="Evidence Vault state is invalid"):
+        reopened.stored_records()
 
 
 def test_future_ambiguous_mapping_is_unavailable_with_durable_mapping_provenance(

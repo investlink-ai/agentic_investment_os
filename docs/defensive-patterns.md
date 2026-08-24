@@ -38,9 +38,11 @@ from authoritative records.
 When an external authority assigns an immutable document identity, the first accepted content and
 publication facts establish that identity's binding. Later retrievals may append independent
 observations of the same binding, but conflicting bytes or publication facts fail closed as a typed
-contradiction. A correction or amendment uses its own source identity and links to the earlier one;
-it never reuses the original identity. Keep source identity, content identity, artifact identity, and
-effect-local observation identity separate.
+contradiction. Establish the binding with a one-winner atomic publication at the authoritative store;
+a scan followed by an independent append permits concurrent writers to establish contradictory
+facts. Revalidate stored observations against the binding on reopen. A correction or amendment uses
+its own source identity and links to the earlier one; it never reuses the original identity. Keep
+source identity, content identity, artifact identity, and effect-local observation identity separate.
 
 ## Treat availability time as distinct from event time
 

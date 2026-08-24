@@ -45,6 +45,7 @@ __all__ = (
     "EvidenceRetrieval",
     "EvidenceSource",
     "EvidenceSourceDisposition",
+    "EvidenceSourceIdentityConflictError",
     "EvidenceSourceResult",
     "EvidenceStoredRecord",
     "EvidenceVault",
@@ -175,6 +176,10 @@ class InvalidEvidenceError(ValueError):
 
 class EvidencePersistenceError(RuntimeError):
     """Report that the append-only Evidence Vault cannot be trusted or published."""
+
+
+class EvidenceSourceIdentityConflictError(EvidencePersistenceError):
+    """Report a conflicting immutable binding for one official source identity."""
 
 
 class EvidenceKind(StrEnum):
@@ -1044,7 +1049,16 @@ class CaptureEvidence:
                     None,
                 )
                 content = None
-            self.vault.append_outcome(intent, outcome, content)
+            try:
+                self.vault.append_outcome(intent, outcome, content)
+            except EvidenceSourceIdentityConflictError:
+                outcome = CaptureOutcome(
+                    intent.intent_id,
+                    EvidenceCaptureStatus.INVALID,
+                    EvidenceRefusalReason.INVALID_RECORDED_INPUT,
+                    None,
+                )
+                self.vault.append_outcome(intent, outcome, None)
             outcomes.append(outcome)
         return EvidenceCaptureSummary.from_policy(self.policy, tuple(outcomes))
 

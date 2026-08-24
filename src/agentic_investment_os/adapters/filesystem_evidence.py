@@ -5,23 +5,27 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import secrets
 import stat
 from contextlib import suppress
 from pathlib import Path
 
 from agentic_investment_os.domain.lifecycle import EvidenceCaptureReference, is_sha256
+from agentic_investment_os.domain.temporal import InvalidUtcInstantError, UtcInstant
 from agentic_investment_os.evidence.capture import (
     CaptureIntent,
     CaptureOutcome,
+    EvidenceArtifact,
     EvidenceCaptureSummary,
+    EvidenceFeed,
     EvidencePersistenceError,
     EvidencePolicy,
+    EvidenceSourceIdentityConflictError,
     EvidenceStoredRecord,
     InvalidEvidenceError,
     parse_capture_intent,
     parse_capture_outcome,
-    source_identity_is_consistent,
     validate_capture_outcome_association,
 )
 
@@ -33,6 +37,27 @@ _MAXIMUM_METADATA_BYTES = 2_000_000
 _MAXIMUM_CONTENT_BYTES = 1_000_000
 _VAULT_INVALID = "Evidence Vault state is invalid"
 _VAULT_WRITE_FAILED = "Evidence Vault publication failed"
+_SOURCE_IDENTITY_CONFLICT = "official source identity has conflicting immutable facts"
+_SOURCE_IDENTITY = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,255}\Z")
+_SOURCE_BINDING_FIELDS = frozenset(
+    {
+        "schema_version",
+        "record_kind",
+        "feed",
+        "source_identity",
+        "content_hash",
+        "published_at",
+    }
+)
+_OFFICIAL_FEEDS = frozenset(
+    {
+        EvidenceFeed.SEC_EDGAR,
+        EvidenceFeed.ISSUER_INVESTOR_RELATIONS,
+        EvidenceFeed.FEDERAL_RESERVE,
+        EvidenceFeed.BLS,
+        EvidenceFeed.BEA,
+    }
+)
 
 
 class FilesystemEvidenceVault:
@@ -51,6 +76,7 @@ class FilesystemEvidenceVault:
         self._intents = root / "intents"
         self._outcomes = root / "outcomes"
         self._policies = root / "policies"
+        self._source_bindings = root / "source-bindings"
         self._temporary = root / "tmp"
         for directory in (
             self._root,
@@ -58,6 +84,7 @@ class FilesystemEvidenceVault:
             self._intents,
             self._outcomes,
             self._policies,
+            self._source_bindings,
             self._temporary,
         ):
             if _create:
@@ -139,7 +166,10 @@ class FilesystemEvidenceVault:
                 self._contents / outcome.artifact.content_hash,
                 outcome.artifact.content_hash,
             )
-            _validated_stored_record(outcome, content)
+            record = _validated_stored_record(outcome, content)
+            if record is None:  # pragma: no cover - guarded by the artifact branch.
+                raise EvidencePersistenceError(_VAULT_INVALID)
+            self._validate_source_bindings((record,))
         return outcome
 
     def append_outcome(
@@ -158,8 +188,7 @@ class FilesystemEvidenceVault:
         _validate_association(intent, outcome)
         record = _validated_stored_record(outcome, content)
         if record is not None:
-            if not source_identity_is_consistent(record.artifact, self.stored_records()):
-                raise EvidencePersistenceError(_VAULT_INVALID)
+            self._append_source_binding(record.artifact)
             self._append_bytes(self._contents / record.artifact.content_hash, record.content)
         self._append_bytes(
             self._outcomes / f"{intent.intent_id}.json",
@@ -187,7 +216,9 @@ class FilesystemEvidenceVault:
             if previous is not None and previous != record:  # pragma: no cover - SHA-256 identity.
                 raise EvidencePersistenceError(_VAULT_INVALID)
             records[artifact.observation_id] = record
-        return tuple(records[key] for key in sorted(records))
+        ordered = tuple(records[key] for key in sorted(records))
+        self._validate_source_bindings(ordered)
+        return ordered
 
     def validate_references(
         self,
@@ -212,6 +243,7 @@ class FilesystemEvidenceVault:
             self._intents,
             self._outcomes,
             self._policies,
+            self._source_bindings,
             self._temporary,
         ):
             _validate_private_directory(directory)
@@ -244,6 +276,54 @@ class FilesystemEvidenceVault:
             ):
                 raise EvidencePersistenceError(_VAULT_INVALID)
 
+    def _append_source_binding(self, artifact: EvidenceArtifact) -> None:
+        binding = _source_binding(artifact)
+        if binding is None:
+            return
+        binding_id, content = binding
+        path = self._source_bindings / f"{binding_id}.json"
+        try:
+            self._append_bytes(path, content)
+        except EvidencePersistenceError as error:
+            try:
+                existing = _load_source_binding(path)
+            except EvidencePersistenceError as binding_error:
+                raise error from binding_error
+            published_at = artifact.published_at
+            if published_at is None:  # pragma: no cover - official artifacts require publication.
+                raise error
+            target = (
+                artifact.feed,
+                artifact.source_identity,
+                artifact.content_hash,
+                published_at.isoformat(),
+            )
+            if existing == target or existing[:2] != target[:2]:
+                raise error from None
+            raise EvidenceSourceIdentityConflictError(_SOURCE_IDENTITY_CONFLICT) from error
+
+    def _validate_source_bindings(
+        self,
+        records: tuple[EvidenceStoredRecord, ...],
+    ) -> None:
+        published = {
+            path.stem: _load_source_binding(path)
+            for path in _published_files(self._source_bindings)
+        }
+        expected: dict[str, bytes] = {}
+        for record in records:
+            binding = _source_binding(record.artifact)
+            if binding is None:
+                continue
+            binding_id, content = binding
+            previous = expected.get(binding_id)
+            if previous is not None and previous != content:
+                raise EvidencePersistenceError(_VAULT_INVALID)
+            expected[binding_id] = content
+            actual = published.get(binding_id)
+            if actual is None or _canonical_json(_source_binding_payload(*actual)) != content:
+                raise EvidencePersistenceError(_VAULT_INVALID)
+
     def _append_bytes(  # noqa: PLR0912 - validate publication components independently.
         self,
         destination: Path,
@@ -254,6 +334,7 @@ class FilesystemEvidenceVault:
             self._intents,
             self._outcomes,
             self._policies,
+            self._source_bindings,
         ):
             raise EvidencePersistenceError(_VAULT_INVALID)
         if destination.parent == self._contents:
@@ -346,6 +427,95 @@ def _validate_association(intent: CaptureIntent, outcome: CaptureOutcome) -> Non
         validate_capture_outcome_association(intent, outcome)
     except InvalidEvidenceError as error:
         raise EvidencePersistenceError(_VAULT_INVALID) from error
+
+
+def _source_binding(artifact: EvidenceArtifact) -> tuple[str, bytes] | None:
+    if artifact.feed not in _OFFICIAL_FEEDS:
+        return None
+    published_at = artifact.published_at
+    if published_at is None:  # pragma: no cover - official artifact validation requires it.
+        raise EvidencePersistenceError(_VAULT_INVALID)
+    binding_id = _source_binding_id(artifact.feed, artifact.source_identity)
+    payload = _source_binding_payload(
+        artifact.feed,
+        artifact.source_identity,
+        artifact.content_hash,
+        published_at.isoformat(),
+    )
+    return binding_id, _canonical_json(payload)
+
+
+def _source_binding_id(feed: EvidenceFeed, source_identity: str) -> str:
+    subject = _canonical_json(
+        {
+            "feed": feed.value,
+            "source_identity": source_identity,
+        }
+    )
+    return hashlib.sha256(subject).hexdigest()
+
+
+def _source_binding_payload(
+    feed: EvidenceFeed,
+    source_identity: str,
+    content_hash: str,
+    published_at: str,
+) -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "record_kind": "official_source_binding",
+        "feed": feed.value,
+        "source_identity": source_identity,
+        "content_hash": content_hash,
+        "published_at": published_at,
+    }
+
+
+def _load_source_binding(path: Path) -> tuple[EvidenceFeed, str, str, str]:
+    value = _load_json(path)
+    fields = _exact_source_binding_mapping(value)
+    if fields is None:
+        raise EvidencePersistenceError(_VAULT_INVALID)
+    raw_feed = fields["feed"]
+    source_identity = fields["source_identity"]
+    content_hash = fields["content_hash"]
+    published_at = fields["published_at"]
+    if (
+        fields["schema_version"] != 1
+        or fields["record_kind"] != "official_source_binding"
+        or type(raw_feed) is not str
+        or type(source_identity) is not str
+        or _SOURCE_IDENTITY.fullmatch(source_identity) is None
+        or type(content_hash) is not str
+        or not is_sha256(content_hash)
+        or type(published_at) is not str
+    ):
+        raise EvidencePersistenceError(_VAULT_INVALID)
+    try:
+        feed = EvidenceFeed(raw_feed)
+        canonical_published_at = UtcInstant.parse(published_at).isoformat()
+    except (InvalidUtcInstantError, ValueError) as error:
+        raise EvidencePersistenceError(_VAULT_INVALID) from error
+    if (
+        feed not in _OFFICIAL_FEEDS
+        or path.stem != _source_binding_id(feed, source_identity)
+        or canonical_published_at != published_at
+    ):
+        raise EvidencePersistenceError(_VAULT_INVALID)
+    return feed, source_identity, content_hash, published_at
+
+
+def _exact_source_binding_mapping(value: object) -> dict[str, object] | None:
+    if type(value) is not dict:
+        return None
+    result: dict[str, object] = {}
+    for key, item in value.items():
+        if type(key) is not str:
+            return None
+        result[key] = item
+    if result.keys() != _SOURCE_BINDING_FIELDS:
+        return None
+    return result
 
 
 def _prepare_private_directory(directory: Path) -> None:
