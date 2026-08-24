@@ -2,16 +2,19 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import sqlite3
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 
 from agentic_investment_os.adapters.sqlite_lifecycle import (
     RuntimeRootRefusal,
     SQLiteConstitutionGovernance,
+    SQLiteLifecycleLedger,
 )
 from agentic_investment_os.application.governance import Govern
 from agentic_investment_os.application.lifecycle import Advance, Status
@@ -23,7 +26,13 @@ from agentic_investment_os.domain.governance import (
     GovernanceStateError,
 )
 from agentic_investment_os.domain.identity import MarketSession
-from agentic_investment_os.domain.lifecycle import LifecyclePersistenceError
+from agentic_investment_os.domain.lifecycle import (
+    AdvanceAttempt,
+    IdempotencyKey,
+    LifecycleCommand,
+    LifecycleDecision,
+    LifecyclePersistenceError,
+)
 from agentic_investment_os.entrypoints.configuration import (
     ConfigurationRefusal,
     ConfigurationRefusalCode,
@@ -41,8 +50,40 @@ from tests._governance import (
 )
 from tests._universe import recorded_universe, runtime_configuration
 
+if TYPE_CHECKING:
+    from agentic_investment_os.domain.governance import ConstitutionReference, ConstitutionUse
+    from agentic_investment_os.domain.temporal import UtcInstant
+
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 AMENDMENT_VERSION = 2
+
+
+class SimulatedInterruptionError(RuntimeError):
+    """Stop a lifecycle after its first authoritative write."""
+
+
+@dataclass(slots=True)
+class InterruptAfterFirstWrite:
+    delegate: SQLiteLifecycleLedger
+    interrupted: bool = False
+
+    def pinned_constitution(self, idempotency_key: IdempotencyKey) -> ConstitutionReference | None:
+        return self.delegate.pinned_constitution(idempotency_key)
+
+    def constitution_uses(self) -> tuple[ConstitutionUse, ...]:
+        return self.delegate.constitution_uses()
+
+    def advance_step(
+        self,
+        command: LifecycleCommand,
+        attempt: AdvanceAttempt,
+        recorded_at: UtcInstant,
+    ) -> LifecycleDecision:
+        decision = self.delegate.advance_step(command, attempt, recorded_at)
+        if not self.interrupted:
+            self.interrupted = True
+            raise SimulatedInterruptionError
+        return decision
 
 
 @dataclass(frozen=True, slots=True)
@@ -106,6 +147,7 @@ def test_govern_advance_and_status_schedule_activate_pin_and_replay_exactly_once
         repository_root=REPOSITORY_ROOT,
         recorded_universe=recorded_universe(),
         recorded_evidence=recorded_evidence(),
+        session_eligibility=RecordedSessionEligibility(),
         clock=FixedClock(datetime(2026, 8, 24, 22, 0, tzinfo=UTC)),
         approval_verifier=HashApprovalVerifier(),
     )
@@ -188,6 +230,7 @@ def test_changed_identity_ineligible_session_and_missed_boundary_fail_closed(
         repository_root=REPOSITORY_ROOT,
         recorded_universe=recorded_universe(),
         recorded_evidence=recorded_evidence(),
+        session_eligibility=RecordedSessionEligibility(),
         clock=FixedClock(datetime(2026, 8, 25, 22, 0, tzinfo=UTC)),
         approval_verifier=HashApprovalVerifier(),
     )
@@ -327,3 +370,228 @@ def test_govern_composition_refuses_invalid_configuration_and_runtime_storage(
         ConfigurationRefusalCode.INVALID_STATE_ROOT,
         ("state_root",),
     )
+
+
+@pytest.mark.parametrize(
+    "recorded_at",
+    [
+        datetime(2026, 8, 24, 20, 5, tzinfo=UTC),
+        datetime(2026, 8, 25, 20, 5, tzinfo=UTC),
+    ],
+)
+def test_govern_refuses_current_or_past_activation_before_downstream_state(
+    tmp_path: Path,
+    recorded_at: datetime,
+) -> None:
+    state_root = tmp_path / recorded_at.date().isoformat()
+
+    receipt = _schedule(_govern(state_root, clock=recorded_at))
+
+    assert receipt.disposition is GovernanceDisposition.REFUSED
+    assert receipt.reason is GovernanceRefusalReason.NON_FUTURE_ACTIVATION
+    with sqlite3.connect(state_root / "lifecycle.sqlite3") as connection:
+        governance_count = connection.execute(
+            "SELECT COUNT(*) FROM constitution_governance_events"
+        ).fetchone()
+        lifecycle_count = connection.execute("SELECT COUNT(*) FROM lifecycle_events").fetchone()
+    assert governance_count == (1,)
+    assert lifecycle_count == (0,)
+    assert not (state_root / "evidence-vault").exists()
+
+
+def test_invalid_governance_retry_is_bounded_and_changed_raw_material_is_distinct(
+    tmp_path: Path,
+) -> None:
+    state_root = tmp_path / "runtime"
+    govern = _govern(state_root)
+    arguments: dict[str, object] = {
+        "request_identity": [],
+        "artifact": {"invalid": True},
+        "activation_session": ACTIVATION_SESSION.to_payload(),
+        "approval_proof": None,
+    }
+
+    first = govern(**arguments)
+    replay = govern(**arguments)
+    changed = govern(**{**arguments, "request_identity": ["changed"]})
+
+    assert first.disposition is GovernanceDisposition.REFUSED
+    assert replay.disposition is GovernanceDisposition.REPLAYED
+    assert changed.disposition is GovernanceDisposition.REFUSED
+    with sqlite3.connect(state_root / "lifecycle.sqlite3") as connection:
+        count = connection.execute("SELECT COUNT(*) FROM constitution_governance_events").fetchone()
+    assert count == (2,)
+
+
+def test_interrupted_run_keeps_its_pin_after_a_later_constitution_activates(
+    tmp_path: Path,
+) -> None:
+    state_root = tmp_path / "runtime"
+    _schedule(_govern(state_root))
+    initial = configure_advance(
+        _sources(state_root),
+        repository_root=REPOSITORY_ROOT,
+        recorded_universe=recorded_universe(),
+        recorded_evidence=recorded_evidence(),
+        session_eligibility=RecordedSessionEligibility(),
+        clock=FixedClock(datetime(2026, 8, 23, 20, 5, tzinfo=UTC)),
+        approval_verifier=HashApprovalVerifier(),
+    )
+    assert isinstance(initial, Advance)
+    ledger = initial.ledger
+    assert isinstance(ledger, SQLiteLifecycleLedger)
+    interrupted = Advance(
+        ledger=InterruptAfterFirstWrite(ledger),
+        configuration_version=initial.configuration_version,
+        configuration_hash=initial.configuration_hash,
+        universe_source=initial.universe_source,
+        enabled_asset_classes=initial.enabled_asset_classes,
+        universe_policy=initial.universe_policy,
+        evidence_capture=initial.evidence_capture,
+        attention_policy=initial.attention_policy,
+        attention_inputs=initial.attention_inputs,
+        clock=initial.clock,
+        constitution_registry=initial.constitution_registry,
+    )
+    earlier_session = MarketSession(date(2026, 8, 23))
+    with pytest.raises(SimulatedInterruptionError):
+        interrupted(
+            cycle=earlier_session.to_payload(),
+            mode="champion",
+            idempotency_key="interrupted-before-activation",
+        )
+
+    activation = _govern(
+        state_root,
+        clock=datetime(2026, 8, 24, 20, 5, tzinfo=UTC),
+    ).activate(session=ACTIVATION_SESSION.to_payload())
+    assert activation.disposition is GovernanceDisposition.ACTIVATED
+    retry = configure_advance(
+        _sources(state_root),
+        repository_root=REPOSITORY_ROOT,
+        recorded_universe=recorded_universe(),
+        recorded_evidence=recorded_evidence(),
+        session_eligibility=RecordedSessionEligibility(),
+        clock=FixedClock(datetime(2026, 8, 24, 20, 6, tzinfo=UTC)),
+        approval_verifier=HashApprovalVerifier(),
+    )
+    assert isinstance(retry, Advance)
+
+    receipt = retry(
+        cycle=earlier_session.to_payload(),
+        mode="champion",
+        idempotency_key="interrupted-before-activation",
+    )
+
+    assert receipt.pinned_run_identity is not None
+    assert receipt.pinned_run_identity.constitution_version == ACTIVE_CONSTITUTION.version
+    assert receipt.pinned_run_identity.constitution_hash == ACTIVE_CONSTITUTION.content_hash
+    with sqlite3.connect(state_root / "lifecycle.sqlite3") as connection:
+        requested = connection.execute(
+            "SELECT COUNT(*) FROM lifecycle_events "
+            "WHERE idempotency_key = 'interrupted-before-activation' "
+            "AND event_kind = 'advance_requested'"
+        ).fetchone()
+    assert requested == (1,)
+
+
+def test_lifecycle_pins_fail_closed_if_governance_history_is_removed(
+    tmp_path: Path,
+) -> None:
+    state_root = tmp_path / "runtime"
+    _schedule(_govern(state_root))
+    advance = configure_advance(
+        _sources(state_root),
+        repository_root=REPOSITORY_ROOT,
+        recorded_universe=recorded_universe(),
+        recorded_evidence=recorded_evidence(),
+        session_eligibility=RecordedSessionEligibility(),
+        clock=FixedClock(datetime(2026, 8, 24, 20, 5, tzinfo=UTC)),
+        approval_verifier=HashApprovalVerifier(),
+    )
+    assert isinstance(advance, Advance)
+    advance(
+        cycle=ACTIVATION_SESSION.to_payload(),
+        mode="champion",
+        idempotency_key="governed-lifecycle-use",
+    )
+    database = state_root / "lifecycle.sqlite3"
+    with sqlite3.connect(database) as connection:
+        trigger_sql = connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'trigger' "
+            "AND name = 'constitution_governance_events_are_append_only_delete'"
+        ).fetchone()
+        assert trigger_sql is not None
+        assert isinstance(trigger_sql[0], str)
+        before_count = connection.execute("SELECT COUNT(*) FROM lifecycle_events").fetchone()
+        connection.execute("DROP TRIGGER constitution_governance_events_are_append_only_delete")
+        connection.execute("DELETE FROM constitution_governance_events")
+        connection.execute(trigger_sql[0])
+    evidence_before = tuple(sorted(path.relative_to(state_root) for path in state_root.rglob("*")))
+
+    status = configure_status(
+        _sources(state_root),
+        repository_root=REPOSITORY_ROOT,
+        approval_verifier=HashApprovalVerifier(),
+    )
+    assert isinstance(status, Status)
+    with pytest.raises(GovernanceStateError, match="invalid Constitution governance history"):
+        status()
+    retry = configure_advance(
+        _sources(state_root),
+        repository_root=REPOSITORY_ROOT,
+        recorded_universe=recorded_universe(),
+        recorded_evidence=recorded_evidence(),
+        session_eligibility=RecordedSessionEligibility(),
+        clock=FixedClock(datetime(2026, 8, 25, 20, 5, tzinfo=UTC)),
+        approval_verifier=HashApprovalVerifier(),
+    )
+    assert isinstance(retry, Advance)
+    with pytest.raises(GovernanceStateError, match="invalid Constitution governance history"):
+        retry(
+            cycle=MarketSession(date(2026, 8, 25)).to_payload(),
+            mode="champion",
+            idempotency_key="blocked-by-missing-governance",
+        )
+    with sqlite3.connect(database) as connection:
+        after_count = connection.execute("SELECT COUNT(*) FROM lifecycle_events").fetchone()
+    evidence_after = tuple(sorted(path.relative_to(state_root) for path in state_root.rglob("*")))
+    assert after_count == before_count
+    assert evidence_after == evidence_before
+
+
+def test_status_reopens_and_rebuilds_projection_from_governed_history(tmp_path: Path) -> None:
+    state_root = tmp_path / "runtime"
+    _schedule(_govern(state_root))
+    initial = configure_status(
+        _sources(state_root),
+        repository_root=REPOSITORY_ROOT,
+        approval_verifier=HashApprovalVerifier(),
+    )
+    assert isinstance(initial, Status)
+    initial()
+    database = state_root / "lifecycle.sqlite3"
+    with sqlite3.connect(database) as connection:
+        connection.execute("DELETE FROM lifecycle_status_projection")
+
+    reopened = configure_status(
+        _sources(state_root),
+        repository_root=REPOSITORY_ROOT,
+        approval_verifier=HashApprovalVerifier(),
+    )
+
+    assert isinstance(reopened, Status)
+    governance = reopened().constitution_governance
+    assert governance is not None
+    assert governance.active == ACTIVE_CONSTITUTION.reference
+    assert governance.pending[0].constitution == amended_constitution().reference
+
+
+def test_document_owned_baseline_constitution_matches_the_runtime_artifact() -> None:
+    document = (REPOSITORY_ROOT / "docs" / "investment-domain.md").read_text(encoding="utf-8")
+    section = document.split("## Investment Constitution", 1)[1].split("## Decision flow", 1)[0]
+    clauses = tuple(
+        match.group(1) for match in re.finditer(r"^\d+\. (.+)$", section, flags=re.MULTILINE)
+    )
+
+    assert clauses == ACTIVE_CONSTITUTION.clauses

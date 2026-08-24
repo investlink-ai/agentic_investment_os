@@ -31,6 +31,10 @@ def _valid_arguments() -> dict[str, object]:
         (("artifact", "artifact_type", "model_policy"), GovernanceRefusalReason.INVALID_ARTIFACT),
         (("artifact", "clauses", "invalid"), GovernanceRefusalReason.INVALID_ARTIFACT),
         (("approval_proof", "signature", ""), GovernanceRefusalReason.INVALID_APPROVAL),
+        (
+            ("approval_proof", "approved_at", "2026-08-21T20:00:00"),
+            GovernanceRefusalReason.INVALID_APPROVAL,
+        ),
         (("approval_proof", "extra", True), GovernanceRefusalReason.INVALID_APPROVAL),
         (
             ("approval_proof", "constitution_hash", "f" * 64),
@@ -68,3 +72,29 @@ def test_exact_valid_material_constructs_a_typed_request_and_inert_external_text
     assert isinstance(parsed, GovernanceRequest)
     assert parsed.artifact.clauses[-1] == clauses[-1]
     assert parsed.activation_session == ACTIVATION_SESSION
+
+
+@pytest.mark.parametrize("origin", ["model", "external_text", "research_lab"])
+def test_non_operator_origins_cannot_construct_governance_authority(origin: str) -> None:
+    approval_arguments = _valid_arguments()
+    approval = approval_arguments["approval_proof"]
+    assert isinstance(approval, dict)
+    approval["authority_scope"] = origin
+
+    parsed_approval = parse_governance_request(**approval_arguments)
+    parsed_artifact = parse_governance_request(
+        request_identity="forbidden-origin",
+        artifact={
+            "schema_version": 1,
+            "artifact_type": origin,
+            "authority_scope": origin,
+            "requested_effect": "Govern",
+        },
+        activation_session=ACTIVATION_SESSION.to_payload(),
+        approval_proof=approval_for(amended_constitution()).to_payload(),
+    )
+
+    assert isinstance(parsed_approval, GovernanceInputRefusal)
+    assert parsed_approval.reason is GovernanceRefusalReason.INVALID_APPROVAL
+    assert isinstance(parsed_artifact, GovernanceInputRefusal)
+    assert parsed_artifact.reason is GovernanceRefusalReason.INVALID_ARTIFACT

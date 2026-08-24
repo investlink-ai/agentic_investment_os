@@ -11,18 +11,24 @@ from agentic_investment_os.application.governance import (
     Govern,
 )
 from agentic_investment_os.domain.governance import (
+    ACTIVE_CONSTITUTION,
     ApprovalVerification,
     ConstitutionActivation,
+    ConstitutionArtifact,
     ConstitutionGovernanceHistory,
     ConstitutionGovernanceStatus,
+    ConstitutionUse,
     GovernanceCommand,
     GovernanceDisposition,
     GovernanceReceipt,
+    GovernanceStateError,
     OperatorApprovalProof,
     OperatorApprovalVerifier,
+    SessionBoundaryRelation,
     activate_constitution,
     decide_governance,
     reconstruct_constitution_governance,
+    validate_constitution_uses,
 )
 from agentic_investment_os.domain.identity import MarketSession
 from agentic_investment_os.domain.temporal import UtcInstant
@@ -48,6 +54,7 @@ class FixedClock:
 @dataclass(frozen=True, slots=True)
 class InvalidClock:
     def now(self) -> datetime:
+        # This hostile boundary double deliberately violates the clock protocol.
         return "invalid"  # type: ignore[return-value]
 
 
@@ -81,25 +88,62 @@ class MemoryGovernanceLedger:
             self.history = self.history.append(activation.record)
         return activation
 
-    def rebuild_constitution_status(
-        self, verifier: OperatorApprovalVerifier | None
-    ) -> ConstitutionGovernanceStatus:
+    def constitution_for(
+        self,
+        session: MarketSession,
+        verifier: OperatorApprovalVerifier | None,
+    ) -> ConstitutionArtifact:
+        verification = HashApprovalVerifier().verify if verifier is None else verifier.verify
+        return reconstruct_constitution_governance(self.history, verification).constitution_for(
+            session
+        )
+
+    def next_activation_session(
+        self,
+        verifier: OperatorApprovalVerifier | None,
+    ) -> MarketSession | None:
         verification = HashApprovalVerifier().verify if verifier is None else verifier.verify
         state = reconstruct_constitution_governance(self.history, verification)
+        return None if not state.pending else state.pending[0].activation_session
+
+    def validate_constitution_uses(
+        self,
+        uses: tuple[ConstitutionUse, ...],
+        verifier: OperatorApprovalVerifier | None,
+    ) -> None:
+        verification = HashApprovalVerifier().verify if verifier is None else verifier.verify
+        validate_constitution_uses(self.history, verification, uses)
+
+    def rebuild_constitution_status(
+        self,
+        verifier: OperatorApprovalVerifier | None,
+        uses: tuple[ConstitutionUse, ...] = (),
+    ) -> ConstitutionGovernanceStatus:
+        verification = HashApprovalVerifier().verify if verifier is None else verifier.verify
+        state = validate_constitution_uses(self.history, verification, uses)
         return ConstitutionGovernanceStatus.from_state(state)
 
 
 @dataclass(frozen=True, slots=True)
 class InvalidEligibility:
-    def is_eligible(self, session: MarketSession) -> bool:
-        del session
-        return False
+    def relation(self, session: MarketSession, recorded_at: UtcInstant) -> SessionBoundaryRelation:
+        del session, recorded_at
+        return SessionBoundaryRelation.INELIGIBLE
+
+
+@dataclass(frozen=True, slots=True)
+class InvalidBoundaryPolicy:
+    def relation(self, session: MarketSession, recorded_at: UtcInstant) -> SessionBoundaryRelation:
+        del session, recorded_at
+        # This hostile boundary double deliberately violates the policy protocol.
+        return "invalid"  # type: ignore[return-value]
 
 
 @dataclass(frozen=True, slots=True)
 class InvalidVerifier:
     def verify(self, proof: OperatorApprovalProof) -> ApprovalVerification:
         del proof
+        # This hostile boundary double deliberately violates the verifier protocol.
         return "invalid"  # type: ignore[return-value]
 
 
@@ -107,13 +151,17 @@ def _govern(
     ledger: MemoryGovernanceLedger,
     *,
     verifier: OperatorApprovalVerifier | None = None,
-    eligibility: RecordedSessionEligibility | InvalidEligibility | None = None,
+    eligibility: RecordedSessionEligibility
+    | InvalidEligibility
+    | InvalidBoundaryPolicy
+    | None = None,
+    recorded_at: UtcInstant = RECORDED_AT,
 ) -> Govern:
     return Govern(
         ledger,
         HashApprovalVerifier() if verifier is None else verifier,
         RecordedSessionEligibility() if eligibility is None else eligibility,
-        FixedClock(RECORDED_AT.value),
+        FixedClock(recorded_at.value),
     )
 
 
@@ -154,23 +202,49 @@ def test_govern_activate_reports_invalid_due_idle_and_replayed_boundaries() -> N
     invalid = capability.activate(session="invalid")
     assert invalid.disposition is GovernanceDisposition.REFUSED
 
-    idle = capability.activate(session=MarketSession(date(2026, 8, 22)).to_payload())
+    idle = capability.activate(session=MarketSession(date(2026, 8, 21)).to_payload())
     assert idle.disposition is GovernanceDisposition.REPLAYED
     assert idle.constitution is not None
 
     _schedule(capability)
-    activated = capability.activate(session=ACTIVATION_SESSION.to_payload())
+    early = capability.activate(session=ACTIVATION_SESSION.to_payload())
+    assert early.disposition is GovernanceDisposition.REFUSED
+    ineligible = capability.activate(session=MarketSession(date(2026, 8, 25)).to_payload())
+    assert ineligible.disposition is GovernanceDisposition.REFUSED
+    assert ineligible.reason is not None
+    assert ineligible.reason.value == "ineligible_session"
+
+    activation_time = UtcInstant.from_datetime(datetime(2026, 8, 24, 20, 5, tzinfo=UTC))
+    activation_capability = _govern(ledger, recorded_at=activation_time)
+    activated = activation_capability.activate(session=ACTIVATION_SESSION.to_payload())
     assert activated.disposition is GovernanceDisposition.ACTIVATED
-    replayed = capability.activate(session=ACTIVATION_SESSION.to_payload())
+    replayed = activation_capability.activate(session=ACTIVATION_SESSION.to_payload())
     assert replayed.disposition is GovernanceDisposition.REPLAYED
 
 
 def test_registry_status_and_invalid_clock_preserve_their_boundaries() -> None:
     ledger = MemoryGovernanceLedger()
-    registry = ConstitutionRegistry(ledger)
-    assert registry.resolve(ACTIVATION_SESSION, RECORDED_AT).version == 1
-    status = ConstitutionStatus(ledger)()
+    registry = ConstitutionRegistry(ledger, HashApprovalVerifier(), RecordedSessionEligibility())
+    assert registry.resolve(ACTIVATION_SESSION, RECORDED_AT, None) == ACTIVE_CONSTITUTION
+    assert (
+        registry.resolve(ACTIVATION_SESSION, RECORDED_AT, ACTIVE_CONSTITUTION.reference)
+        == ACTIVE_CONSTITUTION
+    )
+    status = ConstitutionStatus(ledger)(())
     assert status.active.version == 1
+
+    _schedule(_govern(ledger))
+    with pytest.raises(GovernanceStateError, match="exact current Market Session"):
+        registry.resolve(ACTIVATION_SESSION, RECORDED_AT, None)
+    late = UtcInstant.from_datetime(datetime(2026, 8, 25, 20, 5, tzinfo=UTC))
+    with pytest.raises(GovernanceStateError, match="missed Constitution activation boundary"):
+        registry.resolve(ACTIVATION_SESSION, late, None)
+    with pytest.raises(GovernanceStateError, match="pinned Constitution does not match"):
+        registry.resolve(
+            ACTIVATION_SESSION,
+            RECORDED_AT,
+            ConstitutionArtifact.create(version=1, clauses=("different",)).reference,
+        )
 
     invalid_clock = Govern(
         ledger,
@@ -180,3 +254,18 @@ def test_registry_status_and_invalid_clock_preserve_their_boundaries() -> None:
     )
     with pytest.raises(RuntimeError, match="governance clock must return"):
         _schedule(invalid_clock)
+
+    with pytest.raises(RuntimeError, match="boundary policy returned an invalid relation"):
+        _schedule(_govern(ledger, eligibility=InvalidBoundaryPolicy()))
+
+
+def test_govern_refuses_current_activation_even_with_an_older_valid_approval() -> None:
+    ledger = MemoryGovernanceLedger()
+    current = UtcInstant.from_datetime(datetime(2026, 8, 24, 20, 5, tzinfo=UTC))
+
+    receipt = _schedule(_govern(ledger, recorded_at=current))
+
+    assert receipt.disposition is GovernanceDisposition.REFUSED
+    assert receipt.reason is not None
+    assert receipt.reason.value == "non_future_activation"
+    assert ledger.history.events[0].kind.value == "constitution_refused"

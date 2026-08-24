@@ -283,8 +283,9 @@ Normal production callers see six capabilities:
   a separate pinned input. A recognized disabled cycle or malformed cycle is returned as a bounded
   refusal before the clock, adapter, or authoritative lifecycle ledger is entered. A valid
   `MarketSession` remains explicit in any later durable refusal and its replay. Before universe,
-  evidence, or model work, Advance resolves the Constitution regime for that session and pins its
-  version and content hash in the run identity.
+  evidence, or model work, Advance validates every existing lifecycle pin against governance
+  history. It resumes an existing request from that stream's historical pin; only a new request
+  resolves the Constitution regime for its session and pins that version and content hash.
 - **Status** validates authoritative lifecycle history, replaces its disposable projection, and returns
   the active `LifecycleCheckpoint`, `last_completed_cycle` as a `DecisionCycleIdentity`, the latest
   eligible-universe checkpoint as an exact `universe_snapshot_cycle` and snapshot-identifier pair,
@@ -391,12 +392,15 @@ complete; asset-owned policy interprets the activity.
 
 The V0 scheduler resolves an NYSE trading date and exchange-relative deadlines into an equity
 `MarketSession`. `ReconcilePriorState` proves cash, positions, pending orders, and prior receipts agree.
-Before any of those checks reach universe, evidence, attention, or model work, Advance reconstructs
-Constitution governance, activates a due amendment only when the requested session is its exact
-approved boundary, and fails closed if that boundary was missed or its history or proof cannot be
+Before any of those checks reach universe, evidence, attention, or model work, Advance reconstructs Constitution
+governance. The injected exchange-session policy classifies the approved boundary against a trusted
+UTC instant as past, current, future, or ineligible; host-local date and time never choose authority.
+Advance activates a due amendment only when the requested session is the exact current approved
+boundary, resumes an existing stream from its previously pinned historical regime, and fails closed
+if the boundary was missed or any governance proof or lifecycle-to-governance reference cannot be
 validated.
-`PinRunInputs` records the equity cycle identity, equity-feed Data Regime and Evidence Cutoff,
-Constitution version and hash, configuration, instrument catalog, position snapshot, and policy
+`PinRunInputs` records the equity cycle identity, Constitution version and hash, equity-feed Data
+Regime and Evidence Cutoff, configuration, instrument catalog, position snapshot, and policy
 fingerprints; the current Basic entitlement uses IEX, while a later SIP entitlement is a different
 regime. `SnapshotUniverse` publishes the eligible universe before `CaptureEvidence` appends
 intent-first market, news, SEC, issuer, and official-macro capture outcomes to the Evidence Vault.
@@ -691,10 +695,12 @@ artifacts and atomic publications. Runtime state uses ignored, configurable root
 
 The Constitution governance ledger stores canonical event envelopes and public approval proofs as
 append-only authority. Reopen, Advance, and Status revalidate every artifact hash, envelope hash, and
-stored signature before selecting a regime. A missing verifier in the presence of governed history,
-corrupt proof, conflicting identity, or skipped activation boundary fails closed before downstream
-work. The baseline remains the document-owned version 1 when no governed event exists. A projection
-may summarize governance state but never authorizes activation or substitutes for the event ledger.
+stored signature before selecting a regime, and Advance and Status require every lifecycle
+Constitution version and hash to resolve exactly for its recorded Market Session. A missing verifier
+in the presence of governed history, corrupt proof, missing governed artifact, conflicting identity,
+or skipped activation boundary fails closed before downstream work. The baseline remains the
+document-owned version 1 when no governed event exists. A projection may summarize governance state
+but never authorizes activation or substitutes for the event ledger.
 
 The SQLite database carries one database-wide physical schema version independent of run
 configuration and durable-record schema versions. The adapter owns one current schema definition. It

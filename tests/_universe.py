@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, TypeGuard
 
 from agentic_investment_os.adapters.recorded_universe import RecordedUniverseSource
+from agentic_investment_os.domain.governance import ACTIVE_CONSTITUTION
 from agentic_investment_os.domain.identity import AssetClass, EquityInstrumentIdentity
 from agentic_investment_os.domain.lifecycle import (
     AdvanceCommand,
@@ -280,6 +281,7 @@ def pinned_run_identity(
         configuration_version=configuration_version,
         configuration_hash=configuration_hash,
         universe_inputs=input_identity,
+        constitution=ACTIVE_CONSTITUTION.reference,
     )
 
 

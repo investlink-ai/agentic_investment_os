@@ -26,6 +26,7 @@ __all__ = (
     "ConstitutionGovernanceState",
     "ConstitutionGovernanceStatus",
     "ConstitutionReference",
+    "ConstitutionUse",
     "GovernanceCommand",
     "GovernanceDecision",
     "GovernanceDisposition",
@@ -40,11 +41,13 @@ __all__ = (
     "MarketSessionEligibility",
     "OperatorApprovalProof",
     "OperatorApprovalVerifier",
+    "SessionBoundaryRelation",
     "activate_constitution",
     "decide_governance",
     "parse_governance_event",
     "parse_governance_request",
     "reconstruct_constitution_governance",
+    "validate_constitution_uses",
 )
 
 _SCHEMA_VERSION = 1
@@ -57,6 +60,9 @@ _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 _MAX_CLAUSES = 32
 _MAX_CLAUSE_LENGTH = 2_000
 _MAX_TOTAL_LENGTH = 32_000
+_MAX_HOSTILE_DIGEST_DEPTH = 32
+_MAX_EXACT_INTEGER_BITS = 512
+_HOSTILE_TEXT_CHUNK_SIZE = 4_096
 _MISSED_ACTIVATION = "missed Constitution activation boundary"
 _INVALID_HISTORY = "invalid Constitution governance history"
 _INVALID_REFERENCE = "invalid Constitution reference"
@@ -121,6 +127,15 @@ class GovernanceEventKind(StrEnum):
     CONFLICTED = "constitution_conflicted"
 
 
+class SessionBoundaryRelation(StrEnum):
+    """Classify an eligible exchange session against one trusted UTC instant."""
+
+    PAST = "past"
+    CURRENT = "current"
+    FUTURE = "future"
+    INELIGIBLE = "ineligible"
+
+
 @dataclass(frozen=True, slots=True)
 class ConstitutionReference:
     """Identify one immutable Constitution without carrying its model-visible content."""
@@ -130,6 +145,21 @@ class ConstitutionReference:
 
     def __post_init__(self) -> None:
         if type(self.version) is not int or self.version < 1 or not _is_sha256(self.content_hash):
+            raise ValueError(_INVALID_REFERENCE)
+
+
+@dataclass(frozen=True, slots=True)
+class ConstitutionUse:
+    """Bind one lifecycle session to the exact Constitution it durably used."""
+
+    session: MarketSession
+    constitution: ConstitutionReference
+
+    def __post_init__(self) -> None:
+        if (
+            type(self.session) is not MarketSession
+            or type(self.constitution) is not ConstitutionReference
+        ):
             raise ValueError(_INVALID_REFERENCE)
 
 
@@ -295,9 +325,11 @@ class OperatorApprovalVerifier(Protocol):
 
 
 class MarketSessionEligibility(Protocol):
-    """Confirm that a requested activation date is an eligible Market Session."""
+    """Classify a session using an exchange calendar and a trusted UTC instant."""
 
-    def is_eligible(self, session: MarketSession) -> bool: ...
+    def relation(
+        self, session: MarketSession, recorded_at: UtcInstant
+    ) -> SessionBoundaryRelation: ...
 
 
 class ConstitutionGovernanceLedger(Protocol):
@@ -318,12 +350,31 @@ class ConstitutionGovernanceLedger(Protocol):
         recorded_at: UtcInstant,
     ) -> ConstitutionActivation: ...
 
+    def constitution_for(
+        self,
+        session: MarketSession,
+        verifier: OperatorApprovalVerifier | None,
+    ) -> ConstitutionArtifact: ...
+
+    def next_activation_session(
+        self,
+        verifier: OperatorApprovalVerifier | None,
+    ) -> MarketSession | None: ...
+
+    def validate_constitution_uses(
+        self,
+        uses: tuple[ConstitutionUse, ...],
+        verifier: OperatorApprovalVerifier | None,
+    ) -> None: ...
+
 
 class ConstitutionGovernanceProjection(Protocol):
     """Rebuild bounded governance status from authoritative append-only history."""
 
     def rebuild_constitution_status(
-        self, verifier: OperatorApprovalVerifier | None
+        self,
+        verifier: OperatorApprovalVerifier | None,
+        uses: tuple[ConstitutionUse, ...] = (),
     ) -> ConstitutionGovernanceStatus: ...
 
 
@@ -704,12 +755,17 @@ def parse_governance_request(  # noqa: PLR0911 - retain precise bounded refusal 
     identity = GovernanceRequestIdentity.parse(request_identity)
     parsed_artifact, artifact_reason = _parse_artifact(artifact)
     session = _market_session(activation_session)
-    fingerprint = _input_fingerprint(identity, parsed_artifact, session, approval_proof)
     if identity is None:
         return GovernanceInputRefusal(
             GovernanceRefusalReason.INVALID_REQUEST_IDENTITY,
             None,
-            fingerprint,
+            _input_fingerprint(
+                GovernanceRefusalReason.INVALID_REQUEST_IDENTITY,
+                request_identity,
+                artifact,
+                activation_session,
+                approval_proof,
+            ),
             parsed_artifact,
             session,
         )
@@ -717,21 +773,39 @@ def parse_governance_request(  # noqa: PLR0911 - retain precise bounded refusal 
         return GovernanceInputRefusal(
             artifact_reason,
             identity,
-            fingerprint,
+            _input_fingerprint(
+                artifact_reason,
+                request_identity,
+                artifact,
+                activation_session,
+                approval_proof,
+            ),
             activation_session=session,
         )
     if session is None:
         return GovernanceInputRefusal(
             GovernanceRefusalReason.INVALID_ACTIVATION_SESSION,
             identity,
-            fingerprint,
+            _input_fingerprint(
+                GovernanceRefusalReason.INVALID_ACTIVATION_SESSION,
+                request_identity,
+                artifact,
+                activation_session,
+                approval_proof,
+            ),
             parsed_artifact,
         )
     if approval_proof is None:
         return GovernanceInputRefusal(
             GovernanceRefusalReason.UNSIGNED,
             identity,
-            fingerprint,
+            _input_fingerprint(
+                GovernanceRefusalReason.UNSIGNED,
+                request_identity,
+                artifact,
+                activation_session,
+                approval_proof,
+            ),
             parsed_artifact,
             session,
         )
@@ -740,7 +814,13 @@ def parse_governance_request(  # noqa: PLR0911 - retain precise bounded refusal 
         return GovernanceInputRefusal(
             GovernanceRefusalReason.INVALID_APPROVAL,
             identity,
-            fingerprint,
+            _input_fingerprint(
+                GovernanceRefusalReason.INVALID_APPROVAL,
+                request_identity,
+                artifact,
+                activation_session,
+                approval_proof,
+            ),
             parsed_artifact,
             session,
         )
@@ -752,7 +832,13 @@ def parse_governance_request(  # noqa: PLR0911 - retain precise bounded refusal 
         return GovernanceInputRefusal(
             GovernanceRefusalReason.APPROVAL_MISMATCH,
             identity,
-            fingerprint,
+            _input_fingerprint(
+                GovernanceRefusalReason.APPROVAL_MISMATCH,
+                request_identity,
+                artifact,
+                activation_session,
+                approval_proof,
+            ),
             parsed_artifact,
             session,
         )
@@ -760,7 +846,13 @@ def parse_governance_request(  # noqa: PLR0911 - retain precise bounded refusal 
         return GovernanceInputRefusal(
             GovernanceRefusalReason.NON_FUTURE_ACTIVATION,
             identity,
-            fingerprint,
+            _input_fingerprint(
+                GovernanceRefusalReason.NON_FUTURE_ACTIVATION,
+                request_identity,
+                artifact,
+                activation_session,
+                approval_proof,
+            ),
             parsed_artifact,
             session,
         )
@@ -777,12 +869,12 @@ def decide_governance(
     state = _reconstruct_constitution_governance(history, None)
     identity = _command_identity(command)
     fingerprint = _command_fingerprint(command)
-    if identity is not None:
-        prior = tuple(event for event in history.events if event.request_identity == identity)
-        if prior:
-            matching = tuple(event for event in prior if event.request_fingerprint == fingerprint)
-            if matching:
-                return GovernanceDecision(None, _replay_receipt(matching))
+    prior = tuple(event for event in history.events if event.request_identity == identity)
+    if prior:
+        matching = tuple(event for event in prior if event.request_fingerprint == fingerprint)
+        if matching:
+            return GovernanceDecision(None, _replay_receipt(matching))
+        if identity is not None:
             event = _conflict_event(history, command, recorded_at)
             return GovernanceDecision(event, _receipt_for_event(event))
     if isinstance(command, GovernanceInputRefusal):
@@ -859,6 +951,18 @@ def reconstruct_constitution_governance(
 ) -> ConstitutionGovernanceState:
     """Rebuild governance state and reverify every durable operator approval proof."""
     return _reconstruct_constitution_governance(history, verifier)
+
+
+def validate_constitution_uses(
+    history: ConstitutionGovernanceHistory,
+    verifier: Callable[[OperatorApprovalProof], ApprovalVerification],
+    uses: tuple[ConstitutionUse, ...],
+) -> ConstitutionGovernanceState:
+    """Rebuild governance and require every lifecycle pin to resolve exactly."""
+    state = _reconstruct_constitution_governance(history, verifier)
+    if any(state.constitution_for(use.session).reference != use.constitution for use in uses):
+        raise GovernanceStateError(_INVALID_HISTORY)
+    return state
 
 
 def _reconstruct_constitution_governance(
@@ -1186,20 +1290,113 @@ def _artifact_material_required(version: int, clauses: tuple[str, ...]) -> dict[
 
 
 def _input_fingerprint(
-    identity: GovernanceRequestIdentity | None,
-    artifact: ConstitutionArtifact | None,
-    session: MarketSession | None,
+    reason: GovernanceRefusalReason,
+    request_identity: object,
+    artifact: object,
+    activation_session: object,
     approval: object,
 ) -> str:
-    proof = OperatorApprovalProof.parse(approval)
     return _content_hash(
         {
-            "request_identity": None if identity is None else identity.value,
-            "artifact": None if artifact is None else artifact.to_payload(),
-            "activation_session": None if session is None else session.to_payload(),
-            "approval": None if proof is None else proof.to_payload(),
+            "reason": reason.value,
+            "request_identity_digest": _hostile_value_digest(request_identity),
+            "artifact_digest": _hostile_value_digest(artifact),
+            "activation_session_digest": _hostile_value_digest(activation_session),
+            "approval_digest": _hostile_value_digest(approval),
         }
     )
+
+
+def _hostile_value_digest(value: object) -> str:
+    return _digest_hostile_node(value, frozenset(), 0).hex()
+
+
+def _digest_hostile_node(value: object, ancestors: frozenset[int], depth: int) -> bytes:
+    digest = hashlib.sha256()
+    value_type = type(value)
+    digest.update(value_type.__module__.encode())
+    digest.update(b":")
+    digest.update(value_type.__qualname__.encode())
+    digest.update(b":")
+    if depth >= _MAX_HOSTILE_DIGEST_DEPTH:
+        digest.update(b"depth-limit")
+        return digest.digest()
+    primitive = _primitive_hostile_digest(value)
+    if primitive is not None:
+        digest.update(primitive)
+        return digest.digest()
+    identity = id(value)
+    if identity in ancestors:
+        digest.update(b"cycle")
+        return digest.digest()
+    _update_container_digest(digest, value, ancestors | {identity}, depth)
+    return digest.digest()
+
+
+def _primitive_hostile_digest(value: object) -> bytes | None:
+    digest = hashlib.sha256()
+    value_type = type(value)
+    handled = True
+    if value is None:
+        digest.update(b"none")
+    elif isinstance(value, bool) and value_type is bool:
+        digest.update(b"true" if value else b"false")
+    elif isinstance(value, int) and value_type is int:
+        _update_integer_digest(digest, value)
+    elif isinstance(value, float) and value_type is float:
+        digest.update(value.hex().encode())
+    elif isinstance(value, str) and value_type is str:
+        digest.update(str(len(value)).encode())
+        for offset in range(0, len(value), _HOSTILE_TEXT_CHUNK_SIZE):
+            digest.update(value[offset : offset + _HOSTILE_TEXT_CHUNK_SIZE].encode())
+    elif isinstance(value, bytes) and value_type is bytes:
+        digest.update(str(len(value)).encode())
+        digest.update(value)
+    else:
+        handled = False
+    return digest.digest() if handled else None
+
+
+def _update_integer_digest(digest: hashlib._Hash, value: int) -> None:
+    magnitude = abs(value)
+    bit_length = magnitude.bit_length()
+    digest.update(b"-" if value < 0 else b"+")
+    digest.update(str(bit_length).encode())
+    if bit_length <= _MAX_EXACT_INTEGER_BITS:
+        digest.update(magnitude.to_bytes(max(1, (bit_length + 7) // 8), "big"))
+        return
+    digest.update((magnitude >> (bit_length - 256)).to_bytes(32, "big"))
+    digest.update((magnitude & ((1 << 256) - 1)).to_bytes(32, "big"))
+
+
+def _update_container_digest(
+    digest: hashlib._Hash,
+    value: object,
+    ancestors: frozenset[int],
+    depth: int,
+) -> None:
+    value_type = type(value)
+    if isinstance(value, dict) and value_type is dict:
+        entries = sorted(
+            (
+                _digest_hostile_node(key, ancestors, depth + 1),
+                _digest_hostile_node(item, ancestors, depth + 1),
+            )
+            for key, item in value.items()
+        )
+        digest.update(str(len(entries)).encode())
+        for key_digest, item_digest in entries:
+            digest.update(key_digest)
+            digest.update(item_digest)
+    elif isinstance(value, (list, tuple)) and value_type in {list, tuple}:
+        digest.update(str(len(value)).encode())
+        for item in value:
+            digest.update(_digest_hostile_node(item, ancestors, depth + 1))
+    elif isinstance(value, (set, frozenset)) and value_type in {set, frozenset}:
+        items = sorted(_digest_hostile_node(item, ancestors, depth + 1) for item in value)
+        digest.update(str(len(items)).encode())
+        for item_digest in items:
+            digest.update(item_digest)
 
 
 def _required_artifact(event: GovernanceEvent) -> ConstitutionArtifact:

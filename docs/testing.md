@@ -282,10 +282,13 @@ evidence. A scenario becomes mandatory when its owning behavior is implemented.
   Sessions before scheduling. An exact retry replays one receipt without another event; reuse of its
   identity with changed material appends a bounded conflict.
 - Constitution amendments activate only at their exact approved future Market Session. Advance pins
-  the selected version and content hash before downstream work, preserves an in-progress run's
-  selection, and fails closed on a missed boundary, corrupt history, unverifiable approval, or
-  incompatible governed state. Status rebuilds active, pending, superseded, refused, and conflicting
-  state from the append-only ledger without exposing signature material.
+  the selected version and content hash before downstream work, resolves an interrupted retry from
+  its historical pin even after a later activation, and fails closed on a missed boundary, corrupt or
+  missing governance history, unverifiable approval, or a lifecycle pin that cannot be reconstructed
+  from its session regime. Tests supply a recorded exchange-session policy and trusted UTC instants;
+  host-local time is not evidence. Status revalidates lifecycle pins and rebuilds active, pending,
+  superseded, refused, and conflicting state from the append-only ledger without exposing signature
+  material.
 - Universe snapshots retain every current position by canonical instrument identity, apply the
   versioned structural and threshold policy at the pinned cutoff, and fail closed on partial, stale,
   contradictory, mixed-variant, or changed retry inputs.

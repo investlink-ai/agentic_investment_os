@@ -14,6 +14,7 @@ from agentic_investment_os.domain.governance import (
     ConstitutionArtifact,
     ConstitutionGovernanceHistory,
     ConstitutionReference,
+    ConstitutionUse,
     GovernanceDisposition,
     GovernanceEvent,
     GovernanceEventKind,
@@ -28,6 +29,7 @@ from agentic_investment_os.domain.governance import (
     parse_governance_event,
     parse_governance_request,
     reconstruct_constitution_governance,
+    validate_constitution_uses,
 )
 from agentic_investment_os.domain.identity import MarketSession
 from agentic_investment_os.domain.temporal import UtcInstant
@@ -102,6 +104,7 @@ def test_constitution_artifact_is_immutable_versioned_and_hash_consistent() -> N
     assert ConstitutionArtifact.parse({**artifact.to_payload(), "content_hash": "f" * 64}) is None
     assert ConstitutionArtifact.parse({**artifact.to_payload(), "schema_version": 2}) is None
     with pytest.raises(AttributeError):
+        # Frozen artifact immutability is the behavior under test, so assignment is intentional.
         artifact.clauses = ("changed",)  # type: ignore[misc]
     with pytest.raises(ValueError, match="invalid Constitution artifact"):
         ConstitutionArtifact(1, ("clause",), "f" * SHA256_HEX_LENGTH)
@@ -227,6 +230,84 @@ def test_governance_request_rejects_unsigned_inconsistent_and_non_future_materia
     assert typed_session == request
 
 
+def test_invalid_request_fingerprints_are_type_strict_cycle_safe_and_retry_bounded() -> None:
+    cyclic: list[object] = []
+    cyclic.append(cyclic)
+    nested: object = "leaf"
+    for _ in range(34):
+        nested = [nested]
+    hostile_values: tuple[object, ...] = (
+        True,
+        -(1 << 600),
+        1.5,
+        b"bytes",
+        ("tuple",),
+        {"set"},
+        frozenset({"frozen"}),
+        cyclic,
+        nested,
+        object(),
+    )
+    fingerprints: set[str] = set()
+    for value in hostile_values:
+        first = parse_governance_request(
+            request_identity=value,
+            artifact={"invalid": True},
+            activation_session=ACTIVATION_SESSION.to_payload(),
+            approval_proof=None,
+        )
+        second = parse_governance_request(
+            request_identity=value,
+            artifact={"invalid": True},
+            activation_session=ACTIVATION_SESSION.to_payload(),
+            approval_proof=None,
+        )
+        assert isinstance(first, GovernanceInputRefusal)
+        assert isinstance(second, GovernanceInputRefusal)
+        assert first.request_fingerprint == second.request_fingerprint
+        fingerprints.add(first.request_fingerprint)
+    assert len(fingerprints) == len(hostile_values)
+
+    first_decision = decide_governance(
+        ConstitutionGovernanceHistory(),
+        parse_governance_request(
+            request_identity=[],
+            artifact={"invalid": True},
+            activation_session=ACTIVATION_SESSION.to_payload(),
+            approval_proof=None,
+        ),
+        None,
+        RECORDED_AT,
+    )
+    history = ConstitutionGovernanceHistory().append(first_decision.record)
+    replay = decide_governance(
+        history,
+        parse_governance_request(
+            request_identity=[],
+            artifact={"invalid": True},
+            activation_session=ACTIVATION_SESSION.to_payload(),
+            approval_proof=None,
+        ),
+        None,
+        RECORDED_AT,
+    )
+    changed = decide_governance(
+        history,
+        parse_governance_request(
+            request_identity=["changed"],
+            artifact={"invalid": True},
+            activation_session=ACTIVATION_SESSION.to_payload(),
+            approval_proof=None,
+        ),
+        None,
+        RECORDED_AT,
+    )
+    assert replay.record is None
+    assert replay.receipt.disposition is GovernanceDisposition.REPLAYED
+    assert changed.record is not None
+    assert changed.receipt.disposition is GovernanceDisposition.REFUSED
+
+
 def test_schedule_retry_conflict_and_exact_boundary_activation_are_deterministic() -> None:
     request = _request()
     empty = ConstitutionGovernanceHistory()
@@ -294,6 +375,35 @@ def test_invalid_signature_and_missed_boundary_fail_closed() -> None:
     history = ConstitutionGovernanceHistory().append(scheduled.record)
     with pytest.raises(GovernanceStateError, match="missed Constitution activation boundary"):
         activate_constitution(history, MarketSession(date(2026, 8, 25)), RECORDED_AT)
+
+
+def test_constitution_uses_must_resolve_exactly_from_governance_history() -> None:
+    request = _request()
+    scheduled = decide_governance(
+        ConstitutionGovernanceHistory(),
+        request,
+        ApprovalVerification.VERIFIED,
+        RECORDED_AT,
+    )
+    scheduled_history = ConstitutionGovernanceHistory().append(scheduled.record)
+    activation = activate_constitution(scheduled_history, ACTIVATION_SESSION, RECORDED_AT)
+    activated_history = scheduled_history.append(activation.record)
+    valid_uses = (
+        ConstitutionUse(APPROVED_SESSION, ACTIVE_CONSTITUTION.reference),
+        ConstitutionUse(ACTIVATION_SESSION, request.artifact.reference),
+    )
+
+    assert validate_constitution_uses(activated_history, _verify, valid_uses).active == (
+        request.artifact.reference
+    )
+    with pytest.raises(GovernanceStateError, match="invalid Constitution governance history"):
+        validate_constitution_uses(
+            activated_history,
+            _verify,
+            (ConstitutionUse(ACTIVATION_SESSION, ACTIVE_CONSTITUTION.reference),),
+        )
+    with pytest.raises(ValueError, match="invalid Constitution reference"):
+        ConstitutionUse(ACTIVATION_SESSION, "invalid")  # type: ignore[arg-type]
 
 
 def test_governance_decisions_bound_refusals_pending_versions_and_future_approval() -> None:

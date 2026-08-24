@@ -25,7 +25,11 @@ from agentic_investment_os.adapters.sqlite_lifecycle import (
 )
 from agentic_investment_os.application.lifecycle import Advance
 from agentic_investment_os.domain.attention import AttentionRefusalReason
-from agentic_investment_os.domain.governance import ACTIVE_CONSTITUTION
+from agentic_investment_os.domain.governance import (
+    ACTIVE_CONSTITUTION,
+    ConstitutionReference,
+    ConstitutionUse,
+)
 from agentic_investment_os.domain.identity import (
     CryptoDecisionWindow,
     EquityInstrumentIdentity,
@@ -43,6 +47,7 @@ from agentic_investment_os.domain.lifecycle import (
     AppendTerminalLifecycleRecord,
     DurableAdvanceConflict,
     DurableAdvanceRefusal,
+    IdempotencyKey,
     InputRefusal,
     InvalidLifecycleStateError,
     LifecycleCommand,
@@ -70,6 +75,7 @@ from tests._evidence import (
     recorded_evidence,
     recorded_official_evidence,
 )
+from tests._governance import RecordedSessionEligibility
 from tests._universe import (
     advance_command,
     pinned_run_identity,
@@ -750,6 +756,12 @@ class InterruptingLedger:
     operation: str
     timing: str
 
+    def pinned_constitution(self, idempotency_key: IdempotencyKey) -> ConstitutionReference | None:
+        return self.delegate.pinned_constitution(idempotency_key)
+
+    def constitution_uses(self) -> tuple[ConstitutionUse, ...]:
+        return self.delegate.constitution_uses()
+
     def advance_step(
         self,
         command: LifecycleCommand,
@@ -771,6 +783,12 @@ class RacingStartLedger:
     delegate: SQLiteLifecycleLedger
     winner_phase: LifecyclePhase | None
     raced: bool = False
+
+    def pinned_constitution(self, idempotency_key: IdempotencyKey) -> ConstitutionReference | None:
+        return self.delegate.pinned_constitution(idempotency_key)
+
+    def constitution_uses(self) -> tuple[ConstitutionUse, ...]:
+        return self.delegate.constitution_uses()
 
     def advance_step(
         self,
@@ -1259,6 +1277,7 @@ def _configure(state_root: Path) -> Advance:
         repository_root=REPOSITORY_ROOT,
         recorded_universe=recorded_universe(),
         recorded_evidence=recorded_evidence(),
+        session_eligibility=RecordedSessionEligibility(),
         clock=FixedClock(datetime(2026, 8, 21, 22, 0, tzinfo=UTC)),
     )
     assert isinstance(configured, Advance)
@@ -1527,6 +1546,7 @@ def test_fresh_process_resumes_at_every_universe_snapshot_write_boundary(
         attention_policy=capability.attention_policy,
         attention_inputs=capability.attention_inputs,
         clock=capability.clock,
+        constitution_registry=capability.constitution_registry,
     )
 
     with pytest.raises(SimulatedInterruptionError):
@@ -1668,6 +1688,7 @@ def test_fresh_process_recovers_at_each_refusal_write_boundary(
         attention_policy=capability.attention_policy,
         attention_inputs=capability.attention_inputs,
         clock=capability.clock,
+        constitution_registry=capability.constitution_registry,
     )
 
     with pytest.raises(SimulatedInterruptionError):
@@ -1726,6 +1747,7 @@ def test_fresh_process_recovers_at_each_completed_conflict_write_boundary(
         attention_policy=capability.attention_policy,
         attention_inputs=capability.attention_inputs,
         clock=capability.clock,
+        constitution_registry=capability.constitution_registry,
     )
 
     with pytest.raises(SimulatedInterruptionError):
@@ -1780,6 +1802,7 @@ def test_duplicate_delivery_reports_progress_committed_by_the_winner_as_resumed(
         attention_policy=capability.attention_policy,
         attention_inputs=capability.attention_inputs,
         clock=capability.clock,
+        constitution_registry=capability.constitution_registry,
     )
 
     receipt = raced(
@@ -1907,6 +1930,7 @@ class LifecycleStateMachine(RuleBasedStateMachine):
             attention_policy=self.capability.attention_policy,
             attention_inputs=self.capability.attention_inputs,
             clock=self.capability.clock,
+            constitution_registry=self.capability.constitution_registry,
         )
         with pytest.raises(SimulatedInterruptionError):
             interrupted(cycle=_cycle_payload(session), mode="champion", idempotency_key=key)
@@ -2261,6 +2285,7 @@ def test_conflicting_pinned_identity_fails_without_rewriting_completed_work(
         attention_policy=capability.attention_policy,
         attention_inputs=capability.attention_inputs,
         clock=capability.clock,
+        constitution_registry=capability.constitution_registry,
     )
 
     conflict = conflicting_capability(
@@ -2300,6 +2325,7 @@ def test_terminal_conflict_refusal_prevents_partial_stream_resumption(tmp_path: 
         attention_policy=capability.attention_policy,
         attention_inputs=capability.attention_inputs,
         clock=capability.clock,
+        constitution_registry=capability.constitution_registry,
     )
     with pytest.raises(SimulatedInterruptionError):
         interrupted(
@@ -2503,6 +2529,7 @@ def test_runtime_state_root_cannot_point_into_source_directories(tmp_path: Path)
         repository_root=repository,
         recorded_universe=recorded_universe(),
         recorded_evidence=recorded_evidence(),
+        session_eligibility=RecordedSessionEligibility(),
         clock=FixedClock(datetime(2026, 8, 21, 22, 0, tzinfo=UTC)),
     )
 
@@ -2547,6 +2574,7 @@ def test_malformed_universe_policy_is_refused_before_state_creation(
         repository_root=REPOSITORY_ROOT,
         recorded_universe=recorded_universe(),
         recorded_evidence=recorded_evidence(),
+        session_eligibility=RecordedSessionEligibility(),
         clock=FixedClock(datetime(2026, 8, 21, 22, 0, tzinfo=UTC)),
     )
 
@@ -2567,6 +2595,7 @@ def test_hostile_asset_activation_is_refused_before_state_creation(tmp_path: Pat
         repository_root=REPOSITORY_ROOT,
         recorded_universe=recorded_universe(),
         recorded_evidence=recorded_evidence(),
+        session_eligibility=RecordedSessionEligibility(),
         clock=FixedClock(datetime(2026, 8, 21, 22, 0, tzinfo=UTC)),
     )
 
@@ -2590,6 +2619,7 @@ def test_hostile_top_level_configuration_key_is_refused_before_state_creation(
         repository_root=REPOSITORY_ROOT,
         recorded_universe=recorded_universe(),
         recorded_evidence=recorded_evidence(),
+        session_eligibility=RecordedSessionEligibility(),
         clock=FixedClock(datetime(2026, 8, 21, 22, 0, tzinfo=UTC)),
     )
 
@@ -2648,6 +2678,7 @@ def test_runtime_state_storage_refuses_links_public_modes_and_unsafe_shapes(
             repository_root=REPOSITORY_ROOT,
             recorded_universe=recorded_universe(),
             recorded_evidence=recorded_evidence(),
+            session_eligibility=RecordedSessionEligibility(),
             clock=FixedClock(datetime(2026, 8, 21, 22, 0, tzinfo=UTC)),
         )
         assert configured == ConfigurationRefusal(
@@ -2680,6 +2711,7 @@ def test_equivalent_clock_offsets_persist_identically_after_reopen(
         repository_root=REPOSITORY_ROOT,
         recorded_universe=recorded_universe(),
         recorded_evidence=recorded_evidence(),
+        session_eligibility=RecordedSessionEligibility(),
         clock=FixedClock(instant),
     )
     assert isinstance(configured, Advance)
@@ -2895,6 +2927,7 @@ def test_universe_source_rejects_a_forged_utc_instant_before_append(tmp_path: Pa
         attention_policy=capability.attention_policy,
         attention_inputs=capability.attention_inputs,
         clock=capability.clock,
+        constitution_registry=capability.constitution_registry,
     )
 
     with pytest.raises(
@@ -2917,6 +2950,7 @@ def test_naive_clock_cannot_create_a_checkpoint(tmp_path: Path) -> None:
         repository_root=REPOSITORY_ROOT,
         recorded_universe=recorded_universe(),
         recorded_evidence=recorded_evidence(),
+        session_eligibility=RecordedSessionEligibility(),
         # Intentionally hostile clock value proves the boundary refuses naive time.
         clock=FixedClock(datetime(2026, 8, 21, 22, 0)),  # noqa: DTZ001
     )
@@ -2942,6 +2976,7 @@ def test_out_of_range_aware_clock_cannot_create_a_checkpoint(tmp_path: Path) -> 
         repository_root=REPOSITORY_ROOT,
         recorded_universe=recorded_universe(),
         recorded_evidence=recorded_evidence(),
+        session_eligibility=RecordedSessionEligibility(),
         clock=FixedClock(datetime(1, 1, 1, tzinfo=timezone(timedelta(hours=14)))),
     )
     assert isinstance(configured, Advance)
@@ -3040,6 +3075,7 @@ def test_missing_refusal_sequence_row_fails_closed(tmp_path: Path) -> None:
         attention_policy=capability.attention_policy,
         attention_inputs=capability.attention_inputs,
         clock=capability.clock,
+        constitution_registry=capability.constitution_registry,
     )
 
     with pytest.raises(
@@ -3067,6 +3103,7 @@ def test_invalid_refusal_sequence_row_has_a_bounded_diagnostic(tmp_path: Path) -
         attention_policy=capability.attention_policy,
         attention_inputs=capability.attention_inputs,
         clock=capability.clock,
+        constitution_registry=capability.constitution_registry,
     )
 
     with pytest.raises(
@@ -3410,6 +3447,7 @@ def test_corrupt_checkpoint_history_uses_the_call_timestamp_for_its_refusal(
         attention_policy=capability.attention_policy,
         attention_inputs=capability.attention_inputs,
         clock=FixedClock(refused_at),
+        constitution_registry=capability.constitution_registry,
     )
     receipt = refused(
         cycle=_cycle_payload(request.session.isoformat()),

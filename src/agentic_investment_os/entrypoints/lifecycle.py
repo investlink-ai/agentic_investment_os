@@ -34,7 +34,10 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from agentic_investment_os.application.lifecycle import Clock
-    from agentic_investment_os.domain.governance import OperatorApprovalVerifier
+    from agentic_investment_os.domain.governance import (
+        MarketSessionEligibility,
+        OperatorApprovalVerifier,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -51,6 +54,7 @@ def configure_advance(  # noqa: PLR0913 - composition names each untrusted bound
     repository_root: Path,
     recorded_universe: object,
     recorded_evidence: object,
+    session_eligibility: MarketSessionEligibility,
     recorded_official_evidence: object = None,
     clock: Clock | None = None,
     approval_verifier: OperatorApprovalVerifier | None = None,
@@ -96,6 +100,7 @@ def configure_advance(  # noqa: PLR0913 - composition names each untrusted bound
             constitution_registry=ConstitutionRegistry(
                 SQLiteConstitutionGovernance(database.path),
                 approval_verifier,
+                session_eligibility,
             ),
         )
     # Strict mypy proves this line unreachable; removing it is runtime-equivalent.

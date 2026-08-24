@@ -20,9 +20,12 @@ from agentic_investment_os.domain.attention import (
 from agentic_investment_os.domain.governance import (
     ApprovalVerification,
     ConstitutionActivation,
+    ConstitutionArtifact,
     ConstitutionGovernanceHistory,
     ConstitutionGovernanceState,
     ConstitutionGovernanceStatus,
+    ConstitutionReference,
+    ConstitutionUse,
     GovernanceCommand,
     GovernanceEvent,
     GovernanceReceipt,
@@ -33,6 +36,7 @@ from agentic_investment_os.domain.governance import (
     decide_governance,
     parse_governance_event,
     reconstruct_constitution_governance,
+    validate_constitution_uses,
 )
 from agentic_investment_os.domain.identity import (
     MarketSession,
@@ -72,6 +76,7 @@ from agentic_investment_os.domain.lifecycle import (
     derive_lifecycle_status,
     is_sha256,
     parse_lifecycle_checkpoint,
+    reconstruct_constitution_uses,
     reconstruct_evidence_checkpoints,
 )
 from agentic_investment_os.domain.temporal import InvalidUtcInstantError, UtcInstant
@@ -407,8 +412,9 @@ CREATE TABLE constitution_governance_events (
 """,
     """
 CREATE UNIQUE INDEX one_constitution_governance_fact_per_kind_request_and_material
-ON constitution_governance_events(event_kind, request_identity, request_fingerprint)
-WHERE request_identity IS NOT NULL
+ON constitution_governance_events(
+    event_kind, COALESCE(request_identity, ''), request_fingerprint
+)
 """,
     """
 CREATE TRIGGER constitution_governance_events_are_append_only_update
@@ -747,6 +753,27 @@ class SQLiteLifecycleLedger:
 
         return self._write(operation)
 
+    def pinned_constitution(self, idempotency_key: IdempotencyKey) -> ConstitutionReference | None:
+        """Return an existing stream's Constitution pin without reading unrelated fields."""
+
+        def operation(connection: sqlite3.Connection) -> ConstitutionReference | None:
+            uses = _load_constitution_uses(connection, key=idempotency_key)
+            if not uses:
+                return None
+            if len(uses) != 1:
+                raise InvalidLifecycleStateError(_INVALID_CHECKPOINT_ORDER)
+            return uses[0].constitution
+
+        return self._write(operation)
+
+    def constitution_uses(self) -> tuple[ConstitutionUse, ...]:
+        """Read every lifecycle Constitution pin without coupling unrelated streams."""
+
+        def operation(connection: sqlite3.Connection) -> tuple[ConstitutionUse, ...]:
+            return _load_constitution_uses(connection)
+
+        return self._write(operation)
+
     def rebuild_evidence_checkpoints(self) -> tuple[EvidenceCaptureReference, ...]:
         """Reconstruct every validated lifecycle reference into Evidence Vault state."""
 
@@ -757,6 +784,16 @@ class SQLiteLifecycleLedger:
                 conflicts=tuple(_load_conflicts(connection)),
             )
             return reconstruct_evidence_checkpoints(history)
+
+        return self._write(operation)
+
+    def rebuild_constitution_uses(self) -> tuple[ConstitutionUse, ...]:
+        """Reconstruct exact lifecycle-to-Constitution references for Status validation."""
+
+        def operation(connection: sqlite3.Connection) -> tuple[ConstitutionUse, ...]:
+            return reconstruct_constitution_uses(
+                LifecycleHistory(events=tuple(_load_events(connection)))
+            )
 
         return self._write(operation)
 
@@ -827,14 +864,56 @@ class SQLiteConstitutionGovernance:
 
         return self._write(operation)
 
+    def constitution_for(
+        self,
+        session: MarketSession,
+        verifier: OperatorApprovalVerifier | None,
+    ) -> ConstitutionArtifact:
+        """Resolve one historical session without activating pending governance."""
+
+        def operation(connection: sqlite3.Connection) -> ConstitutionArtifact:
+            history = _load_governance_history(connection)
+            state = _validate_governance_history(history, verifier)
+            return state.constitution_for(session)
+
+        return self._write(operation)
+
+    def next_activation_session(
+        self,
+        verifier: OperatorApprovalVerifier | None,
+    ) -> MarketSession | None:
+        """Return the sole pending activation boundary after validating history."""
+
+        def operation(connection: sqlite3.Connection) -> MarketSession | None:
+            history = _load_governance_history(connection)
+            state = _validate_governance_history(history, verifier)
+            return None if not state.pending else state.pending[0].activation_session
+
+        return self._write(operation)
+
+    def validate_constitution_uses(
+        self,
+        uses: tuple[ConstitutionUse, ...],
+        verifier: OperatorApprovalVerifier | None,
+    ) -> None:
+        """Require lifecycle pins to resolve from authoritative governance history."""
+
+        def operation(connection: sqlite3.Connection) -> None:
+            history = _load_governance_history(connection)
+            _validate_governance_history(history, verifier, uses)
+
+        self._write(operation)
+
     def rebuild_constitution_status(
-        self, verifier: OperatorApprovalVerifier | None
+        self,
+        verifier: OperatorApprovalVerifier | None,
+        uses: tuple[ConstitutionUse, ...] = (),
     ) -> ConstitutionGovernanceStatus:
         """Reconstruct bounded status after reverifying durable approvals."""
 
         def operation(connection: sqlite3.Connection) -> ConstitutionGovernanceStatus:
             history = _load_governance_history(connection)
-            state = _validate_governance_history(history, verifier)
+            state = _validate_governance_history(history, verifier, uses)
             return ConstitutionGovernanceStatus.from_state(state)
 
         return self._write(operation)
@@ -885,12 +964,12 @@ def _load_governance_history(connection: sqlite3.Connection) -> ConstitutionGove
 def _validate_governance_history(
     history: ConstitutionGovernanceHistory,
     verifier: OperatorApprovalVerifier | None,
+    uses: tuple[ConstitutionUse, ...] = (),
 ) -> ConstitutionGovernanceState:
     if history.events and verifier is None:
         raise GovernanceStateError(_MISSING_APPROVAL_VERIFIER)
-    if verifier is None:
-        return reconstruct_constitution_governance(history, _approval_unavailable)
-    return reconstruct_constitution_governance(history, verifier.verify)
+    verification = _approval_unavailable if verifier is None else verifier.verify
+    return validate_constitution_uses(history, verification, uses)
 
 
 def _approval_unavailable(_proof: OperatorApprovalProof) -> ApprovalVerification:
@@ -984,6 +1063,43 @@ def _load_events(
             (key.value,),
         ).fetchall()
     return [_load_event(row) for row in rows]
+
+
+def _load_constitution_uses(
+    connection: sqlite3.Connection,
+    *,
+    key: IdempotencyKey | None = None,
+) -> tuple[ConstitutionUse, ...]:
+    """Validate only governance-owned columns so unrelated stream damage stays isolated."""
+    if key is None:
+        rows = connection.execute(
+            """
+            SELECT DISTINCT cycle_identity, constitution_version, constitution_hash
+            FROM lifecycle_events
+            ORDER BY cycle_identity, constitution_version, constitution_hash
+            """
+        ).fetchall()
+    else:
+        rows = connection.execute(
+            """
+            SELECT DISTINCT cycle_identity, constitution_version, constitution_hash
+            FROM lifecycle_events
+            WHERE idempotency_key = ?
+            ORDER BY cycle_identity, constitution_version, constitution_hash
+            """,
+            (key.value,),
+        ).fetchall()
+    uses: list[ConstitutionUse] = []
+    for row in rows:
+        try:
+            reference = ConstitutionReference(
+                _integer(row[1], "constitution_version"),
+                _hash(row[2], "constitution_hash"),
+            )
+        except ValueError as error:
+            raise InvalidLifecycleStateError(_INVALID_CHECKPOINT_ORDER) from error
+        uses.append(ConstitutionUse(_market_session(row[0]), reference))
+    return tuple(uses)
 
 
 def _load_event(row: tuple[object, ...]) -> LifecycleEvent:

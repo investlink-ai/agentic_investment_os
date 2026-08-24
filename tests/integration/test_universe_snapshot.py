@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
@@ -23,6 +23,7 @@ from agentic_investment_os.domain.temporal import UtcInstant
 from agentic_investment_os.entrypoints.configuration import ConfigurationSource
 from agentic_investment_os.entrypoints.lifecycle import configure_advance, configure_status
 from tests._evidence import recorded_evidence
+from tests._governance import BASELINE_GOVERNANCE_STATUS, RecordedSessionEligibility
 from tests._universe import (
     mutable_mapping,
     mutable_mapping_list,
@@ -57,6 +58,7 @@ def _configure(
         repository_root=Path.cwd(),
         recorded_universe=payload,
         recorded_evidence=recorded_evidence(),
+        session_eligibility=RecordedSessionEligibility(),
         clock=FixedClock() if clock is None else clock,
     )
     assert isinstance(configured, Advance)
@@ -287,7 +289,10 @@ def test_disabled_crypto_cycle_fails_before_loading_or_snapshotting_equity_input
         repository_root=Path.cwd(),
     )
     assert isinstance(status, Status)
-    assert status() == LifecycleStatus.not_started()
+    assert status() == replace(
+        LifecycleStatus.not_started(),
+        constitution_governance=BASELINE_GOVERNANCE_STATUS,
+    )
 
 
 @pytest.mark.parametrize(

@@ -19,9 +19,9 @@ from agentic_investment_os.domain.attention import (
     validate_attention_history,
 )
 from agentic_investment_os.domain.governance import (
-    ACTIVE_CONSTITUTION,
     ConstitutionGovernanceStatus,
     ConstitutionReference,
+    ConstitutionUse,
 )
 from agentic_investment_os.domain.identity import (
     CryptoDecisionWindow,
@@ -75,6 +75,7 @@ __all__ = (
     "is_sha256",
     "parse_advance_receipt",
     "parse_lifecycle_checkpoint",
+    "reconstruct_constitution_uses",
     "reconstruct_evidence_checkpoints",
 )
 
@@ -100,13 +101,6 @@ _INVALID_ABSOLUTE_INSTANT = "lifecycle absolute instant must be canonical"
 _LIFECYCLE_ENVELOPE_SCHEMA_VERSION = 1
 _LIFECYCLE_PAYLOAD_SCHEMA_VERSION = 1
 _LIFECYCLE_AUTHORITY_SCOPE = "investment_operating_system"
-_ACTIVE_CONSTITUTION_STATUS = ConstitutionGovernanceStatus(
-    ACTIVE_CONSTITUTION.reference,
-    (),
-    (),
-    (),
-    (),
-)
 _CHECKPOINT_FIELDS = frozenset(
     {
         "envelope_schema_version",
@@ -297,7 +291,7 @@ class AdvanceRecovery(StrEnum):
 
 
 class InputRefusalCode(StrEnum):
-    """Classify hostile or incomplete Advance arguments without retaining their values."""
+    """Classify a bounded refusal detected before lifecycle effects begin."""
 
     INVALID_SESSION = "invalid_session"
     INVALID_MODE = "invalid_mode"
@@ -306,6 +300,7 @@ class InputRefusalCode(StrEnum):
     INVALID_UNIVERSE_INPUT = "invalid_universe_input"
     STALE_UNIVERSE_INPUT = "stale_universe_input"
     CONTRADICTORY_UNIVERSE_INPUT = "contradictory_universe_input"
+    INVALID_DURABLE_STATE = "invalid_durable_state"
 
 
 class AdvanceFailureReason(StrEnum):
@@ -404,7 +399,7 @@ class PinnedRunIdentity:
         configuration_version: int,
         configuration_hash: str,
         universe_inputs: UniverseInputIdentity,
-        constitution: ConstitutionReference = ACTIVE_CONSTITUTION.reference,
+        constitution: ConstitutionReference,
     ) -> PinnedRunIdentity:
         return cls(
             run_id=_fingerprint(
@@ -1000,7 +995,7 @@ class LifecycleStatus:
     universe_snapshot_id: str | None
     attention_artifact_cycle: DecisionCycleIdentity | None = None
     attention_artifact_id: str | None = None
-    constitution_governance: ConstitutionGovernanceStatus = _ACTIVE_CONSTITUTION_STATUS
+    constitution_governance: ConstitutionGovernanceStatus | None = None
 
     @classmethod
     def not_started(cls) -> LifecycleStatus:
@@ -1373,6 +1368,22 @@ def reconstruct_evidence_checkpoints(
     return (*completed, *refused)
 
 
+def reconstruct_constitution_uses(
+    history: LifecycleHistory,
+) -> tuple[ConstitutionUse, ...]:
+    """Return every exact Constitution reference used by validated lifecycle history."""
+    return tuple(
+        ConstitutionUse(
+            progress.request.session,
+            ConstitutionReference(
+                progress.pinned_run_identity.constitution_version,
+                progress.pinned_run_identity.constitution_hash,
+            ),
+        )
+        for progress in reconstruct_lifecycle(history)
+    )
+
+
 def _evidence_reference(
     progress: LifecycleProgress,
     checkpoint: EvidenceCaptureCheckpoint,
@@ -1688,13 +1699,19 @@ def _input_failure_reason(code: InputRefusalCode) -> AdvanceFailureReason:
         reason = AdvanceFailureReason.STALE_UNIVERSE_INPUT
     elif code is InputRefusalCode.CONTRADICTORY_UNIVERSE_INPUT:
         reason = AdvanceFailureReason.CONTRADICTORY_UNIVERSE_INPUT
+    elif code is InputRefusalCode.INVALID_DURABLE_STATE:
+        reason = AdvanceFailureReason.INVALID_DURABLE_STATE
     else:
         # Strict mypy proves this line unreachable; removing it is runtime-equivalent.
         assert_never(code)  # pragma: no cover
     return reason
 
 
-_INPUT_FAILURE_REASONS = frozenset(_input_failure_reason(code) for code in InputRefusalCode)
+_INPUT_FAILURE_REASONS = frozenset(
+    _input_failure_reason(code)
+    for code in InputRefusalCode
+    if code is not InputRefusalCode.INVALID_DURABLE_STATE
+)
 
 
 def _decide_idempotency_conflict(
@@ -2037,6 +2054,12 @@ class LifecycleLedger(Protocol):
         recorded_at: UtcInstant,
     ) -> LifecycleDecision: ...
 
+    def pinned_constitution(
+        self, idempotency_key: IdempotencyKey
+    ) -> ConstitutionReference | None: ...
+
+    def constitution_uses(self) -> tuple[ConstitutionUse, ...]: ...
+
 
 class LifecycleStatusProjection(Protocol):
     """Rebuild the disposable operator projection from authoritative history."""
@@ -2044,6 +2067,8 @@ class LifecycleStatusProjection(Protocol):
     def rebuild_status(self) -> LifecycleStatus: ...
 
     def rebuild_evidence_checkpoints(self) -> tuple[EvidenceCaptureReference, ...]: ...
+
+    def rebuild_constitution_uses(self) -> tuple[ConstitutionUse, ...]: ...
 
 
 def is_sha256(value: object) -> TypeGuard[str]:
