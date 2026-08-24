@@ -18,7 +18,6 @@ from agentic_investment_os.domain.attention import (
 from agentic_investment_os.domain.governance import (
     ACTIVE_CONSTITUTION,
     ConstitutionArtifact,
-    ConstitutionReference,
     ConstitutionUse,
     GovernanceStateError,
 )
@@ -322,7 +321,7 @@ class ConcurrentCompletionLedger:
     receipt: AdvanceReceipt
     steps: int = 0
 
-    def pinned_constitution(self, _idempotency_key: IdempotencyKey) -> ConstitutionReference | None:
+    def pinned_constitution_use(self, _idempotency_key: IdempotencyKey) -> ConstitutionUse | None:
         return None
 
     def constitution_uses(self) -> tuple[ConstitutionUse, ...]:
@@ -332,7 +331,7 @@ class ConcurrentCompletionLedger:
         self,
         command: LifecycleCommand,
         attempt: AdvanceAttempt,
-        _recorded_at: UtcInstant,
+        recorded_at: UtcInstant,
     ) -> LifecycleDecision:
         assert isinstance(command, AdvanceCommand)
         if self.completion_point == "start" and self.steps == 0:
@@ -367,6 +366,7 @@ class ConcurrentCompletionLedger:
                 command.pinned_run_identity,
                 event_kind,
                 None if phase is None else LifecycleCheckpoint.equity(phase),
+                recorded_at,
             ),
             next_attempt,
         )
@@ -378,7 +378,7 @@ class ConcurrentCompletionLedger:
 class _DecisionOnRefusalLedger:
     decision: LifecycleDecision
 
-    def pinned_constitution(self, _idempotency_key: IdempotencyKey) -> ConstitutionReference | None:
+    def pinned_constitution_use(self, _idempotency_key: IdempotencyKey) -> ConstitutionUse | None:
         return None
 
     def constitution_uses(self) -> tuple[ConstitutionUse, ...]:
@@ -402,9 +402,10 @@ class _ContradictoryAttentionHistoryLedger:
     expected_reason: AttentionRefusalReason = AttentionRefusalReason.CONTRADICTORY_EVIDENCE
     calls: int = 0
 
-    def pinned_constitution(
-        self, _idempotency_key: IdempotencyKey
-    ) -> ConstitutionReference | None:
+    def pinned_constitution_use(
+        self,
+        _idempotency_key: IdempotencyKey,
+    ) -> ConstitutionUse | None:
         return None
 
     def constitution_uses(self) -> tuple[ConstitutionUse, ...]:
@@ -447,6 +448,9 @@ class _CountingUniverseSource:
 
 @dataclass(frozen=True, slots=True)
 class _RefusingConstitutionRegistry:
+    def activate_due(self, recorded_at: UtcInstant) -> None:
+        del recorded_at
+
     def validate_references(self, uses: tuple[ConstitutionUse, ...]) -> None:
         del uses
         raise GovernanceStateError(INVALID_GOVERNANCE_HISTORY)
@@ -455,7 +459,7 @@ class _RefusingConstitutionRegistry:
         self,
         session: MarketSession,
         recorded_at: UtcInstant,
-        pinned: ConstitutionReference | None,
+        pinned: ConstitutionUse | None,
     ) -> ConstitutionArtifact:
         del session, recorded_at, pinned
         raise AssertionError(UNEXPECTED_GOVERNANCE_RESOLUTION)
@@ -536,6 +540,7 @@ def test_lifecycle_reconstruction_rejects_an_invalid_pinned_constitution_referen
         identity,
         LifecycleEventKind.ADVANCE_REQUESTED,
         None,
+        RECEIPT_RECORDED_AT,
     )
 
     with pytest.raises(InvalidLifecycleStateError, match="derived identity is invalid"):
@@ -552,10 +557,11 @@ def test_lifecycle_reconstructs_the_exact_constitution_use() -> None:
         identity,
         LifecycleEventKind.ADVANCE_REQUESTED,
         None,
+        RECEIPT_RECORDED_AT,
     )
 
     assert reconstruct_constitution_uses(LifecycleHistory(events=(event,))) == (
-        ConstitutionUse(request.session, ACTIVE_CONSTITUTION.reference),
+        ConstitutionUse(request.session, ACTIVE_CONSTITUTION.reference, RECEIPT_RECORDED_AT),
     )
 
 
@@ -646,10 +652,11 @@ def test_lifecycle_event_uses_a_hashed_common_envelope() -> None:
         identity,
         LifecycleEventKind.UNIVERSE_SNAPSHOTTED,
         checkpoint,
+        RECEIPT_RECORDED_AT,
         snapshot,
     )
 
-    envelope = event.to_envelope(UtcInstant.from_datetime(datetime(2026, 8, 21, 22, 0, tzinfo=UTC)))
+    envelope = event.to_envelope()
 
     assert envelope["payload_discriminator"] == "equity_market_session_lifecycle_event"
     assert envelope["authority_scope"] == "investment_operating_system"
@@ -660,9 +667,10 @@ def test_lifecycle_event_uses_a_hashed_common_envelope() -> None:
     assert event_payload["completed_phase"] == checkpoint.to_payload()
     assert event_payload["universe_snapshot_id"] == snapshot.snapshot_id
     with pytest.raises(ValueError, match="timezone-aware"):
-        event.to_envelope(
-            cast("UtcInstant", datetime(2026, 8, 21, 22, 0))  # noqa: DTZ001
-        )
+        replace(
+            event,
+            recorded_at=cast("UtcInstant", datetime(2026, 8, 21, 22, 0)),  # noqa: DTZ001
+        ).to_envelope()
 
 
 def test_pinned_identity_rejects_an_untyped_evidence_cutoff_with_a_bounded_error() -> None:

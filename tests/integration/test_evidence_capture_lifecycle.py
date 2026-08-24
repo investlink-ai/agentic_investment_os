@@ -13,12 +13,17 @@ from agentic_investment_os.adapters.sqlite_lifecycle import SQLiteLifecycleLedge
 from agentic_investment_os.application.lifecycle import Advance, Status
 from agentic_investment_os.domain.identity import MarketSession
 from agentic_investment_os.domain.lifecycle import (
+    AdvanceAttempt,
+    AdvanceCommand,
     AdvanceDisposition,
     AdvanceFailureReason,
+    AdvanceReceipt,
+    AdvanceRequest,
     InvalidLifecycleStateError,
     LifecyclePhase,
     parse_advance_receipt,
 )
+from agentic_investment_os.domain.temporal import UtcInstant
 from agentic_investment_os.entrypoints.configuration import ConfigurationSource
 from agentic_investment_os.entrypoints.lifecycle import configure_advance, configure_status
 from agentic_investment_os.evidence.capture import EvidencePersistenceError, InvalidEvidenceError
@@ -27,8 +32,10 @@ from tests._governance import RecordedSessionEligibility
 from tests._universe import (
     mutable_mapping,
     mutable_mapping_list,
+    pinned_run_identity,
     recorded_universe,
     runtime_configuration,
+    universe_snapshot,
 )
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
@@ -549,6 +556,31 @@ def test_evidence_refusal_retry_fails_closed_when_its_own_history_is_corrupt(
             "UPDATE lifecycle_events SET event_envelope = '{}' "
             "WHERE idempotency_key = 'refusal-with-corrupt-own-history' AND sequence = 1"
         )
+
+    request = AdvanceRequest.parse(
+        session="2026-08-21",
+        mode="champion",
+        idempotency_key="refusal-with-corrupt-own-history",
+    )
+    assert isinstance(request, AdvanceRequest)
+    identity = pinned_run_identity(
+        request,
+        configuration_version=retry.configuration_version,
+        configuration_hash=retry.configuration_hash,
+    )
+    direct_replay = retry.ledger.advance_step(
+        AdvanceCommand(
+            request,
+            identity,
+            universe_snapshot(identity),
+        ),
+        AdvanceAttempt(),
+        UtcInstant.from_datetime(_FixedClock().now()),
+    )
+    assert direct_replay == AdvanceReceipt.failed_closed(
+        AdvanceFailureReason.INVALID_DURABLE_STATE,
+        cycle=request.session,
+    )
 
     receipt = retry(
         cycle=MarketSession(date(2026, 8, 21)).to_payload(),

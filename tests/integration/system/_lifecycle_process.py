@@ -28,7 +28,7 @@ from tests._governance import RecordedSessionEligibility
 from tests._universe import recorded_universe, runtime_configuration
 
 if TYPE_CHECKING:
-    from agentic_investment_os.domain.governance import ConstitutionReference, ConstitutionUse
+    from agentic_investment_os.domain.governance import ConstitutionUse
     from agentic_investment_os.domain.temporal import UtcInstant
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
@@ -65,8 +65,8 @@ class FixedClock:
 class InterruptAfterReconcileLedger:
     delegate: LifecycleLedger
 
-    def pinned_constitution(self, idempotency_key: IdempotencyKey) -> ConstitutionReference | None:
-        return self.delegate.pinned_constitution(idempotency_key)
+    def pinned_constitution_use(self, idempotency_key: IdempotencyKey) -> ConstitutionUse | None:
+        return self.delegate.pinned_constitution_use(idempotency_key)
 
     def constitution_uses(self) -> tuple[ConstitutionUse, ...]:
         return self.delegate.constitution_uses()

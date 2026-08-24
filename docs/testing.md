@@ -283,10 +283,12 @@ evidence. A scenario becomes mandatory when its owning behavior is implemented.
   identity with changed material appends a bounded conflict.
 - Constitution amendments activate only at their exact approved future Market Session. Advance pins
   the selected version and content hash before downstream work, resolves an interrupted retry from
-  its historical pin even after a later activation, and fails closed on a missed boundary, corrupt or
-  missing governance history, unverifiable approval, or a lifecycle pin that cannot be reconstructed
-  from its session regime. Tests supply a recorded exchange-session policy and trusted UTC instants;
-  host-local time is not evidence. Status revalidates lifecycle pins and rebuilds active, pending,
+  the governance prefix visible at its first event even when an amendment later activates for that
+  same session, and fails closed on a missed boundary, retroactive event time, corrupt or missing
+  governance history, unverifiable approval, or a lifecycle pin that cannot be reconstructed from
+  its historical regime. Tests supply a recorded exchange-session policy and trusted UTC instants;
+  host-local time is not evidence. Contract tests keep the `Govern` object capability confined to its
+  operator composition root. Status revalidates lifecycle pins and rebuilds active, pending,
   superseded, refused, and conflicting state from the append-only ledger without exposing signature
   material.
 - Universe snapshots retain every current position by canonical instrument identity, apply the

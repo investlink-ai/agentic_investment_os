@@ -9,7 +9,6 @@ from agentic_investment_os.domain.governance import (
     ApprovalVerification,
     ConstitutionArtifact,
     ConstitutionGovernanceStatus,
-    ConstitutionReference,
     ConstitutionUse,
     GovernanceStateError,
     OperatorApprovalProof,
@@ -96,14 +95,17 @@ class RecordedSessionEligibility:
 class BaselineConstitutionRegistry:
     """Provide an explicit baseline only to tests with no governance history."""
 
+    def activate_due(self, recorded_at: UtcInstant) -> None:
+        del recorded_at
+
     def resolve(
         self,
         session: MarketSession,
         recorded_at: UtcInstant,
-        pinned: ConstitutionReference | None,
+        pinned: ConstitutionUse | None,
     ) -> ConstitutionArtifact:
         del session, recorded_at
-        if pinned is not None and pinned != ACTIVE_CONSTITUTION.reference:
+        if pinned is not None and pinned.constitution != ACTIVE_CONSTITUTION.reference:
             raise GovernanceStateError(_INVALID_BASELINE_PIN)
         return ACTIVE_CONSTITUTION
 

@@ -36,6 +36,8 @@ from agentic_investment_os.domain.temporal import UtcInstant
 
 APPROVED_AT = UtcInstant.from_datetime(datetime(2026, 8, 21, 20, 0, tzinfo=UTC))
 RECORDED_AT = UtcInstant.from_datetime(datetime(2026, 8, 21, 20, 5, tzinfo=UTC))
+PINNED_BEFORE_ACTIVATION = UtcInstant.from_datetime(datetime(2026, 8, 22, 20, 5, tzinfo=UTC))
+ACTIVATED_AT = UtcInstant.from_datetime(datetime(2026, 8, 24, 20, 5, tzinfo=UTC))
 APPROVED_SESSION = MarketSession(date(2026, 8, 21))
 ACTIVATION_SESSION = MarketSession(date(2026, 8, 24))
 AMENDMENT_VERSION = 2
@@ -386,11 +388,16 @@ def test_constitution_uses_must_resolve_exactly_from_governance_history() -> Non
         RECORDED_AT,
     )
     scheduled_history = ConstitutionGovernanceHistory().append(scheduled.record)
-    activation = activate_constitution(scheduled_history, ACTIVATION_SESSION, RECORDED_AT)
+    activation = activate_constitution(scheduled_history, ACTIVATION_SESSION, ACTIVATED_AT)
     activated_history = scheduled_history.append(activation.record)
     valid_uses = (
-        ConstitutionUse(APPROVED_SESSION, ACTIVE_CONSTITUTION.reference),
-        ConstitutionUse(ACTIVATION_SESSION, request.artifact.reference),
+        ConstitutionUse(APPROVED_SESSION, ACTIVE_CONSTITUTION.reference, RECORDED_AT),
+        ConstitutionUse(
+            ACTIVATION_SESSION,
+            ACTIVE_CONSTITUTION.reference,
+            PINNED_BEFORE_ACTIVATION,
+        ),
+        ConstitutionUse(ACTIVATION_SESSION, request.artifact.reference, ACTIVATED_AT),
     )
 
     assert validate_constitution_uses(activated_history, _verify, valid_uses).active == (
@@ -400,10 +407,44 @@ def test_constitution_uses_must_resolve_exactly_from_governance_history() -> Non
         validate_constitution_uses(
             activated_history,
             _verify,
-            (ConstitutionUse(ACTIVATION_SESSION, ACTIVE_CONSTITUTION.reference),),
+            (ConstitutionUse(ACTIVATION_SESSION, ACTIVE_CONSTITUTION.reference, ACTIVATED_AT),),
         )
     with pytest.raises(ValueError, match="invalid Constitution reference"):
-        ConstitutionUse(ACTIVATION_SESSION, "invalid")  # type: ignore[arg-type]
+        # Static typing cannot represent the hostile value needed to exercise this runtime guard.
+        ConstitutionUse(
+            ACTIVATION_SESSION,
+            "invalid",  # type: ignore[arg-type]
+            RECORDED_AT,
+        )
+    with pytest.raises(ValueError, match="invalid Constitution reference"):
+        # Static typing cannot represent the hostile value needed to exercise this runtime guard.
+        ConstitutionUse(
+            ACTIVATION_SESSION,
+            ACTIVE_CONSTITUTION.reference,
+            "invalid",  # type: ignore[arg-type]
+        )
+
+
+def test_governance_refuses_retroactive_authoritative_event_times() -> None:
+    request = _request()
+    scheduled = decide_governance(
+        ConstitutionGovernanceHistory(),
+        request,
+        ApprovalVerification.VERIFIED,
+        RECORDED_AT,
+    )
+    history = ConstitutionGovernanceHistory().append(scheduled.record)
+    retroactive = UtcInstant.from_datetime(datetime(2026, 8, 21, 20, 4, tzinfo=UTC))
+
+    with pytest.raises(GovernanceStateError, match="invalid Constitution governance history"):
+        decide_governance(
+            history,
+            _request(identity_value="retroactive-request"),
+            ApprovalVerification.VERIFIED,
+            retroactive,
+        )
+    with pytest.raises(GovernanceStateError, match="invalid Constitution governance history"):
+        activate_constitution(history, ACTIVATION_SESSION, retroactive)
 
 
 def test_governance_decisions_bound_refusals_pending_versions_and_future_approval() -> None:

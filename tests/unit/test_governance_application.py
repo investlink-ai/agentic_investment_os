@@ -26,6 +26,7 @@ from agentic_investment_os.domain.governance import (
     OperatorApprovalVerifier,
     SessionBoundaryRelation,
     activate_constitution,
+    constitution_for_use,
     decide_governance,
     reconstruct_constitution_governance,
     validate_constitution_uses,
@@ -34,6 +35,7 @@ from agentic_investment_os.domain.identity import MarketSession
 from agentic_investment_os.domain.temporal import UtcInstant
 from tests._governance import (
     ACTIVATION_SESSION,
+    APPROVED_SESSION,
     HashApprovalVerifier,
     RecordedSessionEligibility,
     amended_constitution,
@@ -97,6 +99,14 @@ class MemoryGovernanceLedger:
         return reconstruct_constitution_governance(self.history, verification).constitution_for(
             session
         )
+
+    def constitution_for_use(
+        self,
+        use: ConstitutionUse,
+        verifier: OperatorApprovalVerifier | None,
+    ) -> ConstitutionArtifact:
+        verification = HashApprovalVerifier().verify if verifier is None else verifier.verify
+        return constitution_for_use(self.history, verification, use)
 
     def next_activation_session(
         self,
@@ -227,13 +237,30 @@ def test_registry_status_and_invalid_clock_preserve_their_boundaries() -> None:
     registry = ConstitutionRegistry(ledger, HashApprovalVerifier(), RecordedSessionEligibility())
     assert registry.resolve(ACTIVATION_SESSION, RECORDED_AT, None) == ACTIVE_CONSTITUTION
     assert (
-        registry.resolve(ACTIVATION_SESSION, RECORDED_AT, ACTIVE_CONSTITUTION.reference)
+        registry.resolve(
+            ACTIVATION_SESSION,
+            RECORDED_AT,
+            ConstitutionUse(ACTIVATION_SESSION, ACTIVE_CONSTITUTION.reference, RECORDED_AT),
+        )
         == ACTIVE_CONSTITUTION
     )
+    with pytest.raises(GovernanceStateError, match="pinned Constitution does not match"):
+        registry.resolve(
+            APPROVED_SESSION,
+            RECORDED_AT,
+            ConstitutionUse(ACTIVATION_SESSION, ACTIVE_CONSTITUTION.reference, RECORDED_AT),
+        )
     status = ConstitutionStatus(ledger)(())
     assert status.active.version == 1
 
     _schedule(_govern(ledger))
+    ineligible_registry = ConstitutionRegistry(
+        ledger,
+        HashApprovalVerifier(),
+        InvalidEligibility(),
+    )
+    with pytest.raises(GovernanceStateError, match="exact current Market Session"):
+        ineligible_registry.activate_due(RECORDED_AT)
     with pytest.raises(GovernanceStateError, match="exact current Market Session"):
         registry.resolve(ACTIVATION_SESSION, RECORDED_AT, None)
     late = UtcInstant.from_datetime(datetime(2026, 8, 25, 20, 5, tzinfo=UTC))
@@ -241,9 +268,13 @@ def test_registry_status_and_invalid_clock_preserve_their_boundaries() -> None:
         registry.resolve(ACTIVATION_SESSION, late, None)
     with pytest.raises(GovernanceStateError, match="pinned Constitution does not match"):
         registry.resolve(
-            ACTIVATION_SESSION,
+            APPROVED_SESSION,
             RECORDED_AT,
-            ConstitutionArtifact.create(version=1, clauses=("different",)).reference,
+            ConstitutionUse(
+                APPROVED_SESSION,
+                ConstitutionArtifact.create(version=1, clauses=("different",)).reference,
+                RECORDED_AT,
+            ),
         )
 
     invalid_clock = Govern(
@@ -257,6 +288,27 @@ def test_registry_status_and_invalid_clock_preserve_their_boundaries() -> None:
 
     with pytest.raises(RuntimeError, match="boundary policy returned an invalid relation"):
         _schedule(_govern(ledger, eligibility=InvalidBoundaryPolicy()))
+
+
+def test_registry_activates_globally_while_preserving_a_same_session_historical_pin() -> None:
+    ledger = MemoryGovernanceLedger()
+    registry = ConstitutionRegistry(ledger, HashApprovalVerifier(), RecordedSessionEligibility())
+    pinned_at = UtcInstant.from_datetime(datetime(2026, 8, 21, 19, 55, tzinfo=UTC))
+    historical = ConstitutionUse(
+        ACTIVATION_SESSION,
+        ACTIVE_CONSTITUTION.reference,
+        pinned_at,
+    )
+    _schedule(_govern(ledger))
+    activation_time = UtcInstant.from_datetime(datetime(2026, 8, 24, 20, 5, tzinfo=UTC))
+
+    selected = registry.resolve(ACTIVATION_SESSION, activation_time, historical)
+
+    state = reconstruct_constitution_governance(ledger.history, HashApprovalVerifier().verify)
+    assert selected == ACTIVE_CONSTITUTION
+    assert state.active == amended_constitution().reference
+    assert state.pending == ()
+    validate_constitution_uses(ledger.history, HashApprovalVerifier().verify, (historical,))
 
 
 def test_govern_refuses_current_activation_even_with_an_older_valid_approval() -> None:

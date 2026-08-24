@@ -33,9 +33,9 @@ from agentic_investment_os.domain.governance import (
     OperatorApprovalProof,
     OperatorApprovalVerifier,
     activate_constitution,
+    constitution_for_use,
     decide_governance,
     parse_governance_event,
-    reconstruct_constitution_governance,
     validate_constitution_uses,
 )
 from agentic_investment_os.domain.identity import (
@@ -753,16 +753,37 @@ class SQLiteLifecycleLedger:
 
         return self._write(operation)
 
-    def pinned_constitution(self, idempotency_key: IdempotencyKey) -> ConstitutionReference | None:
-        """Return an existing stream's Constitution pin without reading unrelated fields."""
+    def pinned_constitution_use(self, idempotency_key: IdempotencyKey) -> ConstitutionUse | None:
+        """Return an existing stream's fully validated historical Constitution use."""
 
-        def operation(connection: sqlite3.Connection) -> ConstitutionReference | None:
-            uses = _load_constitution_uses(connection, key=idempotency_key)
-            if not uses:
+        def operation(connection: sqlite3.Connection) -> ConstitutionUse | None:
+            target_events = tuple(_load_events(connection, key=idempotency_key))
+            if not target_events:
                 return None
-            if len(uses) != 1:
+            events = (
+                tuple(
+                    _load_events(
+                        connection,
+                        key=idempotency_key,
+                        include_attention_history=True,
+                    )
+                )
+                if any(event.attention_artifact is not None for event in target_events)
+                else target_events
+            )
+            history = LifecycleHistory(events=events)
+            stream_starts = tuple(event for event in events if event.sequence == 0)
+            uses = reconstruct_constitution_uses(history)
+            if len(stream_starts) != len(uses):
                 raise InvalidLifecycleStateError(_INVALID_CHECKPOINT_ORDER)
-            return uses[0].constitution
+            matching = tuple(
+                use
+                for event, use in zip(stream_starts, uses, strict=True)
+                if event.request.idempotency_key == idempotency_key
+            )
+            if len(matching) != 1:
+                raise InvalidLifecycleStateError(_INVALID_CHECKPOINT_ORDER)
+            return matching[0]
 
         return self._write(operation)
 
@@ -837,7 +858,8 @@ class SQLiteConstitutionGovernance:
 
         def operation(connection: sqlite3.Connection) -> GovernanceReceipt:
             history = _load_governance_history(connection)
-            reconstruct_constitution_governance(history, verifier.verify)
+            uses = _load_constitution_uses(connection)
+            _validate_governance_history(history, verifier, uses)
             decision = decide_governance(history, command, verification, recorded_at)
             if decision.record is not None:
                 _append_governance_event(connection, decision.record, timestamp)
@@ -856,9 +878,15 @@ class SQLiteConstitutionGovernance:
 
         def operation(connection: sqlite3.Connection) -> ConstitutionActivation:
             history = _load_governance_history(connection)
-            _validate_governance_history(history, verifier)
+            uses = _load_constitution_uses(connection)
+            _validate_governance_history(history, verifier, uses)
             activation = activate_constitution(history, session, recorded_at)
             if activation.record is not None:
+                _validate_governance_history(
+                    history.append(activation.record),
+                    verifier,
+                    uses,
+                )
                 _append_governance_event(connection, activation.record, timestamp)
             return activation
 
@@ -875,6 +903,22 @@ class SQLiteConstitutionGovernance:
             history = _load_governance_history(connection)
             state = _validate_governance_history(history, verifier)
             return state.constitution_for(session)
+
+        return self._write(operation)
+
+    def constitution_for_use(
+        self,
+        use: ConstitutionUse,
+        verifier: OperatorApprovalVerifier | None,
+    ) -> ConstitutionArtifact:
+        """Resolve one lifecycle pin from the governance prefix visible at its pin time."""
+
+        def operation(connection: sqlite3.Connection) -> ConstitutionArtifact:
+            history = _load_governance_history(connection)
+            if history.events and verifier is None:
+                raise GovernanceStateError(_MISSING_APPROVAL_VERIFIER)
+            verification = _approval_unavailable if verifier is None else verifier.verify
+            return constitution_for_use(history, verification, use)
 
         return self._write(operation)
 
@@ -1067,28 +1111,16 @@ def _load_events(
 
 def _load_constitution_uses(
     connection: sqlite3.Connection,
-    *,
-    key: IdempotencyKey | None = None,
 ) -> tuple[ConstitutionUse, ...]:
     """Validate only governance-owned columns so unrelated stream damage stays isolated."""
-    if key is None:
-        rows = connection.execute(
-            """
-            SELECT DISTINCT cycle_identity, constitution_version, constitution_hash
-            FROM lifecycle_events
-            ORDER BY cycle_identity, constitution_version, constitution_hash
-            """
-        ).fetchall()
-    else:
-        rows = connection.execute(
-            """
-            SELECT DISTINCT cycle_identity, constitution_version, constitution_hash
-            FROM lifecycle_events
-            WHERE idempotency_key = ?
-            ORDER BY cycle_identity, constitution_version, constitution_hash
-            """,
-            (key.value,),
-        ).fetchall()
+    rows = connection.execute(
+        """
+        SELECT DISTINCT cycle_identity, constitution_version, constitution_hash, recorded_at
+        FROM lifecycle_events
+        WHERE sequence = 0
+        ORDER BY cycle_identity, constitution_version, constitution_hash, recorded_at
+        """
+    ).fetchall()
     uses: list[ConstitutionUse] = []
     for row in rows:
         try:
@@ -1098,7 +1130,13 @@ def _load_constitution_uses(
             )
         except ValueError as error:
             raise InvalidLifecycleStateError(_INVALID_CHECKPOINT_ORDER) from error
-        uses.append(ConstitutionUse(_market_session(row[0]), reference))
+        uses.append(
+            ConstitutionUse(
+                _market_session(row[0]),
+                reference,
+                _canonical_timestamp(row[3], "recorded_at"),
+            )
+        )
     return tuple(uses)
 
 
@@ -1163,13 +1201,14 @@ def _load_event(row: tuple[object, ...]) -> LifecycleEvent:
         ),
         event_kind=event_kind,
         completed_phase=completed_phase,
+        recorded_at=recorded_at,
         prepared_universe_snapshot=prepared_snapshot,
         published_universe_snapshot_id=published_snapshot_id,
         evidence_capture=evidence_capture,
         attention_artifact=attention_artifact,
     )
     envelope = _text(row[24], "event_envelope")
-    if _canonical_json(event.to_envelope(recorded_at)) != envelope:
+    if _canonical_json(event.to_envelope()) != envelope:
         raise InvalidLifecycleStateError(_INVALID_CHECKPOINT_ORDER)
     return event
 
@@ -1484,6 +1523,8 @@ def _append_record(
     timestamp: str,
 ) -> None:
     if isinstance(record, LifecycleEvent):
+        if record.recorded_at != recorded_at:
+            raise InvalidLifecycleStateError(_INVALID_CHECKPOINT_ORDER)
         request = record.request
         identity = record.pinned_run_identity
         connection.execute(
@@ -1550,7 +1591,7 @@ def _append_record(
                     if record.attention_artifact is None
                     else _canonical_json(record.attention_artifact.to_payload())
                 ),
-                _canonical_json(record.to_envelope(recorded_at)),
+                _canonical_json(record.to_envelope()),
                 timestamp,
             ),
         )

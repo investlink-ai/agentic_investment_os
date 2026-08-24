@@ -284,8 +284,10 @@ Normal production callers see six capabilities:
   refusal before the clock, adapter, or authoritative lifecycle ledger is entered. A valid
   `MarketSession` remains explicit in any later durable refusal and its replay. Before universe,
   evidence, or model work, Advance validates every existing lifecycle pin against governance
-  history. It resumes an existing request from that stream's historical pin; only a new request
-  resolves the Constitution regime for its session and pins that version and content hash.
+  history. A lifecycle pin's first event time selects the exact governance-history prefix it
+  observed, so a later amendment may activate globally without rewriting an interrupted run. Only a
+  new request resolves the then-current Constitution regime for its session and pins that version
+  and content hash.
 - **Status** validates authoritative lifecycle history, replaces its disposable projection, and returns
   the active `LifecycleCheckpoint`, `last_completed_cycle` as a `DecisionCycleIdentity`, the latest
   eligible-universe checkpoint as an exact `universe_snapshot_cycle` and snapshot-identifier pair,
@@ -305,7 +307,9 @@ Normal production callers see six capabilities:
   artifact for one exact eligible future Market Session. Stable request identity makes exact retries
   idempotent and changed material conflicting. Its receipt exposes only bounded disposition,
   reference, boundary, reason, and time fields; approval signatures remain in authoritative history.
-  Champion and controlled-policy governance remain later capabilities behind this interface.
+  The `Govern` object capability is constructed only by the operator composition root and is never
+  injected into model, external-text, Research Lab, portfolio, or execution contexts. Champion and
+  controlled-policy governance remain later capabilities behind this interface.
 - **Apply** independently validates one published `DecisionPacket`, manages only its permitted paper
   orders, and returns an `ExecutionReceipt`.
 - **Reconcile** observes broker orders and positions, matches stable client order identifiers, and
@@ -395,10 +399,10 @@ The V0 scheduler resolves an NYSE trading date and exchange-relative deadlines i
 Before any of those checks reach universe, evidence, attention, or model work, Advance reconstructs Constitution
 governance. The injected exchange-session policy classifies the approved boundary against a trusted
 UTC instant as past, current, future, or ineligible; host-local date and time never choose authority.
-Advance activates a due amendment only when the requested session is the exact current approved
-boundary, resumes an existing stream from its previously pinned historical regime, and fails closed
-if the boundary was missed or any governance proof or lifecycle-to-governance reference cannot be
-validated.
+Advance activates a due amendment whenever its boundary is the exact current approved session,
+before selecting either a new or resumed run. It resumes an existing stream from the governance
+prefix visible at that stream's first durable event and fails closed if the boundary was missed or
+any governance proof or lifecycle-to-governance reference cannot be validated.
 `PinRunInputs` records the equity cycle identity, Constitution version and hash, equity-feed Data
 Regime and Evidence Cutoff, configuration, instrument catalog, position snapshot, and policy
 fingerprints; the current Basic entitlement uses IEX, while a later SIP entitlement is a different
@@ -696,11 +700,14 @@ artifacts and atomic publications. Runtime state uses ignored, configurable root
 The Constitution governance ledger stores canonical event envelopes and public approval proofs as
 append-only authority. Reopen, Advance, and Status revalidate every artifact hash, envelope hash, and
 stored signature before selecting a regime, and Advance and Status require every lifecycle
-Constitution version and hash to resolve exactly for its recorded Market Session. A missing verifier
-in the presence of governed history, corrupt proof, missing governed artifact, conflicting identity,
-or skipped activation boundary fails closed before downstream work. The baseline remains the
-document-owned version 1 when no governed event exists. A projection may summarize governance state
-but never authorizes activation or substitutes for the event ledger.
+Constitution version and hash to resolve exactly for its recorded Market Session from the governance
+prefix visible at the lifecycle stream's first recorded event. Governance event times cannot move
+backward. Scheduling or activation validates those historical uses in the same database transaction,
+so a new global regime cannot invalidate an earlier run. A missing verifier in the presence of
+governed history, corrupt proof, missing governed artifact, conflicting identity, or skipped
+activation boundary fails closed before downstream work. The baseline remains the document-owned
+version 1 when no governed event exists. A projection may summarize governance state but never
+authorizes activation or substitutes for the event ledger.
 
 The SQLite database carries one database-wide physical schema version independent of run
 configuration and durable-record schema versions. The adapter owns one current schema definition. It

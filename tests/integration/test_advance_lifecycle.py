@@ -27,7 +27,6 @@ from agentic_investment_os.application.lifecycle import Advance
 from agentic_investment_os.domain.attention import AttentionRefusalReason
 from agentic_investment_os.domain.governance import (
     ACTIVE_CONSTITUTION,
-    ConstitutionReference,
     ConstitutionUse,
 )
 from agentic_investment_os.domain.identity import (
@@ -49,10 +48,12 @@ from agentic_investment_os.domain.lifecycle import (
     DurableAdvanceRefusal,
     IdempotencyKey,
     InputRefusal,
+    InputRefusalCode,
     InvalidLifecycleStateError,
     LifecycleCommand,
     LifecycleDecision,
     LifecycleEvent,
+    LifecycleEventKind,
     LifecyclePersistenceError,
     LifecyclePhase,
     LifecycleStatus,
@@ -756,8 +757,8 @@ class InterruptingLedger:
     operation: str
     timing: str
 
-    def pinned_constitution(self, idempotency_key: IdempotencyKey) -> ConstitutionReference | None:
-        return self.delegate.pinned_constitution(idempotency_key)
+    def pinned_constitution_use(self, idempotency_key: IdempotencyKey) -> ConstitutionUse | None:
+        return self.delegate.pinned_constitution_use(idempotency_key)
 
     def constitution_uses(self) -> tuple[ConstitutionUse, ...]:
         return self.delegate.constitution_uses()
@@ -784,8 +785,8 @@ class RacingStartLedger:
     winner_phase: LifecyclePhase | None
     raced: bool = False
 
-    def pinned_constitution(self, idempotency_key: IdempotencyKey) -> ConstitutionReference | None:
-        return self.delegate.pinned_constitution(idempotency_key)
+    def pinned_constitution_use(self, idempotency_key: IdempotencyKey) -> ConstitutionUse | None:
+        return self.delegate.pinned_constitution_use(idempotency_key)
 
     def constitution_uses(self) -> tuple[ConstitutionUse, ...]:
         return self.delegate.constitution_uses()
@@ -808,6 +809,8 @@ class RacingStartLedger:
 
 def _attempt_operation(command: LifecycleCommand, attempt: AdvanceAttempt) -> str:
     if isinstance(command, InputRefusal):
+        if command.code is InputRefusalCode.IDEMPOTENCY_KEY_CONFLICT:
+            return "start"
         return "refuse"
     return {
         None: "start",
@@ -1387,6 +1390,7 @@ def test_advance_captures_all_recorded_official_sources_without_network_access(
         repository_root=REPOSITORY_ROOT,
         recorded_universe=recorded_universe(),
         recorded_evidence=recorded_evidence(),
+        session_eligibility=RecordedSessionEligibility(),
         recorded_official_evidence=recorded_official_evidence(),
         clock=FixedClock(datetime(2026, 8, 21, 22, 0, tzinfo=UTC)),
     )
@@ -1423,6 +1427,7 @@ def test_optional_official_artifact_after_cutoff_is_not_published_as_admitted_ev
         repository_root=REPOSITORY_ROOT,
         recorded_universe=recorded_universe(),
         recorded_evidence=recorded_evidence(),
+        session_eligibility=RecordedSessionEligibility(),
         recorded_official_evidence=official,
         clock=FixedClock(datetime(2026, 8, 21, 22, 0, tzinfo=UTC)),
     )
@@ -1463,6 +1468,7 @@ def test_advance_fails_closed_when_a_required_official_source_is_absent(
         repository_root=REPOSITORY_ROOT,
         recorded_universe=recorded_universe(),
         recorded_evidence=recorded_evidence(),
+        session_eligibility=RecordedSessionEligibility(),
         clock=FixedClock(datetime(2026, 8, 21, 22, 0, tzinfo=UTC)),
     )
     assert isinstance(configured, Advance)
@@ -1972,6 +1978,7 @@ def test_resuming_an_older_partial_cycle_after_a_later_selection_fails_closed(
         attention_policy=capability.attention_policy,
         attention_inputs=capability.attention_inputs,
         clock=capability.clock,
+        constitution_registry=capability.constitution_registry,
     )
 
     with pytest.raises(SimulatedInterruptionError):
@@ -2775,6 +2782,118 @@ def test_lifecycle_ledger_applies_domain_steps_idempotently(tmp_path: Path) -> N
     assert not hasattr(ledger, "complete_reconciliation")
     assert not hasattr(ledger, "pin_run_inputs")
     assert not hasattr(ledger, "record_refusal")
+
+
+def test_lifecycle_ledger_rejects_a_kernel_record_with_a_different_write_time(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    capability = _configure(tmp_path / "runtime")
+    ledger = capability.ledger
+    assert isinstance(ledger, SQLiteLifecycleLedger)
+    request = AdvanceRequest.parse(
+        session="2026-08-24",
+        mode="champion",
+        idempotency_key="mismatched-kernel-record-time",
+    )
+    assert isinstance(request, AdvanceRequest)
+    command = advance_command(request)
+    write_time = UtcInstant.from_datetime(datetime(2026, 8, 22, 22, 0, tzinfo=UTC))
+    mismatched_time = UtcInstant.from_datetime(datetime(2026, 8, 22, 22, 1, tzinfo=UTC))
+    record = LifecycleEvent(
+        request.stream_id,
+        0,
+        request,
+        command.pinned_run_identity,
+        LifecycleEventKind.ADVANCE_REQUESTED,
+        None,
+        mismatched_time,
+    )
+    decision = AppendLifecycleRecord(
+        record,
+        AdvanceAttempt(AdvanceRecovery.FRESH, record.sequence),
+    )
+    monkeypatch.setattr(
+        "agentic_investment_os.adapters.sqlite_lifecycle.decide_advance",
+        lambda _history, _candidate, _attempt, _recorded_at: decision,
+    )
+
+    with pytest.raises(
+        InvalidLifecycleStateError,
+        match="lifecycle stream checkpoint order is invalid",
+    ):
+        ledger.advance_step(command, AdvanceAttempt(), write_time)
+
+
+def test_pinned_constitution_reader_rejects_an_ambiguous_kernel_result(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    capability = _configure(tmp_path / "runtime")
+    ledger = capability.ledger
+    assert isinstance(ledger, SQLiteLifecycleLedger)
+    request = AdvanceRequest.parse(
+        session="2026-08-24",
+        mode="champion",
+        idempotency_key="ambiguous-constitution-pin",
+    )
+    assert isinstance(request, AdvanceRequest)
+    now = UtcInstant.from_datetime(datetime(2026, 8, 22, 22, 0, tzinfo=UTC))
+    command = advance_command(request)
+    started = ledger.advance_step(command, AdvanceAttempt(), now)
+    assert isinstance(started, AppendLifecycleRecord)
+    pinned = ConstitutionUse(request.session, ACTIVE_CONSTITUTION.reference, now)
+    monkeypatch.setattr(
+        "agentic_investment_os.adapters.sqlite_lifecycle.reconstruct_constitution_uses",
+        lambda _history: (pinned, pinned),
+    )
+
+    with pytest.raises(
+        InvalidLifecycleStateError,
+        match="lifecycle stream checkpoint order is invalid",
+    ):
+        ledger.pinned_constitution_use(request.idempotency_key)
+
+
+def test_pinned_constitution_reader_rejects_a_substituted_stream(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    capability = _configure(tmp_path / "runtime")
+    ledger = capability.ledger
+    assert isinstance(ledger, SQLiteLifecycleLedger)
+    request = AdvanceRequest.parse(
+        session="2026-08-24",
+        mode="champion",
+        idempotency_key="expected-constitution-pin",
+    )
+    substituted = AdvanceRequest.parse(
+        session="2026-08-25",
+        mode="champion",
+        idempotency_key="substituted-constitution-pin",
+    )
+    assert isinstance(request, AdvanceRequest)
+    assert isinstance(substituted, AdvanceRequest)
+    now = UtcInstant.from_datetime(datetime(2026, 8, 22, 22, 0, tzinfo=UTC))
+    substituted_event = LifecycleEvent(
+        substituted.stream_id,
+        0,
+        substituted,
+        advance_command(substituted).pinned_run_identity,
+        LifecycleEventKind.ADVANCE_REQUESTED,
+        None,
+        now,
+    )
+    monkeypatch.setattr(
+        "agentic_investment_os.adapters.sqlite_lifecycle._load_events",
+        lambda _connection, **_filters: [substituted_event],
+    )
+
+    with pytest.raises(
+        InvalidLifecycleStateError,
+        match="lifecycle stream checkpoint order is invalid",
+    ):
+        ledger.pinned_constitution_use(request.idempotency_key)
 
 
 def test_lifecycle_ledger_appends_generic_checkpoint_records(tmp_path: Path) -> None:
@@ -3765,7 +3884,7 @@ def _replace_with_corrupt_events(
         )
         connection.executemany(
             "INSERT INTO lifecycle_events VALUES "
-            "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             rows,
         )
         for statement in statements:

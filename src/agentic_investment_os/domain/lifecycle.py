@@ -296,6 +296,7 @@ class InputRefusalCode(StrEnum):
     INVALID_SESSION = "invalid_session"
     INVALID_MODE = "invalid_mode"
     INVALID_IDEMPOTENCY_KEY = "invalid_idempotency_key"
+    IDEMPOTENCY_KEY_CONFLICT = "idempotency_key_conflict"
     MISSING_UNIVERSE_INPUT = "missing_universe_input"
     INVALID_UNIVERSE_INPUT = "invalid_universe_input"
     STALE_UNIVERSE_INPUT = "stale_universe_input"
@@ -875,6 +876,7 @@ class LifecycleEvent:
     pinned_run_identity: PinnedRunIdentity
     event_kind: LifecycleEventKind
     completed_phase: LifecycleCheckpoint | None
+    recorded_at: UtcInstant
     prepared_universe_snapshot: UniverseSnapshot | None = None
     published_universe_snapshot_id: str | None = None
     evidence_capture: EvidenceCaptureCheckpoint | None = None
@@ -887,10 +889,10 @@ class LifecycleEvent:
             return self.prepared_universe_snapshot.snapshot_id
         return self.published_universe_snapshot_id
 
-    def to_envelope(self, recorded_at: UtcInstant) -> dict[str, object]:
+    def to_envelope(self) -> dict[str, object]:
         """Serialize one equity event through the stable hashed lifecycle envelope."""
         try:
-            recorded_at_text = _instant_text(recorded_at)
+            recorded_at_text = _instant_text(self.recorded_at)
         except InvalidUtcInstantError as error:
             raise ValueError(_INVALID_EVENT_TIME) from error
         identity = self.pinned_run_identity
@@ -1267,9 +1269,14 @@ def _terminal_input_refusal(
     )
     if refusal is None:
         return None
-    if refusal_key is not None and (
-        refusal.cycle != command.cycle or refusal.reason is not current_reason
-    ):
+    if refusal_key is not None and refusal.cycle != command.cycle:
+        return AdvanceReceipt.failed_closed(
+            AdvanceFailureReason.IDEMPOTENCY_KEY_CONFLICT,
+            cycle=command.cycle,
+        )
+    if current_reason is AdvanceFailureReason.INVALID_DURABLE_STATE:
+        return AdvanceReceipt.failed_closed(current_reason, cycle=command.cycle)
+    if refusal_key is not None and refusal.reason is not current_reason:
         return AdvanceReceipt.failed_closed(
             AdvanceFailureReason.IDEMPOTENCY_KEY_CONFLICT,
             cycle=command.cycle,
@@ -1378,6 +1385,12 @@ def reconstruct_constitution_uses(
             ConstitutionReference(
                 progress.pinned_run_identity.constitution_version,
                 progress.pinned_run_identity.constitution_hash,
+            ),
+            next(
+                event.recorded_at
+                for event in history.events
+                if event.request.idempotency_key == progress.request.idempotency_key
+                and event.sequence == 0
             ),
         )
         for progress in reconstruct_lifecycle(history)
@@ -1599,7 +1612,13 @@ def _decide_valid_advance(
     key = request.idempotency_key
     progress = progress_by_key.get(key.value)
     if progress is None:
-        return _decide_new_stream(history, tuple(progress_by_key.values()), command, attempt)
+        return _decide_new_stream(
+            history,
+            tuple(progress_by_key.values()),
+            command,
+            attempt,
+            recorded_at,
+        )
     if not _advance_matches_progress(progress, command):
         return _decide_idempotency_conflict(history, progress, key, request.session)
     recovery = _recovery_for_progress(progress, attempt)
@@ -1636,6 +1655,7 @@ def _decide_new_stream(
     progresses: tuple[LifecycleProgress, ...],
     command: AdvanceCommand,
     attempt: AdvanceAttempt,
+    recorded_at: UtcInstant,
 ) -> LifecycleDecision:
     request = command.request
     key = request.idempotency_key
@@ -1662,6 +1682,7 @@ def _decide_new_stream(
         pinned_run_identity=command.pinned_run_identity,
         event_kind=LifecycleEventKind.ADVANCE_REQUESTED,
         completed_phase=None,
+        recorded_at=recorded_at,
     )
     return AppendLifecycleRecord(
         record,
@@ -1691,6 +1712,8 @@ def _input_failure_reason(code: InputRefusalCode) -> AdvanceFailureReason:
         reason = AdvanceFailureReason.INVALID_MODE
     elif code is InputRefusalCode.INVALID_IDEMPOTENCY_KEY:
         reason = AdvanceFailureReason.INVALID_IDEMPOTENCY_KEY
+    elif code is InputRefusalCode.IDEMPOTENCY_KEY_CONFLICT:
+        reason = AdvanceFailureReason.IDEMPOTENCY_KEY_CONFLICT
     elif code is InputRefusalCode.MISSING_UNIVERSE_INPUT:
         reason = AdvanceFailureReason.MISSING_UNIVERSE_INPUT
     elif code is InputRefusalCode.INVALID_UNIVERSE_INPUT:
@@ -1800,6 +1823,7 @@ def _append_next_event(  # noqa: PLR0911 - exhaust each lifecycle phase explicit
         pinned_run_identity=command.pinned_run_identity,
         event_kind=event_kind,
         completed_phase=None if phase is None else LifecycleCheckpoint.equity(phase),
+        recorded_at=recorded_at,
         prepared_universe_snapshot=prepared_snapshot,
         published_universe_snapshot_id=published_snapshot_id,
         evidence_capture=(
@@ -2054,9 +2078,9 @@ class LifecycleLedger(Protocol):
         recorded_at: UtcInstant,
     ) -> LifecycleDecision: ...
 
-    def pinned_constitution(
+    def pinned_constitution_use(
         self, idempotency_key: IdempotencyKey
-    ) -> ConstitutionReference | None: ...
+    ) -> ConstitutionUse | None: ...
 
     def constitution_uses(self) -> tuple[ConstitutionUse, ...]: ...
 

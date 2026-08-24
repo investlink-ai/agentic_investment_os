@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import ast
+from pathlib import Path
+
 import pytest
 
 from agentic_investment_os.domain.governance import (
@@ -98,3 +101,19 @@ def test_non_operator_origins_cannot_construct_governance_authority(origin: str)
     assert parsed_approval.reason is GovernanceRefusalReason.INVALID_APPROVAL
     assert isinstance(parsed_artifact, GovernanceInputRefusal)
     assert parsed_artifact.reason is GovernanceRefusalReason.INVALID_ARTIFACT
+
+
+def test_only_the_operator_composition_root_receives_the_govern_capability() -> None:
+    production_root = Path(__file__).resolve().parents[2] / "src" / "agentic_investment_os"
+    importers: list[str] = []
+    for source in sorted(production_root.rglob("*.py")):
+        tree = ast.parse(source.read_text(), filename=str(source))
+        if any(
+            isinstance(node, ast.ImportFrom)
+            and node.module == "agentic_investment_os.application.governance"
+            and any(alias.name == "Govern" for alias in node.names)
+            for node in ast.walk(tree)
+        ):
+            importers.append(source.relative_to(production_root).as_posix())
+
+    assert importers == ["entrypoints/governance.py"]

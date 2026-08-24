@@ -926,6 +926,11 @@ def test_terminal_refusal_selection_distinguishes_keyed_and_unkeyed_history() ->
         valid_command.request.idempotency_key,
         valid_cycle,
     )
+    changed_reason_command = InputRefusal(
+        InputRefusalCode.INVALID_MODE,
+        valid_command.request.idempotency_key,
+        valid_cycle,
+    )
     missing_command = InputRefusal(
         InputRefusalCode.INVALID_MODE,
         _command(key="missing-key").request.idempotency_key,
@@ -964,6 +969,13 @@ def test_terminal_refusal_selection_distinguishes_keyed_and_unkeyed_history() ->
         AdvanceFailureReason.INVALID_SESSION,
         cycle=valid_cycle,
     )
+    assert decide_terminal_refusal(
+        refusals,
+        changed_reason_command,
+    ) == AdvanceReceipt.failed_closed(
+        AdvanceFailureReason.IDEMPOTENCY_KEY_CONFLICT,
+        cycle=valid_cycle,
+    )
     assert decide_terminal_refusal(refusals, valid_command) == AdvanceReceipt.failed_closed(
         AdvanceFailureReason.IDEMPOTENCY_KEY_CONFLICT,
         cycle=valid_cycle,
@@ -985,6 +997,7 @@ def test_kernel_fails_closed_on_invalid_typed_history() -> None:
         command.pinned_run_identity,
         LifecycleEventKind.PHASE_COMPLETED,
         LifecycleCheckpoint.equity(LifecyclePhase.RECONCILE_PRIOR_STATE),
+        KERNEL_RECORDED_AT,
     )
     invalid_history = LifecycleHistory(
         events=(invalid_event,),

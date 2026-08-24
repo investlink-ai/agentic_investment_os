@@ -43,6 +43,7 @@ __all__ = (
     "OperatorApprovalVerifier",
     "SessionBoundaryRelation",
     "activate_constitution",
+    "constitution_for_use",
     "decide_governance",
     "parse_governance_event",
     "parse_governance_request",
@@ -150,15 +151,17 @@ class ConstitutionReference:
 
 @dataclass(frozen=True, slots=True)
 class ConstitutionUse:
-    """Bind one lifecycle session to the exact Constitution it durably used."""
+    """Bind one lifecycle pin time and session to the exact Constitution it used."""
 
     session: MarketSession
     constitution: ConstitutionReference
+    pinned_at: UtcInstant
 
     def __post_init__(self) -> None:
         if (
             type(self.session) is not MarketSession
             or type(self.constitution) is not ConstitutionReference
+            or type(self.pinned_at) is not UtcInstant
         ):
             raise ValueError(_INVALID_REFERENCE)
 
@@ -353,6 +356,12 @@ class ConstitutionGovernanceLedger(Protocol):
     def constitution_for(
         self,
         session: MarketSession,
+        verifier: OperatorApprovalVerifier | None,
+    ) -> ConstitutionArtifact: ...
+
+    def constitution_for_use(
+        self,
+        use: ConstitutionUse,
         verifier: OperatorApprovalVerifier | None,
     ) -> ConstitutionArtifact: ...
 
@@ -874,9 +883,11 @@ def decide_governance(
         matching = tuple(event for event in prior if event.request_fingerprint == fingerprint)
         if matching:
             return GovernanceDecision(None, _replay_receipt(matching))
+        _require_nonretroactive_recorded_at(history, recorded_at)
         if identity is not None:
             event = _conflict_event(history, command, recorded_at)
             return GovernanceDecision(event, _receipt_for_event(event))
+    _require_nonretroactive_recorded_at(history, recorded_at)
     if isinstance(command, GovernanceInputRefusal):
         event = _refusal_event(history, command, command.reason, recorded_at)
         return GovernanceDecision(event, _receipt_for_event(event))
@@ -913,6 +924,7 @@ def activate_constitution(
 ) -> ConstitutionActivation:
     """Select the exact as-of Constitution and activate only at its approved boundary."""
     state = _reconstruct_constitution_governance(history, None)
+    _require_nonretroactive_recorded_at(history, recorded_at)
     pending = state.pending
     if pending:
         scheduled = pending[0]
@@ -958,11 +970,39 @@ def validate_constitution_uses(
     verifier: Callable[[OperatorApprovalProof], ApprovalVerification],
     uses: tuple[ConstitutionUse, ...],
 ) -> ConstitutionGovernanceState:
-    """Rebuild governance and require every lifecycle pin to resolve exactly."""
+    """Rebuild governance and require every lifecycle pin to resolve at its pin time."""
     state = _reconstruct_constitution_governance(history, verifier)
-    if any(state.constitution_for(use.session).reference != use.constitution for use in uses):
+    if any(
+        _constitution_for_use(history, verifier, use).reference != use.constitution for use in uses
+    ):
         raise GovernanceStateError(_INVALID_HISTORY)
     return state
+
+
+def constitution_for_use(
+    history: ConstitutionGovernanceHistory,
+    verifier: Callable[[OperatorApprovalProof], ApprovalVerification],
+    use: ConstitutionUse,
+) -> ConstitutionArtifact:
+    """Resolve one lifecycle pin from the exact governance history visible when it was made."""
+    _reconstruct_constitution_governance(history, verifier)
+    artifact = _constitution_for_use(history, verifier, use)
+    if artifact.reference != use.constitution:
+        raise GovernanceStateError(_INVALID_HISTORY)
+    return artifact
+
+
+def _constitution_for_use(
+    history: ConstitutionGovernanceHistory,
+    verifier: Callable[[OperatorApprovalProof], ApprovalVerification],
+    use: ConstitutionUse,
+) -> ConstitutionArtifact:
+    visible_history = ConstitutionGovernanceHistory(
+        tuple(event for event in history.events if event.recorded_at.value <= use.pinned_at.value)
+    )
+    return _reconstruct_constitution_governance(visible_history, verifier).constitution_for(
+        use.session
+    )
 
 
 def _reconstruct_constitution_governance(
@@ -976,9 +1016,14 @@ def _reconstruct_constitution_governance(
     conflicts: list[GovernanceRequestIdentity] = []
     regimes: list[tuple[MarketSession | None, ConstitutionArtifact]] = [(None, active)]
     latest_activation_request: GovernanceRequestIdentity | None = None
+    previous_recorded_at: UtcInstant | None = None
     for sequence, event in enumerate(history.events):
-        if event.sequence != sequence:
+        if event.sequence != sequence or (
+            previous_recorded_at is not None
+            and event.recorded_at.value < previous_recorded_at.value
+        ):
             raise GovernanceStateError(_INVALID_HISTORY)
+        previous_recorded_at = event.recorded_at
         if event.kind is GovernanceEventKind.SCHEDULED:
             artifact = _required_artifact(event)
             approval = event.approval
@@ -1074,6 +1119,14 @@ def _verify(
     return (
         result if type(result) is ApprovalVerification else ApprovalVerification.INVALID_SIGNATURE
     )
+
+
+def _require_nonretroactive_recorded_at(
+    history: ConstitutionGovernanceHistory,
+    recorded_at: UtcInstant,
+) -> None:
+    if history.events and recorded_at.value < history.events[-1].recorded_at.value:
+        raise GovernanceStateError(_INVALID_HISTORY)
 
 
 def _receipt_for_event(event: GovernanceEvent) -> GovernanceReceipt:

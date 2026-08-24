@@ -62,7 +62,6 @@ if TYPE_CHECKING:
     from agentic_investment_os.application.governance import ConstitutionStatus
     from agentic_investment_os.domain.governance import (
         ConstitutionArtifact,
-        ConstitutionReference,
         ConstitutionUse,
     )
     from agentic_investment_os.evidence.capture import (
@@ -103,11 +102,13 @@ class AttentionInputsCapability(Protocol):
 class ConstitutionResolver(Protocol):
     """Resolve the exact immutable Constitution for one Market Session."""
 
+    def activate_due(self, recorded_at: UtcInstant) -> None: ...
+
     def resolve(
         self,
         session: MarketSession,
         recorded_at: UtcInstant,
-        pinned: ConstitutionReference | None,
+        pinned: ConstitutionUse | None,
     ) -> ConstitutionArtifact: ...
 
     def validate_references(self, uses: tuple[ConstitutionUse, ...]) -> None: ...
@@ -292,7 +293,7 @@ class Advance:
         if isinstance(parsed, AdvanceRequest):
             try:
                 uses = self.ledger.constitution_uses()
-                pinned = self.ledger.pinned_constitution(parsed.idempotency_key)
+                pinned = self.ledger.pinned_constitution_use(parsed.idempotency_key)
             except InvalidLifecycleStateError:
                 return InputRefusal(
                     InputRefusalCode.INVALID_DURABLE_STATE,
@@ -300,6 +301,13 @@ class Advance:
                     parsed.session,
                 )
             self.constitution_registry.validate_references(uses)
+            if pinned is not None and pinned.session != parsed.session:
+                self.constitution_registry.activate_due(recorded_at)
+                return InputRefusal(
+                    InputRefusalCode.IDEMPOTENCY_KEY_CONFLICT,
+                    parsed.idempotency_key,
+                    parsed.session,
+                )
             constitution = self.constitution_registry.resolve(
                 parsed.session,
                 recorded_at,

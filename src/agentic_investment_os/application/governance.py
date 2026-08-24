@@ -11,7 +11,6 @@ from agentic_investment_os.domain.governance import (
     ConstitutionGovernanceLedger,
     ConstitutionGovernanceProjection,
     ConstitutionGovernanceStatus,
-    ConstitutionReference,
     ConstitutionUse,
     GovernanceDisposition,
     GovernanceInputRefusal,
@@ -162,24 +161,42 @@ class ConstitutionRegistry:
     approval_verifier: OperatorApprovalVerifier | None
     session_eligibility: MarketSessionEligibility
 
+    def activate_due(self, recorded_at: UtcInstant) -> None:
+        """Activate the global pending regime or reject a missed or invalid boundary."""
+        pending = self.ledger.next_activation_session(self.approval_verifier)
+        if pending is None:
+            return
+        relation = _session_relation(self.session_eligibility, pending, recorded_at)
+        if relation is SessionBoundaryRelation.PAST:
+            raise GovernanceStateError(_MISSED_ACTIVATION)
+        if relation is SessionBoundaryRelation.INELIGIBLE:
+            raise GovernanceStateError(_ACTIVATION_BOUNDARY_INVALID)
+        if relation is SessionBoundaryRelation.CURRENT:
+            self.ledger.resolve_constitution(
+                pending,
+                self.approval_verifier,
+                recorded_at,
+            )
+
     def resolve(
         self,
         session: MarketSession,
         recorded_at: UtcInstant,
-        pinned: ConstitutionReference | None,
+        pinned: ConstitutionUse | None,
     ) -> ConstitutionArtifact:
-        if pinned is not None:
-            artifact = self.ledger.constitution_for(session, self.approval_verifier)
-            if artifact.reference != pinned:
-                raise GovernanceStateError(_PINNED_CONSTITUTION_INVALID)
-            return artifact
+        self.activate_due(recorded_at)
         pending = self.ledger.next_activation_session(self.approval_verifier)
         if pending is not None:
             relation = _session_relation(self.session_eligibility, pending, recorded_at)
-            if relation is SessionBoundaryRelation.PAST:
-                raise GovernanceStateError(_MISSED_ACTIVATION)
             if session == pending and relation is not SessionBoundaryRelation.CURRENT:
                 raise GovernanceStateError(_ACTIVATION_BOUNDARY_INVALID)
+        if pinned is not None:
+            if pinned.session != session:
+                raise GovernanceStateError(_PINNED_CONSTITUTION_INVALID)
+            try:
+                return self.ledger.constitution_for_use(pinned, self.approval_verifier)
+            except GovernanceStateError as error:
+                raise GovernanceStateError(_PINNED_CONSTITUTION_INVALID) from error
         return self.ledger.resolve_constitution(
             session,
             self.approval_verifier,
