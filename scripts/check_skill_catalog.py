@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import argparse
+import json
+import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -15,7 +17,29 @@ if TYPE_CHECKING:
 MAX_SKILL_DESCRIPTION_CHARS = 320
 MAX_CATALOG_DESCRIPTION_CHARS = 3_200
 _FRONTMATTER_BOUNDARY = "---"
-_MULTILINE_SCALARS = frozenset({"|", "|-", "|+", ">", ">-", ">+"})
+_YAML_NON_STRING_SCALARS = frozenset(
+    {
+        "~",
+        "false",
+        "no",
+        "null",
+        "off",
+        "on",
+        "true",
+        "yes",
+    }
+)
+_YAML_STRUCTURAL_PREFIXES = ("!", "&", "*", "[", "{", "|", ">", "@", "`", "%")
+_YAML_INDICATOR_SCALAR = re.compile(r"^[-?:](?:\s|$)")
+_YAML_NUMERIC_SCALAR = re.compile(
+    r"^[+-]?(?:"
+    r"(?:[0-9][0-9_]*)(?:\.[0-9_]*)?(?:e[+-]?[0-9_]+)?"
+    r"|0x[0-9a-f_]+|0o[0-7_]+|0b[01_]+"
+    r"|\.[0-9_]+(?:e[+-]?[0-9_]+)?|\.inf|\.nan"
+    r")$",
+    re.IGNORECASE,
+)
+_YAML_TIMESTAMP_SCALAR = re.compile(r"^\d{4}-\d{1,2}-\d{1,2}(?:$|[Tt ])")
 
 
 @dataclass(frozen=True, slots=True)
@@ -47,6 +71,61 @@ def _relative(path: Path, root: Path) -> PurePosixPath:
     return PurePosixPath(path.relative_to(root).as_posix())
 
 
+def _quoted_token(value: str) -> str | None:
+    quote = value[0]
+    index = 1
+    while index < len(value):
+        if quote == "'" and value[index : index + 2] == "''":
+            index += 2
+            continue
+        if quote == '"' and value[index] == "\\":
+            index += 2
+            continue
+        if value[index] == quote:
+            suffix = value[index + 1 :].strip()
+            return value[: index + 1] if not suffix or suffix.startswith("#") else None
+        index += 1
+    return None
+
+
+def _decode_quoted_description(value: str) -> str | None:
+    token = _quoted_token(value)
+    if token is None:
+        return None
+    if token[0] == '"':
+        try:
+            decoded: object = json.loads(token)
+        except json.JSONDecodeError:
+            return None
+        return decoded if isinstance(decoded, str) else None
+    inner = token[1:-1]
+    decoded = inner.replace("''", "'")
+    if decoded.replace("'", "''") != inner:
+        return None
+    return decoded
+
+
+def _decode_description(value: str) -> str | None:
+    value = value.strip()
+    if not value or value.startswith("#"):
+        return None
+    if value[0] in {'"', "'"}:
+        return _decode_quoted_description(value)
+
+    value = value.split(" #", maxsplit=1)[0].rstrip()
+    if (
+        not value
+        or value.lower() in _YAML_NON_STRING_SCALARS
+        or value.startswith(_YAML_STRUCTURAL_PREFIXES)
+        or _YAML_INDICATOR_SCALAR.match(value)
+        or _YAML_NUMERIC_SCALAR.match(value)
+        or _YAML_TIMESTAMP_SCALAR.match(value)
+        or ": " in value
+    ):
+        return None
+    return value
+
+
 def _parse_description(
     lines: Sequence[str],
     *,
@@ -63,7 +142,9 @@ def _parse_description(
         return None, (violation,)
 
     description_lines = [
-        line for line in lines[1:end] if line == "description:" or line.startswith("description: ")
+        (index, line)
+        for index, line in enumerate(lines[1:end], start=1)
+        if line == "description:" or line.startswith("description: ")
     ]
     if not description_lines:
         violation = SkillCatalogViolation(relative_path, "description is missing")
@@ -72,11 +153,18 @@ def _parse_description(
         violation = SkillCatalogViolation(relative_path, "description must appear exactly once")
         return None, (violation,)
 
-    description = description_lines[0].removeprefix("description:").strip()
-    if not description or description in _MULTILINE_SCALARS:
+    description_index, description_line = description_lines[0]
+    has_continuation = False
+    for subsequent_line in lines[description_index + 1 : end]:
+        if not subsequent_line.strip() or subsequent_line.lstrip().startswith("#"):
+            continue
+        has_continuation = subsequent_line.startswith((" ", "\t"))
+        break
+    description = _decode_description(description_line.removeprefix("description:"))
+    if description is None or not description or "\n" in description or has_continuation:
         violation = SkillCatalogViolation(
             relative_path,
-            "description must be non-empty single-line text",
+            "description must be a non-empty single-line string scalar",
         )
         return None, (violation,)
 

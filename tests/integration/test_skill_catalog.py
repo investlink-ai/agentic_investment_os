@@ -58,8 +58,16 @@ def test_exact_individual_and_aggregate_limits_pass(
     ("description_line", "expected"),
     [
         (None, "description is missing"),
-        ("", "description must be non-empty single-line text"),
-        ("|", "description must be non-empty single-line text"),
+        ("", "description must be a non-empty single-line string scalar"),
+        ("# comment only", "description must be a non-empty single-line string scalar"),
+        ("|", "description must be a non-empty single-line string scalar"),
+        ("> # folded text", "description must be a non-empty single-line string scalar"),
+        ("[unterminated", "description must be a non-empty single-line string scalar"),
+        ("- item", "description must be a non-empty single-line string scalar"),
+        ("? item", "description must be a non-empty single-line string scalar"),
+        ("@invalid", "description must be a non-empty single-line string scalar"),
+        ("null", "description must be a non-empty single-line string scalar"),
+        ("[]", "description must be a non-empty single-line string scalar"),
     ],
 )
 def test_missing_or_malformed_description_is_rejected(
@@ -74,6 +82,63 @@ def test_missing_or_malformed_description_is_rejected(
 
     assert exit_code == 1
     assert capsys.readouterr().err == (f".agents/skills/broken-skill/SKILL.md: {expected}\n")
+
+
+@pytest.mark.parametrize("separator", ["", "\n"])
+def test_multiline_description_continuation_is_rejected(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    separator: str,
+) -> None:
+    _write_skill(tmp_path, "multiline-skill", "short")
+    path = tmp_path / ".agents" / "skills" / "multiline-skill" / "SKILL.md"
+    path.write_text(
+        path.read_text(encoding="utf-8").replace(
+            "description: short\n",
+            f"description: short\n{separator}  {'x' * 400}\n",
+        ),
+        encoding="utf-8",
+    )
+
+    exit_code = main(("--root", str(tmp_path)))
+
+    assert exit_code == 1
+    assert capsys.readouterr().err == (
+        ".agents/skills/multiline-skill/SKILL.md: "
+        "description must be a non-empty single-line string scalar\n"
+    )
+
+
+def test_quoted_description_is_measured_without_yaml_quotes(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _write_skill(
+        tmp_path,
+        "quoted-skill",
+        f"'{'x' * MAX_SKILL_DESCRIPTION_CHARS}' # catalog comment",
+    )
+
+    exit_code = main(("--root", str(tmp_path)))
+
+    assert exit_code == 0
+    assert capsys.readouterr().out == (
+        "skill catalog passed: 1 descriptions, 320/3200 characters, max 320/320\n"
+    )
+
+
+def test_digit_leading_plain_description_remains_text(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _write_skill(tmp_path, "numbered-skill", "12 skills route reviews")
+
+    exit_code = main(("--root", str(tmp_path)))
+
+    assert exit_code == 0
+    assert capsys.readouterr().out == (
+        "skill catalog passed: 1 descriptions, 23/3200 characters, max 23/320\n"
+    )
 
 
 def test_duplicate_description_is_rejected(
