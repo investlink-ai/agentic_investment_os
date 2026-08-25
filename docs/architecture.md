@@ -9,6 +9,26 @@ Architecture does not own investment rules, product outcomes, Python import edge
 test procedure, or design rationale. Those live in `investment-domain.md`,
 `product-requirements.md`, `module-graph.md`, `config-catalog.md`, `testing.md`, and ADRs respectively.
 
+## Architectural spine
+
+The system is one modular monolith with three deliberately separate process and trust seams. Each
+process receives only its permitted capabilities; an entrypoint composes owner-defined ports with
+adapters. Capability code never reaches through an adapter to acquire an external effect directly.
+
+| Process and trust seam | Public capabilities | Effect authority | Authoritative state |
+| --- | --- | --- | --- |
+| Investment Operating System, without broker credentials | `Advance`, `Status`, `Record`, `Govern` | Source, model, and persistence effects only through owner-defined ports implemented by `adapters` | Evidence Vault, append-only lifecycle, belief, governance, decision, and outcome ledgers; published `DecisionPacket` store |
+| Order Execution Module, without model capability | `Apply`, `Reconcile` | Packet reads, executor persistence, and paper-broker effects through execution-owned ports implemented by `adapters` | Published packets as input; append-only order intents, broker observations, and execution receipts |
+| Research Lab, isolated from production state and authority | `Replay` | Model and Lab-persistence effects through research-owned ports implemented by Lab-only `adapters` | Synthetic or copied inputs and one Lab-local append-only ledger |
+
+The [system topology](#system-topology) shows those seams and effect paths. [Public lifecycle
+interfaces](#public-lifecycle-interfaces) and the [Research Lab interface](#research-lab-interface)
+own the coarse capability contracts; [module ownership](#module-ownership) and the
+[module graph](module-graph.md) place their Python seams. [Authority](#authority-and-trust) and
+[durable state](#durable-state) own the non-negotiable trust and storage rules. The
+[README status table](../README.md#status) is the only current-state inventory: a target contract in
+this document is not evidence that its runtime behavior is enabled.
+
 ## Design drivers
 
 - Keep a local Python 3.12 modular monolith until measured constraints justify another deployment
@@ -214,14 +234,21 @@ semantic review even though this particular gate exempts them.
 ```mermaid
 flowchart LR
     operator[Operator / Scheduler]
+    public_sources[Allowed Public Sources]
+    model_provider[Model Provider / Recorded Fixture]
+    alpaca[Alpaca Paper]
 
     subgraph uncredentialed["Investment Operating System — no broker credentials"]
+        os_entry[Entrypoint Composition]
         lifecycle["Lifecycle interface<br/>Advance · Status · Record · Govern"]
         evidence[Evidence]
         memory[Memory]
         research[Codex Research]
         portfolio[Deterministic Portfolio]
         evaluation[Evaluation]
+        source_adapter[Source Adapters]
+        model_adapter[Model Adapter]
+        os_persistence[Persistence Adapters]
     end
 
     subgraph durable["Authoritative local state"]
@@ -232,42 +259,60 @@ flowchart LR
     end
 
     subgraph credentialed["Order Execution Module — no model capability"]
+        executor_entry[Executor Entrypoint]
         executor[Apply · Reconcile]
+        execution_persistence[Persistence Adapter]
+        broker_adapter[Alpaca Adapter]
         execution_state[(Order Intents and Receipts)]
     end
 
     subgraph laboratory["Research Lab — isolated namespace"]
+        lab_entry[Lab Entrypoint]
         lab[Stage Replay]
+        lab_model_adapter[Lab Model Adapter]
+        lab_persistence[Lab Persistence Adapter]
         lab_state[(Synthetic / Copied State)]
     end
 
-    alpaca[Alpaca Paper]
-    public_sources[Allowed Public Sources]
-
-    operator --> lifecycle
-    public_sources --> evidence
+    operator --> os_entry --> lifecycle
+    os_entry -. wires .-> source_adapter
+    os_entry -. wires .-> model_adapter
+    os_entry -. wires .-> os_persistence
     lifecycle --> evidence
     lifecycle --> memory
     lifecycle --> research
     lifecycle --> portfolio
     lifecycle --> evaluation
-    evidence --> vault
-    memory --> ledgers
-    portfolio --> ledgers
-    portfolio --> packets
-    ledgers --> projections
-    packets --> executor
-    executor --> execution_state
-    executor --> alpaca
-    alpaca --> executor
+    evidence -->|source port| source_adapter --> public_sources
+    research -->|model port| model_adapter --> model_provider
+    evidence -->|storage port| os_persistence
+    memory -->|storage port| os_persistence
+    portfolio -->|storage port| os_persistence
+    os_persistence --> vault
+    os_persistence --> ledgers
+    os_persistence --> packets
+    os_persistence --> projections
+    operator --> executor_entry --> executor
+    executor_entry -. wires .-> execution_persistence
+    executor_entry -. wires .-> broker_adapter
+    executor -->|packet and storage ports| execution_persistence
+    execution_persistence --> packets
+    execution_persistence --> execution_state
+    executor -->|broker port| broker_adapter <--> alpaca
     executor -->|OutcomeBatch| lifecycle
-    lab --> lab_state
+    operator --> lab_entry --> lab
+    lab_entry -. wires .-> lab_model_adapter
+    lab_entry -. wires .-> lab_persistence
+    lab -->|model port| lab_model_adapter --> model_provider
+    lab -->|storage port| lab_persistence --> lab_state
     lab -. reuses capability code .-> research
 ```
 
 The three process seams are the Investment Operating System, Order Execution Module, and Research
 Lab. They may share immutable domain contracts inside one package; they do not share authority or
-credentials.
+credentials. Arrows to public sources, model providers, durable stores, and Alpaca cross an
+owner-defined port and its adapter. The entrypoint nodes wire those implementations; they do not move
+effect authority into the protected capability.
 
 ## Public lifecycle interfaces
 
@@ -528,34 +573,44 @@ health are separate operational concerns.
 sequenceDiagram
     actor Operator
     participant OS as Investment OS
-    participant Ledger as Append-only Ledger
+    participant OSStore as OS Persistence Port / Adapter
     participant Research as Codex Research
+    participant ModelAdapter as Model Port / Adapter
+    participant Model as Model Provider
     participant Risk as Deterministic Portfolio
-    participant Packet as Packet Store
     participant Executor
+    participant ExecutorStore as Executor Persistence Port / Adapter
+    participant BrokerAdapter as Broker Port / Adapter
     participant Broker as Alpaca Paper
 
     Operator->>OS: Advance(cycle, mode, idempotency key)
-    OS->>Ledger: Append phase intent and pinned inputs
+    OS->>OSStore: Append phase intent and pinned inputs
     OS->>Research: Curated evidence + bounded schema
+    Research->>ModelAdapter: Typed request through research-owned port
+    ModelAdapter->>Model: Invoke configured model effect
+    Model-->>ModelAdapter: Raw response and effect metadata
+    ModelAdapter-->>Research: Typed untrusted response
     Research-->>OS: Untrusted typed candidate artifacts
     OS->>OS: Validate schema, evidence, provenance, authority
     OS->>Risk: Validated HouseView + market/risk inputs
     Risk-->>OS: Risk-clamped DecisionPacket candidate
-    OS->>Ledger: Append immutable DecisionRecord
-    OS->>Packet: Atomically publish validated packet
-    Executor->>Packet: Load published packet
+    OS->>OSStore: Append DecisionRecord and atomically publish packet
+    Executor->>ExecutorStore: Load packet through execution-owned port
     Executor->>Executor: Revalidate signature, scope, expiry, account, risk
-    Executor->>Ledger: Persist effect-local order intent
-    Executor->>Broker: Submit stable client order ID
-    Broker-->>Executor: Order event or ambiguous timeout
-    Executor->>Ledger: Append independent observations and receipt
+    Executor->>ExecutorStore: Persist effect-local order intent
+    Executor->>BrokerAdapter: Submit stable client order ID through broker port
+    BrokerAdapter->>Broker: Invoke configured paper-broker effect
+    Broker-->>BrokerAdapter: Order event or ambiguous timeout
+    BrokerAdapter-->>Executor: Typed broker observation
+    Executor->>ExecutorStore: Append independent observations and receipt
     Executor-->>OS: OutcomeBatch
-    OS->>Ledger: Append outcomes and preserve original decision
+    OS->>OSStore: Append outcomes and preserve original decision
 ```
 
 Timeout and broker acceptance remain independent facts. Reconciliation resolves ambiguity by stable
-client order identity; it never guesses or repeats exposure blindly.
+client order identity; it never guesses or repeats exposure blindly. Persistence, model, and broker
+participants denote owner-defined ports with their configured adapters, not capabilities that own
+those effects directly.
 
 ## Module ownership
 
