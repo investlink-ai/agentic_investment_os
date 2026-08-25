@@ -83,7 +83,7 @@ def test_advance_durably_publishes_a_reconstructable_universe_snapshot(tmp_path:
 
     assert first.disposition is AdvanceDisposition.ADVANCED
     assert first.completed_phase is not None
-    assert first.completed_phase.phase is LifecyclePhase.CAPTURE_EVIDENCE
+    assert first.completed_phase.phase is LifecyclePhase.SELECT_ATTENTION
     assert first.recovery is AdvanceRecovery.FRESH
     assert first.universe_snapshot_id is not None
     assert first.pinned_run_identity is not None
@@ -102,6 +102,7 @@ def test_advance_durably_publishes_a_reconstructable_universe_snapshot(tmp_path:
         evidence_policy_id=first.evidence_policy_id,
         evidence_artifact_ids=first.evidence_artifact_ids,
         evidence_refusal_ids=(),
+        attention_artifact=first.attention_artifact,
     )
 
     database = state_root / "lifecycle.sqlite3"
@@ -119,6 +120,7 @@ def test_advance_durably_publishes_a_reconstructable_universe_snapshot(tmp_path:
         ("run_inputs_pinned", "PinRunInputs"),
         ("universe_snapshotted", "SnapshotUniverse"),
         ("evidence_captured", "CaptureEvidence"),
+        ("attention_selected", "SelectAttention"),
     ]
     assert all(row[2] is None and row[3] is None for row in events[:2])
     assert events[2][2] == first.universe_snapshot_id
@@ -383,5 +385,5 @@ def test_retry_with_changed_recorded_snapshot_fails_without_changing_first_snaps
     assert replay.universe_snapshot_id == first.universe_snapshot_id
     assert replay.recovery is AdvanceRecovery.PREVIOUSLY_COMPLETED
     with sqlite3.connect(state_root / "lifecycle.sqlite3") as connection:
-        assert connection.execute("SELECT COUNT(*) FROM lifecycle_events").fetchone() == (5,)
+        assert connection.execute("SELECT COUNT(*) FROM lifecycle_events").fetchone() == (6,)
         assert connection.execute("SELECT COUNT(*) FROM advance_conflicts").fetchone() == (1,)

@@ -240,6 +240,9 @@ def test_status_reports_empty_incomplete_and_universe_snapshot_history(tmp_path:
     assert pinned.pinned_run_identity == receipt.pinned_run_identity
     assert pinned.durable_reason is None
     assert pinned.universe_snapshot_id == receipt.universe_snapshot_id
+    assert receipt.attention_artifact is not None
+    assert pinned.attention_artifact_cycle == MarketSession(date(2026, 8, 21))
+    assert pinned.attention_artifact_id == receipt.attention_artifact.artifact_id
     assert receipt.pinned_run_identity is not None
     assert _projection(database) == [
         (
@@ -262,6 +265,12 @@ def test_status_reports_empty_incomplete_and_universe_snapshot_history(tmp_path:
                 '"payload_schema_version":1,"schema_version":1}'
             ),
             receipt.universe_snapshot_id,
+            (
+                '{"asset_class":"us_equity","cycle_type":"market_session",'
+                '"payload":{"trading_date":"2026-08-21"},'
+                '"payload_schema_version":1,"schema_version":1}'
+            ),
+            receipt.attention_artifact.artifact_id,
         )
     ]
 
@@ -417,6 +426,58 @@ def test_status_selects_the_latest_market_session_independent_of_stream_order(
     assert status.pinned_run_identity == latest.pinned_run_identity
 
 
+def test_status_keeps_the_latest_attention_artifact_bound_to_its_own_cycle(
+    tmp_path: Path,
+) -> None:
+    state_root = tmp_path / "runtime"
+    advance = _advance(state_root)
+    completed = advance(
+        cycle=_cycle_payload("2026-08-21"),
+        mode="champion",
+        idempotency_key="completed-attention",
+    )
+    assert completed.attention_artifact is not None
+    status_capability = _status(state_root)
+    database = state_root / "lifecycle.sqlite3"
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            """
+            CREATE TRIGGER stop_later_cycle_after_start
+            BEFORE INSERT ON lifecycle_events
+            WHEN NEW.event_kind = 'phase_completed'
+            BEGIN
+                SELECT RAISE(ABORT, 'injected interruption');
+            END
+            """
+        )
+    with pytest.raises(LifecyclePersistenceError, match="SQLite lifecycle checkpoint failed"):
+        advance(
+            cycle=_cycle_payload("2026-08-22"),
+            mode="champion",
+            idempotency_key="later-partial",
+        )
+
+    status = status_capability()
+
+    assert status.pinned_run_identity is not None
+    assert status.pinned_run_identity.cycle == MarketSession(date(2026, 8, 22))
+    assert status.attention_artifact_cycle == MarketSession(date(2026, 8, 21))
+    assert status.attention_artifact_id == completed.attention_artifact.artifact_id
+    with sqlite3.connect(database) as connection:
+        projection = connection.execute(
+            """SELECT attention_artifact_cycle, attention_artifact_id
+            FROM lifecycle_status_projection"""
+        ).fetchone()
+    assert projection == (
+        (
+            '{"asset_class":"us_equity","cycle_type":"market_session",'
+            '"payload":{"trading_date":"2026-08-21"},'
+            '"payload_schema_version":1,"schema_version":1}'
+        ),
+        completed.attention_artifact.artifact_id,
+    )
+
+
 def test_status_rebuild_replaces_deleted_or_corrupt_projection_without_mutating_history(
     tmp_path: Path,
 ) -> None:
@@ -474,6 +535,7 @@ def test_status_rejects_corrupt_authoritative_history_instead_of_using_projectio
                    event_kind, completed_phase, universe_snapshot_id,
                    universe_snapshot, evidence_policy_id,
                    evidence_artifact_ids, evidence_refusal_ids,
+                   attention_artifact_id, attention_artifact,
                    event_envelope, recorded_at
             FROM lifecycle_events ORDER BY sequence
             """
@@ -489,13 +551,14 @@ def test_status_rejects_corrupt_authoritative_history_instead_of_using_projectio
                 event_kind, completed_phase, universe_snapshot_id,
                 universe_snapshot, evidence_policy_id,
                 evidence_artifact_ids, evidence_refusal_ids,
+                attention_artifact_id, attention_artifact,
                 event_envelope, recorded_at
             )
             """
         )
         connection.executemany(
             "INSERT INTO lifecycle_events VALUES "
-            "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             rows,
         )
         connection.execute(
@@ -654,7 +717,7 @@ def test_status_rejects_an_invalid_refusal_reason_for_a_partial_stream(tmp_path:
                 INSERT INTO advance_refusals
                 SELECT 2, idempotency_key, cycle_identity, reason_code,
                        evidence_policy_id, evidence_artifact_ids,
-                       evidence_refusal_ids, recorded_at
+                       evidence_refusal_ids, attention_refusal_reason, recorded_at
                 FROM advance_refusals
                 """,
             "refusal uniqueness is invalid",
@@ -677,17 +740,19 @@ def test_status_rejects_corrupt_refusal_history(
     with sqlite3.connect(database) as connection:
         rows = connection.execute(
             "SELECT refusal_id, idempotency_key, cycle_identity, reason_code, "
-            "evidence_policy_id, evidence_artifact_ids, evidence_refusal_ids, recorded_at "
+            "evidence_policy_id, evidence_artifact_ids, evidence_refusal_ids, "
+            "attention_refusal_reason, recorded_at "
             "FROM advance_refusals"
         ).fetchall()
         connection.execute("DROP TABLE advance_refusals")
         connection.execute(
             "CREATE TABLE advance_refusals "
             "(refusal_id, idempotency_key, cycle_identity, reason_code, "
-            "evidence_policy_id, evidence_artifact_ids, evidence_refusal_ids, recorded_at)"
+            "evidence_policy_id, evidence_artifact_ids, evidence_refusal_ids, "
+            "attention_refusal_reason, recorded_at)"
         )
         connection.executemany(
-            "INSERT INTO advance_refusals VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO advance_refusals VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             rows,
         )
         connection.execute(corruption)
@@ -708,24 +773,27 @@ def test_status_rejects_duplicate_unkeyed_refusal_authority(tmp_path: Path) -> N
     with sqlite3.connect(database) as connection:
         rows = connection.execute(
             "SELECT refusal_id, idempotency_key, cycle_identity, reason_code, "
-            "evidence_policy_id, evidence_artifact_ids, evidence_refusal_ids, recorded_at "
+            "evidence_policy_id, evidence_artifact_ids, evidence_refusal_ids, "
+            "attention_refusal_reason, recorded_at "
             "FROM advance_refusals"
         ).fetchall()
         connection.execute("DROP TABLE advance_refusals")
         connection.execute(
             "CREATE TABLE advance_refusals "
             "(refusal_id, idempotency_key, cycle_identity, reason_code, "
-            "evidence_policy_id, evidence_artifact_ids, evidence_refusal_ids, recorded_at)"
+            "evidence_policy_id, evidence_artifact_ids, evidence_refusal_ids, "
+            "attention_refusal_reason, recorded_at)"
         )
         connection.executemany(
-            "INSERT INTO advance_refusals VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO advance_refusals VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             rows,
         )
         connection.execute(
             """
             INSERT INTO advance_refusals
             SELECT 2, idempotency_key, cycle_identity, reason_code,
-                   evidence_policy_id, evidence_artifact_ids, evidence_refusal_ids, recorded_at
+                   evidence_policy_id, evidence_artifact_ids, evidence_refusal_ids,
+                   attention_refusal_reason, recorded_at
             FROM advance_refusals
             """
         )
@@ -894,6 +962,7 @@ def _replace_event_table(database: Path, statement: str) -> None:
                    event_kind, completed_phase, universe_snapshot_id,
                    universe_snapshot, evidence_policy_id,
                    evidence_artifact_ids, evidence_refusal_ids,
+                   attention_artifact_id, attention_artifact,
                    event_envelope, recorded_at
             FROM lifecycle_events ORDER BY stream_id, sequence
             """
@@ -909,13 +978,14 @@ def _replace_event_table(database: Path, statement: str) -> None:
                 event_kind, completed_phase, universe_snapshot_id,
                 universe_snapshot, evidence_policy_id,
                 evidence_artifact_ids, evidence_refusal_ids,
+                attention_artifact_id, attention_artifact,
                 event_envelope, recorded_at
             )
             """
         )
         connection.executemany(
             "INSERT INTO lifecycle_events VALUES "
-            "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             rows,
         )
         connection.execute(statement)

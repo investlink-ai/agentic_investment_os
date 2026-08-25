@@ -12,6 +12,11 @@ from enum import StrEnum
 from typing import TYPE_CHECKING, Self, TypeVar, assert_never
 
 from agentic_investment_os.adapters.recorded_universe import parse_persisted_universe_snapshot
+from agentic_investment_os.domain.attention import (
+    AttentionArtifact,
+    AttentionRefusalReason,
+    parse_attention_artifact,
+)
 from agentic_investment_os.domain.identity import (
     MarketSession,
     parse_decision_cycle_identity,
@@ -40,6 +45,7 @@ from agentic_investment_os.domain.lifecycle import (
     LifecyclePersistenceError,
     LifecycleRecord,
     LifecycleStatus,
+    PerformAttentionSelection,
     PerformEvidenceCapture,
     PinnedRunIdentity,
     decide_advance,
@@ -126,7 +132,7 @@ CREATE TABLE lifecycle_events (
     event_kind TEXT NOT NULL CHECK (
         event_kind IN (
             'advance_requested', 'phase_completed', 'run_inputs_pinned',
-            'universe_snapshotted', 'evidence_captured'
+            'universe_snapshotted', 'evidence_captured', 'attention_selected'
         )
     ),
     completed_phase TEXT,
@@ -139,6 +145,10 @@ CREATE TABLE lifecycle_events (
     ),
     evidence_artifact_ids TEXT,
     evidence_refusal_ids TEXT,
+    attention_artifact_id TEXT CHECK (
+        attention_artifact_id IS NULL OR length(attention_artifact_id) = 64
+    ),
+    attention_artifact TEXT,
     event_envelope TEXT NOT NULL,
     recorded_at TEXT NOT NULL,
     CHECK (
@@ -147,27 +157,44 @@ CREATE TABLE lifecycle_events (
             AND universe_snapshot IS NOT NULL
             AND evidence_policy_id IS NULL
             AND evidence_artifact_ids IS NULL
-            AND evidence_refusal_ids IS NULL)
+            AND evidence_refusal_ids IS NULL
+            AND attention_artifact_id IS NULL
+            AND attention_artifact IS NULL)
         OR (event_kind = 'universe_snapshotted'
             AND universe_snapshot_id IS NOT NULL
             AND universe_snapshot IS NULL
             AND evidence_policy_id IS NULL
             AND evidence_artifact_ids IS NULL
-            AND evidence_refusal_ids IS NULL)
+            AND evidence_refusal_ids IS NULL
+            AND attention_artifact_id IS NULL
+            AND attention_artifact IS NULL)
         OR (event_kind = 'evidence_captured'
             AND universe_snapshot_id IS NULL
             AND universe_snapshot IS NULL
             AND evidence_policy_id IS NOT NULL
             AND evidence_artifact_ids IS NOT NULL
-            AND evidence_refusal_ids = '[]')
+            AND evidence_refusal_ids = '[]'
+            AND attention_artifact_id IS NULL
+            AND attention_artifact IS NULL)
+        OR (event_kind = 'attention_selected'
+            AND universe_snapshot_id IS NULL
+            AND universe_snapshot IS NULL
+            AND evidence_policy_id IS NULL
+            AND evidence_artifact_ids IS NULL
+            AND evidence_refusal_ids IS NULL
+            AND attention_artifact_id IS NOT NULL
+            AND attention_artifact IS NOT NULL)
         OR (event_kind NOT IN (
-                'run_inputs_pinned', 'universe_snapshotted', 'evidence_captured'
+                'run_inputs_pinned', 'universe_snapshotted', 'evidence_captured',
+                'attention_selected'
             )
             AND universe_snapshot_id IS NULL
             AND universe_snapshot IS NULL
             AND evidence_policy_id IS NULL
             AND evidence_artifact_ids IS NULL
-            AND evidence_refusal_ids IS NULL)
+            AND evidence_refusal_ids IS NULL
+            AND attention_artifact_id IS NULL
+            AND attention_artifact IS NULL)
     ),
     PRIMARY KEY (stream_id, sequence),
     UNIQUE (idempotency_key, sequence)
@@ -189,7 +216,8 @@ CREATE TABLE advance_refusals (
             'missing_universe_input', 'invalid_universe_input',
             'stale_universe_input', 'contradictory_universe_input',
             'session_stream_conflict', 'idempotency_key_conflict',
-            'invalid_durable_state', 'evidence_capture_failed'
+            'invalid_durable_state', 'evidence_capture_failed',
+            'attention_selection_failed'
         )
     ),
     evidence_policy_id TEXT CHECK (
@@ -197,17 +225,31 @@ CREATE TABLE advance_refusals (
     ),
     evidence_artifact_ids TEXT,
     evidence_refusal_ids TEXT,
+    attention_refusal_reason TEXT CHECK (
+        attention_refusal_reason IS NULL OR attention_refusal_reason IN (
+            'missing_evidence', 'stale_evidence', 'contradictory_evidence',
+            'corrupt_evidence'
+        )
+    ),
     recorded_at TEXT NOT NULL,
     CHECK (
         (reason_code = 'evidence_capture_failed'
             AND evidence_policy_id IS NOT NULL
             AND evidence_artifact_ids IS NOT NULL
             AND evidence_refusal_ids IS NOT NULL
-            AND evidence_refusal_ids != '[]')
-        OR (reason_code != 'evidence_capture_failed'
+            AND evidence_refusal_ids != '[]'
+            AND attention_refusal_reason IS NULL)
+        OR (reason_code = 'attention_selection_failed'
+            AND evidence_policy_id IS NOT NULL
+            AND evidence_artifact_ids IS NOT NULL
+            AND evidence_artifact_ids != '[]'
+            AND evidence_refusal_ids = '[]'
+            AND attention_refusal_reason IS NOT NULL)
+        OR (reason_code NOT IN ('evidence_capture_failed', 'attention_selection_failed')
             AND evidence_policy_id IS NULL
             AND evidence_artifact_ids IS NULL
-            AND evidence_refusal_ids IS NULL)
+            AND evidence_refusal_ids IS NULL
+            AND attention_refusal_reason IS NULL)
     )
 ) STRICT
 """,
@@ -255,7 +297,7 @@ class _DatabaseOpenMode(StrEnum):
     EXISTING_ONLY = "rw"
 
 
-_CURRENT_DATABASE_VERSION = 6
+_CURRENT_DATABASE_VERSION = 7
 _CURRENT_SCHEMA_SIGNATURE = frozenset(" ".join(statement.split()) for statement in _CURRENT_SCHEMA)
 
 _PROJECTION_SCHEMA = """
@@ -274,7 +316,9 @@ CREATE TABLE lifecycle_status_projection (
     liveness TEXT NOT NULL,
     durable_reason TEXT,
     universe_snapshot_cycle TEXT,
-    universe_snapshot_id TEXT
+    universe_snapshot_id TEXT,
+    attention_artifact_cycle TEXT,
+    attention_artifact_id TEXT
 ) STRICT;
 """
 
@@ -480,7 +524,9 @@ class SQLiteLifecycleLedger:
         """Apply one pure lifecycle decision inside an append transaction."""
         recorded_at_value, timestamp = _canonical_write_timestamp(recorded_at)
 
-        def operation(connection: sqlite3.Connection) -> LifecycleDecision:
+        def operation(  # noqa: PLR0911 - preserve one transaction for all decisions.
+            connection: sqlite3.Connection,
+        ) -> LifecycleDecision:
             key = _command_key(command)
             refusals = _load_refusals(connection, command=command)
             terminal = decide_terminal_refusal(tuple(refusals), command)
@@ -506,7 +552,17 @@ class SQLiteLifecycleLedger:
                 return decide_evidence_refusal_replay(history, tuple(refusals), command)
             try:
                 history = LifecycleHistory(
-                    events=() if key is None else tuple(_load_events(connection, key=key)),
+                    events=(
+                        ()
+                        if key is None
+                        else tuple(
+                            _load_events(
+                                connection,
+                                key=key,
+                                include_attention_history=True,
+                            )
+                        )
+                    ),
                     conflicts=(() if key is None else tuple(_load_conflicts(connection, key=key))),
                     occupied_stream_ids=_occupied_stream_ids(connection, command),
                     next_refusal_sequence=next_refusal_sequence,
@@ -525,6 +581,8 @@ class SQLiteLifecycleLedger:
             if isinstance(decision, AdvanceReceipt):
                 return decision
             if isinstance(decision, PerformEvidenceCapture):
+                return decision
+            if isinstance(decision, PerformAttentionSelection):
                 return decision
             # Strict mypy proves this line unreachable; removing it is runtime-equivalent.
             assert_never(decision)  # pragma: no cover
@@ -575,6 +633,7 @@ def _load_events(
     connection: sqlite3.Connection,
     *,
     key: IdempotencyKey | None = None,
+    include_attention_history: bool = False,
 ) -> list[LifecycleEvent]:
     if key is None:
         rows = connection.execute(
@@ -586,9 +645,31 @@ def _load_events(
                    event_kind, completed_phase, universe_snapshot_id,
                    universe_snapshot, evidence_policy_id,
                    evidence_artifact_ids, evidence_refusal_ids,
+                   attention_artifact_id, attention_artifact,
                    event_envelope, recorded_at
             FROM lifecycle_events ORDER BY stream_id, sequence
             """
+        ).fetchall()
+    elif include_attention_history:
+        rows = connection.execute(
+            """
+            SELECT stream_id, sequence, idempotency_key, cycle_identity, mode,
+                   configuration_version, configuration_hash, run_id,
+                   data_regime, evidence_cutoff, instrument_snapshot_hash,
+                   position_snapshot_hash, eligibility_policy_hash,
+                   event_kind, completed_phase, universe_snapshot_id,
+                   universe_snapshot, evidence_policy_id,
+                   evidence_artifact_ids, evidence_refusal_ids,
+                   attention_artifact_id, attention_artifact,
+                   event_envelope, recorded_at
+            FROM lifecycle_events
+            WHERE idempotency_key = ? OR stream_id IN (
+                SELECT stream_id FROM lifecycle_events
+                WHERE event_kind = 'attention_selected'
+            )
+            ORDER BY stream_id, sequence
+            """,
+            (key.value,),
         ).fetchall()
     else:
         rows = connection.execute(
@@ -600,6 +681,7 @@ def _load_events(
                    event_kind, completed_phase, universe_snapshot_id,
                    universe_snapshot, evidence_policy_id,
                    evidence_artifact_ids, evidence_refusal_ids,
+                   attention_artifact_id, attention_artifact,
                    event_envelope, recorded_at
             FROM lifecycle_events WHERE idempotency_key = ? ORDER BY sequence
             """,
@@ -626,7 +708,7 @@ def _load_event(row: tuple[object, ...]) -> LifecycleEvent:
     instrument_snapshot_hash = _hash(row[10], "instrument_snapshot_hash")
     position_snapshot_hash = _hash(row[11], "position_snapshot_hash")
     eligibility_policy_hash = _hash(row[12], "eligibility_policy_hash")
-    recorded_at = _canonical_timestamp(row[21], "recorded_at")
+    recorded_at = _canonical_timestamp(row[23], "recorded_at")
     if evidence_cutoff.value > recorded_at.value:
         raise InvalidLifecycleStateError(_FUTURE_EVIDENCE_CUTOFF)
     try:
@@ -642,6 +724,12 @@ def _load_event(row: tuple[object, ...]) -> LifecycleEvent:
         recorded_at=recorded_at,
     )
     evidence_capture = _load_evidence_capture(row[17], row[18], row[19], event_kind=event_kind)
+    attention_artifact = _load_attention_artifact(
+        row[20],
+        row[21],
+        event_kind=event_kind,
+        recorded_at=recorded_at,
+    )
     event = LifecycleEvent(
         stream_id=stream_id,
         sequence=sequence,
@@ -662,8 +750,9 @@ def _load_event(row: tuple[object, ...]) -> LifecycleEvent:
         prepared_universe_snapshot=prepared_snapshot,
         published_universe_snapshot_id=published_snapshot_id,
         evidence_capture=evidence_capture,
+        attention_artifact=attention_artifact,
     )
-    envelope = _text(row[20], "event_envelope")
+    envelope = _text(row[22], "event_envelope")
     if _canonical_json(event.to_envelope(recorded_at)) != envelope:
         raise InvalidLifecycleStateError(_INVALID_CHECKPOINT_ORDER)
     return event
@@ -743,6 +832,34 @@ def _parse_evidence_capture(
         raise InvalidLifecycleStateError(_INVALID_CHECKPOINT_ORDER) from error
 
 
+def _load_attention_artifact(
+    artifact_id_value: object,
+    artifact_value: object,
+    *,
+    event_kind: LifecycleEventKind,
+    recorded_at: UtcInstant,
+) -> AttentionArtifact | None:
+    if event_kind is not LifecycleEventKind.ATTENTION_SELECTED:
+        if artifact_id_value is not None or artifact_value is not None:
+            raise InvalidLifecycleStateError(_INVALID_CHECKPOINT_ORDER)
+        return None
+    artifact_id = _hash(artifact_id_value, "attention_artifact_id")
+    encoded = _text(artifact_value, "attention_artifact")
+    try:
+        decoded: object = json.loads(encoded)
+    except (ValueError, RecursionError) as error:
+        raise InvalidLifecycleStateError(_INVALID_CHECKPOINT_ORDER) from error
+    artifact = parse_attention_artifact(decoded)
+    if (
+        artifact is None
+        or artifact.artifact_id != artifact_id
+        or artifact.available_at != recorded_at
+        or _canonical_json(artifact.to_payload()) != encoded
+    ):
+        raise InvalidLifecycleStateError(_INVALID_CHECKPOINT_ORDER)
+    return artifact
+
+
 def _hash_tuple_json(value: object, field: str) -> tuple[str, ...]:
     encoded = _text(value, field)
     try:
@@ -768,7 +885,8 @@ def _load_refusals(
         rows = connection.execute(
             """
             SELECT refusal_id, idempotency_key, cycle_identity, reason_code,
-                   evidence_policy_id, evidence_artifact_ids, evidence_refusal_ids, recorded_at
+                   evidence_policy_id, evidence_artifact_ids, evidence_refusal_ids,
+                   attention_refusal_reason, recorded_at
             FROM advance_refusals ORDER BY refusal_id
             """
         ).fetchall()
@@ -779,7 +897,8 @@ def _load_refusals(
             rows = connection.execute(
                 """
                 SELECT refusal_id, idempotency_key, cycle_identity, reason_code,
-                       evidence_policy_id, evidence_artifact_ids, evidence_refusal_ids, recorded_at
+                       evidence_policy_id, evidence_artifact_ids, evidence_refusal_ids,
+                       attention_refusal_reason, recorded_at
                 FROM advance_refusals
                 WHERE idempotency_key IS NULL AND reason_code = ?
                     AND cycle_identity IS ?
@@ -794,7 +913,8 @@ def _load_refusals(
             rows = connection.execute(
                 """
                 SELECT refusal_id, idempotency_key, cycle_identity, reason_code,
-                       evidence_policy_id, evidence_artifact_ids, evidence_refusal_ids, recorded_at
+                       evidence_policy_id, evidence_artifact_ids, evidence_refusal_ids,
+                       attention_refusal_reason, recorded_at
                 FROM advance_refusals WHERE idempotency_key = ? ORDER BY refusal_id
                 """,
                 (refusal_key.value,),
@@ -803,7 +923,8 @@ def _load_refusals(
         rows = connection.execute(
             """
             SELECT refusal_id, idempotency_key, cycle_identity, reason_code,
-                   evidence_policy_id, evidence_artifact_ids, evidence_refusal_ids, recorded_at
+                   evidence_policy_id, evidence_artifact_ids, evidence_refusal_ids,
+                   attention_refusal_reason, recorded_at
             FROM advance_refusals WHERE idempotency_key = ? ORDER BY refusal_id
             """,
             (command.request.idempotency_key.value,),
@@ -820,8 +941,18 @@ def _load_refusals(
             row[6],
             reason=reason,
         )
-        _canonical_timestamp(row[7], "recorded_at")
-        refusals.append(DurableAdvanceRefusal(sequence, key, reason, cycle, evidence_capture))
+        attention_refusal_reason = _load_attention_refusal_reason(row[7], reason=reason)
+        _canonical_timestamp(row[8], "recorded_at")
+        refusals.append(
+            DurableAdvanceRefusal(
+                sequence,
+                key,
+                reason,
+                cycle,
+                evidence_capture,
+                attention_refusal_reason,
+            )
+        )
     return refusals
 
 
@@ -832,7 +963,10 @@ def _load_refusal_evidence_capture(
     *,
     reason: AdvanceFailureReason,
 ) -> EvidenceCaptureCheckpoint | None:
-    if reason is not AdvanceFailureReason.EVIDENCE_CAPTURE_FAILED:
+    if reason not in (
+        AdvanceFailureReason.EVIDENCE_CAPTURE_FAILED,
+        AdvanceFailureReason.ATTENTION_SELECTION_FAILED,
+    ):
         if policy_id_value is not None:
             raise InvalidLifecycleStateError(_INVALID_REFUSAL_KEY)
         if artifact_ids_value is not None:
@@ -845,9 +979,27 @@ def _load_refusal_evidence_capture(
         artifact_ids_value,
         refusal_ids_value,
     )
-    if checkpoint.is_complete:
+    if (reason is AdvanceFailureReason.EVIDENCE_CAPTURE_FAILED and checkpoint.is_complete) or (
+        reason is AdvanceFailureReason.ATTENTION_SELECTION_FAILED and not checkpoint.is_complete
+    ):
         raise InvalidLifecycleStateError(_INVALID_REFUSAL_KEY)
     return checkpoint
+
+
+def _load_attention_refusal_reason(
+    value: object,
+    *,
+    reason: AdvanceFailureReason,
+) -> AttentionRefusalReason | None:
+    if reason is not AdvanceFailureReason.ATTENTION_SELECTION_FAILED:
+        if value is not None:
+            raise InvalidLifecycleStateError(_INVALID_REFUSAL_KEY)
+        return None
+    text = _text(value, "attention_refusal_reason")
+    try:
+        return AttentionRefusalReason(text)
+    except ValueError as error:
+        raise InvalidLifecycleStateError(_INVALID_REFUSAL_KEY) from error
 
 
 def _load_conflicts(
@@ -928,8 +1080,9 @@ def _append_record(
                 event_kind, completed_phase, universe_snapshot_id,
                 universe_snapshot, evidence_policy_id,
                 evidence_artifact_ids, evidence_refusal_ids,
+                attention_artifact_id, attention_artifact,
                 event_envelope, recorded_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 record.stream_id,
@@ -968,6 +1121,16 @@ def _append_record(
                     if record.evidence_capture is None
                     else _canonical_json(list(record.evidence_capture.refusal_ids))
                 ),
+                (
+                    None
+                    if record.attention_artifact is None
+                    else record.attention_artifact.artifact_id
+                ),
+                (
+                    None
+                    if record.attention_artifact is None
+                    else _canonical_json(record.attention_artifact.to_payload())
+                ),
                 _canonical_json(record.to_envelope(recorded_at)),
                 timestamp,
             ),
@@ -978,8 +1141,9 @@ def _append_record(
             """
             INSERT INTO advance_refusals (
                 refusal_id, idempotency_key, cycle_identity, reason_code,
-                evidence_policy_id, evidence_artifact_ids, evidence_refusal_ids, recorded_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                evidence_policy_id, evidence_artifact_ids, evidence_refusal_ids,
+                attention_refusal_reason, recorded_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 record.sequence,
@@ -996,6 +1160,11 @@ def _append_record(
                     None
                     if record.evidence_capture is None
                     else _canonical_json(list(record.evidence_capture.refusal_ids))
+                ),
+                (
+                    None
+                    if record.attention_refusal_reason is None
+                    else record.attention_refusal_reason.value
                 ),
                 timestamp,
             ),
@@ -1027,8 +1196,9 @@ def _replace_status_projection(
             singleton, active_phase, last_completed_cycle, run_id,
             configuration_version, configuration_hash, data_regime, evidence_cutoff,
             instrument_snapshot_hash, position_snapshot_hash, eligibility_policy_hash,
-            liveness, durable_reason, universe_snapshot_cycle, universe_snapshot_id
-        ) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            liveness, durable_reason, universe_snapshot_cycle, universe_snapshot_id,
+            attention_artifact_cycle, attention_artifact_id
+        ) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             (
@@ -1057,6 +1227,12 @@ def _replace_status_projection(
                 else _canonical_json(status.universe_snapshot_cycle.to_payload())
             ),
             status.universe_snapshot_id,
+            (
+                None
+                if status.attention_artifact_cycle is None
+                else _canonical_json(status.attention_artifact_cycle.to_payload())
+            ),
+            status.attention_artifact_id,
         ),
     )
 

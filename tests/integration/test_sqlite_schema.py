@@ -19,19 +19,21 @@ from agentic_investment_os.domain.lifecycle import (
     InvalidLifecycleStateError,
     LifecycleEvent,
     LifecyclePersistenceError,
+    PerformAttentionSelection,
     PerformEvidenceCapture,
     PinnedRunIdentity,
 )
 from agentic_investment_os.domain.temporal import UtcInstant
+from tests._attention import attention_artifact
 from tests._evidence import evidence_capture_checkpoint
 from tests._universe import advance_command
 
-CURRENT_DATABASE_VERSION = 6
+CURRENT_DATABASE_VERSION = 7
 CONFIGURATION_HASH = "a" * 64
 RECORDED_AT = "2026-08-21T22:00:00.000000+00:00"
 MAX_DIAGNOSTIC_LENGTH = 100
 SQLiteValue = str | bytes | int | float | None
-CAPTURE_EVENT_SEQUENCE = 4
+ATTENTION_EVENT_SEQUENCE = 5
 
 
 class InvalidDatabaseVersionCursor(sqlite3.Cursor):
@@ -93,12 +95,24 @@ def _populate_current_history(database: Path) -> tuple[AdvanceRequest, PinnedRun
     ledger = SQLiteLifecycleLedger(database)
     attempt = AdvanceAttempt()
     recorded_at = UtcInstant.parse(RECORDED_AT)
-    for expected_sequence in range(5):
+    capture = evidence_capture_checkpoint()
+    for expected_sequence in range(6):
         decision = ledger.advance_step(command, attempt, recorded_at)
         if isinstance(decision, PerformEvidenceCapture):
-            command = replace(command, evidence_capture=evidence_capture_checkpoint())
+            command = replace(command, evidence_capture=capture)
             decision = ledger.advance_step(command, attempt, recorded_at)
-        if expected_sequence < CAPTURE_EVENT_SEQUENCE:
+        if isinstance(decision, PerformAttentionSelection):
+            command = replace(
+                command,
+                attention_selection=attention_artifact(
+                    identity,
+                    command.universe_snapshot,
+                    capture,
+                    decision.attention_history,
+                ),
+            )
+            decision = ledger.advance_step(command, attempt, recorded_at)
+        if expected_sequence < ATTENTION_EVENT_SEQUENCE:
             assert isinstance(decision, AppendLifecycleRecord)
             attempt = decision.attempt
         else:

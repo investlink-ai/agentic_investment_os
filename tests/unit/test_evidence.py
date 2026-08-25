@@ -143,6 +143,13 @@ class _MemoryVault:
     def stored_records(self) -> tuple[EvidenceStoredRecord, ...]:
         return ()
 
+    def stored_records_for_artifacts(
+        self,
+        artifact_ids: tuple[str, ...],
+    ) -> tuple[EvidenceStoredRecord, ...]:
+        _ = artifact_ids
+        return ()
+
 
 @dataclass(frozen=True)
 class _FixedSource:

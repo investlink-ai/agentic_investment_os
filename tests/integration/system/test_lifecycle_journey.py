@@ -174,7 +174,7 @@ def test_lifecycle_journey_resumes_replays_and_rebuilds_status_across_processes(
     resumed = _advance_observation(_run_process("advance", state_root))
 
     assert resumed.disposition == "advanced"
-    assert resumed.completed_phase == "CaptureEvidence"
+    assert resumed.completed_phase == "SelectAttention"
     assert resumed.recovery == "resumed"
     assert resumed.configuration_version == 1
     assert len(resumed.run_id) == SHA256_HEX_LENGTH
@@ -187,6 +187,7 @@ def test_lifecycle_journey_resumes_replays_and_rebuilds_status_across_processes(
         (2, "run_inputs_pinned", "PinRunInputs"),
         (3, "universe_snapshotted", "SnapshotUniverse"),
         (4, "evidence_captured", "CaptureEvidence"),
+        (5, "attention_selected", "SelectAttention"),
     ]
     assert {str(row[3]) for row in completed_history} == {resumed.run_id}
     assert {str(row[4]) for row in completed_history} == {resumed.configuration_hash}

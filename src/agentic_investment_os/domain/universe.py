@@ -638,6 +638,32 @@ class UniverseSnapshot:
     inputs: UniverseInputs
     subjects: tuple[UniverseSubject, ...]
 
+    @property
+    def attention_subjects(self) -> tuple[UniverseSubject, ...]:
+        """Return eligible, held, and explicitly excluded equities for attention transitions."""
+        subjects_by_identity = {
+            canonical_instrument_bytes(subject.identity): subject for subject in self.subjects
+        }
+        for instrument in self.inputs.instrument_snapshot.instruments:
+            key = canonical_instrument_bytes(instrument.identity)
+            if key in subjects_by_identity or not isinstance(instrument, EquityInstrument):
+                continue
+            reasons = _exclusion_reasons(instrument, self.policy)
+            subjects_by_identity[key] = UniverseSubject(
+                identity=instrument.identity,
+                aliases=instrument.aliases,
+                is_position=False,
+                eligible_for_new_entry=False,
+                position_disposition=PositionDisposition.NOT_APPLICABLE,
+                exclusion_reasons=reasons,
+            )
+        return tuple(
+            sorted(
+                subjects_by_identity.values(),
+                key=lambda subject: canonical_instrument_bytes(subject.identity),
+            )
+        )
+
     def to_payload(self) -> dict[str, object]:
         material = _universe_snapshot_envelope(
             snapshot_id=self.snapshot_id,

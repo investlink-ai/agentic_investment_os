@@ -220,6 +220,39 @@ class FilesystemEvidenceVault:
         self._validate_source_bindings(ordered)
         return ordered
 
+    def stored_records_for_artifacts(
+        self,
+        artifact_ids: tuple[str, ...],
+    ) -> tuple[EvidenceStoredRecord, ...]:
+        """Reconstruct and validate only the exact artifact set named by a checkpoint."""
+        requested = set(artifact_ids)
+        if (
+            type(artifact_ids) is not tuple
+            or len(requested) != len(artifact_ids)
+            or any(not is_sha256(artifact_id) for artifact_id in artifact_ids)
+        ):
+            raise EvidencePersistenceError(_VAULT_INVALID)
+        records: dict[str, EvidenceStoredRecord] = {}
+        for path in _published_files(self._outcomes):
+            outcome = _load_outcome(path)
+            artifact = outcome.artifact
+            if artifact is None or artifact.artifact_id not in requested:
+                continue
+            intent = _load_intent(self._intents / f"{outcome.intent_id}.json")
+            _validate_association(intent, outcome)
+            content = _load_content(self._contents / artifact.content_hash, artifact.content_hash)
+            try:
+                record = EvidenceStoredRecord(artifact, content)
+            except InvalidEvidenceError as error:  # pragma: no cover - load validates both hashes.
+                raise EvidencePersistenceError(_VAULT_INVALID) from error
+            previous = records.get(artifact.artifact_id)
+            if previous is not None and previous != record:  # pragma: no cover - SHA-256 identity.
+                raise EvidencePersistenceError(_VAULT_INVALID)
+            records[artifact.artifact_id] = record
+        ordered = tuple(records[key] for key in sorted(records))
+        self._validate_source_bindings(ordered)
+        return ordered
+
     def validate_references(
         self,
         checkpoints: tuple[EvidenceCaptureReference, ...],

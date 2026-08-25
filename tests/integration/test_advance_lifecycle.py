@@ -10,6 +10,7 @@ from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
+from shutil import copytree
 from tempfile import TemporaryDirectory
 from typing import Literal, override
 
@@ -23,6 +24,7 @@ from agentic_investment_os.adapters.sqlite_lifecycle import (
     prepare_runtime_database,
 )
 from agentic_investment_os.application.lifecycle import Advance
+from agentic_investment_os.domain.attention import AttentionRefusalReason
 from agentic_investment_os.domain.identity import (
     CryptoDecisionWindow,
     EquityInstrumentIdentity,
@@ -42,13 +44,13 @@ from agentic_investment_os.domain.lifecycle import (
     DurableAdvanceRefusal,
     InputRefusal,
     InvalidLifecycleStateError,
-    LifecycleCheckpoint,
     LifecycleCommand,
     LifecycleDecision,
     LifecycleEvent,
     LifecyclePersistenceError,
     LifecyclePhase,
     LifecycleStatus,
+    PerformAttentionSelection,
     PerformEvidenceCapture,
     PinnedRunIdentity,
 )
@@ -60,6 +62,7 @@ from agentic_investment_os.entrypoints.configuration import (
     ConfigurationSource,
 )
 from agentic_investment_os.entrypoints.lifecycle import SystemClock, configure_advance
+from tests._attention import attention_artifact
 from tests._evidence import (
     evidence_capture_checkpoint,
     materialized_evidence_capture_checkpoint,
@@ -79,7 +82,7 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 SHA256_HEX_LENGTH = 64
 PRIVATE_DIRECTORY_MODE = 0o700
 PRIVATE_FILE_MODE = 0o600
-PINNED_EVENT_COUNT = 5
+PINNED_EVENT_COUNT = 6
 RECEIPT_FIELD_COUNT = 4
 BASE_EVIDENCE_ARTIFACT_COUNT = 2
 COMPLETE_EVIDENCE_ARTIFACT_COUNT = 7
@@ -186,6 +189,7 @@ CORRUPTIONS = {
                    event_kind, completed_phase, universe_snapshot_id,
                    universe_snapshot, evidence_policy_id,
                    evidence_artifact_ids, evidence_refusal_ids,
+                   attention_artifact_id, attention_artifact,
                    event_envelope, recorded_at
             FROM lifecycle_events WHERE sequence = 2
             """,
@@ -519,6 +523,34 @@ CORRUPTIONS = {
         (NONCANONICAL_EVIDENCE_IDENTIFIERS_SQL,),
         "lifecycle stream checkpoint order is invalid",
     ),
+    "attention_artifact_on_wrong_event": (
+        (
+            (
+                "UPDATE lifecycle_events SET attention_artifact_id = "
+                "'ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff', "
+                "attention_artifact = '{}' WHERE sequence = 0"
+            ),
+        ),
+        "lifecycle stream checkpoint order is invalid",
+    ),
+    "malformed_attention_artifact": (
+        (
+            (
+                "UPDATE lifecycle_events SET attention_artifact = '{' "
+                "WHERE event_kind = 'attention_selected'"
+            ),
+        ),
+        "lifecycle stream checkpoint order is invalid",
+    ),
+    "invalid_attention_artifact": (
+        (
+            (
+                "UPDATE lifecycle_events SET attention_artifact = '{}' "
+                "WHERE event_kind = 'attention_selected'"
+            ),
+        ),
+        "lifecycle stream checkpoint order is invalid",
+    ),
 }
 
 
@@ -564,6 +596,12 @@ ROLLBACK_TRIGGERS = {
         BEFORE INSERT ON lifecycle_events
         WHEN NEW.event_kind = 'evidence_captured'
         BEGIN SELECT RAISE(ABORT, 'injected evidence capture failure'); END
+    """,
+    "attention_selected": """
+        CREATE TRIGGER fail_attention_selected_before_insert
+        BEFORE INSERT ON lifecycle_events
+        WHEN NEW.event_kind = 'attention_selected'
+        BEGIN SELECT RAISE(ABORT, 'injected attention selection failure'); END
     """,
     "advance_refusal": """
         CREATE TRIGGER fail_advance_refusal_before_insert
@@ -747,15 +785,21 @@ class RacingStartLedger:
 def _attempt_operation(command: LifecycleCommand, attempt: AdvanceAttempt) -> str:
     if isinstance(command, InputRefusal):
         return "refuse"
-    return {None: "start", 0: "reconcile", 1: "pin", 2: "snapshot", 3: "evidence"}.get(
-        attempt.last_sequence,
-        "evidence",
-    )
+    return {
+        None: "start",
+        0: "reconcile",
+        1: "pin",
+        2: "snapshot",
+        3: "evidence",
+        4: "attention",
+    }.get(attempt.last_sequence, "attention")
 
 
 def _decision_operation(decision: LifecycleDecision, fallback: str) -> str:
     if isinstance(decision, PerformEvidenceCapture):
         return "capture_effect"
+    if isinstance(decision, PerformAttentionSelection):
+        return "attention_effect"
     if not isinstance(decision, AppendLifecycleRecord):
         return fallback
     if isinstance(decision.record, DurableAdvanceRefusal):
@@ -763,9 +807,14 @@ def _decision_operation(decision: LifecycleDecision, fallback: str) -> str:
     if isinstance(decision.record, DurableAdvanceConflict):
         return "start"
     assert isinstance(decision.record, LifecycleEvent)
-    return {0: "start", 1: "reconcile", 2: "pin", 3: "snapshot", 4: "evidence"}[
-        decision.record.sequence
-    ]
+    return {
+        0: "start",
+        1: "reconcile",
+        2: "pin",
+        3: "snapshot",
+        4: "evidence",
+        5: "attention",
+    }[decision.record.sequence]
 
 
 def _reference_mapping(value: object) -> dict[str, object]:
@@ -996,6 +1045,11 @@ class _LifecycleReferenceModel:
             return self._failed(AdvanceFailureReason.IDEMPOTENCY_KEY_CONFLICT, cycle)
         if current_reason is not None and reason is not current_reason:
             return self._failed(AdvanceFailureReason.IDEMPOTENCY_KEY_CONFLICT, cycle)
+        if reason is AdvanceFailureReason.ATTENTION_SELECTION_FAILED:
+            stream = self.streams.get(key)
+            if stream is None:  # pragma: no cover - reference-model invariant.
+                raise AssertionError
+            return self._attention_failed(stream)
         return self._failed(reason, cycle)
 
     def _advance_valid(
@@ -1007,6 +1061,14 @@ class _LifecycleReferenceModel:
         if stream is not None:
             if stream.session != session:
                 return self._record_idempotency_conflict(key, stream, session)
+            if stream.events < PINNED_EVENT_COUNT and any(
+                candidate.events == PINNED_EVENT_COUNT and candidate.session > session
+                for candidate in self.streams.values()
+            ):
+                cycle = MarketSession(date.fromisoformat(session))
+                stream.events = PINNED_EVENT_COUNT - 1
+                self.refusals[key] = AdvanceFailureReason.ATTENTION_SELECTION_FAILED, cycle
+                return self._attention_failed(stream)
             recovery = (
                 AdvanceRecovery.PREVIOUSLY_COMPLETED
                 if stream.events == PINNED_EVENT_COUNT
@@ -1068,6 +1130,22 @@ class _LifecycleReferenceModel:
         return AdvanceReceipt.failed_closed(reason, cycle=cycle)
 
     @staticmethod
+    def _attention_failed(stream: _ReferenceStream) -> AdvanceReceipt:
+        identity = stream.pinned_run_identity
+        checkpoint = materialized_evidence_capture_checkpoint(
+            run_id=identity.run_id,
+            universe_snapshot_id=stream.universe_snapshot_id,
+            cutoff=identity.evidence_cutoff,
+            data_regime=identity.data_regime,
+        )
+        return AdvanceReceipt.failed_closed(
+            AdvanceFailureReason.ATTENTION_SELECTION_FAILED,
+            cycle=identity.cycle,
+            evidence_capture=checkpoint,
+            attention_refusal_reason=AttentionRefusalReason.CONTRADICTORY_EVIDENCE,
+        )
+
+    @staticmethod
     def _advanced(stream: _ReferenceStream, recovery: AdvanceRecovery) -> AdvanceReceipt:
         identity = stream.pinned_run_identity
         checkpoint = materialized_evidence_capture_checkpoint(
@@ -1076,16 +1154,15 @@ class _LifecycleReferenceModel:
             cutoff=identity.evidence_cutoff,
             data_regime=identity.data_regime,
         )
-        return AdvanceReceipt(
-            disposition=AdvanceDisposition.ADVANCED,
-            completed_phase=LifecycleCheckpoint.equity(LifecyclePhase.CAPTURE_EVIDENCE),
-            pinned_run_identity=stream.pinned_run_identity,
-            failure_reason=None,
-            recovery=recovery,
-            universe_snapshot_id=stream.universe_snapshot_id,
-            recorded_at=UtcInstant.from_datetime(RECORDED_AT),
-            evidence_policy_id=checkpoint.policy_id,
-            evidence_artifact_ids=checkpoint.artifact_ids,
+        snapshot = universe_snapshot(identity)
+        assert snapshot.snapshot_id == stream.universe_snapshot_id
+        return AdvanceReceipt.advanced(
+            identity,
+            snapshot,
+            recovery,
+            UtcInstant.from_datetime(RECORDED_AT),
+            checkpoint,
+            attention_artifact(identity, snapshot, checkpoint),
         )
 
     def _stream(self, session: str, events: int) -> _ReferenceStream:
@@ -1255,7 +1332,7 @@ def test_advance_pins_one_stream_and_reconstructs_its_receipt_after_reopen(
     assert first.pinned_run_identity == replay.pinned_run_identity
     assert first.disposition is AdvanceDisposition.ADVANCED
     assert first.completed_phase is not None
-    assert first.completed_phase.phase is LifecyclePhase.CAPTURE_EVIDENCE
+    assert first.completed_phase.phase is LifecyclePhase.SELECT_ATTENTION
     assert first.pinned_run_identity is not None
     assert len(first.pinned_run_identity.run_id) == SHA256_HEX_LENGTH
     assert len(first.pinned_run_identity.configuration_hash) == SHA256_HEX_LENGTH
@@ -1266,6 +1343,7 @@ def test_advance_pins_one_stream_and_reconstructs_its_receipt_after_reopen(
         ("run_inputs_pinned", "PinRunInputs"),
         ("universe_snapshotted", "SnapshotUniverse"),
         ("evidence_captured", "CaptureEvidence"),
+        ("attention_selected", "SelectAttention"),
     ]
     assert stat.S_IMODE(state_root.stat().st_mode) == PRIVATE_DIRECTORY_MODE
     assert stat.S_IMODE((state_root / "lifecycle.sqlite3").stat().st_mode) == PRIVATE_FILE_MODE
@@ -1412,7 +1490,9 @@ def test_disabled_crypto_cycle_is_refused_before_authoritative_state_changes(
         ("snapshot", "before", 3, AdvanceRecovery.RESUMED),
         ("snapshot", "after", 4, AdvanceRecovery.RESUMED),
         ("evidence", "before", 4, AdvanceRecovery.RESUMED),
-        ("evidence", "after", 5, AdvanceRecovery.PREVIOUSLY_COMPLETED),
+        ("evidence", "after", 5, AdvanceRecovery.RESUMED),
+        ("attention", "before", 5, AdvanceRecovery.RESUMED),
+        ("attention", "after", 6, AdvanceRecovery.PREVIOUSLY_COMPLETED),
     ],
 )
 def test_fresh_process_resumes_at_every_universe_snapshot_write_boundary(
@@ -1434,6 +1514,8 @@ def test_fresh_process_resumes_at_every_universe_snapshot_write_boundary(
         enabled_asset_classes=capability.enabled_asset_classes,
         universe_policy=capability.universe_policy,
         evidence_capture=capability.evidence_capture,
+        attention_policy=capability.attention_policy,
+        attention_inputs=capability.attention_inputs,
         clock=capability.clock,
     )
 
@@ -1451,10 +1533,94 @@ def test_fresh_process_resumes_at_every_universe_snapshot_write_boundary(
     )
 
     assert disposition == AdvanceDisposition.ADVANCED.value
-    assert phase == LifecyclePhase.CAPTURE_EVIDENCE.value
+    assert phase == LifecyclePhase.SELECT_ATTENTION.value
     assert recovery == expected_recovery.value
     assert len(run_id) == SHA256_HEX_LENGTH
     assert len(_events(database)) == PINNED_EVENT_COUNT
+
+
+def test_attention_retry_keeps_selection_identity_when_publication_time_changes(
+    tmp_path: Path,
+) -> None:
+    state_root = tmp_path / "partial"
+    capability = _configure(state_root)
+    ledger = capability.ledger
+    assert isinstance(ledger, SQLiteLifecycleLedger)
+    interrupted = replace(
+        capability,
+        ledger=InterruptingLedger(ledger, "attention", "before"),
+    )
+    cycle = _cycle_payload("2026-08-21")
+
+    with pytest.raises(SimulatedInterruptionError):
+        interrupted(
+            cycle=cycle,
+            mode="champion",
+            idempotency_key="changing-clock-retry",
+        )
+
+    first_root = copytree(state_root, tmp_path / "first-publication")
+    later_root = copytree(state_root, tmp_path / "later-publication")
+    first_time = RECORDED_AT
+    later_time = RECORDED_AT + timedelta(seconds=1)
+    first_capability = replace(
+        capability,
+        ledger=SQLiteLifecycleLedger(first_root / "lifecycle.sqlite3"),
+        clock=FixedClock(first_time),
+    )
+    later_capability = replace(
+        capability,
+        ledger=SQLiteLifecycleLedger(later_root / "lifecycle.sqlite3"),
+        clock=FixedClock(later_time),
+    )
+    first = first_capability(
+        cycle=cycle,
+        mode="champion",
+        idempotency_key="changing-clock-retry",
+    )
+    later = later_capability(
+        cycle=cycle,
+        mode="champion",
+        idempotency_key="changing-clock-retry",
+    )
+
+    assert first.recovery is AdvanceRecovery.RESUMED
+    assert later.recovery is AdvanceRecovery.RESUMED
+    assert first.attention_artifact is not None
+    assert later.attention_artifact is not None
+    assert later.attention_artifact.artifact_id == first.attention_artifact.artifact_id
+    assert later.attention_artifact.content_hash != first.attention_artifact.content_hash
+    assert later.attention_artifact.available_at == UtcInstant.from_datetime(later_time)
+    assert first.attention_artifact.available_at == UtcInstant.from_datetime(first_time)
+    assert later.attention_artifact.candidate_cards == first.attention_artifact.candidate_cards
+    assert later.attention_artifact.dossier_requests == first.attention_artifact.dossier_requests
+    assert (
+        later.attention_artifact.resource_accounting == first.attention_artifact.resource_accounting
+    )
+
+    after_first = first_capability(
+        cycle=_cycle_payload("2026-08-22"),
+        mode="champion",
+        idempotency_key="after-changing-clock-retry",
+    )
+    after_later = later_capability(
+        cycle=_cycle_payload("2026-08-22"),
+        mode="champion",
+        idempotency_key="after-changing-clock-retry",
+    )
+
+    assert after_first.attention_artifact is not None
+    assert after_later.attention_artifact is not None
+    assert after_later.attention_artifact.history_fingerprint == (
+        after_first.attention_artifact.history_fingerprint
+    )
+    assert after_later.attention_artifact.artifact_id == after_first.attention_artifact.artifact_id
+    assert after_later.attention_artifact.candidate_cards == (
+        after_first.attention_artifact.candidate_cards
+    )
+    assert after_later.attention_artifact.resource_accounting == (
+        after_first.attention_artifact.resource_accounting
+    )
 
 
 @pytest.mark.parametrize(
@@ -1489,6 +1655,8 @@ def test_fresh_process_recovers_at_each_refusal_write_boundary(
         enabled_asset_classes=capability.enabled_asset_classes,
         universe_policy=capability.universe_policy,
         evidence_capture=capability.evidence_capture,
+        attention_policy=capability.attention_policy,
+        attention_inputs=capability.attention_inputs,
         clock=capability.clock,
     )
 
@@ -1545,6 +1713,8 @@ def test_fresh_process_recovers_at_each_completed_conflict_write_boundary(
         enabled_asset_classes=capability.enabled_asset_classes,
         universe_policy=capability.universe_policy,
         evidence_capture=capability.evidence_capture,
+        attention_policy=capability.attention_policy,
+        attention_inputs=capability.attention_inputs,
         clock=capability.clock,
     )
 
@@ -1597,6 +1767,8 @@ def test_duplicate_delivery_reports_progress_committed_by_the_winner_as_resumed(
         enabled_asset_classes=capability.enabled_asset_classes,
         universe_policy=capability.universe_policy,
         evidence_capture=capability.evidence_capture,
+        attention_policy=capability.attention_policy,
+        attention_inputs=capability.attention_inputs,
         clock=capability.clock,
     )
 
@@ -1637,6 +1809,9 @@ class LifecycleStateMachine(RuleBasedStateMachine):
     def _advance(self, *, session: str, mode: str, key: str) -> None:
         expected = self.reference.advance(session=session, mode=mode, key=key)
         observed = self.capability(cycle=_cycle_payload(session), mode=mode, idempotency_key=key)
+        if observed.disposition is AdvanceDisposition.ADVANCED:
+            assert observed.attention_artifact is not None
+            expected = replace(expected, attention_artifact=observed.attention_artifact)
         assert observed == expected
 
     def _stream_key(self, selection: int) -> str:
@@ -1701,7 +1876,8 @@ class LifecycleStateMachine(RuleBasedStateMachine):
                 ("reconcile", 2),
                 ("pin", 3),
                 ("snapshot", 4),
-                ("evidence", PINNED_EVENT_COUNT),
+                ("evidence", 5),
+                ("attention", PINNED_EVENT_COUNT),
             )
         )
     )
@@ -1718,6 +1894,8 @@ class LifecycleStateMachine(RuleBasedStateMachine):
             enabled_asset_classes=self.capability.enabled_asset_classes,
             universe_policy=self.capability.universe_policy,
             evidence_capture=self.capability.evidence_capture,
+            attention_policy=self.capability.attention_policy,
+            attention_inputs=self.capability.attention_inputs,
             clock=self.capability.clock,
         )
         with pytest.raises(SimulatedInterruptionError):
@@ -1740,6 +1918,70 @@ class LifecycleStateMachine(RuleBasedStateMachine):
 
 
 TestLifecycleStateMachine = LifecycleStateMachine.TestCase
+
+
+def test_resuming_an_older_partial_cycle_after_a_later_selection_fails_closed(
+    tmp_path: Path,
+) -> None:
+    state_root = tmp_path / "runtime"
+    capability = _configure(state_root)
+    ledger = capability.ledger
+    assert isinstance(ledger, SQLiteLifecycleLedger)
+    interrupted = Advance(
+        ledger=InterruptingLedger(ledger, "start", "after"),
+        configuration_version=capability.configuration_version,
+        configuration_hash=capability.configuration_hash,
+        universe_source=capability.universe_source,
+        enabled_asset_classes=capability.enabled_asset_classes,
+        universe_policy=capability.universe_policy,
+        evidence_capture=capability.evidence_capture,
+        attention_policy=capability.attention_policy,
+        attention_inputs=capability.attention_inputs,
+        clock=capability.clock,
+    )
+
+    with pytest.raises(SimulatedInterruptionError):
+        interrupted(
+            cycle=_cycle_payload("2026-09-02"),
+            mode="champion",
+            idempotency_key="older-partial",
+        )
+    later = capability(
+        cycle=_cycle_payload("2026-09-03"),
+        mode="champion",
+        idempotency_key="later-complete",
+    )
+    refused = capability(
+        cycle=_cycle_payload("2026-09-02"),
+        mode="champion",
+        idempotency_key="older-partial",
+    )
+    replay = _configure(state_root)(
+        cycle=_cycle_payload("2026-09-02"),
+        mode="champion",
+        idempotency_key="older-partial",
+    )
+
+    assert later.disposition is AdvanceDisposition.ADVANCED
+    assert refused.disposition is AdvanceDisposition.FAILED_CLOSED
+    assert refused.failure_reason is AdvanceFailureReason.ATTENTION_SELECTION_FAILED
+    assert refused.attention_refusal_reason is AttentionRefusalReason.CONTRADICTORY_EVIDENCE
+    assert refused.evidence_artifact_ids
+    assert replay == refused
+    with sqlite3.connect(state_root / "lifecycle.sqlite3") as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM lifecycle_events WHERE idempotency_key = ?",
+            ("older-partial",),
+        ).fetchone() == (5,)
+        assert connection.execute(
+            """SELECT COUNT(*) FROM lifecycle_events
+            WHERE idempotency_key = ? AND event_kind = 'attention_selected'""",
+            ("older-partial",),
+        ).fetchone() == (0,)
+        assert connection.execute(
+            "SELECT COUNT(*) FROM advance_refusals WHERE idempotency_key = ?",
+            ("older-partial",),
+        ).fetchone() == (1,)
 
 
 def test_conflicting_valid_idempotency_reuse_fails_without_shadowing_completed_work(
@@ -2006,6 +2248,8 @@ def test_conflicting_pinned_identity_fails_without_rewriting_completed_work(
         enabled_asset_classes=capability.enabled_asset_classes,
         universe_policy=capability.universe_policy,
         evidence_capture=capability.evidence_capture,
+        attention_policy=capability.attention_policy,
+        attention_inputs=capability.attention_inputs,
         clock=capability.clock,
     )
 
@@ -2043,6 +2287,8 @@ def test_terminal_conflict_refusal_prevents_partial_stream_resumption(tmp_path: 
         enabled_asset_classes=capability.enabled_asset_classes,
         universe_policy=capability.universe_policy,
         evidence_capture=capability.evidence_capture,
+        attention_policy=capability.attention_policy,
+        attention_inputs=capability.attention_inputs,
         clock=capability.clock,
     )
     with pytest.raises(SimulatedInterruptionError):
@@ -2082,6 +2328,7 @@ def test_terminal_conflict_refusal_prevents_partial_stream_resumption(tmp_path: 
         ("run_inputs_pinned", 2, AdvanceRecovery.RESUMED),
         ("universe_snapshotted", 3, AdvanceRecovery.RESUMED),
         ("evidence_captured", 4, AdvanceRecovery.RESUMED),
+        ("attention_selected", 5, AdvanceRecovery.RESUMED),
     ],
 )
 def test_advance_resumes_after_each_checkpoint_transaction_rolls_back(
@@ -2123,13 +2370,16 @@ def test_advance_resumes_after_each_checkpoint_transaction_rolls_back(
             "fail_evidence_captured_before_insert": (
                 "DROP TRIGGER fail_evidence_captured_before_insert"
             ),
+            "fail_attention_selected_before_insert": (
+                "DROP TRIGGER fail_attention_selected_before_insert"
+            ),
         }
         connection.execute(known_drop_statements[str(trigger_name[0])])
 
     disposition, phase, recovery, run_id = _advance_in_fresh_process(state_root, "rollback-key")
 
     assert disposition == AdvanceDisposition.ADVANCED.value
-    assert phase == LifecyclePhase.CAPTURE_EVIDENCE.value
+    assert phase == LifecyclePhase.SELECT_ATTENTION.value
     assert recovery == expected_recovery.value
     assert len(run_id) == SHA256_HEX_LENGTH
     assert len(_events(database)) == PINNED_EVENT_COUNT
@@ -2498,16 +2748,31 @@ def test_lifecycle_ledger_appends_generic_checkpoint_records(tmp_path: Path) -> 
     identity = pinned_run_identity(request, configuration_hash="c" * SHA256_HEX_LENGTH)
     now = UtcInstant.from_datetime(datetime(2026, 8, 22, 22, 0, tzinfo=UTC))
 
-    command = AdvanceCommand(request, identity, universe_snapshot(identity))
+    snapshot = universe_snapshot(identity)
+    capture = evidence_capture_checkpoint()
+    command = AdvanceCommand(request, identity, snapshot)
     attempt = AdvanceAttempt()
     terminal: AppendTerminalLifecycleRecord | None = None
     for expected_sequence in range(PINNED_EVENT_COUNT):
         decision = ledger.advance_step(command, attempt, now)
         if isinstance(decision, PerformEvidenceCapture):
-            command = replace(command, evidence_capture=evidence_capture_checkpoint())
+            command = replace(command, evidence_capture=capture)
+            decision = ledger.advance_step(command, attempt, now)
+        if isinstance(decision, PerformAttentionSelection):
+            command = replace(
+                command,
+                attention_selection=attention_artifact(
+                    identity,
+                    snapshot,
+                    capture,
+                    decision.attention_history,
+                    available_at=now,
+                ),
+            )
             decision = ledger.advance_step(command, attempt, now)
         assert not isinstance(decision, AdvanceReceipt)
         assert not isinstance(decision, PerformEvidenceCapture)
+        assert not isinstance(decision, PerformAttentionSelection)
         assert isinstance(decision.record, LifecycleEvent)
         assert decision.record.sequence == expected_sequence
         if isinstance(decision, AppendTerminalLifecycleRecord):
@@ -2515,20 +2780,21 @@ def test_lifecycle_ledger_appends_generic_checkpoint_records(tmp_path: Path) -> 
         else:
             attempt = decision.attempt
     assert terminal is not None
-    snapshot = universe_snapshot(identity)
     assert terminal.receipt == AdvanceReceipt.advanced(
         identity,
         snapshot,
         AdvanceRecovery.FRESH,
         now,
-        evidence_capture_checkpoint(),
+        capture,
+        attention_artifact(identity, snapshot, capture, available_at=now),
     )
     assert ledger.advance_step(command, AdvanceAttempt(), now) == AdvanceReceipt.advanced(
         identity,
         snapshot,
         AdvanceRecovery.PREVIOUSLY_COMPLETED,
         now,
-        evidence_capture_checkpoint(),
+        capture,
+        attention_artifact(identity, snapshot, capture, available_at=now),
     )
 
     conflicting_identity = pinned_run_identity(
@@ -2616,6 +2882,8 @@ def test_universe_source_rejects_a_forged_utc_instant_before_append(tmp_path: Pa
         enabled_asset_classes=capability.enabled_asset_classes,
         universe_policy=capability.universe_policy,
         evidence_capture=capability.evidence_capture,
+        attention_policy=capability.attention_policy,
+        attention_inputs=capability.attention_inputs,
         clock=capability.clock,
     )
 
@@ -2759,6 +3027,8 @@ def test_missing_refusal_sequence_row_fails_closed(tmp_path: Path) -> None:
         enabled_asset_classes=capability.enabled_asset_classes,
         universe_policy=capability.universe_policy,
         evidence_capture=capability.evidence_capture,
+        attention_policy=capability.attention_policy,
+        attention_inputs=capability.attention_inputs,
         clock=capability.clock,
     )
 
@@ -2784,6 +3054,8 @@ def test_invalid_refusal_sequence_row_has_a_bounded_diagnostic(tmp_path: Path) -
         enabled_asset_classes=capability.enabled_asset_classes,
         universe_policy=capability.universe_policy,
         evidence_capture=capability.evidence_capture,
+        attention_policy=capability.attention_policy,
+        attention_inputs=capability.attention_inputs,
         clock=capability.clock,
     )
 
@@ -2869,19 +3141,31 @@ def test_corrupt_refusal_rows_fail_closed_with_a_bounded_diagnostic(
     with sqlite3.connect(database) as connection:
         row = connection.execute(
             "SELECT refusal_id, idempotency_key, cycle_identity, reason_code, "
-            "evidence_policy_id, evidence_artifact_ids, evidence_refusal_ids, recorded_at "
+            "evidence_policy_id, evidence_artifact_ids, evidence_refusal_ids, "
+            "attention_refusal_reason, recorded_at "
             "FROM advance_refusals"
         ).fetchone()
         connection.execute("DROP TABLE advance_refusals")
         connection.execute(
             "CREATE TABLE advance_refusals "
             "(refusal_id, idempotency_key, cycle_identity, reason_code, "
-            "evidence_policy_id, evidence_artifact_ids, evidence_refusal_ids, recorded_at)"
+            "evidence_policy_id, evidence_artifact_ids, evidence_refusal_ids, "
+            "attention_refusal_reason, recorded_at)"
         )
         assert row is not None
         connection.execute(
-            "INSERT INTO advance_refusals VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (row[0], row[1], row[2], reason_code, row[4], row[5], row[6], recorded_at),
+            "INSERT INTO advance_refusals VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                row[0],
+                row[1],
+                row[2],
+                reason_code,
+                row[4],
+                row[5],
+                row[6],
+                row[7],
+                recorded_at,
+            ),
         )
 
     with pytest.raises(LifecyclePersistenceError, match=expected_message):
@@ -2889,6 +3173,69 @@ def test_corrupt_refusal_rows_fail_closed_with_a_bounded_diagnostic(
             cycle=_cycle_payload("2026-08-21"),
             mode="invalid",
             idempotency_key="corrupt-refusal",
+        )
+
+
+@pytest.mark.parametrize("corruption", ["reason_on_other_refusal", "unknown_reason"])
+def test_corrupt_attention_refusal_reason_fails_closed(
+    tmp_path: Path,
+    corruption: str,
+) -> None:
+    state_root = tmp_path / "runtime"
+    capability = _configure(state_root)
+    database = state_root / "lifecycle.sqlite3"
+    cycle = json.dumps(
+        MarketSession(date(2026, 8, 21)).to_payload(),
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    capture = evidence_capture_checkpoint()
+    row: tuple[object, ...]
+    if corruption == "reason_on_other_refusal":
+        row = (
+            1,
+            "corrupt-attention-refusal",
+            cycle,
+            AdvanceFailureReason.INVALID_MODE.value,
+            None,
+            None,
+            None,
+            AttentionRefusalReason.MISSING_EVIDENCE.value,
+            UtcInstant.from_datetime(RECORDED_AT).isoformat(),
+        )
+    else:
+        row = (
+            1,
+            "corrupt-attention-refusal",
+            cycle,
+            AdvanceFailureReason.ATTENTION_SELECTION_FAILED.value,
+            capture.policy_id,
+            json.dumps(list(capture.artifact_ids), separators=(",", ":")),
+            "[]",
+            "unknown",
+            UtcInstant.from_datetime(RECORDED_AT).isoformat(),
+        )
+    with sqlite3.connect(database) as connection:
+        connection.execute("DROP TABLE advance_refusals")
+        connection.execute(
+            "CREATE TABLE advance_refusals "
+            "(refusal_id, idempotency_key, cycle_identity, reason_code, "
+            "evidence_policy_id, evidence_artifact_ids, evidence_refusal_ids, "
+            "attention_refusal_reason, recorded_at)"
+        )
+        connection.execute(
+            "INSERT INTO advance_refusals VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            row,
+        )
+
+    with pytest.raises(
+        LifecyclePersistenceError,
+        match="invalid idempotency_key in lifecycle refusal ledger",
+    ):
+        capability(
+            cycle=_cycle_payload("2026-08-21"),
+            mode="champion",
+            idempotency_key="corrupt-attention-refusal",
         )
 
 
@@ -3050,6 +3397,8 @@ def test_corrupt_checkpoint_history_uses_the_call_timestamp_for_its_refusal(
         enabled_asset_classes=capability.enabled_asset_classes,
         universe_policy=capability.universe_policy,
         evidence_capture=capability.evidence_capture,
+        attention_policy=capability.attention_policy,
+        attention_inputs=capability.attention_inputs,
         clock=FixedClock(refused_at),
     )
     receipt = refused(
@@ -3157,7 +3506,7 @@ def test_extreme_snapshot_json_fails_closed_for_status_and_advance(
     )
 
 
-def test_unrelated_corrupt_history_does_not_change_a_fresh_request(tmp_path: Path) -> None:
+def test_corrupt_attention_history_fails_a_fresh_selection_closed(tmp_path: Path) -> None:
     state_root = tmp_path / "runtime"
     capability = _configure(state_root)
     capability(
@@ -3175,19 +3524,21 @@ def test_unrelated_corrupt_history_does_not_change_a_fresh_request(tmp_path: Pat
     with sqlite3.connect(database) as connection:
         row = connection.execute(
             "SELECT refusal_id, idempotency_key, cycle_identity, reason_code, "
-            "evidence_policy_id, evidence_artifact_ids, evidence_refusal_ids, recorded_at "
+            "evidence_policy_id, evidence_artifact_ids, evidence_refusal_ids, "
+            "attention_refusal_reason, recorded_at "
             "FROM advance_refusals"
         ).fetchone()
         connection.execute("DROP TABLE advance_refusals")
         connection.execute(
             "CREATE TABLE advance_refusals "
             "(refusal_id, idempotency_key, cycle_identity, reason_code, "
-            "evidence_policy_id, evidence_artifact_ids, evidence_refusal_ids, recorded_at)"
+            "evidence_policy_id, evidence_artifact_ids, evidence_refusal_ids, "
+            "attention_refusal_reason, recorded_at)"
         )
         assert row is not None
         connection.execute(
-            "INSERT INTO advance_refusals VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (row[0], row[1], row[2], "unknown", row[4], row[5], row[6], row[7]),
+            "INSERT INTO advance_refusals VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (row[0], row[1], row[2], "unknown", row[4], row[5], row[6], row[7], row[8]),
         )
 
     receipt = capability(
@@ -3196,14 +3547,15 @@ def test_unrelated_corrupt_history_does_not_change_a_fresh_request(tmp_path: Pat
         idempotency_key="fresh-beside-corruption",
     )
 
-    assert receipt.disposition is AdvanceDisposition.ADVANCED
-    assert receipt.recovery is AdvanceRecovery.FRESH
+    assert receipt.disposition is AdvanceDisposition.FAILED_CLOSED
+    assert receipt.failure_reason is AdvanceFailureReason.INVALID_DURABLE_STATE
+    assert receipt.recovery is None
     with sqlite3.connect(database) as connection:
         assert connection.execute(
             "SELECT COUNT(*) FROM lifecycle_events WHERE idempotency_key = ?",
             ("fresh-beside-corruption",),
-        ).fetchone() == (PINNED_EVENT_COUNT,)
-        assert connection.execute("SELECT COUNT(*) FROM advance_refusals").fetchone() == (1,)
+        ).fetchone() == (0,)
+        assert connection.execute("SELECT COUNT(*) FROM advance_refusals").fetchone() == (2,)
 
 
 def test_restart_does_not_globally_validate_unrelated_history(tmp_path: Path) -> None:
@@ -3340,6 +3692,7 @@ def _replace_with_corrupt_events(
                    event_kind, completed_phase, universe_snapshot_id,
                    universe_snapshot, evidence_policy_id,
                    evidence_artifact_ids, evidence_refusal_ids,
+                   attention_artifact_id, attention_artifact,
                    event_envelope, recorded_at
             FROM lifecycle_events ORDER BY sequence
             """
@@ -3355,13 +3708,14 @@ def _replace_with_corrupt_events(
                 event_kind, completed_phase, universe_snapshot_id,
                 universe_snapshot, evidence_policy_id,
                 evidence_artifact_ids, evidence_refusal_ids,
+                attention_artifact_id, attention_artifact,
                 event_envelope, recorded_at
             )
             """
         )
         connection.executemany(
             "INSERT INTO lifecycle_events VALUES "
-            "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             rows,
         )
         for statement in statements:

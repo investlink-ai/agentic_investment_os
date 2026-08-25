@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
+from typing import TYPE_CHECKING, cast
 
 import pytest
 
@@ -29,6 +30,8 @@ from agentic_investment_os.domain.lifecycle import (
     LifecycleHistory,
     LifecycleLiveness,
     LifecyclePhase,
+    LifecycleProgress,
+    PerformAttentionSelection,
     PerformEvidenceCapture,
     decide_evidence_refusal_replay,
     decide_invalid_history,
@@ -40,11 +43,15 @@ from agentic_investment_os.domain.lifecycle import (
     decide_advance as _decide_advance,
 )
 from agentic_investment_os.domain.temporal import UtcInstant
+from tests._attention import attention_artifact
 from tests._universe import (
     advance_command,
     pinned_run_identity,
     universe_snapshot,
 )
+
+if TYPE_CHECKING:
+    from agentic_investment_os.domain.attention import AttentionArtifact
 
 SHA256_HEX_LENGTH = 64
 EVIDENCE_CAPTURE = EvidenceCaptureCheckpoint(
@@ -97,8 +104,21 @@ def _append_decision(
         assert isinstance(command, AdvanceCommand)
         command = replace(command, evidence_capture=EVIDENCE_CAPTURE)
         decision = decide_advance(history, command, attempt)
+    if isinstance(decision, PerformAttentionSelection):
+        assert isinstance(command, AdvanceCommand)
+        command = replace(
+            command,
+            attention_selection=attention_artifact(
+                command.pinned_run_identity,
+                command.universe_snapshot,
+                EVIDENCE_CAPTURE,
+                decision.attention_history,
+            ),
+        )
+        decision = decide_advance(history, command, attempt)
     assert not isinstance(decision, AdvanceReceipt)
     assert not isinstance(decision, PerformEvidenceCapture)
+    assert not isinstance(decision, PerformAttentionSelection)
     next_history = history.append(decision.record)
     if isinstance(decision, AppendTerminalLifecycleRecord):
         return next_history, attempt, decision.receipt
@@ -117,6 +137,17 @@ def _complete(
             return history, decision
         if isinstance(decision, PerformEvidenceCapture):
             command = replace(command, evidence_capture=EVIDENCE_CAPTURE)
+            continue
+        if isinstance(decision, PerformAttentionSelection):
+            command = replace(
+                command,
+                attention_selection=attention_artifact(
+                    command.pinned_run_identity,
+                    command.universe_snapshot,
+                    EVIDENCE_CAPTURE,
+                    decision.attention_history,
+                ),
+            )
             continue
         history = history.append(decision.record)
         if isinstance(decision, AppendTerminalLifecycleRecord):
@@ -164,6 +195,7 @@ def test_kernel_assigns_universe_events_and_fresh_recovery() -> None:
         (2, LifecycleEventKind.RUN_INPUTS_PINNED),
         (3, LifecycleEventKind.UNIVERSE_SNAPSHOTTED),
         (4, LifecycleEventKind.EVIDENCE_CAPTURED),
+        (5, LifecycleEventKind.ATTENTION_SELECTED),
     )
     completed: AppendTerminalLifecycleRecord | None = None
     for sequence, event_kind in expected:
@@ -171,8 +203,20 @@ def test_kernel_assigns_universe_events_and_fresh_recovery() -> None:
         if isinstance(decision, PerformEvidenceCapture):
             command = replace(command, evidence_capture=EVIDENCE_CAPTURE)
             decision = decide_advance(history, command, attempt)
+        if isinstance(decision, PerformAttentionSelection):
+            command = replace(
+                command,
+                attention_selection=attention_artifact(
+                    command.pinned_run_identity,
+                    command.universe_snapshot,
+                    EVIDENCE_CAPTURE,
+                    decision.attention_history,
+                ),
+            )
+            decision = decide_advance(history, command, attempt)
         assert not isinstance(decision, AdvanceReceipt)
         assert not isinstance(decision, PerformEvidenceCapture)
+        assert not isinstance(decision, PerformAttentionSelection)
         assert isinstance(decision.record, LifecycleEvent)
         assert decision.record.sequence == sequence
         assert decision.record.event_kind is event_kind
@@ -185,6 +229,77 @@ def test_kernel_assigns_universe_events_and_fresh_recovery() -> None:
 
     assert completed is not None
     assert completed.receipt.recovery is AdvanceRecovery.FRESH
+
+
+def test_partial_progress_refuses_attention_access_before_its_checkpoint() -> None:
+    command = _command()
+    progress = LifecycleProgress(
+        command.request,
+        command.pinned_run_identity,
+        LifecyclePhase.CAPTURE_EVIDENCE,
+        4,
+        command.universe_snapshot,
+        EVIDENCE_CAPTURE,
+    )
+
+    with pytest.raises(
+        InvalidLifecycleStateError,
+        match="lifecycle stream checkpoint order is invalid",
+    ):
+        progress.require_attention_artifact()
+
+
+@pytest.mark.parametrize(
+    "invalid_selection",
+    ["wrong_type", "changed_artifact", "changed_cutoff", "changed_regime", "changed_available"],
+)
+def test_kernel_refuses_invalid_attention_selection_at_publication(
+    invalid_selection: str,
+) -> None:
+    command = _command()
+    history, attempt = _through_snapshot(command)
+    command = replace(command, evidence_capture=EVIDENCE_CAPTURE)
+    captured = decide_advance(history, command, attempt)
+    assert isinstance(captured, AppendLifecycleRecord)
+    history = history.append(captured.record)
+    attempt = captured.attempt
+    artifact = attention_artifact(
+        command.pinned_run_identity,
+        command.universe_snapshot,
+        EVIDENCE_CAPTURE,
+    )
+    if invalid_selection == "wrong_type":
+        selection = cast("AttentionArtifact", "invalid")
+    elif invalid_selection == "changed_artifact":
+        object.__setattr__(artifact, "run_id", "f" * SHA256_HEX_LENGTH)
+        selection = artifact
+    elif invalid_selection == "changed_cutoff":
+        object.__setattr__(
+            artifact,
+            "cutoff",
+            UtcInstant(artifact.cutoff.value + timedelta(seconds=1)),
+        )
+        selection = artifact
+    elif invalid_selection == "changed_regime":
+        object.__setattr__(artifact, "data_regime", "alpaca:iex")
+        selection = artifact
+    else:
+        object.__setattr__(
+            artifact,
+            "available_at",
+            UtcInstant(artifact.available_at.value - timedelta(seconds=1)),
+        )
+        selection = artifact
+    invalid_command = replace(
+        command,
+        attention_selection=selection,
+    )
+
+    with pytest.raises(
+        InvalidLifecycleStateError,
+        match="lifecycle stream checkpoint order is invalid",
+    ):
+        decide_advance(history, invalid_command, attempt)
 
 
 def test_kernel_resumes_partial_history_and_replays_completion() -> None:
@@ -200,6 +315,11 @@ def test_kernel_resumes_partial_history_and_replays_completion() -> None:
         AdvanceRecovery.RESUMED,
         KERNEL_RECORDED_AT,
         EVIDENCE_CAPTURE,
+        attention_artifact(
+            command.pinned_run_identity,
+            command.universe_snapshot,
+            EVIDENCE_CAPTURE,
+        ),
     )
     assert replay == AdvanceReceipt.advanced(
         command.pinned_run_identity,
@@ -207,7 +327,63 @@ def test_kernel_resumes_partial_history_and_replays_completion() -> None:
         AdvanceRecovery.PREVIOUSLY_COMPLETED,
         KERNEL_RECORDED_AT,
         EVIDENCE_CAPTURE,
+        attention_artifact(
+            command.pinned_run_identity,
+            command.universe_snapshot,
+            EVIDENCE_CAPTURE,
+        ),
     )
+
+
+@pytest.mark.parametrize("corruption", ["artifact_before_phase", "missing_artifact"])
+def test_reconstruction_requires_attention_only_at_its_checkpoint(corruption: str) -> None:
+    command = _command()
+    history, _ = _complete(LifecycleHistory(), command)
+    artifact = history.events[-1].attention_artifact
+    assert artifact is not None
+    if corruption == "artifact_before_phase":
+        object.__setattr__(history.events[-2], "attention_artifact", artifact)
+    else:
+        object.__setattr__(history.events[-1], "attention_artifact", None)
+
+    with pytest.raises(
+        InvalidLifecycleStateError,
+        match="lifecycle stream checkpoint order is invalid",
+    ):
+        reconstruct_lifecycle(history)
+
+
+def test_reconstruction_rejects_attention_that_changes_pinned_facts() -> None:
+    command = _command()
+    history, _ = _complete(LifecycleHistory(), command)
+    artifact = history.events[-1].attention_artifact
+    assert artifact is not None
+    object.__setattr__(artifact, "run_id", "f" * SHA256_HEX_LENGTH)
+
+    with pytest.raises(
+        InvalidLifecycleStateError,
+        match="lifecycle stream changed pinned request facts",
+    ):
+        reconstruct_lifecycle(history)
+
+
+def test_reconstruction_rejects_a_discontinuous_attention_history_chain() -> None:
+    first_history, _ = _complete(
+        LifecycleHistory(),
+        _command(session="2026-08-21", key="first-attention-cycle"),
+    )
+    second_history, _ = _complete(
+        LifecycleHistory(),
+        _command(session="2026-08-22", key="second-attention-cycle"),
+    )
+
+    with pytest.raises(
+        InvalidLifecycleStateError,
+        match="lifecycle stream changed pinned request facts",
+    ):
+        reconstruct_lifecycle(
+            LifecycleHistory(events=(*first_history.events, *second_history.events))
+        )
 
 
 @pytest.mark.parametrize(
@@ -954,6 +1130,7 @@ def test_status_uses_the_kernel_transition_sequence() -> None:
         LifecyclePhase.PIN_RUN_INPUTS,
         LifecyclePhase.SNAPSHOT_UNIVERSE,
         LifecyclePhase.CAPTURE_EVIDENCE,
+        LifecyclePhase.SELECT_ATTENTION,
         None,
     )
 

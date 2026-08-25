@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, timedelta
 from typing import TYPE_CHECKING, cast, override
 
@@ -11,6 +11,10 @@ import pytest
 
 from agentic_investment_os.adapters.recorded_universe import RecordedUniverseSource
 from agentic_investment_os.application.lifecycle import Advance
+from agentic_investment_os.domain.attention import (
+    AttentionArtifact,
+    AttentionRefusalReason,
+)
 from agentic_investment_os.domain.identity import AssetClass, CryptoDecisionWindow, MarketSession
 from agentic_investment_os.domain.lifecycle import (
     AdvanceAttempt,
@@ -33,6 +37,7 @@ from agentic_investment_os.domain.lifecycle import (
     LifecycleEventKind,
     LifecycleLedger,
     LifecyclePhase,
+    PerformAttentionSelection,
     PerformEvidenceCapture,
     PinnedRunIdentity,
     parse_advance_receipt,
@@ -40,6 +45,12 @@ from agentic_investment_os.domain.lifecycle import (
 )
 from agentic_investment_os.domain.temporal import InvalidUtcInstantError, UtcInstant
 from agentic_investment_os.domain.universe import UniverseInputIdentity, UniverseSnapshot
+from agentic_investment_os.evidence.capture import EvidencePersistenceError
+from tests._attention import (
+    attention_artifact,
+    attention_inputs_for_snapshot,
+    typed_attention_policy,
+)
 from tests._evidence import evidence_capture_checkpoint
 from tests._universe import (
     exact_text,
@@ -53,8 +64,11 @@ SHA256_HEX_LENGTH = 64
 PINNED_SEQUENCE = 2
 RECEIPT_RECORDED_AT = UtcInstant.from_datetime(datetime(2026, 8, 21, 22, 0, tzinfo=UTC))
 UNEXPECTED_EVIDENCE_CAPTURE = "test ledger should terminate before evidence capture"
+EVIDENCE_VAULT_INVALID = "Evidence Vault state is invalid"
+ATTENTION_INPUTS_LOADED_TOO_EARLY = "attention inputs must not load before checkpoint validation"
 
 if TYPE_CHECKING:
+    from agentic_investment_os.domain.attention import AttentionInputs
     from agentic_investment_os.evidence.capture import EvidenceCaptureSummary
 
 
@@ -95,6 +109,8 @@ def _advance(ledger: LifecycleLedger) -> Advance:
         enabled_asset_classes=(AssetClass.US_EQUITY,),
         universe_policy=typed_universe_policy(),
         evidence_capture=_UnusedEvidenceCapture(),
+        attention_policy=typed_attention_policy(),
+        attention_inputs=_FixtureAttentionInputs(),
         clock=FixedClock(),
     )
 
@@ -106,12 +122,14 @@ def _advanced_receipt(
     recorded_at: UtcInstant,
     evidence_capture: EvidenceCaptureCheckpoint | None = None,
 ) -> AdvanceReceipt:
+    capture = evidence_capture_checkpoint() if evidence_capture is None else evidence_capture
     return AdvanceReceipt.advanced(
         identity,
         snapshot,
         recovery,
         recorded_at,
-        evidence_capture_checkpoint() if evidence_capture is None else evidence_capture,
+        capture,
+        attention_artifact(identity, snapshot, capture),
     )
 
 
@@ -178,6 +196,104 @@ class _UnusedEvidenceCapture:
         _ = (run_id, universe_snapshot_id, cutoff, data_regime, checkpoint)
 
 
+@dataclass(frozen=True)
+class _InvalidCheckpointEvidenceCapture(_UnusedEvidenceCapture):
+    @override
+    def validate_checkpoint(
+        self,
+        *,
+        run_id: str,
+        universe_snapshot_id: str,
+        cutoff: UtcInstant,
+        data_regime: str,
+        checkpoint: EvidenceCaptureCheckpoint,
+    ) -> None:
+        _ = (run_id, universe_snapshot_id, cutoff, data_regime, checkpoint)
+        raise EvidencePersistenceError(EVIDENCE_VAULT_INVALID)
+
+
+@dataclass(frozen=True)
+class _FixtureAttentionInputs:
+    def __call__(  # noqa: PLR0913 - mirror the production capability protocol.
+        self,
+        *,
+        run_id: str,
+        cycle: MarketSession,
+        universe_snapshot: UniverseSnapshot,
+        cutoff: UtcInstant,
+        data_regime: str,
+        evidence_policy_id: str,
+        evidence_artifact_ids: tuple[str, ...],
+    ) -> AttentionInputs | AttentionRefusalReason:
+        return attention_inputs_for_snapshot(
+            run_id=run_id,
+            cycle=cycle,
+            snapshot=universe_snapshot,
+            cutoff=cutoff,
+            data_regime=data_regime,
+            evidence=EvidenceCaptureCheckpoint(
+                evidence_policy_id,
+                evidence_artifact_ids,
+                (),
+            ),
+        )
+
+
+@dataclass(frozen=True)
+class _FailingAttentionInputs:
+    reason: AttentionRefusalReason | None = None
+
+    def __call__(  # noqa: PLR0913 - mirror the production capability protocol.
+        self,
+        *,
+        run_id: str,
+        cycle: MarketSession,
+        universe_snapshot: UniverseSnapshot,
+        cutoff: UtcInstant,
+        data_regime: str,
+        evidence_policy_id: str,
+        evidence_artifact_ids: tuple[str, ...],
+    ) -> AttentionInputs | AttentionRefusalReason:
+        _ = (
+            run_id,
+            cycle,
+            universe_snapshot,
+            cutoff,
+            data_regime,
+            evidence_policy_id,
+            evidence_artifact_ids,
+        )
+        if self.reason is not None:
+            return self.reason
+        raise EvidencePersistenceError(EVIDENCE_VAULT_INVALID)
+
+
+@dataclass(frozen=True)
+class _UnexpectedAttentionInputs(_FailingAttentionInputs):
+    @override
+    def __call__(
+        self,
+        *,
+        run_id: str,
+        cycle: MarketSession,
+        universe_snapshot: UniverseSnapshot,
+        cutoff: UtcInstant,
+        data_regime: str,
+        evidence_policy_id: str,
+        evidence_artifact_ids: tuple[str, ...],
+    ) -> AttentionInputs | AttentionRefusalReason:
+        _ = (
+            run_id,
+            cycle,
+            universe_snapshot,
+            cutoff,
+            data_regime,
+            evidence_policy_id,
+            evidence_artifact_ids,
+        )
+        raise AssertionError(ATTENTION_INPUTS_LOADED_TOO_EARLY)
+
+
 @dataclass
 class ConcurrentCompletionLedger:
     completion_point: str
@@ -242,6 +358,39 @@ class _DecisionOnRefusalLedger:
     ) -> LifecycleDecision:
         _ = (command, attempt, recorded_at)
         return self.decision
+
+
+@dataclass
+class _ContradictoryAttentionHistoryLedger:
+    identity: PinnedRunIdentity
+    snapshot: UniverseSnapshot
+    artifact: AttentionArtifact
+    expected_reason: AttentionRefusalReason = AttentionRefusalReason.CONTRADICTORY_EVIDENCE
+    calls: int = 0
+
+    def advance_step(
+        self,
+        command: LifecycleCommand,
+        attempt: AdvanceAttempt,
+        recorded_at: UtcInstant,
+    ) -> LifecycleDecision:
+        _ = (attempt, recorded_at)
+        assert isinstance(command, AdvanceCommand)
+        self.calls += 1
+        if self.calls == 1:
+            return PerformAttentionSelection(
+                self.identity,
+                self.snapshot,
+                evidence_capture_checkpoint(),
+                (self.artifact,),
+            )
+        assert command.attention_selection is self.expected_reason
+        return AdvanceReceipt.failed_closed(
+            AdvanceFailureReason.ATTENTION_SELECTION_FAILED,
+            cycle=command.request.session,
+            evidence_capture=evidence_capture_checkpoint(),
+            attention_refusal_reason=command.attention_selection,
+        )
 
 
 def test_advance_request_validates_the_complete_boundary() -> None:
@@ -562,7 +711,7 @@ def test_advance_receipt_parser_rejects_crypto_as_success_even_when_resealed() -
     assert parse_advance_receipt(envelope) is None
 
 
-def test_advance_receipt_round_trips_the_universe_owned_data_regime_grammar() -> None:
+def test_advance_receipt_rejects_a_data_regime_not_bound_into_attention() -> None:
     identity = pinned_run_identity(_request())
     snapshot = universe_snapshot(identity)
     envelope = _advanced_receipt(
@@ -578,9 +727,7 @@ def test_advance_receipt_round_trips_the_universe_owned_data_regime_grammar() ->
 
     parsed = parse_advance_receipt(envelope)
 
-    assert parsed is not None
-    assert parsed.pinned_run_identity is not None
-    assert parsed.pinned_run_identity.data_regime == "alpaca:iex"
+    assert parsed is None
 
 
 def test_advance_receipt_rejects_a_completion_time_before_its_evidence_cutoff() -> None:
@@ -615,6 +762,7 @@ def test_advance_receipt_rejects_a_completion_time_before_its_evidence_cutoff() 
         ),
         (("payload", "evidence_refusal_ids"), True),
         (("payload", "evidence_refusal_ids"), ["invalid"]),
+        (("payload", "attention_artifact", "content_hash"), "f" * SHA256_HEX_LENGTH),
         (
             ("payload", "evidence_refusal_ids"),
             ["b" * SHA256_HEX_LENGTH, "a" * SHA256_HEX_LENGTH],
@@ -1001,5 +1149,132 @@ def test_advance_rejects_evidence_receipt_for_an_input_refusal() -> None:
         capability(
             cycle=_cycle(),
             mode="invalid",
+            idempotency_key="concurrent-request",
+        )
+
+
+def test_advance_rejects_attention_effect_for_an_input_refusal() -> None:
+    identity = pinned_run_identity(_request())
+    snapshot = universe_snapshot(identity)
+    capture = evidence_capture_checkpoint()
+    capability = _advance(
+        _DecisionOnRefusalLedger(
+            PerformAttentionSelection(
+                identity,
+                snapshot,
+                capture,
+                (),
+            )
+        )
+    )
+
+    with pytest.raises(
+        InvalidLifecycleStateError,
+        match="lifecycle ledger returned an incomplete checkpoint result",
+    ):
+        capability(
+            cycle=_cycle(),
+            mode="invalid",
+            idempotency_key="concurrent-request",
+        )
+
+
+def test_advance_translates_contradictory_attention_history_to_a_typed_refusal() -> None:
+    identity = pinned_run_identity(_request())
+    snapshot = universe_snapshot(identity)
+    capture = evidence_capture_checkpoint()
+    ledger = _ContradictoryAttentionHistoryLedger(
+        identity,
+        snapshot,
+        attention_artifact(identity, snapshot, capture),
+    )
+    capability = _advance(ledger)
+
+    receipt = capability(
+        cycle=_cycle(),
+        mode="champion",
+        idempotency_key="concurrent-request",
+    )
+
+    assert receipt.failure_reason is AdvanceFailureReason.ATTENTION_SELECTION_FAILED
+    assert receipt.attention_refusal_reason is AttentionRefusalReason.CONTRADICTORY_EVIDENCE
+
+
+def test_advance_translates_corrupt_attention_inputs_to_a_typed_refusal() -> None:
+    identity = pinned_run_identity(_request())
+    snapshot = universe_snapshot(identity)
+    capture = evidence_capture_checkpoint()
+    ledger = _ContradictoryAttentionHistoryLedger(
+        identity,
+        snapshot,
+        attention_artifact(identity, snapshot, capture),
+        AttentionRefusalReason.CORRUPT_EVIDENCE,
+    )
+    capability = replace(_advance(ledger), attention_inputs=_FailingAttentionInputs())
+
+    receipt = capability(
+        cycle=_cycle(),
+        mode="champion",
+        idempotency_key="concurrent-request",
+    )
+
+    assert receipt.attention_refusal_reason is AttentionRefusalReason.CORRUPT_EVIDENCE
+
+
+def test_advance_validates_the_complete_checkpoint_before_loading_attention_inputs() -> None:
+    identity = pinned_run_identity(_request())
+    snapshot = universe_snapshot(identity)
+    capture = evidence_capture_checkpoint()
+    ledger = _ContradictoryAttentionHistoryLedger(
+        identity,
+        snapshot,
+        attention_artifact(identity, snapshot, capture),
+        AttentionRefusalReason.CORRUPT_EVIDENCE,
+    )
+    capability = replace(
+        _advance(ledger),
+        evidence_capture=_InvalidCheckpointEvidenceCapture(),
+        attention_inputs=_UnexpectedAttentionInputs(),
+    )
+
+    receipt = capability(
+        cycle=_cycle(),
+        mode="champion",
+        idempotency_key="concurrent-request",
+    )
+
+    assert receipt.failure_reason is AdvanceFailureReason.ATTENTION_SELECTION_FAILED
+    assert receipt.attention_refusal_reason is AttentionRefusalReason.CORRUPT_EVIDENCE
+
+
+@pytest.mark.parametrize("invalid_inputs", ["corrupt", "refused"])
+def test_advance_revalidates_completed_attention_inputs(
+    invalid_inputs: str,
+) -> None:
+    identity = pinned_run_identity(_request())
+    snapshot = universe_snapshot(identity)
+    receipt = _advanced_receipt(
+        identity,
+        snapshot,
+        AdvanceRecovery.PREVIOUSLY_COMPLETED,
+        RECEIPT_RECORDED_AT,
+    )
+    capability = _advance(_DecisionOnRefusalLedger(receipt))
+    capability = replace(
+        capability,
+        attention_inputs=(
+            _FailingAttentionInputs()
+            if invalid_inputs == "corrupt"
+            else _FailingAttentionInputs(AttentionRefusalReason.MISSING_EVIDENCE)
+        ),
+    )
+
+    with pytest.raises(
+        InvalidLifecycleStateError,
+        match="lifecycle ledger returned an incomplete checkpoint result",
+    ):
+        capability(
+            cycle=_cycle(),
+            mode="champion",
             idempotency_key="concurrent-request",
         )
