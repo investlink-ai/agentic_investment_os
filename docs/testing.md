@@ -505,7 +505,9 @@ enumerates tracked repository files with Git, then inspects every tracked Markdo
 repository's supported inline links and image destinations. It validates same-file, cross-file, and
 parent-relative local targets. A local target must remain inside the repository, be tracked, and exist
 in the worktree. A fragment on a Markdown target must match its GitHub-style ATX heading identifier,
-including the numeric suffix assigned to a duplicate heading.
+including the numeric suffix assigned to a duplicate heading. Tracked source and target symlinks may
+resolve within the repository; resolution outside its canonical root fails before the checker reads
+the file.
 
 The checker ignores fenced and inline code plus destinations with an external URI scheme; it performs
 no network or external-site availability check. Its parser is deliberately not a general Markdown or

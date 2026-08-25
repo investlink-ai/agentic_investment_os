@@ -2,8 +2,8 @@
 
 This document is the source of truth for accepted runtime topology, module seams, authority,
 lifecycle-state meaning, authoritative state, effect ordering, and trust boundaries. It describes
-contracts that implementation must preserve; the [README status table](../README.md#status) alone says
-which behavior is currently implemented.
+contracts that implementation must preserve; the [README status table](../README.md#status) is the
+capability-level delivery inventory.
 
 Architecture does not own investment rules, product outcomes, Python import edges, runtime values,
 test procedure, or design rationale. Those live in [the investment domain](investment-domain.md),
@@ -124,9 +124,11 @@ flowchart LR
 ```
 
 The Investment Operating System, executor, and Lab may share immutable domain contracts inside one
-package; they do not share authority, credentials, or production state. Every arrow to a source,
-model, durable store, or broker crosses an owner-defined port and its adapter. Entrypoints wire those
-implementations but do not move effect authority into protected capabilities.
+package, but they never share authority or credentials. The Lab is disjoint from production state;
+the Investment Operating System and executor exchange only published packets and returned
+`OutcomeBatch` values through the shown interfaces. Every arrow to a source, model, durable store, or
+broker crosses an owner-defined port and its adapter. Entrypoints wire those implementations but do
+not move effect authority into protected capabilities.
 
 ## Authority and trust
 
@@ -386,12 +388,12 @@ checkpoints, effects, dispositions, and idempotency rules.
 | Research Lab calls and artifacts | Namespace-local Lab ledger | Append role intent before effect and one observation or bounded refusal afterward |
 | Graphs, reports, indexes, status | Projection stores | Replace only by deterministic rebuild from validated authority |
 
-Every authoritative record has a closed, versioned envelope whose discriminator is parsed before its
-payload. Relevant event and availability times, authority scope, material configuration and source
-fingerprints, canonical subject or cycle identity, and content hash are explicit where applicable.
-Readers reconstruct canonical values and hashes instead of trusting stored summaries. Unknown
-variants, unsupported versions, missing references, incompatible authority, or corrupt hashes fail
-closed at the first seam.
+Every authoritative record has a closed envelope and payload with independent schema versions; the
+envelope discriminator is parsed before its payload. Relevant event and availability times, authority
+scope, material configuration and source fingerprints, canonical subject or cycle identity, and
+content hash are explicit where applicable. Readers reconstruct canonical values and hashes instead
+of trusting stored summaries. Unknown variants, unsupported versions, missing references,
+incompatible authority, or corrupt hashes fail closed at the first seam.
 
 Financial history is append-only. Corrections name what they supersede; exact redelivery replays its
 receipt; changed material under an existing identity conflicts. Content-addressed bytes may be shared,
@@ -406,11 +408,15 @@ append rather than replace. Projections never authorize behavior and cannot beco
 truth.
 
 Lifecycle, belief, governance, executor, and Lab ledgers validate their complete request-relevant
-history before replay or append. A commitment chain plus non-rewindable integrity anchor makes
-truncating a belief suffix detectable. Governance is selected from validated approval history visible
-to a lifecycle stream. Capture, model, and broker effects persist their exact intent before crossing
-the port, then append the independent observation before progress. Ambiguous prior effects remain
-indeterminate until reconciliation; retry never manufactures an observation or repeats exposure.
+history before replay or append. Each atomic belief append writes its event and commitment, then
+advances a singleton integrity anchor by exactly one from its exact predecessor; reconstruction
+requires that anchor to match the validated chain terminal, making suffix truncation detectable.
+Governance event time never moves backward. Scheduling or activation validates the candidate
+governance history against every lifecycle Constitution use in the same transaction as its append, so
+a new regime cannot invalidate an earlier or interrupted run. Capture, model, and broker effects
+persist their exact intent before crossing the port, then append the independent observation before
+progress. Ambiguous prior effects remain indeterminate until reconciliation; retry never manufactures
+an observation or repeats exposure.
 
 SQLite owns one database-wide physical schema version, independent of durable-record and run schema
 versions. Its adapter atomically initializes an empty database or validates the exact current schema;
@@ -458,8 +464,9 @@ evidence, never activation authority. Describing a variant here does not authori
 portfolio, risk, data, or execution behavior.
 
 `DecisionCycleIdentity` is the closed cycle union. `MarketSession` is the equity variant and the
-only V0 kernel input; `CryptoDecisionWindow` is reserved. Option expiration, exercise, and assignment
-are reconciliation obligations rather than cycle identities.
+only V0 kernel input. A future `CryptoDecisionWindow` is UTC-bounded, owns its 24/7 scheduling
+policy, and may exist when the equity planner produces no eligible session. Option expiration,
+exercise, and assignment are reconciliation obligations rather than cycle identities.
 
 Every durable instrument reference uses a versioned `InstrumentIdentity` union with asset-class
 discriminator, provider-and-environment catalog namespace, and opaque catalog identifier. Display

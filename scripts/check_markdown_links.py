@@ -186,6 +186,21 @@ def _resolve_target(
     return PurePosixPath(*parts)
 
 
+def _resolved_repository_file(
+    root: Path,
+    relative_path: PurePosixPath,
+) -> tuple[Path | None, str | None]:
+    try:
+        resolved = (root / relative_path).resolve(strict=True)
+    except OSError:
+        return None, "missing"
+    if not resolved.is_relative_to(root):
+        return None, "outside"
+    if not resolved.is_file():
+        return None, "missing"
+    return resolved, None
+
+
 def _violation(
     source: PurePosixPath,
     reference: _LocalReference,
@@ -239,24 +254,29 @@ def _parse_destination(
     return _ParsedDestination(target, fragment), None
 
 
-def _target_violation(
+def _target_path_or_violation(
     *,
     root: Path,
     source: PurePosixPath,
     reference: _LocalReference,
     parsed: _ParsedDestination,
     tracked_paths: frozenset[PurePosixPath],
-) -> MarkdownLinkViolation | None:
+) -> tuple[Path | None, MarkdownLinkViolation | None]:
     message: str | None = None
+    resolved_target: Path | None = None
     if parsed.target not in tracked_paths:
         message = f"target is not a tracked repository file: {parsed.target}"
-    elif not (root / parsed.target).is_file():
-        message = f"tracked target is missing from the worktree: {parsed.target}"
-    elif parsed.fragment is not None and parsed.target.suffix.lower() != ".md":
-        message = f"heading fragments require a Markdown target: {parsed.target}"
+    else:
+        resolved_target, resolution = _resolved_repository_file(root, parsed.target)
+        if resolution == "outside":
+            message = f"target resolves outside the repository: {parsed.target}"
+        elif resolution == "missing":
+            message = f"tracked target is missing from the worktree: {parsed.target}"
+        elif parsed.fragment is not None and parsed.target.suffix.lower() != ".md":
+            message = f"heading fragments require a Markdown target: {parsed.target}"
     if message is None:
-        return None
-    return _violation(source, reference, message)
+        return resolved_target, None
+    return None, _violation(source, reference, message)
 
 
 def _validate_reference(
@@ -270,7 +290,7 @@ def _validate_reference(
     parsed, destination_violation = _parse_destination(source, reference)
     if parsed is None:
         return destination_violation
-    target_violation = _target_violation(
+    resolved_target, target_violation = _target_path_or_violation(
         root=root,
         source=source,
         reference=reference,
@@ -279,13 +299,16 @@ def _validate_reference(
     )
     if target_violation is not None:
         return target_violation
+    if resolved_target is None:
+        message = "validated tracked target must resolve to a repository file"
+        raise AssertionError(message)
     if parsed.fragment is None:
         return None
 
     content = markdown_content.get(parsed.target)
     if content is None:
         try:
-            content = (root / parsed.target).read_text(encoding="utf-8")
+            content = resolved_target.read_text(encoding="utf-8")
         except (OSError, UnicodeError):
             return _violation(
                 source,
@@ -307,6 +330,7 @@ def check_markdown_links(
     tracked_paths: Sequence[PurePosixPath],
 ) -> MarkdownLinkResult:
     """Check supported links in every tracked Markdown file under ``root``."""
+    resolved_root = root.resolve()
     normalized_paths = frozenset(PurePosixPath(path) for path in tracked_paths)
     markdown_paths = tuple(
         sorted(path for path in normalized_paths if path.suffix.lower() == ".md")
@@ -315,8 +339,29 @@ def check_markdown_links(
     local_reference_count = 0
     markdown_content: dict[PurePosixPath, str] = {}
     for source in markdown_paths:
+        resolved_source, resolution = _resolved_repository_file(resolved_root, source)
+        if resolution == "outside":
+            violations.append(
+                MarkdownLinkViolation(
+                    source,
+                    1,
+                    1,
+                    f"tracked Markdown source resolves outside repository: {source}",
+                )
+            )
+            continue
+        if resolved_source is None:
+            violations.append(
+                MarkdownLinkViolation(
+                    source,
+                    1,
+                    1,
+                    "cannot read tracked Markdown source as UTF-8",
+                )
+            )
+            continue
         try:
-            content = (root / source).read_text(encoding="utf-8")
+            content = resolved_source.read_text(encoding="utf-8")
         except (OSError, UnicodeError):
             violations.append(
                 MarkdownLinkViolation(
@@ -332,7 +377,7 @@ def check_markdown_links(
         local_reference_count += len(references)
         for reference in references:
             violation = _validate_reference(
-                root=root,
+                root=resolved_root,
                 source=source,
                 reference=reference,
                 tracked_paths=normalized_paths,

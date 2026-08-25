@@ -54,12 +54,23 @@ def test_same_file_cross_file_and_parent_relative_fragments_pass(tmp_path: Path)
     assert result.violations == ()
 
 
-def test_duplicate_github_heading_slugs_are_supported(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("fragment", "expected_message"),
+    [
+        ("foo-2", None),
+        ("foo-3", "heading fragment does not exist: foo-3"),
+    ],
+)
+def test_duplicate_github_heading_slugs_are_checked(
+    tmp_path: Path,
+    fragment: str,
+    expected_message: str | None,
+) -> None:
     tracked_paths = (
         _write_markdown(
             tmp_path,
             "README.md",
-            "# Project\n\n[Collision](guide.md#foo-2)\n",
+            f"# Project\n\n[Collision](guide.md#{fragment})\n",
         ),
         _write_markdown(
             tmp_path,
@@ -70,7 +81,55 @@ def test_duplicate_github_heading_slugs_are_supported(tmp_path: Path) -> None:
 
     result = check_markdown_links(tmp_path, tracked_paths)
 
+    messages = tuple(violation.message for violation in result.violations)
+    assert messages == (() if expected_message is None else (expected_message,))
+
+
+def test_internal_markdown_target_symlink_is_supported(tmp_path: Path) -> None:
+    source = _write_markdown(
+        tmp_path,
+        "README.md",
+        "# Project\n\n[Contract](guide.md#contract)\n",
+    )
+    target = _write_markdown(tmp_path, "docs/guide.md", "# Guide\n\n## Contract\n")
+    (tmp_path / "guide.md").symlink_to("docs/guide.md")
+
+    result = check_markdown_links(
+        tmp_path,
+        (source, target, PurePosixPath("guide.md")),
+    )
+
     assert result.violations == ()
+
+
+def test_escaping_markdown_source_symlink_fails(tmp_path: Path) -> None:
+    root = tmp_path / "repository"
+    root.mkdir()
+    _write_markdown(tmp_path, "outside.md", "# Outside\n")
+    outside = tmp_path / "outside.md"
+    (root / "README.md").symlink_to(outside)
+
+    result = check_markdown_links(root, (PurePosixPath("README.md"),))
+
+    assert result.violations[0].message == (
+        "tracked Markdown source resolves outside repository: README.md"
+    )
+
+
+def test_escaping_markdown_target_symlink_fails(tmp_path: Path) -> None:
+    root = tmp_path / "repository"
+    root.mkdir()
+    source = _write_markdown(root, "README.md", "# Project\n\n[Outside](guide.md)\n")
+    _write_markdown(tmp_path, "outside.md", "# Outside\n")
+    outside = tmp_path / "outside.md"
+    (root / "guide.md").symlink_to(outside)
+
+    result = check_markdown_links(
+        root,
+        (source, PurePosixPath("guide.md")),
+    )
+
+    assert result.violations[0].message == ("target resolves outside the repository: guide.md")
 
 
 @pytest.mark.parametrize(
