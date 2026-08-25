@@ -44,6 +44,10 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 NAMESPACE = "lab.synthetic.aapl"
 
 
+def _canonical_json(value: object) -> str:
+    return json.dumps(value, sort_keys=True, separators=(",", ":"))
+
+
 class SimulatedInterruptionError(RuntimeError):
     """Stop after the recorded adapter completes but before observation append."""
 
@@ -343,6 +347,94 @@ def test_live_schema_corruption_stops_replay_before_the_first_model_effect(
         replay(replay_request())
 
     assert model.unique_effect_count == 0
+
+
+def test_stored_dossier_manifest_hash_corruption_fails_closed_on_reopen(tmp_path: Path) -> None:
+    lab_root = tmp_path / "lab"
+    replay = _configure(
+        lab_root,
+        tmp_path / "production",
+        RecordedEvidenceCollector((_fixture(),)),
+    )
+    assert isinstance(replay, Replay)
+    assert replay(replay_request()).disposition is ReplayDisposition.COMPLETED
+    database = lab_root / "research-lab.sqlite3"
+    with sqlite3.connect(database) as connection:
+        connection.execute("DROP TRIGGER lab_call_observations_no_update")
+        row = connection.execute("SELECT observation_json FROM lab_call_observations").fetchone()
+        assert row is not None
+        observation = json.loads(row[0])
+        assert isinstance(observation, dict)
+        artifact = observation["artifact"]
+        assert isinstance(artifact, dict)
+        artifact["evidence_manifest_hash"] = "f" * 64
+        encoded = _canonical_json(observation)
+        connection.execute(
+            "UPDATE lab_call_observations SET observation_json = ?, observation_hash = ?",
+            (encoded, hashlib.sha256(encoded.encode()).hexdigest()),
+        )
+        connection.execute(
+            "CREATE TRIGGER lab_call_observations_no_update "
+            "BEFORE UPDATE ON lab_call_observations "
+            "BEGIN SELECT RAISE(ABORT, 'Lab observations are append-only'); END"
+        )
+
+    with pytest.raises(LabPersistenceError, match="history is invalid"):
+        SQLiteLabCallLedger(database, NAMESPACE)
+
+
+def test_stored_evidence_content_hash_mismatch_fails_closed_on_reopen(tmp_path: Path) -> None:
+    lab_root = tmp_path / "lab"
+    replay = _configure(
+        lab_root,
+        tmp_path / "production",
+        RecordedEvidenceCollector((_fixture(),)),
+    )
+    assert isinstance(replay, Replay)
+    assert replay(replay_request()).disposition is ReplayDisposition.COMPLETED
+    database = lab_root / "research-lab.sqlite3"
+    with sqlite3.connect(database) as connection:
+        connection.execute("DROP TRIGGER lab_call_intents_no_update")
+        row = connection.execute("SELECT intent_json FROM lab_call_intents").fetchone()
+        assert row is not None
+        intent = json.loads(row[0])
+        assert isinstance(intent, dict)
+        model_input = json.loads(intent["model_input_json"])
+        evidence = model_input["evidence"]
+        assert isinstance(evidence, list)
+        first = evidence[0]
+        assert isinstance(first, dict)
+        first["content"] = "Tampered copied evidence."
+        model_input_json = _canonical_json(model_input)
+        model_input_hash = hashlib.sha256(model_input_json.encode()).hexdigest()
+        intent["model_input_json"] = model_input_json
+        intent["model_input_hash"] = model_input_hash
+        intent["request_fingerprint"] = hashlib.sha256(
+            _canonical_json(
+                {
+                    "request_id": intent["request_id"],
+                    "namespace": intent["namespace"],
+                    "model_input_hash": model_input_hash,
+                }
+            ).encode()
+        ).hexdigest()
+        intent_json = _canonical_json(intent)
+        connection.execute(
+            "UPDATE lab_call_intents SET request_fingerprint = ?, intent_json = ?, intent_hash = ?",
+            (
+                intent["request_fingerprint"],
+                intent_json,
+                hashlib.sha256(intent_json.encode()).hexdigest(),
+            ),
+        )
+        connection.execute(
+            "CREATE TRIGGER lab_call_intents_no_update "
+            "BEFORE UPDATE ON lab_call_intents "
+            "BEGIN SELECT RAISE(ABORT, 'Lab intents are append-only'); END"
+        )
+
+    with pytest.raises(LabPersistenceError, match="history is invalid"):
+        SQLiteLabCallLedger(database, NAMESPACE)
 
 
 def test_oversized_adapter_output_persists_only_its_bounded_identity(tmp_path: Path) -> None:

@@ -515,9 +515,14 @@ def _parse_stored_artifact(
         evidence = model_input["evidence"]
     except (InvalidUtcInstantError, KeyError, TypeError, json.JSONDecodeError) as error:
         raise LabPersistenceError(_CORRUPT_HISTORY) from error
-    if type(subject) is not EquityInstrumentIdentity or type(evidence) is not list:
+    if type(subject) is not EquityInstrumentIdentity:
         raise LabPersistenceError(_CORRUPT_HISTORY)
-    bindings = _evidence_bindings(evidence)
+    bindings = _stored_evidence_bindings(
+        evidence,
+        subject,
+        cutoff,
+        intent.material_input_hashes,
+    )
     if bindings is None:
         raise LabPersistenceError(_CORRUPT_HISTORY)
     artifact_ids = tuple(item[0] for item in bindings)
@@ -534,7 +539,7 @@ def _parse_stored_artifact(
         available_artifact_bindings=bindings if manifest_bound else None,
         cutoff=cutoff,
     )
-    if not isinstance(parsed, Dossier) or parsed.content_hash != value["content_hash"]:
+    if not isinstance(parsed, Dossier) or parsed.to_payload() != value:
         raise LabPersistenceError(_CORRUPT_HISTORY)
     return parsed
 
@@ -661,7 +666,11 @@ def _parse_dossier_payload(
         available_artifact_bindings=evidence_bindings,
         cutoff=cutoff,
     )
-    if not isinstance(parsed, Dossier) or parsed.content_hash != expected_hash:
+    if (
+        not isinstance(parsed, Dossier)
+        or parsed.content_hash != expected_hash
+        or parsed.to_payload() != value
+    ):
         raise LabPersistenceError(_CORRUPT_HISTORY)
     return parsed
 
@@ -765,6 +774,49 @@ def _evidence_bindings(value: object) -> tuple[tuple[str, str], ...] | None:
             or not _is_sha256(artifact_id)
             or type(content_hash) is not str
             or not _is_sha256(content_hash)
+        ):
+            return None
+        bindings.append((artifact_id, content_hash))
+    result = tuple(bindings)
+    return result if result == tuple(sorted(set(result))) else None
+
+
+def _stored_evidence_bindings(
+    value: object,
+    subject: EquityInstrumentIdentity,
+    cutoff: UtcInstant,
+    material_input_hashes: tuple[str, ...],
+) -> tuple[tuple[str, str], ...] | None:
+    if type(value) is not list or not value:
+        return None
+    bindings: list[tuple[str, str]] = []
+    for item in value:
+        fields = _exact_mapping(
+            item,
+            frozenset({"artifact_id", "content_hash", "available_at", "subject", "content"}),
+        )
+        if fields is None:
+            return None
+        artifact_id = fields["artifact_id"]
+        content_hash = fields["content_hash"]
+        content = fields["content"]
+        parsed_subject = parse_instrument_identity(fields["subject"])
+        try:
+            available_at = UtcInstant.parse(fields["available_at"])
+        except InvalidUtcInstantError:
+            return None
+        if (
+            type(artifact_id) is not str
+            or not _is_sha256(artifact_id)
+            or type(content_hash) is not str
+            or not _is_sha256(content_hash)
+            or content_hash not in material_input_hashes
+            or type(content) is not str
+            or not content
+            or hashlib.sha256(content.encode()).hexdigest() != content_hash
+            or type(parsed_subject) is not EquityInstrumentIdentity
+            or parsed_subject != subject
+            or available_at.value > cutoff.value
         ):
             return None
         bindings.append((artifact_id, content_hash))
