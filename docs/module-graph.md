@@ -18,6 +18,7 @@ flowchart TD
     entrypoints --> execution
     entrypoints --> adapters
     entrypoints --> evidence
+    entrypoints --> research
 
     application --> evidence
     application --> memory
@@ -52,7 +53,8 @@ the dependency. Prefer passing typed values and ports over adding an edge.
   policy.
 - Entrypoints are the only modules that construct concrete adapters, read credential references, or
   choose a process composition. They may construct public immutable domain contracts while resolving
-  configuration.
+  configuration. The Research Lab entrypoint may construct the research-owned model port and replay
+  capability, but it receives no Champion, portfolio, packet, execution, broker, or credential port.
 - `execution` never imports `research`, a model client, or a Codex adapter.
 - `portfolio` consumes validated typed research outcomes and deterministic market/risk inputs; it does
   not invoke a model.
@@ -67,8 +69,8 @@ the dependency. Prefer passing typed values and ports over adding an edge.
   owner-defined variants. Provider types never cross into capability or domain interfaces.
 - `entrypoints` select a closed set of asset variants explicitly. Observed provider entitlements and
   dynamic discovery cannot add a dependency or activate a capability.
-- Research Lab composition may reuse capability code but never imports or writes champion execution
-  state.
+- Research Lab composition may import the research contracts it assembles and reuse capability code,
+  but it never imports or writes Champion execution state.
 - A cycle, a reverse edge into adapters, or a new cross-capability edge requires an architecture
   review. Record a durable exception in an ADR.
 

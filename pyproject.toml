@@ -296,8 +296,11 @@ critical_paths = [
 safety_supporting_paths = [
   "adapters/filesystem_evidence.py",
   "adapters/recorded_evidence.py",
+  "adapters/recorded_model.py",
   "adapters/recorded_universe.py",
+  "adapters/sqlite_lab.py",
   "adapters/sqlite_memory.py",
+  "application/replay.py",
   "domain/attention.py",
   "domain/identity.py",
   "domain/temporal.py",
@@ -306,6 +309,9 @@ safety_supporting_paths = [
   "entrypoints/lifecycle.py",
   "memory/beliefs.py",
   "entrypoints/governance.py",
+  "entrypoints/lab.py",
+  "research/dossier.py",
+  "research/model.py",
 ]
 
 [tool.mutmut]

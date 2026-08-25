@@ -26,12 +26,17 @@ while SQLite validates representations and atomically appends the selected recor
 publishes immutable, cutoff-bound artifacts and append-only observations to the Evidence Vault. The
 public `Record` capability appends schema-versioned, bitemporal Belief Events after resolving their
 immutable Vault references, returns bounded idempotent receipts, and deterministically rebuilds an
-explicitly bounded as-of Belief Graph with provenance and omission counts. Research beyond the Dossier
-request, portfolio, execution, evaluation, and later lifecycle phases remain scaffolds. The first
-Stage 3 slice adds operator-only `Govern` for immutable, signed Constitution amendments scheduled at
-an exact future Market Session. Advance resolves and pins one Constitution version and content hash
-before universe, evidence, attention, or model work; Status rebuilds active, pending, superseded,
-refused, and conflicting governance state.
+explicitly bounded as-of Belief Graph with provenance and omission counts. Stage 3 adds operator-only
+`Govern` for immutable, signed Constitution amendments scheduled at an exact future Market Session.
+Advance resolves and pins one Constitution version and content hash before universe, evidence,
+attention, or model work; Status rebuilds active, pending, superseded, refused, and conflicting
+governance state. The isolated Research Lab exposes `Replay` for one stateless Evidence Collector call
+over copied or synthetic inputs. It records intent before the scripted model boundary, validates a
+cited non-production Dossier, replays completed calls, and fails closed on an interrupted call whose
+effect lacks a durable observation. It refuses production roots, changed retry material, unsupported
+citations, prohibited authority, invalid model output, timeout, or quota exhaustion without a network
+or metered fallback. Thesis construction and the later research roles, portfolio, execution,
+evaluation, and remaining lifecycle phases remain scaffolds.
 Active repository documentation owns implementation authority, and the runtime has no dependency on
 the design's Second Brain origin.
 

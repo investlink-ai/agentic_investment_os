@@ -1,0 +1,413 @@
+"""Define the model-call and Lab durability ports owned by research."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import re
+from dataclasses import dataclass
+from enum import StrEnum
+from typing import TYPE_CHECKING, Protocol
+
+from agentic_investment_os.research.dossier import Dossier, DossierRefusalReason
+
+if TYPE_CHECKING:
+    from agentic_investment_os.domain.temporal import UtcInstant
+
+__all__ = (
+    "MAXIMUM_MODEL_OUTPUT_BYTES",
+    "EvidenceCollectorModel",
+    "LabCallIntent",
+    "LabCallLedger",
+    "LabCallObservation",
+    "LabCallPreparation",
+    "LabCallPreparationDisposition",
+    "LabObservationDisposition",
+    "ModelCallDisposition",
+    "ModelCallRequest",
+    "ModelCallResponse",
+    "ModelTimingDisposition",
+)
+
+MAXIMUM_MODEL_OUTPUT_BYTES = 200_000
+_IDENTIFIER = re.compile(r"[a-z0-9][a-z0-9._:-]{0,127}\Z")
+_MODEL_IDENTITY = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}\Z")
+_SHA256 = re.compile(r"[0-9a-f]{64}\Z")
+_INVALID_INTENT = "invalid Research Lab model-call intent"
+_INVALID_OBSERVATION = "invalid Research Lab model-call observation"
+
+
+class ModelCallDisposition(StrEnum):
+    """Classify the recorded adapter outcome without throwing across the port."""
+
+    RESPONDED = "responded"
+    TIMED_OUT = "timed_out"
+    QUOTA_EXHAUSTED = "quota_exhausted"
+    REFUSED = "refused"
+
+
+class ModelTimingDisposition(StrEnum):
+    """Record whether the adapter completed inside its declared budget."""
+
+    WITHIN_BUDGET = "within_budget"
+    TIMED_OUT = "timed_out"
+    UNAVAILABLE = "unavailable"
+
+
+class LabObservationDisposition(StrEnum):
+    """Classify the terminal observation appended for one logical model call."""
+
+    VALIDATED = "validated"
+    MODEL_TIMEOUT = "model_timeout"
+    QUOTA_EXHAUSTED = "quota_exhausted"
+    ADAPTER_REFUSED = "adapter_refused"
+    OVERSIZED_OUTPUT = "oversized_output"
+    INVALID_JSON = "invalid_json"
+    INVALID_DOSSIER = "invalid_dossier"
+    MODEL_IDENTITY_MISMATCH = "model_identity_mismatch"
+
+
+class LabCallPreparationDisposition(StrEnum):
+    """Select a new effect, completed replay, or changed-material conflict."""
+
+    EFFECT_REQUIRED = "effect_required"
+    REPLAY = "replay"
+    CONFLICT = "conflict"
+    INDETERMINATE_EFFECT = "indeterminate_effect"
+
+
+@dataclass(frozen=True, slots=True)
+class ModelCallRequest:
+    """Supply one reconstructable stateless Evidence Collector invocation."""
+
+    call_id: str
+    requested_model_identity: str
+    model_input_json: str
+    model_input_hash: str
+    maximum_output_bytes: int
+
+
+@dataclass(frozen=True, slots=True)
+class ModelCallResponse:
+    """Return one bounded recorded adapter observation."""
+
+    disposition: ModelCallDisposition
+    raw_response: bytes | None
+    exposed_model_identity: str | None
+    input_tokens: int
+    output_tokens: int
+    turns: int
+    elapsed_milliseconds: int | None
+    timing_disposition: ModelTimingDisposition
+
+
+class EvidenceCollectorModel(Protocol):
+    """Invoke one stateless, effect-idempotent Evidence Collector call."""
+
+    def call(self, request: ModelCallRequest) -> ModelCallResponse: ...
+
+
+@dataclass(frozen=True, slots=True)
+class LabCallIntent:
+    """Persist every material model-visible input before invoking the model port."""
+
+    call_id: str
+    namespace: str
+    request_id: str
+    request_fingerprint: str
+    model_input_json: str
+    model_input_hash: str
+    prompt_fingerprint: str
+    requested_model_identity: str
+    model_configuration_fingerprint: str
+    tool_fingerprints: tuple[str, ...]
+    material_input_hashes: tuple[str, ...]
+    maximum_output_bytes: int
+
+    def __post_init__(self) -> None:
+        if not _intent_is_valid(self):
+            raise ValueError(_INVALID_INTENT)
+
+    def to_payload(self) -> dict[str, object]:
+        return {
+            "schema_version": 1,
+            "record_kind": "lab_model_call_intent",
+            "call_id": self.call_id,
+            "namespace": self.namespace,
+            "request_id": self.request_id,
+            "request_fingerprint": self.request_fingerprint,
+            "model_input_json": self.model_input_json,
+            "model_input_hash": self.model_input_hash,
+            "prompt_fingerprint": self.prompt_fingerprint,
+            "requested_model_identity": self.requested_model_identity,
+            "model_configuration_fingerprint": self.model_configuration_fingerprint,
+            "tool_fingerprints": list(self.tool_fingerprints),
+            "material_input_hashes": list(self.material_input_hashes),
+            "maximum_output_bytes": self.maximum_output_bytes,
+        }
+
+    @property
+    def content_hash(self) -> str:
+        return _content_hash(self.to_payload())
+
+    def model_request(self) -> ModelCallRequest:
+        return ModelCallRequest(
+            call_id=self.call_id,
+            requested_model_identity=self.requested_model_identity,
+            model_input_json=self.model_input_json,
+            model_input_hash=self.model_input_hash,
+            maximum_output_bytes=self.maximum_output_bytes,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class LabCallObservation:
+    """Append the raw-response identity and validated artifact or bounded refusal."""
+
+    call_id: str
+    disposition: LabObservationDisposition
+    raw_response: bytes | None
+    raw_response_hash: str | None
+    raw_response_retained: bool
+    exposed_model_identity: str | None
+    input_tokens: int
+    output_tokens: int
+    turns: int
+    elapsed_milliseconds: int | None
+    timing_disposition: ModelTimingDisposition
+    dossier: Dossier | None
+    dossier_refusal: DossierRefusalReason | None
+
+    def __post_init__(self) -> None:
+        if not _observation_is_valid(self):
+            raise ValueError(_INVALID_OBSERVATION)
+
+    @classmethod
+    def create(  # noqa: PLR0913 - observation identity binds effect data and retention.
+        cls,
+        *,
+        call_id: str,
+        disposition: LabObservationDisposition,
+        response: ModelCallResponse,
+        dossier: Dossier | None = None,
+        dossier_refusal: DossierRefusalReason | None = None,
+        retain_raw_response: bool = True,
+    ) -> LabCallObservation:
+        raw_hash = (
+            None
+            if response.raw_response is None
+            else hashlib.sha256(response.raw_response).hexdigest()
+        )
+        return cls(
+            call_id,
+            disposition,
+            response.raw_response if retain_raw_response else None,
+            raw_hash,
+            response.raw_response is not None and retain_raw_response,
+            response.exposed_model_identity,
+            response.input_tokens,
+            response.output_tokens,
+            response.turns,
+            response.elapsed_milliseconds,
+            response.timing_disposition,
+            dossier,
+            dossier_refusal,
+        )
+
+    def to_payload(self) -> dict[str, object]:
+        return {
+            "schema_version": 1,
+            "record_kind": "lab_model_call_observation",
+            "call_id": self.call_id,
+            "disposition": self.disposition.value,
+            "raw_response_hash": self.raw_response_hash,
+            "raw_response_retained": self.raw_response_retained,
+            "exposed_model_identity": self.exposed_model_identity,
+            "input_tokens": self.input_tokens,
+            "output_tokens": self.output_tokens,
+            "turns": self.turns,
+            "elapsed_milliseconds": self.elapsed_milliseconds,
+            "timing_disposition": self.timing_disposition.value,
+            "dossier": None if self.dossier is None else self.dossier.to_payload(),
+            "dossier_refusal": (
+                None if self.dossier_refusal is None else self.dossier_refusal.value
+            ),
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class LabCallPreparation:
+    """Return whether Replay must invoke, replay, or refuse one logical call."""
+
+    disposition: LabCallPreparationDisposition
+    observation: LabCallObservation | None = None
+
+
+class LabCallLedger(Protocol):
+    """Persist Lab-local intent and terminal model observations append-only."""
+
+    def prepare_call(
+        self, intent: LabCallIntent, recorded_at: UtcInstant
+    ) -> LabCallPreparation: ...
+
+    def append_observation(
+        self,
+        intent: LabCallIntent,
+        observation: LabCallObservation,
+        recorded_at: UtcInstant,
+    ) -> LabCallObservation: ...
+
+
+def _content_hash(value: object) -> str:
+    encoded = json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _intent_is_valid(intent: LabCallIntent) -> bool:
+    try:
+        model_input = json.loads(intent.model_input_json)
+    except (TypeError, json.JSONDecodeError):
+        return False
+    return (
+        _IDENTIFIER.fullmatch(intent.namespace) is not None
+        and _IDENTIFIER.fullmatch(intent.request_id) is not None
+        and _SHA256.fullmatch(intent.call_id) is not None
+        and intent.call_id
+        == _content_hash({"namespace": intent.namespace, "request_id": intent.request_id})
+        and _SHA256.fullmatch(intent.request_fingerprint) is not None
+        and intent.request_fingerprint
+        == _content_hash(
+            {
+                "request_id": intent.request_id,
+                "namespace": intent.namespace,
+                "model_input_hash": intent.model_input_hash,
+            }
+        )
+        and type(model_input) is dict
+        and json.dumps(model_input, sort_keys=True, separators=(",", ":"))
+        == intent.model_input_json
+        and _SHA256.fullmatch(intent.model_input_hash) is not None
+        and hashlib.sha256(intent.model_input_json.encode()).hexdigest() == intent.model_input_hash
+        and _model_input_matches_intent(model_input, intent)
+        and _SHA256.fullmatch(intent.prompt_fingerprint) is not None
+        and _MODEL_IDENTITY.fullmatch(intent.requested_model_identity) is not None
+        and _SHA256.fullmatch(intent.model_configuration_fingerprint) is not None
+        and _valid_hash_tuple(intent.tool_fingerprints, allow_empty=True)
+        and _valid_hash_tuple(intent.material_input_hashes, allow_empty=False)
+        and intent.maximum_output_bytes == MAXIMUM_MODEL_OUTPUT_BYTES
+    )
+
+
+def _model_input_matches_intent(model_input: dict[object, object], intent: LabCallIntent) -> bool:
+    prompt = model_input.get("prompt")
+    model_configuration = model_input.get("model_configuration")
+    tools = model_input.get("tools")
+    material_hashes = model_input.get("material_input_hashes")
+    return (
+        model_input.get("schema_version") == 1
+        and model_input.get("role") == "evidence_collector"
+        and model_input.get("authority_scope") == "research_lab_non_production"
+        and model_input.get("non_production") is True
+        and model_input.get("namespace") == intent.namespace
+        and type(prompt) is dict
+        and prompt.get("content_hash") == intent.prompt_fingerprint
+        and type(model_configuration) is dict
+        and model_configuration.get("model_identity") == intent.requested_model_identity
+        and model_configuration.get("content_hash") == intent.model_configuration_fingerprint
+        and type(tools) is list
+        and tuple(item.get("schema_hash") if type(item) is dict else None for item in tools)
+        == intent.tool_fingerprints
+        and type(material_hashes) is list
+        and tuple(material_hashes) == intent.material_input_hashes
+    )
+
+
+def _valid_hash_tuple(value: object, *, allow_empty: bool) -> bool:
+    return (
+        type(value) is tuple
+        and (allow_empty or bool(value))
+        and value == tuple(sorted(set(value)))
+        and all(type(item) is str and _SHA256.fullmatch(item) is not None for item in value)
+    )
+
+
+def _observation_is_valid(observation: LabCallObservation) -> bool:
+    if (
+        type(observation.call_id) is not str
+        or _SHA256.fullmatch(observation.call_id) is None
+        or type(observation.disposition) is not LabObservationDisposition
+        or (observation.raw_response is not None and type(observation.raw_response) is not bytes)
+        or (
+            observation.raw_response_hash is not None
+            and (
+                type(observation.raw_response_hash) is not str
+                or _SHA256.fullmatch(observation.raw_response_hash) is None
+            )
+        )
+        or type(observation.raw_response_retained) is not bool
+        or observation.raw_response_retained != (observation.raw_response is not None)
+        or (
+            observation.raw_response is not None
+            and (
+                len(observation.raw_response) > MAXIMUM_MODEL_OUTPUT_BYTES
+                or hashlib.sha256(observation.raw_response).hexdigest()
+                != observation.raw_response_hash
+            )
+        )
+        or (
+            observation.exposed_model_identity is not None
+            and (
+                type(observation.exposed_model_identity) is not str
+                or _MODEL_IDENTITY.fullmatch(observation.exposed_model_identity) is None
+            )
+        )
+        or type(observation.input_tokens) is not int
+        or observation.input_tokens < 0
+        or type(observation.output_tokens) is not int
+        or observation.output_tokens < 0
+        or type(observation.turns) is not int
+        or observation.turns < 0
+        or (
+            observation.elapsed_milliseconds is not None
+            and (
+                type(observation.elapsed_milliseconds) is not int
+                or observation.elapsed_milliseconds < 0
+            )
+        )
+        or type(observation.timing_disposition) is not ModelTimingDisposition
+        or (observation.dossier is not None and type(observation.dossier) is not Dossier)
+        or (
+            observation.dossier_refusal is not None
+            and type(observation.dossier_refusal) is not DossierRefusalReason
+        )
+    ):
+        return False
+    validated = observation.disposition is LabObservationDisposition.VALIDATED
+    invalid_dossier = observation.disposition is LabObservationDisposition.INVALID_DOSSIER
+    oversized = observation.disposition is LabObservationDisposition.OVERSIZED_OUTPUT
+    if (
+        validated != (observation.dossier is not None and observation.dossier_refusal is None)
+        or invalid_dossier
+        != (observation.dossier is None and observation.dossier_refusal is not None)
+        or (
+            not validated
+            and not invalid_dossier
+            and (observation.dossier is not None or observation.dossier_refusal is not None)
+        )
+        or (
+            oversized
+            and (observation.raw_response_retained or observation.raw_response_hash is None)
+        )
+        or (
+            not oversized
+            and not observation.raw_response_retained
+            and observation.raw_response_hash is not None
+        )
+    ):
+        return False
+    try:
+        if observation.dossier is not None:
+            observation.dossier.__post_init__()
+    except (AttributeError, TypeError, ValueError):
+        return False
+    return True

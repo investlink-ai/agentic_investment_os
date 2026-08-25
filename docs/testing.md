@@ -186,11 +186,14 @@ The implemented candidate inventory is:
 | --- | --- |
 | `adapters/filesystem_evidence.py` | Non-critical Evidence Vault filesystem mechanics and append-only observation durability; integration, corruption, and coverage evidence |
 | `adapters/recorded_evidence.py` | Non-critical recorded-boundary validation and normalization; contract, hostile-input, and coverage evidence |
+| `adapters/recorded_model.py` | Safety-supporting scripted model-call idempotency and recorded resource observations; contract, interruption, and coverage evidence |
+| `adapters/sqlite_lab.py` | Safety-supporting namespace isolation, intent-before-effect durability, append-only reconstruction, and private-root validation; integration, interruption, corruption, and coverage evidence |
 | `adapters/sqlite_lifecycle.py` | Non-critical SQL mechanics and non-authorizing lifecycle and Constitution-governance durability; integration, corruption, architecture, and critical-coverage evidence |
 | `adapters/sqlite_memory.py` | Non-critical belief SQL mechanics and authoritative-history validation; integration, concurrency, corruption, and coverage evidence |
 | `application/governance.py` | Non-critical Constitution scheduling and resolution orchestration with no packet or broker authority; unit, integration, and critical-coverage evidence |
 | `application/lifecycle.py` | Non-critical orchestration through Constitution pinning, evidence capture, and bounded attention; unit, integration, system-journey, and critical-coverage evidence |
 | `application/memory.py` | Non-critical Record orchestration; integration, system-journey, and coverage evidence |
+| `application/replay.py` | Safety-supporting hostile-input admission and Lab replay orchestration with no production or execution authority; unit, contract, integration, interruption, and coverage evidence |
 | `domain/attention.py` | Safety-supporting, non-authorizing admission to bounded research capacity with no stance, sizing, packet, order, or execution effect; unit, property, integration, hostile-input, and coverage evidence |
 | `domain/governance.py` | Non-critical Constitution validation, reconstruction, idempotency, and session-bound regime selection with no packet or broker authority; unit, hostile-input, integration, and critical-coverage evidence |
 | `domain/identity.py` | Non-critical current identity serialization with no implemented packet or broker effect; unit, property, contract, and coverage evidence |
@@ -203,9 +206,12 @@ The implemented candidate inventory is:
 | `entrypoints/governance.py` | Non-critical operator-only governance composition; integration and safety-supporting coverage evidence |
 | `entrypoints/lifecycle.py` | Non-critical composition; integration, system-journey, architecture, and coverage evidence |
 | `entrypoints/memory.py` | Non-critical Record composition; integration, system-journey, architecture, and coverage evidence |
+| `entrypoints/lab.py` | Safety-supporting isolated Lab composition and production-root refusal; integration, architecture, and coverage evidence |
 | `memory/admission.py` | Critical canonical Belief Event types, hostile-input parsing, serialization, and evidence admission; unit, contract, refusal, and mutation evidence |
 | `memory/beliefs.py` | Non-critical typed belief history, receipt, and bounded as-of graph projection; unit, property, contract, integration, corruption, and coverage evidence |
 | `memory/reducer.py` | Critical append-only belief-transition reducer, projection identity, and ledger commitment; unit, property, refusal, and mutation evidence |
+| `research/dossier.py` | Safety-supporting exact-schema, citation, cutoff, lens, and prohibited-authority validation; unit, hostile-input, and coverage evidence |
+| `research/model.py` | Safety-supporting owner-defined model and Lab-ledger contracts with no direct effect implementation; contract, integration, and coverage evidence |
 | `domain/__init__.py` | Non-critical package scaffold with no callable |
 | `execution/__init__.py`, `portfolio/__init__.py` | Critical-authority package scaffolds with no callable; explicit mutation scaffold exemption |
 
@@ -381,6 +387,20 @@ evidence. A scenario becomes mandatory when its owning behavior is implemented.
 - Model output containing a weight, order, unsupported citation, prompt injection, invalid enum,
   inconsistent horizon, missing Skeptic, timeout, quota exhaustion, or oversized result is rejected or
   safely normalized only as its schema explicitly permits.
+- `Replay` accepts only copied or synthetic evidence available by its exact cutoff, canonical subject
+  mapping, pinned Constitution and bounded Belief Graph, explicit prompt, model, reasoning, tool, Data
+  Regime, portfolio-context, namespace, and material hashes. Belief-node bitemporal state and graph
+  provenance are revalidated before the model boundary. Exact completed retry and reopen return the
+  prior Lab observation; changed request material conflicts without another model call.
+- The Lab ledger records intent before the scripted model effect and appends the raw-response identity,
+  validated Dossier or bounded refusal, exposed model identity, tokens, turns, and timing afterward.
+  An interruption that leaves an intent without an observation returns a typed indeterminate-effect
+  refusal after reopen and never repeats the call. Timeout, quota, adapter refusal, malformed or
+  oversized output, and schema or citation failure never select another service.
+- Lab composition refuses a production or overlapping state root, unsafe path, missing production-root
+  declaration, or mismatched namespace. Reopen revalidates schema, integrity, namespace, hashes, and
+  append-only records before another effect; no rejected path reaches production, Champion, packet,
+  credential, network, or broker state.
 - Research Lab artifacts cannot enter Champion stores or produce a packet accepted by execution.
 
 ### Portfolio and execution
