@@ -234,6 +234,10 @@ class SQLiteLabCallLedger:
         observation: LabCallObservation,
         recorded_at: UtcInstant,
     ) -> LabCallObservation:
+        try:
+            observation.__post_init__()
+        except (AttributeError, TypeError, ValueError) as error:
+            raise LabPersistenceError(_OBSERVATION_FAILED) from error
         observation_json = _canonical_json(observation.to_payload())
         observation_hash = hashlib.sha256(observation_json.encode()).hexdigest()
         try:
@@ -429,21 +433,24 @@ def _parse_observation(
         or (not oversized and not retained and stored_raw_hash is not None)
     ):
         raise LabPersistenceError(_CORRUPT_HISTORY)
-    return LabCallObservation(
-        intent.call_id,
-        disposition,
-        raw_response,
-        raw_hash,
-        retained,
-        exposed,
-        input_tokens,
-        output_tokens,
-        turns,
-        elapsed,
-        timing,
-        dossier,
-        dossier_refusal,
-    )
+    try:
+        return LabCallObservation(
+            intent.call_id,
+            disposition,
+            raw_response,
+            raw_hash,
+            retained,
+            exposed,
+            input_tokens,
+            output_tokens,
+            turns,
+            elapsed,
+            timing,
+            dossier,
+            dossier_refusal,
+        )
+    except (TypeError, ValueError) as error:
+        raise LabPersistenceError(_CORRUPT_HISTORY) from error
 
 
 def _parse_stored_dossier(value: object, intent: LabCallIntent) -> Dossier | None:

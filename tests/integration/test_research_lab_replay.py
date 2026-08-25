@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+from copy import copy
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -19,6 +20,7 @@ from agentic_investment_os.application.replay import (
     ReplayDisposition,
     ReplayRefusalReason,
 )
+from agentic_investment_os.domain.temporal import UtcInstant
 from agentic_investment_os.entrypoints.lab import (
     LabCompositionRefusal,
     LabCompositionRefusalCode,
@@ -26,6 +28,11 @@ from agentic_investment_os.entrypoints.lab import (
 )
 from agentic_investment_os.research.model import (
     EvidenceCollectorModel,
+    LabCallIntent,
+    LabCallLedger,
+    LabCallObservation,
+    LabCallPreparation,
+    LabObservationDisposition,
     ModelCallDisposition,
     ModelCallRequest,
     ModelCallResponse,
@@ -76,6 +83,24 @@ class IntentCheckingModel:
         assert intents == (1,)
         assert observations == (0,)
         return self.delegate.call(request)
+
+
+@dataclass(slots=True)
+class CapturingLabLedger:
+    delegate: LabCallLedger
+    intent: LabCallIntent | None = None
+
+    def prepare_call(self, intent: LabCallIntent, recorded_at: UtcInstant) -> LabCallPreparation:
+        self.intent = intent
+        return self.delegate.prepare_call(intent, recorded_at)
+
+    def append_observation(
+        self,
+        intent: LabCallIntent,
+        observation: LabCallObservation,
+        recorded_at: UtcInstant,
+    ) -> LabCallObservation:
+        return self.delegate.append_observation(intent, observation, recorded_at)
 
 
 def _fixture() -> RecordedModelFixture:
@@ -351,6 +376,50 @@ def test_oversized_adapter_output_persists_only_its_bounded_identity(tmp_path: P
     assert isinstance(payload, dict)
     assert payload["raw_response_retained"] is False
     assert row[1] is None
+
+
+def test_ledger_revalidates_a_forged_terminal_observation_before_append(
+    tmp_path: Path,
+) -> None:
+    recorded = RecordedEvidenceCollector((_fixture(),))
+    configured = _configure(
+        tmp_path / "lab",
+        tmp_path / "production",
+        InterruptAfterModelEffect(recorded),
+    )
+    assert isinstance(configured, Replay)
+    capturing = CapturingLabLedger(configured.ledger)
+    replay = Replay(NAMESPACE, capturing, configured.model, configured.clock)
+    with pytest.raises(SimulatedInterruptionError):
+        replay(replay_request())
+    assert capturing.intent is not None
+    response = ModelCallResponse(
+        ModelCallDisposition.REFUSED,
+        None,
+        None,
+        0,
+        0,
+        0,
+        None,
+        ModelTimingDisposition.UNAVAILABLE,
+    )
+    valid = LabCallObservation.create(
+        call_id=capturing.intent.call_id,
+        disposition=LabObservationDisposition.ADAPTER_REFUSED,
+        response=response,
+    )
+    forged = copy(valid)
+    object.__setattr__(forged, "disposition", LabObservationDisposition.VALIDATED)
+
+    with pytest.raises(LabPersistenceError, match="could not append"):
+        configured.ledger.append_observation(
+            capturing.intent,
+            forged,
+            UtcInstant.from_datetime(FixedClock().now()),
+        )
+    assert recorded.unique_effect_count == 1
+    with sqlite3.connect(tmp_path / "lab" / "research-lab.sqlite3") as connection:
+        assert connection.execute("SELECT COUNT(*) FROM lab_call_observations").fetchone() == (0,)
 
 
 @pytest.mark.parametrize(

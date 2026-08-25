@@ -9,9 +9,10 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import TYPE_CHECKING, Protocol
 
+from agentic_investment_os.research.dossier import Dossier, DossierRefusalReason
+
 if TYPE_CHECKING:
     from agentic_investment_os.domain.temporal import UtcInstant
-    from agentic_investment_os.research.dossier import Dossier, DossierRefusalReason
 
 __all__ = (
     "MAXIMUM_MODEL_OUTPUT_BYTES",
@@ -33,6 +34,7 @@ _IDENTIFIER = re.compile(r"[a-z0-9][a-z0-9._:-]{0,127}\Z")
 _MODEL_IDENTITY = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}\Z")
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 _INVALID_INTENT = "invalid Research Lab model-call intent"
+_INVALID_OBSERVATION = "invalid Research Lab model-call observation"
 
 
 class ModelCallDisposition(StrEnum):
@@ -175,6 +177,10 @@ class LabCallObservation:
     timing_disposition: ModelTimingDisposition
     dossier: Dossier | None
     dossier_refusal: DossierRefusalReason | None
+
+    def __post_init__(self) -> None:
+        if not _observation_is_valid(self):
+            raise ValueError(_INVALID_OBSERVATION)
 
     @classmethod
     def create(  # noqa: PLR0913 - observation identity binds effect data and retention.
@@ -323,3 +329,85 @@ def _valid_hash_tuple(value: object, *, allow_empty: bool) -> bool:
         and value == tuple(sorted(set(value)))
         and all(type(item) is str and _SHA256.fullmatch(item) is not None for item in value)
     )
+
+
+def _observation_is_valid(observation: LabCallObservation) -> bool:
+    if (
+        type(observation.call_id) is not str
+        or _SHA256.fullmatch(observation.call_id) is None
+        or type(observation.disposition) is not LabObservationDisposition
+        or (observation.raw_response is not None and type(observation.raw_response) is not bytes)
+        or (
+            observation.raw_response_hash is not None
+            and (
+                type(observation.raw_response_hash) is not str
+                or _SHA256.fullmatch(observation.raw_response_hash) is None
+            )
+        )
+        or type(observation.raw_response_retained) is not bool
+        or observation.raw_response_retained != (observation.raw_response is not None)
+        or (
+            observation.raw_response is not None
+            and (
+                len(observation.raw_response) > MAXIMUM_MODEL_OUTPUT_BYTES
+                or hashlib.sha256(observation.raw_response).hexdigest()
+                != observation.raw_response_hash
+            )
+        )
+        or (
+            observation.exposed_model_identity is not None
+            and (
+                type(observation.exposed_model_identity) is not str
+                or _MODEL_IDENTITY.fullmatch(observation.exposed_model_identity) is None
+            )
+        )
+        or type(observation.input_tokens) is not int
+        or observation.input_tokens < 0
+        or type(observation.output_tokens) is not int
+        or observation.output_tokens < 0
+        or type(observation.turns) is not int
+        or observation.turns < 0
+        or (
+            observation.elapsed_milliseconds is not None
+            and (
+                type(observation.elapsed_milliseconds) is not int
+                or observation.elapsed_milliseconds < 0
+            )
+        )
+        or type(observation.timing_disposition) is not ModelTimingDisposition
+        or (observation.dossier is not None and type(observation.dossier) is not Dossier)
+        or (
+            observation.dossier_refusal is not None
+            and type(observation.dossier_refusal) is not DossierRefusalReason
+        )
+    ):
+        return False
+    validated = observation.disposition is LabObservationDisposition.VALIDATED
+    invalid_dossier = observation.disposition is LabObservationDisposition.INVALID_DOSSIER
+    oversized = observation.disposition is LabObservationDisposition.OVERSIZED_OUTPUT
+    if (
+        validated != (observation.dossier is not None and observation.dossier_refusal is None)
+        or invalid_dossier
+        != (observation.dossier is None and observation.dossier_refusal is not None)
+        or (
+            not validated
+            and not invalid_dossier
+            and (observation.dossier is not None or observation.dossier_refusal is not None)
+        )
+        or (
+            oversized
+            and (observation.raw_response_retained or observation.raw_response_hash is None)
+        )
+        or (
+            not oversized
+            and not observation.raw_response_retained
+            and observation.raw_response_hash is not None
+        )
+    ):
+        return False
+    try:
+        if observation.dossier is not None:
+            observation.dossier.__post_init__()
+    except (AttributeError, TypeError, ValueError):
+        return False
+    return True

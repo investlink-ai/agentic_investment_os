@@ -686,6 +686,8 @@ def _belief_graph_matches_replay(
             or any(
                 reference.artifact_id not in evidence_by_id
                 or evidence_by_id[reference.artifact_id].content_hash != reference.content_hash
+                or evidence_by_id[reference.artifact_id].available_at.value
+                > event.evidence_cutoff.value
                 for reference in event.evidence
             )
         ):
@@ -738,7 +740,13 @@ def _model_response_is_valid(value: object) -> bool:
         type(value) is ModelCallResponse
         and type(value.disposition) is ModelCallDisposition
         and (value.raw_response is None or type(value.raw_response) is bytes)
-        and (value.exposed_model_identity is None or type(value.exposed_model_identity) is str)
+        and (
+            value.exposed_model_identity is None
+            or (
+                type(value.exposed_model_identity) is str
+                and _MODEL_IDENTITY.fullmatch(value.exposed_model_identity) is not None
+            )
+        )
         and type(value.input_tokens) is int
         and value.input_tokens >= 0
         and type(value.output_tokens) is int

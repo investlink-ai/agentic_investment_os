@@ -437,7 +437,12 @@ def _parse_assertions(  # noqa: PLR0911 - preserve exact citation and time refus
             return DossierRefusalReason.INVALID_SCHEMA
         if relevant_at.value > cutoff.value:
             return DossierRefusalReason.FUTURE_EVIDENCE
-        if expected_kind is StatementKind.FACT and uncertainty is not StatementUncertainty.OBSERVED:
+        if (
+            expected_kind is StatementKind.FACT and uncertainty is not StatementUncertainty.OBSERVED
+        ) or (
+            expected_kind is StatementKind.INTERPRETATION
+            and uncertainty is not StatementUncertainty.INFERRED
+        ):
             return DossierRefusalReason.INVALID_SCHEMA
         assertions.append(
             EvidenceAssertion(
