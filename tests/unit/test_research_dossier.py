@@ -11,6 +11,7 @@ from agentic_investment_os.domain.temporal import UtcInstant
 from agentic_investment_os.research.dossier import (
     Dossier,
     DossierRefusalReason,
+    StatementUncertainty,
     parse_dossier,
 )
 
@@ -94,6 +95,32 @@ def test_dossier_is_evidence_bound_and_cannot_carry_sizing_authority() -> None:
         replace(valid, non_production=False)
     with pytest.raises(ValueError, match="invalid non-production Dossier"):
         replace(valid, authority_scope="champion")
+
+
+def test_exported_dossier_constructors_revalidate_component_and_collection_invariants() -> None:
+    parsed = parse_dossier(
+        _payload(),
+        expected_subject=EquityInstrumentIdentity("alpaca-paper", "equity-aapl", "NASDAQ"),
+        available_artifact_ids=("a" * 64, "b" * 64),
+        cutoff=_instant(18),
+    )
+    assert isinstance(parsed, Dossier)
+
+    with pytest.raises(ValueError, match="invalid non-production Dossier"):
+        replace(parsed.facts[0], statement="")
+    with pytest.raises(ValueError, match="invalid non-production Dossier"):
+        replace(parsed.facts[0], citation_artifact_ids=("not-a-hash",))
+    with pytest.raises(ValueError, match="invalid non-production Dossier"):
+        replace(parsed.facts[0], uncertainty=StatementUncertainty.INFERRED)
+    with pytest.raises(ValueError, match="invalid non-production Dossier"):
+        Dossier.create(
+            subject=parsed.subject,
+            facts=parsed.facts,
+            interpretations=parsed.interpretations,
+            contradicting_evidence=parsed.contradicting_evidence,
+            missing_evidence=("missing", "missing"),
+            lenses=parsed.lenses,
+        )
 
 
 @pytest.mark.parametrize(

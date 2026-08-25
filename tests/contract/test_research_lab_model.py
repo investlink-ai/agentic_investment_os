@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import ast
 from copy import deepcopy
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -19,7 +19,20 @@ from agentic_investment_os.application.replay import (
 )
 from agentic_investment_os.domain.governance import ConstitutionArtifact
 from agentic_investment_os.domain.temporal import UtcInstant
-from agentic_investment_os.memory.beliefs import BeliefGraph
+from agentic_investment_os.memory.admission import (
+    BeliefClaimKind,
+    BeliefEvent,
+    BeliefEvidenceReference,
+    BeliefStatus,
+)
+from agentic_investment_os.memory.beliefs import (
+    BeliefGraph,
+    BeliefGraphBeliefNode,
+    BeliefGraphEdge,
+    BeliefGraphEdgeKind,
+    BeliefGraphEvidenceNode,
+    BeliefGraphQuery,
+)
 from agentic_investment_os.research.dossier import DossierRefusalReason
 from agentic_investment_os.research.model import (
     LabCallIntent,
@@ -29,7 +42,16 @@ from agentic_investment_os.research.model import (
     ModelCallDisposition,
     ModelTimingDisposition,
 )
-from tests._replay import CUTOFF, dossier_bytes, dossier_payload, replay_request
+from tests._replay import (
+    ARTIFACT_ID,
+    AVAILABLE_AT,
+    CUTOFF,
+    EVIDENCE_CONTENT_HASH,
+    SUBJECT,
+    dossier_bytes,
+    dossier_payload,
+    replay_request,
+)
 
 EXPECTED_INPUT_TOKENS = 100
 EXPECTED_OUTPUT_TOKENS = 50
@@ -58,7 +80,7 @@ class MemoryLabLedger:
             return LabCallPreparation(LabCallPreparationDisposition.CONFLICT)
         observation = self.observations.get(intent.call_id)
         if observation is None:
-            return LabCallPreparation(LabCallPreparationDisposition.EFFECT_REQUIRED)
+            return LabCallPreparation(LabCallPreparationDisposition.INDETERMINATE_EFFECT)
         return LabCallPreparation(LabCallPreparationDisposition.REPLAY, observation)
 
     def append_observation(
@@ -99,12 +121,18 @@ def test_valid_scripted_output_returns_a_cited_non_production_dossier() -> None:
     assert receipt.disposition is ReplayDisposition.COMPLETED
     assert receipt.dossier is not None
     assert receipt.dossier.non_production is True
+    assert receipt.authority_scope == "research_lab_non_production"
+    assert receipt.non_production is True
     assert receipt.dossier_id == receipt.dossier.content_hash
     assert receipt.raw_response_hash is not None
     assert receipt.input_tokens == EXPECTED_INPUT_TOKENS
     assert receipt.output_tokens == EXPECTED_OUTPUT_TOKENS
     assert receipt.turns == 1
     assert model.unique_effect_count == 1
+    with pytest.raises(ValueError, match="invalid non-production Replay receipt"):
+        replace(receipt, authority_scope="champion")
+    with pytest.raises(ValueError, match="invalid non-production Replay receipt"):
+        replace(receipt, non_production=False)
 
 
 @pytest.mark.parametrize(
@@ -164,6 +192,15 @@ def test_hostile_dossier_output_is_refused_without_research_authority(
         ),
         (
             RecordedModelFixture(
+                ModelCallDisposition.TIMED_OUT,
+                b"x" * 200_001,
+                "codex-subscription/test-model",
+                timing_disposition=ModelTimingDisposition.TIMED_OUT,
+            ),
+            ReplayRefusalReason.OVERSIZED_OUTPUT,
+        ),
+        (
+            RecordedModelFixture(
                 ModelCallDisposition.QUOTA_EXHAUSTED,
                 None,
                 "codex-subscription/test-model",
@@ -219,6 +256,8 @@ def test_boundary_failures_return_typed_dispositions_without_fallback(
     assert receipt.disposition is ReplayDisposition.REFUSED
     assert receipt.refusal_reason is reason
     assert receipt.dossier is None
+    assert receipt.authority_scope == "research_lab_non_production"
+    assert receipt.non_production is True
     assert model.unique_effect_count == 1
 
 
@@ -231,6 +270,53 @@ def test_evidence_unavailable_at_the_cutoff_is_refused_before_the_model_effect()
     assert future.value > CUTOFF.value
     assert receipt.disposition is ReplayDisposition.REFUSED
     assert receipt.refusal_reason is ReplayRefusalReason.UNAVAILABLE_EVIDENCE
+    assert model.unique_effect_count == 0
+
+
+def test_future_belief_graph_state_is_refused_before_the_model_effect() -> None:
+    future = UtcInstant.from_datetime(datetime(2026, 8, 24, 19, tzinfo=UTC))
+    event = BeliefEvent.create(
+        event_id="future-belief-event",
+        belief_id="aapl-demand",
+        subject=SUBJECT,
+        claim_kind=BeliefClaimKind.EXPECTATION,
+        claim="Demand remains resilient.",
+        valid_at=AVAILABLE_AT,
+        transaction_at=future,
+        evidence_cutoff=CUTOFF,
+        confidence="0.7000",
+        evidence=(BeliefEvidenceReference(ARTIFACT_ID, EVIDENCE_CONTENT_HASH),),
+        falsifiers=("A demand contraction would refute the claim.",),
+        status=BeliefStatus.ACTIVE,
+        transition_from_event_id=None,
+        supersedes_event_id=None,
+    )
+    graph = BeliefGraph.create(
+        query=BeliefGraphQuery(CUTOFF, (SUBJECT,), 10, 10),
+        source_history_hash="d" * 64,
+        belief_nodes=(BeliefGraphBeliefNode(1, future, event),),
+        evidence_nodes=(BeliefGraphEvidenceNode(ARTIFACT_ID, EVIDENCE_CONTENT_HASH, AVAILABLE_AT),),
+        edges=(BeliefGraphEdge(BeliefGraphEdgeKind.SUPPORTS, ARTIFACT_ID, event.event_id),),
+        omitted_belief_events=0,
+        omitted_evidence_artifacts=0,
+    )
+    request = replay_request()
+    original_graph = request["belief_graph"]
+    material_hashes = request["material_input_hashes"]
+    assert isinstance(original_graph, BeliefGraph)
+    assert isinstance(material_hashes, list)
+    request["belief_graph"] = graph
+    request["material_input_hashes"] = sorted(
+        graph.content_hash if item == original_graph.content_hash else item
+        for item in material_hashes
+    )
+    replay, model = _replay(_responding_fixture(dossier_bytes()))
+
+    receipt = replay(request)
+
+    assert receipt.disposition is ReplayDisposition.REFUSED
+    assert receipt.refusal_reason is ReplayRefusalReason.INVALID_REQUEST
+    assert receipt.non_production is True
     assert model.unique_effect_count == 0
 
 

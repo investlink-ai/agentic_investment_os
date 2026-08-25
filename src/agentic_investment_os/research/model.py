@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import TYPE_CHECKING, Protocol
@@ -13,6 +14,7 @@ if TYPE_CHECKING:
     from agentic_investment_os.research.dossier import Dossier, DossierRefusalReason
 
 __all__ = (
+    "MAXIMUM_MODEL_OUTPUT_BYTES",
     "EvidenceCollectorModel",
     "LabCallIntent",
     "LabCallLedger",
@@ -25,6 +27,12 @@ __all__ = (
     "ModelCallResponse",
     "ModelTimingDisposition",
 )
+
+MAXIMUM_MODEL_OUTPUT_BYTES = 200_000
+_IDENTIFIER = re.compile(r"[a-z0-9][a-z0-9._:-]{0,127}\Z")
+_MODEL_IDENTITY = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}\Z")
+_SHA256 = re.compile(r"[0-9a-f]{64}\Z")
+_INVALID_INTENT = "invalid Research Lab model-call intent"
 
 
 class ModelCallDisposition(StrEnum):
@@ -63,6 +71,7 @@ class LabCallPreparationDisposition(StrEnum):
     EFFECT_REQUIRED = "effect_required"
     REPLAY = "replay"
     CONFLICT = "conflict"
+    INDETERMINATE_EFFECT = "indeterminate_effect"
 
 
 @dataclass(frozen=True, slots=True)
@@ -113,6 +122,10 @@ class LabCallIntent:
     material_input_hashes: tuple[str, ...]
     maximum_output_bytes: int
 
+    def __post_init__(self) -> None:
+        if not _intent_is_valid(self):
+            raise ValueError(_INVALID_INTENT)
+
     def to_payload(self) -> dict[str, object]:
         return {
             "schema_version": 1,
@@ -153,6 +166,7 @@ class LabCallObservation:
     disposition: LabObservationDisposition
     raw_response: bytes | None
     raw_response_hash: str | None
+    raw_response_retained: bool
     exposed_model_identity: str | None
     input_tokens: int
     output_tokens: int
@@ -163,7 +177,7 @@ class LabCallObservation:
     dossier_refusal: DossierRefusalReason | None
 
     @classmethod
-    def create(
+    def create(  # noqa: PLR0913 - observation identity binds effect data and retention.
         cls,
         *,
         call_id: str,
@@ -171,6 +185,7 @@ class LabCallObservation:
         response: ModelCallResponse,
         dossier: Dossier | None = None,
         dossier_refusal: DossierRefusalReason | None = None,
+        retain_raw_response: bool = True,
     ) -> LabCallObservation:
         raw_hash = (
             None
@@ -180,8 +195,9 @@ class LabCallObservation:
         return cls(
             call_id,
             disposition,
-            response.raw_response,
+            response.raw_response if retain_raw_response else None,
             raw_hash,
+            response.raw_response is not None and retain_raw_response,
             response.exposed_model_identity,
             response.input_tokens,
             response.output_tokens,
@@ -199,6 +215,7 @@ class LabCallObservation:
             "call_id": self.call_id,
             "disposition": self.disposition.value,
             "raw_response_hash": self.raw_response_hash,
+            "raw_response_retained": self.raw_response_retained,
             "exposed_model_identity": self.exposed_model_identity,
             "input_tokens": self.input_tokens,
             "output_tokens": self.output_tokens,
@@ -238,3 +255,71 @@ class LabCallLedger(Protocol):
 def _content_hash(value: object) -> str:
     encoded = json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
     return hashlib.sha256(encoded).hexdigest()
+
+
+def _intent_is_valid(intent: LabCallIntent) -> bool:
+    try:
+        model_input = json.loads(intent.model_input_json)
+    except (TypeError, json.JSONDecodeError):
+        return False
+    return (
+        _IDENTIFIER.fullmatch(intent.namespace) is not None
+        and _IDENTIFIER.fullmatch(intent.request_id) is not None
+        and _SHA256.fullmatch(intent.call_id) is not None
+        and intent.call_id
+        == _content_hash({"namespace": intent.namespace, "request_id": intent.request_id})
+        and _SHA256.fullmatch(intent.request_fingerprint) is not None
+        and intent.request_fingerprint
+        == _content_hash(
+            {
+                "request_id": intent.request_id,
+                "namespace": intent.namespace,
+                "model_input_hash": intent.model_input_hash,
+            }
+        )
+        and type(model_input) is dict
+        and json.dumps(model_input, sort_keys=True, separators=(",", ":"))
+        == intent.model_input_json
+        and _SHA256.fullmatch(intent.model_input_hash) is not None
+        and hashlib.sha256(intent.model_input_json.encode()).hexdigest() == intent.model_input_hash
+        and _model_input_matches_intent(model_input, intent)
+        and _SHA256.fullmatch(intent.prompt_fingerprint) is not None
+        and _MODEL_IDENTITY.fullmatch(intent.requested_model_identity) is not None
+        and _SHA256.fullmatch(intent.model_configuration_fingerprint) is not None
+        and _valid_hash_tuple(intent.tool_fingerprints, allow_empty=True)
+        and _valid_hash_tuple(intent.material_input_hashes, allow_empty=False)
+        and intent.maximum_output_bytes == MAXIMUM_MODEL_OUTPUT_BYTES
+    )
+
+
+def _model_input_matches_intent(model_input: dict[object, object], intent: LabCallIntent) -> bool:
+    prompt = model_input.get("prompt")
+    model_configuration = model_input.get("model_configuration")
+    tools = model_input.get("tools")
+    material_hashes = model_input.get("material_input_hashes")
+    return (
+        model_input.get("schema_version") == 1
+        and model_input.get("role") == "evidence_collector"
+        and model_input.get("authority_scope") == "research_lab_non_production"
+        and model_input.get("non_production") is True
+        and model_input.get("namespace") == intent.namespace
+        and type(prompt) is dict
+        and prompt.get("content_hash") == intent.prompt_fingerprint
+        and type(model_configuration) is dict
+        and model_configuration.get("model_identity") == intent.requested_model_identity
+        and model_configuration.get("content_hash") == intent.model_configuration_fingerprint
+        and type(tools) is list
+        and tuple(item.get("schema_hash") if type(item) is dict else None for item in tools)
+        == intent.tool_fingerprints
+        and type(material_hashes) is list
+        and tuple(material_hashes) == intent.material_input_hashes
+    )
+
+
+def _valid_hash_tuple(value: object, *, allow_empty: bool) -> bool:
+    return (
+        type(value) is tuple
+        and (allow_empty or bool(value))
+        and value == tuple(sorted(set(value)))
+        and all(type(item) is str and _SHA256.fullmatch(item) is not None for item in value)
+    )

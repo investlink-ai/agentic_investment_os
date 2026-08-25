@@ -389,12 +389,14 @@ evidence. A scenario becomes mandatory when its owning behavior is implemented.
   safely normalized only as its schema explicitly permits.
 - `Replay` accepts only copied or synthetic evidence available by its exact cutoff, canonical subject
   mapping, pinned Constitution and bounded Belief Graph, explicit prompt, model, reasoning, tool, Data
-  Regime, portfolio-context, namespace, and material hashes. Exact retry and reopen return the prior
-  Lab observation; changed request material conflicts without another model call.
+  Regime, portfolio-context, namespace, and material hashes. Belief-node bitemporal state and graph
+  provenance are revalidated before the model boundary. Exact completed retry and reopen return the
+  prior Lab observation; changed request material conflicts without another model call.
 - The Lab ledger records intent before the scripted model effect and appends the raw-response identity,
   validated Dossier or bounded refusal, exposed model identity, tokens, turns, and timing afterward.
-  Interruption after the effect reuses the stable logical call, while timeout, quota, adapter refusal,
-  malformed or oversized output, and schema or citation failure never select another service.
+  An interruption that leaves an intent without an observation returns a typed indeterminate-effect
+  refusal after reopen and never repeats the call. Timeout, quota, adapter refusal, malformed or
+  oversized output, and schema or citation failure never select another service.
 - Lab composition refuses a production or overlapping state root, unsafe path, missing production-root
   declaration, or mismatched namespace. Reopen revalidates schema, integrity, namespace, hashes, and
   append-only records before another effect; no rejected path reaches production, Champion, packet,

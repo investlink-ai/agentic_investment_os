@@ -138,6 +138,34 @@ class EvidenceAssertion:
     relevant_at: UtcInstant
     uncertainty: StatementUncertainty
 
+    def __post_init__(self) -> None:
+        if (
+            type(self.assertion_id) is not str
+            or _IDENTIFIER.fullmatch(self.assertion_id) is None
+            or type(self.statement_kind) is not StatementKind
+            or type(self.statement) is not str
+            or not self.statement.strip()
+            or len(self.statement) > _MAXIMUM_STATEMENT_CHARACTERS
+            or type(self.citation_artifact_ids) is not tuple
+            or not 1 <= len(self.citation_artifact_ids) <= _MAXIMUM_CITATIONS_PER_ASSERTION
+            or self.citation_artifact_ids != tuple(sorted(set(self.citation_artifact_ids)))
+            or any(
+                type(citation) is not str or _SHA256.fullmatch(citation) is None
+                for citation in self.citation_artifact_ids
+            )
+            or type(self.relevant_at) is not UtcInstant
+            or type(self.uncertainty) is not StatementUncertainty
+            or (
+                self.statement_kind is StatementKind.FACT
+                and self.uncertainty is not StatementUncertainty.OBSERVED
+            )
+            or (
+                self.statement_kind is StatementKind.INTERPRETATION
+                and self.uncertainty is not StatementUncertainty.INFERRED
+            )
+        ):
+            raise ValueError(_INVALID_DOSSIER)
+
     def to_payload(self) -> dict[str, object]:
         return {
             "assertion_id": self.assertion_id,
@@ -156,6 +184,16 @@ class ContradictingEvidence:
     artifact_id: str
     explanation: str
 
+    def __post_init__(self) -> None:
+        if (
+            type(self.artifact_id) is not str
+            or _SHA256.fullmatch(self.artifact_id) is None
+            or type(self.explanation) is not str
+            or not self.explanation.strip()
+            or len(self.explanation) > _MAXIMUM_EXPLANATION_CHARACTERS
+        ):
+            raise ValueError(_INVALID_DOSSIER)
+
     def to_payload(self) -> dict[str, object]:
         return {"artifact_id": self.artifact_id, "explanation": self.explanation}
 
@@ -167,6 +205,16 @@ class ResearchLensRecord:
     lens: ResearchLens
     disposition: ResearchLensDisposition
     rationale: str
+
+    def __post_init__(self) -> None:
+        if (
+            type(self.lens) is not ResearchLens
+            or type(self.disposition) is not ResearchLensDisposition
+            or type(self.rationale) is not str
+            or not self.rationale.strip()
+            or len(self.rationale) > _MAXIMUM_EXPLANATION_CHARACTERS
+        ):
+            raise ValueError(_INVALID_DOSSIER)
 
     def to_payload(self) -> dict[str, object]:
         return {
@@ -194,23 +242,39 @@ class Dossier:
         if (
             type(self.subject) is not EquityInstrumentIdentity
             or type(self.facts) is not tuple
+            or not 1 <= len(self.facts) <= _MAXIMUM_ASSERTIONS
             or any(
                 type(item) is not EvidenceAssertion or item.statement_kind is not StatementKind.FACT
                 for item in self.facts
             )
             or type(self.interpretations) is not tuple
+            or not 1 <= len(self.interpretations) <= _MAXIMUM_ASSERTIONS
             or any(
                 type(item) is not EvidenceAssertion
                 or item.statement_kind is not StatementKind.INTERPRETATION
                 for item in self.interpretations
             )
             or type(self.contradicting_evidence) is not tuple
+            or len(self.contradicting_evidence) > _MAXIMUM_CONTRADICTIONS
             or any(type(item) is not ContradictingEvidence for item in self.contradicting_evidence)
             or type(self.missing_evidence) is not tuple
-            or any(type(item) is not str for item in self.missing_evidence)
+            or len(self.missing_evidence) > _MAXIMUM_MISSING_EVIDENCE
+            or any(
+                type(item) is not str
+                or not item.strip()
+                or len(item) > _MAXIMUM_EXPLANATION_CHARACTERS
+                for item in self.missing_evidence
+            )
+            or self.missing_evidence != tuple(sorted(set(self.missing_evidence)))
             or type(self.lenses) is not tuple
             or any(type(item) is not ResearchLensRecord for item in self.lenses)
             or {item.lens for item in self.lenses} != set(ResearchLens)
+            or self.lenses != tuple(sorted(self.lenses, key=lambda item: item.lens.value))
+            or len({item.assertion_id for item in (*self.facts, *self.interpretations)})
+            != len(self.facts) + len(self.interpretations)
+            or len({item.artifact_id for item in self.contradicting_evidence})
+            != len(self.contradicting_evidence)
+            or not _dossier_components_are_valid(self)
             or self.authority_scope != _AUTHORITY_SCOPE
             or self.non_production is not True
             or self.content_hash != _content_hash(self.material_payload())
@@ -494,6 +558,19 @@ def _exact_mapping(value: object, fields: frozenset[str]) -> dict[str, object] |
 def _content_hash(value: object) -> str:
     encoded = json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
     return hashlib.sha256(encoded).hexdigest()
+
+
+def _dossier_components_are_valid(dossier: Dossier) -> bool:
+    try:
+        for assertion in (*dossier.facts, *dossier.interpretations):
+            assertion.__post_init__()
+        for contradiction in dossier.contradicting_evidence:
+            contradiction.__post_init__()
+        for lens in dossier.lenses:
+            lens.__post_init__()
+    except (AttributeError, TypeError, ValueError):
+        return False
+    return True
 
 
 def _dossier_material_payload(  # noqa: PLR0913 - canonical identity binds every section.

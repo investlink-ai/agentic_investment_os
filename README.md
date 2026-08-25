@@ -32,10 +32,11 @@ Advance resolves and pins one Constitution version and content hash before unive
 attention, or model work; Status rebuilds active, pending, superseded, refused, and conflicting
 governance state. The isolated Research Lab exposes `Replay` for one stateless Evidence Collector call
 over copied or synthetic inputs. It records intent before the scripted model boundary, validates a
-cited non-production Dossier, replays one logical call after interruption, and refuses production
-roots, changed retry material, unsupported citations, prohibited authority, invalid model output,
-timeout, or quota exhaustion without a network or metered fallback. Thesis construction and the later
-research roles, portfolio, execution, evaluation, and remaining lifecycle phases remain scaffolds.
+cited non-production Dossier, replays completed calls, and fails closed on an interrupted call whose
+effect lacks a durable observation. It refuses production roots, changed retry material, unsupported
+citations, prohibited authority, invalid model output, timeout, or quota exhaustion without a network
+or metered fallback. Thesis construction and the later research roles, portfolio, execution,
+evaluation, and remaining lifecycle phases remain scaffolds.
 Active repository documentation owns implementation authority, and the runtime has no dependency on
 the design's Second Brain origin.
 

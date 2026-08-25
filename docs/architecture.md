@@ -324,15 +324,17 @@ Lab and can write only to its own namespace.
 Evidence Collector boundary accepts only copied or synthetic evidence content and canonical subject
 mapping, an Evidence Cutoff and Data Regime, the pinned Constitution, one bounded Belief Graph, a
 portfolio-context fingerprint, versioned prompt and model configuration, inert canonical tool schemas
-and their fingerprints, and the complete material-input hash set. The canonical model context records every one
-of those values; missing, ambient, unversioned, hash-inconsistent, future-available, or changed retry
-material is refused before a model effect.
+and their fingerprints, and the complete material-input hash set. The canonical model context records
+every one of those values; missing, ambient, unversioned, hash-inconsistent, future-available, or
+changed retry material is refused before a model effect. Belief nodes, evidence nodes, and graph edges
+are revalidated against the subject, cutoff, copied evidence, and bitemporal bounds before admission.
 
 The stateless call crosses a research-owned model port implemented by `adapters`. A Lab-local SQLite
 ledger appends the canonical intent before the call and appends the raw-response identity, exposed
 model identity, resource use, timing disposition, and validated Dossier or bounded refusal afterward.
-The stable call identity reaches the recorded adapter, so an interrupted retry resumes the same
-logical effect; a completed retry reads its prior observation without invoking the model port.
+The stable call identity reaches the adapter. A completed retry reads its prior observation without
+invoking the model port. An intent without an observation is an indeterminate prior effect after a
+possible interruption; retry returns a typed non-production refusal and never repeats the model call.
 
 The Dossier validator admits only the exact Evidence Collector schema. It binds canonical subject and
 entity mapping, resolves every citation against evidence available by the cutoff, separates facts
@@ -345,10 +347,10 @@ receives a Champion store or execution port.
 The Lab state root is an explicit private path rather than production runtime configuration. It must
 be symlink-free, repository-safe, and disjoint from every declared production root before its fixed
 `research-lab.sqlite3` file is created. Namespace metadata, intents, and observations are immutable;
-schema, integrity, namespace, content-hash, or reconstruction failure stops replay before another
-model effect. Default composition uses scripted recorded model fixtures and no network, credential,
-or metered service. A subscription-backed adapter remains unimplemented and cannot be selected as a
-fallback.
+schema, integrity, namespace, content-hash, or reconstruction failure in any existing row stops replay
+before another model effect. Composition requires an explicit model port. Deterministic tests inject
+scripted recorded fixtures; no network, credential, or metered default exists. A subscription-backed
+adapter remains unimplemented and cannot be selected as a fallback.
 
 ## Session lifecycle
 

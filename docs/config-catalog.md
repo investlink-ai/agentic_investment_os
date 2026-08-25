@@ -132,17 +132,18 @@ composition, and documented here before use.
 
 Research Lab replay adds no production runtime configuration field or default. `configure_replay`
 requires an explicit bounded namespace, Lab state root, complete set of production state roots, model
-port, repository root, and injected clock. The Lab root follows the same absolute, symlink-free,
-repository-safe location rule as production state and must be disjoint from every production root;
-composition refuses the request before creating state when that proof is incomplete or false.
+port, and repository root. Callers may inject a clock; otherwise composition uses the system clock at
+the entrypoint. The Lab root follows the same absolute, symlink-free, repository-safe location rule as
+production state and must be disjoint from every production root; composition refuses the request
+before creating state when that proof is incomplete or false.
 
 The root directory and fixed `research-lab.sqlite3` file use private modes `0700` and `0600`. Their
 names and modes are safety constants, not tunable policy. The namespace is immutable database
 metadata, and a different namespace cannot reopen the ledger. Model identity, reasoning limits,
-prompt, inert canonical tool schemas and fingerprints, Data Regime, cutoff, Constitution, bounded Belief Graph,
-portfolio-context fingerprint, and material input hashes belong to each `Replay` request and durable
-call intent rather than ambient configuration. Only the keyless recorded model adapter is
-implemented; no metered or network fallback exists.
+prompt, inert canonical tool schemas and fingerprints, Data Regime, cutoff, Constitution, bounded
+Belief Graph, portfolio-context fingerprint, and material input hashes belong to each `Replay` request
+and durable call intent rather than ambient configuration. The model port has no default. The keyless
+recorded adapter is the only implemented adapter; no metered or network fallback exists.
 
 ## Repository tooling configuration
 

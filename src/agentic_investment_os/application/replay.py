@@ -17,9 +17,17 @@ from agentic_investment_os.domain.identity import (
 from agentic_investment_os.domain.lifecycle import is_sha256
 from agentic_investment_os.domain.temporal import InvalidUtcInstantError, UtcInstant
 from agentic_investment_os.domain.universe import is_data_regime
-from agentic_investment_os.memory.beliefs import BeliefGraph
+from agentic_investment_os.memory.admission import validate_belief_event
+from agentic_investment_os.memory.beliefs import (
+    BeliefGraph,
+    BeliefGraphBeliefNode,
+    BeliefGraphEdge,
+    BeliefGraphEdgeKind,
+    BeliefGraphEvidenceNode,
+)
 from agentic_investment_os.research.dossier import Dossier, DossierRefusalReason, parse_dossier
 from agentic_investment_os.research.model import (
+    MAXIMUM_MODEL_OUTPUT_BYTES,
     EvidenceCollectorModel,
     LabCallIntent,
     LabCallLedger,
@@ -72,12 +80,13 @@ _MODEL_IDENTITY = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}\Z")
 _MAXIMUM_EVIDENCE_ITEMS = 50
 _MAXIMUM_EVIDENCE_CHARACTERS = 250_000
 _MAXIMUM_PROMPT_CHARACTERS = 20_000
-_MAXIMUM_OUTPUT_BYTES = 200_000
 _MAXIMUM_OUTPUT_TOKENS = 20_000
 _MAXIMUM_TURNS = 10
 _MAXIMUM_TOOL_FINGERPRINTS = 10
 _MAXIMUM_TOOL_SCHEMA_CHARACTERS = 20_000
 _CLOCK_INVALID = "Research Lab clock must return a timezone-aware instant representable in UTC"
+_AUTHORITY_SCOPE = "research_lab_non_production"
+_INVALID_RECEIPT = "invalid non-production Replay receipt"
 
 
 class ReplayDisposition(StrEnum):
@@ -103,6 +112,7 @@ class ReplayRefusalReason(StrEnum):
     INVALID_JSON = "invalid_json"
     INCOMPATIBLE_SCHEMA = "incompatible_schema"
     MODEL_IDENTITY_MISMATCH = "model_identity_mismatch"
+    INDETERMINATE_MODEL_EFFECT = "indeterminate_model_effect"
 
 
 class ReplayClock(Protocol):
@@ -210,7 +220,7 @@ class ReplayRequest:
         return {
             "schema_version": 1,
             "role": "evidence_collector",
-            "authority_scope": "research_lab_non_production",
+            "authority_scope": _AUTHORITY_SCOPE,
             "non_production": True,
             "namespace": self.namespace,
             "input_kind": self.input_kind,
@@ -262,7 +272,7 @@ class ReplayRequest:
             model_configuration_fingerprint=self.model_configuration.content_hash,
             tool_fingerprints=tuple(item.schema_hash for item in self.tools),
             material_input_hashes=self.material_input_hashes,
-            maximum_output_bytes=_MAXIMUM_OUTPUT_BYTES,
+            maximum_output_bytes=MAXIMUM_MODEL_OUTPUT_BYTES,
         )
 
 
@@ -289,6 +299,12 @@ class ReplayReceipt:
     turns: int
     elapsed_milliseconds: int | None
     timing_disposition: ModelTimingDisposition | None
+    authority_scope: str = _AUTHORITY_SCOPE
+    non_production: bool = True
+
+    def __post_init__(self) -> None:
+        if self.authority_scope != _AUTHORITY_SCOPE or self.non_production is not True:
+            raise ValueError(_INVALID_RECEIPT)
 
     @property
     def dossier_id(self) -> str | None:
@@ -304,7 +320,9 @@ class Replay:
     model: EvidenceCollectorModel
     clock: ReplayClock
 
-    def __call__(self, request: object) -> ReplayReceipt:
+    def __call__(  # noqa: PLR0911 - preserve each typed replay disposition at the boundary.
+        self, request: object
+    ) -> ReplayReceipt:
         parsed, refusal = _parse_replay_request(request)
         if parsed is None:
             return _input_refusal(refusal or ReplayRefusalReason.INVALID_REQUEST)
@@ -317,6 +335,12 @@ class Replay:
                 intent,
                 disposition=ReplayDisposition.CONFLICTED,
                 refusal=ReplayRefusalReason.IDENTITY_CONFLICT,
+            )
+        if preparation.disposition is LabCallPreparationDisposition.INDETERMINATE_EFFECT:
+            return _receipt_from_intent(
+                intent,
+                disposition=ReplayDisposition.REFUSED,
+                refusal=ReplayRefusalReason.INDETERMINATE_MODEL_EFFECT,
             )
         if preparation.disposition is LabCallPreparationDisposition.REPLAY:
             if preparation.observation is None:
@@ -397,12 +421,7 @@ def _parse_replay_request(  # noqa: PLR0911 - refuse each hostile boundary dimen
     material_hashes = _parse_hashes(root["material_input_hashes"])
     if prompt is None or model_configuration is None or tools is None or material_hashes is None:
         return None, ReplayRefusalReason.INVALID_REQUEST
-    evidence_ids = {item.artifact_id for item in evidence}
-    if (
-        belief_graph.query.subjects != (subject,)
-        or belief_graph.query.cutoff != cutoff
-        or any(node.artifact_id not in evidence_ids for node in belief_graph.evidence_nodes)
-    ):
+    if not _belief_graph_matches_replay(belief_graph, subject, cutoff, evidence):
         return None, ReplayRefusalReason.INVALID_REQUEST
     required_hashes = {
         *(item.content_hash for item in evidence),
@@ -594,6 +613,7 @@ def _observe_response(request: ReplayRequest, response: ModelCallResponse) -> La
         response=response,
         dossier=dossier,
         dossier_refusal=dossier_refusal,
+        retain_raw_response=disposition is not LabObservationDisposition.OVERSIZED_OUTPUT,
     )
 
 
@@ -601,6 +621,11 @@ def _response_disposition(  # noqa: PLR0911 - preserve independent adapter dispo
     request: ReplayRequest,
     response: ModelCallResponse,
 ) -> LabObservationDisposition:
+    if (
+        response.raw_response is not None
+        and len(response.raw_response) > MAXIMUM_MODEL_OUTPUT_BYTES
+    ):
+        return LabObservationDisposition.OVERSIZED_OUTPUT
     if response.disposition is ModelCallDisposition.TIMED_OUT:
         return LabObservationDisposition.MODEL_TIMEOUT
     if response.disposition is ModelCallDisposition.QUOTA_EXHAUSTED:
@@ -616,9 +641,96 @@ def _response_disposition(  # noqa: PLR0911 - preserve independent adapter dispo
         return LabObservationDisposition.MODEL_IDENTITY_MISMATCH
     if response.raw_response is None:
         return LabObservationDisposition.ADAPTER_REFUSED
-    if len(response.raw_response) > _MAXIMUM_OUTPUT_BYTES:
-        return LabObservationDisposition.OVERSIZED_OUTPUT
     return LabObservationDisposition.INVALID_DOSSIER
+
+
+def _belief_graph_matches_replay(
+    graph: BeliefGraph,
+    subject: EquityInstrumentIdentity,
+    cutoff: UtcInstant,
+    evidence: tuple[LabEvidenceInput, ...],
+) -> bool:
+    try:
+        graph.__post_init__()
+        graph.query.__post_init__()
+    except (AttributeError, TypeError, ValueError):
+        return False
+    evidence_by_id = {item.artifact_id: item for item in evidence}
+    if (
+        graph.query.subjects != (subject,)
+        or graph.query.cutoff != cutoff
+        or len(graph.belief_nodes) > graph.query.maximum_belief_events
+        or len(graph.evidence_nodes) > graph.query.maximum_evidence_artifacts
+        or any(type(node) is not BeliefGraphBeliefNode for node in graph.belief_nodes)
+        or any(type(node) is not BeliefGraphEvidenceNode for node in graph.evidence_nodes)
+        or any(type(edge) is not BeliefGraphEdge for edge in graph.edges)
+    ):
+        return False
+    belief_event_ids: set[str] = set()
+    ledger_positions: set[int] = set()
+    for belief_node in graph.belief_nodes:
+        event = belief_node.event
+        if (
+            type(belief_node.ledger_position) is not int
+            or belief_node.ledger_position <= 0
+            or belief_node.ledger_position in ledger_positions
+            or type(belief_node.recorded_at) is not UtcInstant
+            or belief_node.recorded_at.value > cutoff.value
+            or not validate_belief_event(event)
+            or event.subject != subject
+            or event.valid_at.value > cutoff.value
+            or event.transaction_at.value > cutoff.value
+            or event.evidence_cutoff.value > cutoff.value
+            or belief_node.recorded_at.value < event.transaction_at.value
+            or event.event_id in belief_event_ids
+            or any(
+                reference.artifact_id not in evidence_by_id
+                or evidence_by_id[reference.artifact_id].content_hash != reference.content_hash
+                for reference in event.evidence
+            )
+        ):
+            return False
+        belief_event_ids.add(event.event_id)
+        ledger_positions.add(belief_node.ledger_position)
+    graph_evidence_ids: set[str] = set()
+    for evidence_node in graph.evidence_nodes:
+        replay_evidence = evidence_by_id.get(evidence_node.artifact_id)
+        if (
+            replay_evidence is None
+            or evidence_node.artifact_id in graph_evidence_ids
+            or evidence_node.content_hash != replay_evidence.content_hash
+            or evidence_node.available_at != replay_evidence.available_at
+            or evidence_node.available_at.value > cutoff.value
+        ):
+            return False
+        graph_evidence_ids.add(evidence_node.artifact_id)
+    expected_edges = tuple(
+        sorted(
+            (
+                *(
+                    BeliefGraphEdge(
+                        BeliefGraphEdgeKind.SUPPORTS,
+                        reference.artifact_id,
+                        node.event.event_id,
+                    )
+                    for node in graph.belief_nodes
+                    for reference in node.event.evidence
+                    if reference.artifact_id in graph_evidence_ids
+                ),
+                *(
+                    BeliefGraphEdge(kind, node.event.event_id, target)
+                    for node in graph.belief_nodes
+                    for kind, target in (
+                        (BeliefGraphEdgeKind.TRANSITION_FROM, node.event.transition_from_event_id),
+                        (BeliefGraphEdgeKind.SUPERSEDES, node.event.supersedes_event_id),
+                    )
+                    if target is not None and target in belief_event_ids
+                ),
+            ),
+            key=lambda edge: (edge.kind.value, edge.source_id, edge.target_id),
+        )
+    )
+    return graph.edges == expected_edges
 
 
 def _model_response_is_valid(value: object) -> bool:
