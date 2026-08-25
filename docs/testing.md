@@ -212,6 +212,7 @@ The implemented candidate inventory is:
 | `memory/reducer.py` | Critical append-only belief-transition reducer, projection identity, and ledger commitment; unit, property, refusal, and mutation evidence |
 | `research/dossier.py` | Safety-supporting exact-schema, citation, cutoff, lens, and prohibited-authority validation; unit, hostile-input, and coverage evidence |
 | `research/model.py` | Safety-supporting owner-defined model and Lab-ledger contracts with no direct effect implementation; contract, integration, and coverage evidence |
+| `research/resolution.py` | Safety-supporting Thesis, Skeptic, scenario, CIO, horizon, evidence, and prohibited-authority validation with no sizing, packet, or broker effect; unit, hostile-input, integration, and coverage evidence |
 | `domain/__init__.py` | Non-critical package scaffold with no callable |
 | `execution/__init__.py`, `portfolio/__init__.py` | Critical-authority package scaffolds with no callable; explicit mutation scaffold exemption |
 
@@ -392,8 +393,23 @@ evidence. A scenario becomes mandatory when its owning behavior is implemented.
   Regime, portfolio-context, namespace, and material hashes. Belief-node bitemporal state and graph
   provenance are revalidated before the model boundary. Exact completed retry and reopen return the
   prior Lab observation; changed request material conflicts without another model call.
+- A resolution Replay accepts one validated Dossier and exactly ordered Thesis Builder, Independent
+  Skeptic, Scenario Forecaster, and CIO contracts. Each role has a distinct call identity and receives
+  only validated declared artifacts; the Skeptic context contains no Thesis Builder raw response,
+  prompt, or conversation state. The copied evidence manifest binds every artifact ID to its content
+  hash. Thesis identity, claim-local evidence references, required distinctions, and one-to-twenty-day
+  horizon are exact. Skeptic rejection and evidence requests remain observable. Forecasts contain
+  exactly bull, base, and bear outcomes with the Thesis horizon, downside paths, one allowed-source
+  metric and window, a gap-free exclusive threshold partition with explicit finite-bound ownership,
+  and either absent probabilities or basis-point totals of exactly 10,000. Unknown resolution-source
+  classes or ambiguous boundary ownership fail closed. CIO output is limited to `long`, `hold`,
+  `reduce`, `exit`, or `abstain` with a closed evidence-bound rationale. Missing evidence, an active
+  uninvestable condition, or an unresolved evidence request permits only abstention, and a rejected
+  Thesis cannot become `long` or `hold`.
 - The Lab ledger records intent before the scripted model effect and appends the raw-response identity,
-  validated Dossier or bounded refusal, exposed model identity, tokens, turns, and timing afterward.
+  validated role artifact or bounded refusal, exposed model identity, tokens, turns, and timing
+  afterward. Every role receipt distinguishes a fresh required effect from exact replay, and every
+  role resumes independently without duplicating a completed call.
   An interruption that leaves an intent without an observation returns a typed indeterminate-effect
   refusal after reopen and never repeats the call. Timeout, quota, adapter refusal, malformed or
   oversized output, and schema or citation failure never select another service.

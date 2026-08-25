@@ -1,4 +1,4 @@
-"""Provide deterministic scripted Evidence Collector model observations."""
+"""Provide deterministic scripted research-role model observations."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ from agentic_investment_os.research.model import (
     ModelTimingDisposition,
 )
 
-__all__ = ("RecordedEvidenceCollector", "RecordedModelFixture")
+__all__ = ("RecordedEvidenceCollector", "RecordedModelFixture", "RecordedResearchModel")
 
 
 @dataclass(frozen=True, slots=True)
@@ -42,7 +42,7 @@ class RecordedModelFixture:
 
 
 @dataclass(slots=True)
-class RecordedEvidenceCollector:
+class RecordedResearchModel:
     """Replay scripted results once per stable call identity without external effects."""
 
     fixtures: tuple[RecordedModelFixture, ...]
@@ -81,3 +81,6 @@ class RecordedEvidenceCollector:
             response = fixture.response()
         self._responses[request.call_id] = response
         return response
+
+
+RecordedEvidenceCollector = RecordedResearchModel

@@ -25,6 +25,22 @@ from agentic_investment_os.research.model import (
     LabCallPreparationDisposition,
     LabObservationDisposition,
     ModelTimingDisposition,
+    ResearchRole,
+    observation_matches_role,
+)
+from agentic_investment_os.research.resolution import (
+    CioRefusalReason,
+    CioResolution,
+    ForecastRefusalReason,
+    ScenarioForecast,
+    SkepticRefusalReason,
+    SkepticResult,
+    Thesis,
+    ThesisRefusalReason,
+    parse_cio_resolution,
+    parse_scenario_forecast,
+    parse_skeptic_result,
+    parse_thesis,
 )
 
 __all__ = (
@@ -36,10 +52,10 @@ __all__ = (
 )
 
 _DATABASE_NAME = "research-lab.sqlite3"
-_DATABASE_VERSION = 1
+_DATABASE_VERSION = 2
 _BEGIN_IMMEDIATE = "BEGIN IMMEDIATE"
 _PRIVATE_DATABASE_FLAGS = os.O_CREAT | os.O_EXCL | os.O_WRONLY
-_INTENT_ROW_LENGTH = 6
+_INTENT_ROW_LENGTH = 7
 _OBSERVATION_ROW_LENGTH = 5
 _SHA256_LENGTH = 64
 _SCHEMA = (
@@ -52,11 +68,13 @@ _SCHEMA = (
     """
     CREATE TABLE lab_call_intents (
         call_id TEXT PRIMARY KEY CHECK (length(call_id) = 64),
-        request_id TEXT NOT NULL UNIQUE,
+        request_id TEXT NOT NULL,
+        role TEXT NOT NULL,
         request_fingerprint TEXT NOT NULL CHECK (length(request_fingerprint) = 64),
         intent_json TEXT NOT NULL,
         intent_hash TEXT NOT NULL CHECK (length(intent_hash) = 64),
-        recorded_at TEXT NOT NULL
+        recorded_at TEXT NOT NULL,
+        UNIQUE (request_id, role)
     ) STRICT
     """,
     """
@@ -187,18 +205,20 @@ class SQLiteLabCallLedger:
                 connection.execute(_BEGIN_IMMEDIATE)
                 self._validate_database(connection)
                 row = connection.execute(
-                    "SELECT call_id, request_fingerprint, intent_json, intent_hash "
-                    "FROM lab_call_intents WHERE request_id = ?",
-                    (intent.request_id,),
+                    "SELECT call_id, role, request_fingerprint, intent_json, intent_hash "
+                    "FROM lab_call_intents WHERE request_id = ? AND role = ?",
+                    (intent.request_id, intent.role.value),
                 ).fetchone()
                 if row is None:
                     connection.execute(
                         "INSERT INTO lab_call_intents "
-                        "(call_id, request_id, request_fingerprint, intent_json, intent_hash, "
-                        "recorded_at) VALUES (?, ?, ?, ?, ?, ?)",
+                        "(call_id, request_id, role, request_fingerprint, "
+                        "intent_json, intent_hash, "
+                        "recorded_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
                         (
                             intent.call_id,
                             intent.request_id,
+                            intent.role.value,
                             intent.request_fingerprint,
                             intent_json,
                             intent.content_hash,
@@ -206,9 +226,10 @@ class SQLiteLabCallLedger:
                         ),
                     )
                     return LabCallPreparation(LabCallPreparationDisposition.EFFECT_REQUIRED)
-                call_id, fingerprint, stored_json, stored_hash = row
+                call_id, stored_role, fingerprint, stored_json, stored_hash = row
                 if (
-                    type(stored_json) is not str
+                    stored_role != intent.role.value
+                    or type(stored_json) is not str
                     or type(stored_hash) is not str
                     or hashlib.sha256(stored_json.encode()).hexdigest() != stored_hash
                     or not _is_canonical_json(stored_json)
@@ -238,6 +259,8 @@ class SQLiteLabCallLedger:
             observation.__post_init__()
         except (AttributeError, TypeError, ValueError) as error:
             raise LabPersistenceError(_OBSERVATION_FAILED) from error
+        if not observation_matches_role(observation, intent.role):
+            raise LabPersistenceError(_OBSERVATION_FAILED)
         observation_json = _canonical_json(observation.to_payload())
         observation_hash = hashlib.sha256(observation_json.encode()).hexdigest()
         try:
@@ -354,8 +377,8 @@ def _parse_observation(
                 "turns",
                 "elapsed_milliseconds",
                 "timing_disposition",
-                "dossier",
-                "dossier_refusal",
+                "artifact",
+                "artifact_refusal",
             }
         ),
     )
@@ -392,14 +415,12 @@ def _parse_observation(
         timing = ModelTimingDisposition(timing_value)
     except (TypeError, ValueError) as error:
         raise LabPersistenceError(_CORRUPT_HISTORY) from error
-    dossier = _parse_stored_dossier(fields["dossier"], intent)
-    dossier_refusal_value = fields["dossier_refusal"]
-    if dossier_refusal_value is not None and type(dossier_refusal_value) is not str:
+    artifact = _parse_stored_artifact(fields["artifact"], intent)
+    artifact_refusal_value = fields["artifact_refusal"]
+    if artifact_refusal_value is not None and type(artifact_refusal_value) is not str:
         raise LabPersistenceError(_CORRUPT_HISTORY)
     try:
-        dossier_refusal = (
-            None if dossier_refusal_value is None else DossierRefusalReason(dossier_refusal_value)
-        )
+        artifact_refusal = _parse_artifact_refusal(artifact_refusal_value, intent.role)
     except (TypeError, ValueError) as error:
         raise LabPersistenceError(_CORRUPT_HISTORY) from error
     exposed = fields["exposed_model_identity"]
@@ -419,22 +440,25 @@ def _parse_observation(
     ):
         raise LabPersistenceError(_CORRUPT_HISTORY)
     validated = disposition is LabObservationDisposition.VALIDATED
-    invalid_dossier = disposition is LabObservationDisposition.INVALID_DOSSIER
+    invalid_artifact = disposition in (
+        LabObservationDisposition.INVALID_ARTIFACT,
+        LabObservationDisposition.INVALID_DOSSIER,
+    )
     oversized = disposition is LabObservationDisposition.OVERSIZED_OUTPUT
     if (
-        validated != (dossier is not None and dossier_refusal is None)
-        or invalid_dossier != (dossier is None and dossier_refusal is not None)
+        validated != (artifact is not None and artifact_refusal is None)
+        or invalid_artifact != (artifact is None and artifact_refusal is not None)
         or (
             not validated
-            and not invalid_dossier
-            and (dossier is not None or dossier_refusal is not None)
+            and not invalid_artifact
+            and (artifact is not None or artifact_refusal is not None)
         )
         or (oversized and (retained or stored_raw_hash is None))
         or (not oversized and not retained and stored_raw_hash is not None)
     ):
         raise LabPersistenceError(_CORRUPT_HISTORY)
     try:
-        return LabCallObservation(
+        observation = LabCallObservation(
             intent.call_id,
             disposition,
             raw_response,
@@ -446,16 +470,23 @@ def _parse_observation(
             turns,
             elapsed,
             timing,
-            dossier,
-            dossier_refusal,
+            artifact,
+            artifact_refusal,
         )
     except (TypeError, ValueError) as error:
         raise LabPersistenceError(_CORRUPT_HISTORY) from error
+    if not observation_matches_role(observation, intent.role):
+        raise LabPersistenceError(_CORRUPT_HISTORY)
+    return observation
 
 
-def _parse_stored_dossier(value: object, intent: LabCallIntent) -> Dossier | None:
+def _parse_stored_artifact(
+    value: object, intent: LabCallIntent
+) -> Dossier | Thesis | SkepticResult | ScenarioForecast | CioResolution | None:
     if value is None:
         return None
+    if intent.role is not ResearchRole.EVIDENCE_COLLECTOR:
+        return _parse_stored_resolution_artifact(value, intent)
     fields = _exact_mapping(
         value,
         frozenset(
@@ -498,14 +529,216 @@ def _parse_stored_dossier(value: object, intent: LabCallIntent) -> Dossier | Non
     return parsed
 
 
+def _parse_artifact_refusal(
+    value: object, role: ResearchRole
+) -> (
+    DossierRefusalReason
+    | ThesisRefusalReason
+    | SkepticRefusalReason
+    | ForecastRefusalReason
+    | CioRefusalReason
+    | None
+):
+    if value is None:
+        return None
+    if type(value) is not str:
+        raise ValueError(_CORRUPT_HISTORY)
+    if role is ResearchRole.EVIDENCE_COLLECTOR:
+        return DossierRefusalReason(value)
+    if role is ResearchRole.THESIS_BUILDER:
+        return ThesisRefusalReason(value)
+    if role is ResearchRole.INDEPENDENT_SKEPTIC:
+        return SkepticRefusalReason(value)
+    if role is ResearchRole.SCENARIO_FORECASTER:
+        return ForecastRefusalReason(value)
+    return CioRefusalReason(value)
+
+
+def _parse_stored_resolution_artifact(
+    value: object, intent: LabCallIntent
+) -> Thesis | SkepticResult | ScenarioForecast | CioResolution:
+    try:
+        model_input = json.loads(intent.model_input_json)
+        subject = parse_instrument_identity(model_input["subject"])
+        cutoff = UtcInstant.parse(model_input["evidence_cutoff"])
+        artifact_ids_value = model_input["available_artifact_ids"]
+        evidence_manifest = model_input["evidence_manifest"]
+        dossier_value = model_input["dossier"]
+    except (InvalidUtcInstantError, KeyError, TypeError, json.JSONDecodeError) as error:
+        raise LabPersistenceError(_CORRUPT_HISTORY) from error
+    if (
+        type(subject) is not EquityInstrumentIdentity
+        or type(artifact_ids_value) is not list
+        or any(not _is_sha256(item) for item in artifact_ids_value)
+        or not _valid_evidence_manifest(
+            evidence_manifest,
+            subject,
+            cutoff,
+            artifact_ids_value,
+            intent.material_input_hashes,
+        )
+    ):
+        raise LabPersistenceError(_CORRUPT_HISTORY)
+    artifact_ids = tuple(artifact_ids_value)
+    dossier = _parse_dossier_payload(dossier_value, subject, artifact_ids, cutoff)
+    thesis = _parse_prior_thesis(model_input.get("thesis"), dossier)
+    skeptic = _parse_prior_skeptic(model_input.get("skeptic"), dossier, thesis)
+    forecast = _parse_prior_forecast(model_input.get("forecast"), dossier, thesis, skeptic)
+    raw, expected_hash = _split_stored_artifact(value)
+    parsed: (
+        Thesis
+        | ThesisRefusalReason
+        | SkepticResult
+        | SkepticRefusalReason
+        | ScenarioForecast
+        | ForecastRefusalReason
+        | CioResolution
+        | CioRefusalReason
+    )
+    if intent.role is ResearchRole.THESIS_BUILDER:
+        parsed = parse_thesis(raw, dossier=dossier)
+    elif intent.role is ResearchRole.INDEPENDENT_SKEPTIC and thesis is not None:
+        parsed = parse_skeptic_result(raw, dossier=dossier, thesis=thesis)
+    elif (
+        intent.role is ResearchRole.SCENARIO_FORECASTER
+        and thesis is not None
+        and skeptic is not None
+    ):
+        parsed = parse_scenario_forecast(raw, dossier=dossier, thesis=thesis, skeptic=skeptic)
+    elif (
+        intent.role is ResearchRole.CIO
+        and thesis is not None
+        and skeptic is not None
+        and forecast is not None
+    ):
+        parsed = parse_cio_resolution(
+            raw,
+            dossier=dossier,
+            thesis=thesis,
+            skeptic=skeptic,
+            forecast=forecast,
+        )
+    else:
+        raise LabPersistenceError(_CORRUPT_HISTORY)
+    if not isinstance(parsed, (Thesis, SkepticResult, ScenarioForecast, CioResolution)):
+        raise LabPersistenceError(_CORRUPT_HISTORY)
+    if parsed.content_hash != expected_hash:
+        raise LabPersistenceError(_CORRUPT_HISTORY)
+    return parsed
+
+
+def _parse_dossier_payload(
+    value: object,
+    subject: EquityInstrumentIdentity,
+    artifact_ids: tuple[str, ...],
+    cutoff: UtcInstant,
+) -> Dossier:
+    raw, expected_hash = _split_stored_artifact(value)
+    parsed = parse_dossier(
+        raw,
+        expected_subject=subject,
+        available_artifact_ids=artifact_ids,
+        cutoff=cutoff,
+    )
+    if not isinstance(parsed, Dossier) or parsed.content_hash != expected_hash:
+        raise LabPersistenceError(_CORRUPT_HISTORY)
+    return parsed
+
+
+def _parse_prior_thesis(value: object, dossier: Dossier) -> Thesis | None:
+    if value is None:
+        return None
+    raw, expected_hash = _split_stored_artifact(value)
+    parsed = parse_thesis(raw, dossier=dossier)
+    if not isinstance(parsed, Thesis) or parsed.content_hash != expected_hash:
+        raise LabPersistenceError(_CORRUPT_HISTORY)
+    return parsed
+
+
+def _parse_prior_skeptic(
+    value: object, dossier: Dossier, thesis: Thesis | None
+) -> SkepticResult | None:
+    if value is None:
+        return None
+    if thesis is None:
+        raise LabPersistenceError(_CORRUPT_HISTORY)
+    raw, expected_hash = _split_stored_artifact(value)
+    parsed = parse_skeptic_result(raw, dossier=dossier, thesis=thesis)
+    if not isinstance(parsed, SkepticResult) or parsed.content_hash != expected_hash:
+        raise LabPersistenceError(_CORRUPT_HISTORY)
+    return parsed
+
+
+def _parse_prior_forecast(
+    value: object,
+    dossier: Dossier,
+    thesis: Thesis | None,
+    skeptic: SkepticResult | None,
+) -> ScenarioForecast | None:
+    if value is None:
+        return None
+    if thesis is None or skeptic is None:
+        raise LabPersistenceError(_CORRUPT_HISTORY)
+    raw, expected_hash = _split_stored_artifact(value)
+    parsed = parse_scenario_forecast(raw, dossier=dossier, thesis=thesis, skeptic=skeptic)
+    if not isinstance(parsed, ScenarioForecast) or parsed.content_hash != expected_hash:
+        raise LabPersistenceError(_CORRUPT_HISTORY)
+    return parsed
+
+
+def _split_stored_artifact(value: object) -> tuple[dict[str, object], str]:
+    if type(value) is not dict or type(value.get("content_hash")) is not str:
+        raise LabPersistenceError(_CORRUPT_HISTORY)
+    expected_hash = _require_string(value["content_hash"])
+    raw = {key: item for key, item in value.items() if key != "content_hash"}
+    return raw, expected_hash
+
+
+def _valid_evidence_manifest(
+    value: object,
+    subject: EquityInstrumentIdentity,
+    cutoff: UtcInstant,
+    artifact_ids: list[object],
+    material_input_hashes: tuple[str, ...],
+) -> bool:
+    if type(value) is not list or len(value) != len(artifact_ids):
+        return False
+    parsed_ids: list[str] = []
+    for item in value:
+        fields = _exact_mapping(
+            item,
+            frozenset({"artifact_id", "content_hash", "available_at", "subject"}),
+        )
+        if fields is None:
+            return False
+        artifact_id = fields["artifact_id"]
+        parsed_subject = parse_instrument_identity(fields["subject"])
+        try:
+            available_at = UtcInstant.parse(fields["available_at"])
+        except InvalidUtcInstantError:
+            return False
+        if (
+            type(artifact_id) is not str
+            or not _is_sha256(fields["content_hash"])
+            or fields["content_hash"] not in material_input_hashes
+            or type(parsed_subject) is not EquityInstrumentIdentity
+            or parsed_subject != subject
+            or available_at.value > cutoff.value
+        ):
+            return False
+        parsed_ids.append(artifact_id)
+    return parsed_ids == artifact_ids and parsed_ids == sorted(set(parsed_ids))
+
+
 def _require_matching_intent(connection: sqlite3.Connection, intent: LabCallIntent) -> None:
     row = connection.execute(
-        "SELECT request_id, request_fingerprint, intent_json, intent_hash "
+        "SELECT request_id, role, request_fingerprint, intent_json, intent_hash "
         "FROM lab_call_intents WHERE call_id = ?",
         (intent.call_id,),
     ).fetchone()
     if row != (
         intent.request_id,
+        intent.role.value,
         intent.request_fingerprint,
         _canonical_json(intent.to_payload()),
         intent.content_hash,
@@ -516,8 +749,9 @@ def _require_matching_intent(connection: sqlite3.Connection, intent: LabCallInte
 def _validate_history(connection: sqlite3.Connection) -> None:
     intents: dict[str, tuple[LabCallIntent, UtcInstant]] = {}
     rows = connection.execute(
-        "SELECT call_id, request_id, request_fingerprint, intent_json, intent_hash, recorded_at "
-        "FROM lab_call_intents ORDER BY request_id"
+        "SELECT call_id, request_id, role, request_fingerprint, intent_json, intent_hash, "
+        "recorded_at "
+        "FROM lab_call_intents ORDER BY request_id, role"
     ).fetchall()
     for row in rows:
         intent, recorded_at = _parse_intent_row(row)
@@ -552,10 +786,13 @@ def _validate_history(connection: sqlite3.Connection) -> None:
 def _parse_intent_row(row: object) -> tuple[LabCallIntent, UtcInstant]:
     if type(row) is not tuple or len(row) != _INTENT_ROW_LENGTH:
         raise LabPersistenceError(_CORRUPT_HISTORY)
-    call_id, request_id, request_fingerprint, intent_json, intent_hash, recorded_at = row
+    call_id, request_id, stored_role, request_fingerprint, intent_json, intent_hash, recorded_at = (
+        row
+    )
     if (
         type(call_id) is not str
         or type(request_id) is not str
+        or type(stored_role) is not str
         or type(request_fingerprint) is not str
         or type(intent_json) is not str
         or type(intent_hash) is not str
@@ -574,6 +811,7 @@ def _parse_intent_row(row: object) -> tuple[LabCallIntent, UtcInstant]:
                 "schema_version",
                 "record_kind",
                 "call_id",
+                "role",
                 "namespace",
                 "request_id",
                 "request_fingerprint",
@@ -595,6 +833,7 @@ def _parse_intent_row(row: object) -> tuple[LabCallIntent, UtcInstant]:
     ):
         raise LabPersistenceError(_CORRUPT_HISTORY)
     parsed_call_id = _require_string(fields["call_id"])
+    role_value = _require_string(fields["role"])
     namespace = _require_string(fields["namespace"])
     parsed_request_id = _require_string(fields["request_id"])
     parsed_request_fingerprint = _require_string(fields["request_fingerprint"])
@@ -613,8 +852,10 @@ def _parse_intent_row(row: object) -> tuple[LabCallIntent, UtcInstant]:
     ):
         raise LabPersistenceError(_CORRUPT_HISTORY)
     try:
+        role = ResearchRole(role_value)
         intent = LabCallIntent(
             parsed_call_id,
+            role,
             namespace,
             parsed_request_id,
             parsed_request_fingerprint,
@@ -632,6 +873,7 @@ def _parse_intent_row(row: object) -> tuple[LabCallIntent, UtcInstant]:
     if (
         call_id != intent.call_id
         or request_id != intent.request_id
+        or stored_role != intent.role.value
         or request_fingerprint != intent.request_fingerprint
         or intent_hash != intent.content_hash
     ):

@@ -10,6 +10,18 @@ from enum import StrEnum
 from typing import TYPE_CHECKING, Protocol
 
 from agentic_investment_os.research.dossier import Dossier, DossierRefusalReason
+from agentic_investment_os.research.resolution import (
+    CioRefusalReason,
+    CioResolution,
+    ForecastRefusalReason,
+    ResearchArtifact,
+    ResearchArtifactRefusal,
+    ScenarioForecast,
+    SkepticRefusalReason,
+    SkepticResult,
+    Thesis,
+    ThesisRefusalReason,
+)
 
 if TYPE_CHECKING:
     from agentic_investment_os.domain.temporal import UtcInstant
@@ -27,6 +39,9 @@ __all__ = (
     "ModelCallRequest",
     "ModelCallResponse",
     "ModelTimingDisposition",
+    "ResearchRole",
+    "ResearchRoleModel",
+    "observation_matches_role",
 )
 
 MAXIMUM_MODEL_OUTPUT_BYTES = 200_000
@@ -54,6 +69,16 @@ class ModelTimingDisposition(StrEnum):
     UNAVAILABLE = "unavailable"
 
 
+class ResearchRole(StrEnum):
+    """Identify one stateless role in the fixed research workflow."""
+
+    EVIDENCE_COLLECTOR = "evidence_collector"
+    THESIS_BUILDER = "thesis_builder"
+    INDEPENDENT_SKEPTIC = "independent_skeptic"
+    SCENARIO_FORECASTER = "scenario_forecaster"
+    CIO = "cio"
+
+
 class LabObservationDisposition(StrEnum):
     """Classify the terminal observation appended for one logical model call."""
 
@@ -63,6 +88,7 @@ class LabObservationDisposition(StrEnum):
     ADAPTER_REFUSED = "adapter_refused"
     OVERSIZED_OUTPUT = "oversized_output"
     INVALID_JSON = "invalid_json"
+    INVALID_ARTIFACT = "invalid_artifact"
     INVALID_DOSSIER = "invalid_dossier"
     MODEL_IDENTITY_MISMATCH = "model_identity_mismatch"
 
@@ -78,9 +104,10 @@ class LabCallPreparationDisposition(StrEnum):
 
 @dataclass(frozen=True, slots=True)
 class ModelCallRequest:
-    """Supply one reconstructable stateless Evidence Collector invocation."""
+    """Supply one reconstructable stateless research-role invocation."""
 
     call_id: str
+    role: ResearchRole
     requested_model_identity: str
     model_input_json: str
     model_input_hash: str
@@ -101,10 +128,13 @@ class ModelCallResponse:
     timing_disposition: ModelTimingDisposition
 
 
-class EvidenceCollectorModel(Protocol):
-    """Invoke one stateless, effect-idempotent Evidence Collector call."""
+class ResearchRoleModel(Protocol):
+    """Invoke one stateless, effect-idempotent research-role call."""
 
     def call(self, request: ModelCallRequest) -> ModelCallResponse: ...
+
+
+EvidenceCollectorModel = ResearchRoleModel
 
 
 @dataclass(frozen=True, slots=True)
@@ -112,6 +142,7 @@ class LabCallIntent:
     """Persist every material model-visible input before invoking the model port."""
 
     call_id: str
+    role: ResearchRole
     namespace: str
     request_id: str
     request_fingerprint: str
@@ -133,6 +164,7 @@ class LabCallIntent:
             "schema_version": 1,
             "record_kind": "lab_model_call_intent",
             "call_id": self.call_id,
+            "role": self.role.value,
             "namespace": self.namespace,
             "request_id": self.request_id,
             "request_fingerprint": self.request_fingerprint,
@@ -153,6 +185,7 @@ class LabCallIntent:
     def model_request(self) -> ModelCallRequest:
         return ModelCallRequest(
             call_id=self.call_id,
+            role=self.role,
             requested_model_identity=self.requested_model_identity,
             model_input_json=self.model_input_json,
             model_input_hash=self.model_input_hash,
@@ -175,8 +208,8 @@ class LabCallObservation:
     turns: int
     elapsed_milliseconds: int | None
     timing_disposition: ModelTimingDisposition
-    dossier: Dossier | None
-    dossier_refusal: DossierRefusalReason | None
+    artifact: ResearchArtifact | None
+    artifact_refusal: DossierRefusalReason | ResearchArtifactRefusal | None
 
     def __post_init__(self) -> None:
         if not _observation_is_valid(self):
@@ -189,8 +222,8 @@ class LabCallObservation:
         call_id: str,
         disposition: LabObservationDisposition,
         response: ModelCallResponse,
-        dossier: Dossier | None = None,
-        dossier_refusal: DossierRefusalReason | None = None,
+        artifact: ResearchArtifact | None = None,
+        artifact_refusal: DossierRefusalReason | ResearchArtifactRefusal | None = None,
         retain_raw_response: bool = True,
     ) -> LabCallObservation:
         raw_hash = (
@@ -210,8 +243,8 @@ class LabCallObservation:
             response.turns,
             response.elapsed_milliseconds,
             response.timing_disposition,
-            dossier,
-            dossier_refusal,
+            artifact,
+            artifact_refusal,
         )
 
     def to_payload(self) -> dict[str, object]:
@@ -228,11 +261,21 @@ class LabCallObservation:
             "turns": self.turns,
             "elapsed_milliseconds": self.elapsed_milliseconds,
             "timing_disposition": self.timing_disposition.value,
-            "dossier": None if self.dossier is None else self.dossier.to_payload(),
-            "dossier_refusal": (
-                None if self.dossier_refusal is None else self.dossier_refusal.value
+            "artifact": None if self.artifact is None else self.artifact.to_payload(),
+            "artifact_refusal": (
+                None if self.artifact_refusal is None else self.artifact_refusal.value
             ),
         }
+
+    @property
+    def dossier(self) -> Dossier | None:
+        return self.artifact if type(self.artifact) is Dossier else None
+
+    @property
+    def dossier_refusal(self) -> DossierRefusalReason | None:
+        return (
+            self.artifact_refusal if type(self.artifact_refusal) is DossierRefusalReason else None
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -269,11 +312,18 @@ def _intent_is_valid(intent: LabCallIntent) -> bool:
     except (TypeError, json.JSONDecodeError):
         return False
     return (
-        _IDENTIFIER.fullmatch(intent.namespace) is not None
+        type(intent.role) is ResearchRole
+        and _IDENTIFIER.fullmatch(intent.namespace) is not None
         and _IDENTIFIER.fullmatch(intent.request_id) is not None
         and _SHA256.fullmatch(intent.call_id) is not None
         and intent.call_id
-        == _content_hash({"namespace": intent.namespace, "request_id": intent.request_id})
+        == _content_hash(
+            {
+                "namespace": intent.namespace,
+                "request_id": intent.request_id,
+                "role": intent.role.value,
+            }
+        )
         and _SHA256.fullmatch(intent.request_fingerprint) is not None
         and intent.request_fingerprint
         == _content_hash(
@@ -305,7 +355,7 @@ def _model_input_matches_intent(model_input: dict[object, object], intent: LabCa
     material_hashes = model_input.get("material_input_hashes")
     return (
         model_input.get("schema_version") == 1
-        and model_input.get("role") == "evidence_collector"
+        and model_input.get("role") == intent.role.value
         and model_input.get("authority_scope") == "research_lab_non_production"
         and model_input.get("non_production") is True
         and model_input.get("namespace") == intent.namespace
@@ -375,24 +425,27 @@ def _observation_is_valid(observation: LabCallObservation) -> bool:
             )
         )
         or type(observation.timing_disposition) is not ModelTimingDisposition
-        or (observation.dossier is not None and type(observation.dossier) is not Dossier)
+        or (observation.artifact is not None and not _artifact_is_exact(observation.artifact))
         or (
-            observation.dossier_refusal is not None
-            and type(observation.dossier_refusal) is not DossierRefusalReason
+            observation.artifact_refusal is not None
+            and not _artifact_refusal_is_exact(observation.artifact_refusal)
         )
     ):
         return False
     validated = observation.disposition is LabObservationDisposition.VALIDATED
-    invalid_dossier = observation.disposition is LabObservationDisposition.INVALID_DOSSIER
+    invalid_artifact = observation.disposition in (
+        LabObservationDisposition.INVALID_ARTIFACT,
+        LabObservationDisposition.INVALID_DOSSIER,
+    )
     oversized = observation.disposition is LabObservationDisposition.OVERSIZED_OUTPUT
     if (
-        validated != (observation.dossier is not None and observation.dossier_refusal is None)
-        or invalid_dossier
-        != (observation.dossier is None and observation.dossier_refusal is not None)
+        validated != (observation.artifact is not None and observation.artifact_refusal is None)
+        or invalid_artifact
+        != (observation.artifact is None and observation.artifact_refusal is not None)
         or (
             not validated
-            and not invalid_dossier
-            and (observation.dossier is not None or observation.dossier_refusal is not None)
+            and not invalid_artifact
+            and (observation.artifact is not None or observation.artifact_refusal is not None)
         )
         or (
             oversized
@@ -406,8 +459,53 @@ def _observation_is_valid(observation: LabCallObservation) -> bool:
     ):
         return False
     try:
-        if observation.dossier is not None:
-            observation.dossier.__post_init__()
+        if observation.artifact is not None:
+            observation.artifact.__post_init__()
     except (AttributeError, TypeError, ValueError):
         return False
     return True
+
+
+def _artifact_is_exact(value: object) -> bool:
+    return type(value) in (Dossier, Thesis, SkepticResult, ScenarioForecast, CioResolution)
+
+
+def _artifact_refusal_is_exact(value: object) -> bool:
+    return type(value) in (
+        DossierRefusalReason,
+        ThesisRefusalReason,
+        SkepticRefusalReason,
+        ForecastRefusalReason,
+        CioRefusalReason,
+    )
+
+
+def observation_matches_role(observation: LabCallObservation, role: ResearchRole) -> bool:
+    """Return whether an observation carries the exact artifact type owned by its role."""
+    artifact_types = {
+        ResearchRole.EVIDENCE_COLLECTOR: Dossier,
+        ResearchRole.THESIS_BUILDER: Thesis,
+        ResearchRole.INDEPENDENT_SKEPTIC: SkepticResult,
+        ResearchRole.SCENARIO_FORECASTER: ScenarioForecast,
+        ResearchRole.CIO: CioResolution,
+    }
+    refusal_types = {
+        ResearchRole.EVIDENCE_COLLECTOR: DossierRefusalReason,
+        ResearchRole.THESIS_BUILDER: ThesisRefusalReason,
+        ResearchRole.INDEPENDENT_SKEPTIC: SkepticRefusalReason,
+        ResearchRole.SCENARIO_FORECASTER: ForecastRefusalReason,
+        ResearchRole.CIO: CioRefusalReason,
+    }
+    if observation.disposition is LabObservationDisposition.VALIDATED:
+        return type(observation.artifact) is artifact_types[role]
+    if observation.disposition is LabObservationDisposition.INVALID_DOSSIER:
+        return (
+            role is ResearchRole.EVIDENCE_COLLECTOR
+            and type(observation.artifact_refusal) is DossierRefusalReason
+        )
+    if observation.disposition is LabObservationDisposition.INVALID_ARTIFACT:
+        return (
+            role is not ResearchRole.EVIDENCE_COLLECTOR
+            and type(observation.artifact_refusal) is refusal_types[role]
+        )
+    return observation.artifact is None and observation.artifact_refusal is None

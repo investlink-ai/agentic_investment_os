@@ -21,7 +21,7 @@ from agentic_investment_os.entrypoints.configuration import (
 from agentic_investment_os.entrypoints.lifecycle import SystemClock
 
 if TYPE_CHECKING:
-    from agentic_investment_os.research.model import EvidenceCollectorModel
+    from agentic_investment_os.research.model import ResearchRoleModel
 
 __all__ = ("LabCompositionRefusal", "LabCompositionRefusalCode", "configure_replay")
 
@@ -49,7 +49,7 @@ def configure_replay(  # noqa: PLR0913 - composition names every authority input
     lab_state_root: object,
     production_state_roots: tuple[Path, ...],
     repository_root: Path,
-    model: EvidenceCollectorModel,
+    model: ResearchRoleModel,
     clock: ReplayClock | None = None,
 ) -> Replay | LabCompositionRefusal:
     """Validate isolation and construct one Lab-local Replay capability."""
