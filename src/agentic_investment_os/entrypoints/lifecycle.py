@@ -12,10 +12,12 @@ from agentic_investment_os.adapters.recorded_universe import RecordedUniverseSou
 from agentic_investment_os.adapters.sqlite_lifecycle import (
     PreparedRuntimeDatabase,
     RuntimeRootRefusal,
+    SQLiteConstitutionGovernance,
     SQLiteLifecycleLedger,
     open_runtime_database,
     prepare_runtime_database,
 )
+from agentic_investment_os.application.governance import ConstitutionRegistry, ConstitutionStatus
 from agentic_investment_os.application.lifecycle import Advance, Status
 from agentic_investment_os.entrypoints.configuration import (
     ConfigurationRefusal,
@@ -32,6 +34,10 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from agentic_investment_os.application.lifecycle import Clock
+    from agentic_investment_os.domain.governance import (
+        MarketSessionEligibility,
+        OperatorApprovalVerifier,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -48,8 +54,10 @@ def configure_advance(  # noqa: PLR0913 - composition names each untrusted bound
     repository_root: Path,
     recorded_universe: object,
     recorded_evidence: object,
+    session_eligibility: MarketSessionEligibility,
     recorded_official_evidence: object = None,
     clock: Clock | None = None,
+    approval_verifier: OperatorApprovalVerifier | None = None,
 ) -> Advance | ConfigurationRefusal:
     """Validate configuration and compose Advance without credentials or network access.
 
@@ -89,6 +97,11 @@ def configure_advance(  # noqa: PLR0913 - composition names each untrusted bound
             attention_policy=resolution.attention_policy,
             attention_inputs=BuildAttentionInputs(evidence_vault),
             clock=clock if clock is not None else SystemClock(),
+            constitution_registry=ConstitutionRegistry(
+                SQLiteConstitutionGovernance(database.path),
+                approval_verifier,
+                session_eligibility,
+            ),
         )
     # Strict mypy proves this line unreachable; removing it is runtime-equivalent.
     assert_never(database)  # pragma: no cover
@@ -98,6 +111,7 @@ def configure_status(
     sources: Sequence[ConfigurationSource],
     *,
     repository_root: Path,
+    approval_verifier: OperatorApprovalVerifier | None = None,
 ) -> Status | ConfigurationRefusal:
     """Validate configuration and compose rebuildable lifecycle status.
 
@@ -122,6 +136,10 @@ def configure_status(
             SQLiteLifecycleLedger.open_existing(database.path),
             FilesystemEvidenceVault.reference_validator(
                 resolution.state_root / "evidence-vault",
+            ),
+            ConstitutionStatus(
+                SQLiteConstitutionGovernance.open_existing(database.path),
+                approval_verifier,
             ),
         )
     # Strict mypy proves this line unreachable; removing it is runtime-equivalent.

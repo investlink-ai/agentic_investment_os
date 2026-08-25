@@ -14,6 +14,7 @@ from agentic_investment_os.domain.identity import MarketSession, canonical_cycle
 from agentic_investment_os.domain.lifecycle import (
     AdvanceAttempt,
     AppendLifecycleRecord,
+    IdempotencyKey,
     LifecycleCommand,
     LifecycleDecision,
     LifecycleEvent,
@@ -23,9 +24,11 @@ from agentic_investment_os.domain.lifecycle import (
 from agentic_investment_os.entrypoints.configuration import ConfigurationSource
 from agentic_investment_os.entrypoints.lifecycle import configure_advance, configure_status
 from tests._evidence import recorded_evidence
+from tests._governance import RecordedSessionEligibility
 from tests._universe import recorded_universe, runtime_configuration
 
 if TYPE_CHECKING:
+    from agentic_investment_os.domain.governance import ConstitutionUse
     from agentic_investment_os.domain.temporal import UtcInstant
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
@@ -62,6 +65,12 @@ class FixedClock:
 class InterruptAfterReconcileLedger:
     delegate: LifecycleLedger
 
+    def pinned_constitution_use(self, idempotency_key: IdempotencyKey) -> ConstitutionUse | None:
+        return self.delegate.pinned_constitution_use(idempotency_key)
+
+    def constitution_uses(self) -> tuple[ConstitutionUse, ...]:
+        return self.delegate.constitution_uses()
+
     def advance_step(
         self,
         command: LifecycleCommand,
@@ -94,6 +103,7 @@ def _advance(state_root: Path) -> Advance:
         repository_root=REPOSITORY_ROOT,
         recorded_universe=recorded_universe(),
         recorded_evidence=recorded_evidence(),
+        session_eligibility=RecordedSessionEligibility(),
         clock=FixedClock(),
     )
     if not isinstance(capability, Advance):
@@ -176,6 +186,7 @@ def _interrupt_after_reconcile(state_root: Path) -> None:
         attention_policy=configured.attention_policy,
         attention_inputs=configured.attention_inputs,
         clock=configured.clock,
+        constitution_registry=configured.constitution_registry,
     )
     interrupted(
         cycle=MarketSession(date.fromisoformat(SESSION)).to_payload(),

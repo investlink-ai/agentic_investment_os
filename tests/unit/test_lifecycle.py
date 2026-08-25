@@ -15,6 +15,12 @@ from agentic_investment_os.domain.attention import (
     AttentionArtifact,
     AttentionRefusalReason,
 )
+from agentic_investment_os.domain.governance import (
+    ACTIVE_CONSTITUTION,
+    ConstitutionArtifact,
+    ConstitutionUse,
+    GovernanceStateError,
+)
 from agentic_investment_os.domain.identity import AssetClass, CryptoDecisionWindow, MarketSession
 from agentic_investment_os.domain.lifecycle import (
     AdvanceAttempt,
@@ -27,6 +33,7 @@ from agentic_investment_os.domain.lifecycle import (
     AppendLifecycleRecord,
     EvidenceCaptureCheckpoint,
     EvidenceCaptureReference,
+    IdempotencyKey,
     InputRefusal,
     InputRefusalCode,
     InvalidLifecycleStateError,
@@ -35,16 +42,24 @@ from agentic_investment_os.domain.lifecycle import (
     LifecycleDecision,
     LifecycleEvent,
     LifecycleEventKind,
+    LifecycleHistory,
     LifecycleLedger,
     LifecyclePhase,
     PerformAttentionSelection,
     PerformEvidenceCapture,
     PinnedRunIdentity,
+    derive_lifecycle_status,
     parse_advance_receipt,
     parse_lifecycle_checkpoint,
+    reconstruct_constitution_uses,
 )
 from agentic_investment_os.domain.temporal import InvalidUtcInstantError, UtcInstant
-from agentic_investment_os.domain.universe import UniverseInputIdentity, UniverseSnapshot
+from agentic_investment_os.domain.universe import (
+    UniverseInputIdentity,
+    UniverseInputs,
+    UniverseRefusal,
+    UniverseSnapshot,
+)
 from agentic_investment_os.evidence.capture import EvidencePersistenceError
 from tests._attention import (
     attention_artifact,
@@ -52,6 +67,7 @@ from tests._attention import (
     typed_attention_policy,
 )
 from tests._evidence import evidence_capture_checkpoint
+from tests._governance import BaselineConstitutionRegistry
 from tests._universe import (
     exact_text,
     pinned_run_identity,
@@ -66,6 +82,8 @@ RECEIPT_RECORDED_AT = UtcInstant.from_datetime(datetime(2026, 8, 21, 22, 0, tzin
 UNEXPECTED_EVIDENCE_CAPTURE = "test ledger should terminate before evidence capture"
 EVIDENCE_VAULT_INVALID = "Evidence Vault state is invalid"
 ATTENTION_INPUTS_LOADED_TOO_EARLY = "attention inputs must not load before checkpoint validation"
+INVALID_GOVERNANCE_HISTORY = "invalid Constitution governance history"
+UNEXPECTED_GOVERNANCE_RESOLUTION = "governance validation must fail before resolution"
 
 if TYPE_CHECKING:
     from agentic_investment_os.domain.attention import AttentionInputs
@@ -112,6 +130,7 @@ def _advance(ledger: LifecycleLedger) -> Advance:
         attention_policy=typed_attention_policy(),
         attention_inputs=_FixtureAttentionInputs(),
         clock=FixedClock(),
+        constitution_registry=BaselineConstitutionRegistry(),
     )
 
 
@@ -147,6 +166,8 @@ def _reseal_receipt_with_pinned_identity(envelope: dict[str, object]) -> None:
     run_material = (
         pinned["configuration_hash"],
         pinned["configuration_version"],
+        pinned["constitution_hash"],
+        pinned["constitution_version"],
         "champion",
         cycle_text,
         pinned["data_regime"],
@@ -300,11 +321,17 @@ class ConcurrentCompletionLedger:
     receipt: AdvanceReceipt
     steps: int = 0
 
+    def pinned_constitution_use(self, _idempotency_key: IdempotencyKey) -> ConstitutionUse | None:
+        return None
+
+    def constitution_uses(self) -> tuple[ConstitutionUse, ...]:
+        return ()
+
     def advance_step(
         self,
         command: LifecycleCommand,
         attempt: AdvanceAttempt,
-        _recorded_at: UtcInstant,
+        recorded_at: UtcInstant,
     ) -> LifecycleDecision:
         assert isinstance(command, AdvanceCommand)
         if self.completion_point == "start" and self.steps == 0:
@@ -339,6 +366,7 @@ class ConcurrentCompletionLedger:
                 command.pinned_run_identity,
                 event_kind,
                 None if phase is None else LifecycleCheckpoint.equity(phase),
+                recorded_at,
             ),
             next_attempt,
         )
@@ -349,6 +377,12 @@ class ConcurrentCompletionLedger:
 @dataclass(frozen=True)
 class _DecisionOnRefusalLedger:
     decision: LifecycleDecision
+
+    def pinned_constitution_use(self, _idempotency_key: IdempotencyKey) -> ConstitutionUse | None:
+        return None
+
+    def constitution_uses(self) -> tuple[ConstitutionUse, ...]:
+        return ()
 
     def advance_step(
         self,
@@ -367,6 +401,15 @@ class _ContradictoryAttentionHistoryLedger:
     artifact: AttentionArtifact
     expected_reason: AttentionRefusalReason = AttentionRefusalReason.CONTRADICTORY_EVIDENCE
     calls: int = 0
+
+    def pinned_constitution_use(
+        self,
+        _idempotency_key: IdempotencyKey,
+    ) -> ConstitutionUse | None:
+        return None
+
+    def constitution_uses(self) -> tuple[ConstitutionUse, ...]:
+        return ()
 
     def advance_step(
         self,
@@ -393,6 +436,53 @@ class _ContradictoryAttentionHistoryLedger:
         )
 
 
+@dataclass(slots=True)
+class _CountingUniverseSource:
+    delegate: RecordedUniverseSource
+    loads: int = 0
+
+    def load(self) -> UniverseInputs | UniverseRefusal:
+        self.loads += 1
+        return self.delegate.load()
+
+
+@dataclass(frozen=True, slots=True)
+class _RefusingConstitutionRegistry:
+    def activate_due(self, recorded_at: UtcInstant) -> None:
+        del recorded_at
+
+    def validate_references(self, uses: tuple[ConstitutionUse, ...]) -> None:
+        del uses
+        raise GovernanceStateError(INVALID_GOVERNANCE_HISTORY)
+
+    def resolve(
+        self,
+        session: MarketSession,
+        recorded_at: UtcInstant,
+        pinned: ConstitutionUse | None,
+    ) -> ConstitutionArtifact:
+        del session, recorded_at, pinned
+        raise AssertionError(UNEXPECTED_GOVERNANCE_RESOLUTION)
+
+
+def test_advance_validates_governance_before_loading_universe_or_entering_lifecycle() -> None:
+    ledger = _DecisionOnRefusalLedger(
+        AdvanceReceipt.failed_closed(AdvanceFailureReason.INVALID_DURABLE_STATE)
+    )
+    capability = _advance(ledger)
+    source = _CountingUniverseSource(RecordedUniverseSource(recorded_universe()))
+    blocked = replace(
+        capability,
+        universe_source=source,
+        constitution_registry=_RefusingConstitutionRegistry(),
+    )
+
+    with pytest.raises(GovernanceStateError, match="invalid Constitution governance history"):
+        blocked(cycle=_cycle(), mode="champion", idempotency_key="invalid-governance")
+
+    assert source.loads == 0
+
+
 def test_advance_request_validates_the_complete_boundary() -> None:
     request = AdvanceRequest.parse(
         session="2026-08-21",
@@ -409,7 +499,7 @@ def test_advance_request_validates_the_complete_boundary() -> None:
         request,
         configuration_hash="a" * SHA256_HEX_LENGTH,
     )
-    assert identity.run_id == "0ac44d25caa90c6870877bb8704957ecf837a83e0d3f2587687d5be645bd37db"
+    assert identity.run_id == "7deacf630c9a7b297178f045a3c9d0085d70a9200fbac6fe5dc39ba65038dd5f"
 
     invalid_cases = (
         (
@@ -438,6 +528,41 @@ def test_advance_request_validates_the_complete_boundary() -> None:
         refusal = AdvanceRequest.parse(**values)
         assert isinstance(refusal, InputRefusal)
         assert refusal.code is expected_code
+
+
+def test_lifecycle_reconstruction_rejects_an_invalid_pinned_constitution_reference() -> None:
+    request = _request()
+    identity = replace(pinned_run_identity(request), constitution_version=0)
+    event = LifecycleEvent(
+        request.stream_id,
+        0,
+        request,
+        identity,
+        LifecycleEventKind.ADVANCE_REQUESTED,
+        None,
+        RECEIPT_RECORDED_AT,
+    )
+
+    with pytest.raises(InvalidLifecycleStateError, match="derived identity is invalid"):
+        derive_lifecycle_status(LifecycleHistory(events=(event,)))
+
+
+def test_lifecycle_reconstructs_the_exact_constitution_use() -> None:
+    request = _request()
+    identity = pinned_run_identity(request)
+    event = LifecycleEvent(
+        request.stream_id,
+        0,
+        request,
+        identity,
+        LifecycleEventKind.ADVANCE_REQUESTED,
+        None,
+        RECEIPT_RECORDED_AT,
+    )
+
+    assert reconstruct_constitution_uses(LifecycleHistory(events=(event,))) == (
+        ConstitutionUse(request.session, ACTIVE_CONSTITUTION.reference, RECEIPT_RECORDED_AT),
+    )
 
 
 @pytest.mark.parametrize(
@@ -527,10 +652,11 @@ def test_lifecycle_event_uses_a_hashed_common_envelope() -> None:
         identity,
         LifecycleEventKind.UNIVERSE_SNAPSHOTTED,
         checkpoint,
+        RECEIPT_RECORDED_AT,
         snapshot,
     )
 
-    envelope = event.to_envelope(UtcInstant.from_datetime(datetime(2026, 8, 21, 22, 0, tzinfo=UTC)))
+    envelope = event.to_envelope()
 
     assert envelope["payload_discriminator"] == "equity_market_session_lifecycle_event"
     assert envelope["authority_scope"] == "investment_operating_system"
@@ -541,9 +667,10 @@ def test_lifecycle_event_uses_a_hashed_common_envelope() -> None:
     assert event_payload["completed_phase"] == checkpoint.to_payload()
     assert event_payload["universe_snapshot_id"] == snapshot.snapshot_id
     with pytest.raises(ValueError, match="timezone-aware"):
-        event.to_envelope(
-            cast("UtcInstant", datetime(2026, 8, 21, 22, 0))  # noqa: DTZ001
-        )
+        replace(
+            event,
+            recorded_at=cast("UtcInstant", datetime(2026, 8, 21, 22, 0)),  # noqa: DTZ001
+        ).to_envelope()
 
 
 def test_pinned_identity_rejects_an_untyped_evidence_cutoff_with_a_bounded_error() -> None:
@@ -564,6 +691,7 @@ def test_pinned_identity_rejects_an_untyped_evidence_cutoff_with_a_bounded_error
             configuration_version=1,
             configuration_hash="a" * 64,
             universe_inputs=universe_inputs,
+            constitution=ACTIVE_CONSTITUTION.reference,
         )
 
 

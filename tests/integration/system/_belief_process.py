@@ -30,6 +30,7 @@ from agentic_investment_os.memory.beliefs import (
     BeliefGraphQuery,
 )
 from tests._evidence import recorded_evidence
+from tests._governance import RecordedSessionEligibility
 from tests._universe import recorded_universe, runtime_configuration
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
@@ -78,6 +79,7 @@ def _seed(state_root: Path) -> None:
         repository_root=REPOSITORY_ROOT,
         recorded_universe=recorded_universe(),
         recorded_evidence=recorded_evidence(),
+        session_eligibility=RecordedSessionEligibility(),
         clock=FixedClock(),
     )
     if not isinstance(capability, Advance):

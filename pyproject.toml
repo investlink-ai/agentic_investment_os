@@ -282,7 +282,9 @@ safety_supporting_lines = 90
 safety_supporting_branches = 85
 critical_paths = [
   "adapters/sqlite_lifecycle.py",
+  "application/governance.py",
   "application/lifecycle.py",
+  "domain/governance.py",
   "domain/lifecycle.py",
   "domain/universe.py",
   "entrypoints/configuration.py",
@@ -303,6 +305,7 @@ safety_supporting_paths = [
   "evidence/capture.py",
   "entrypoints/lifecycle.py",
   "memory/beliefs.py",
+  "entrypoints/governance.py",
 ]
 
 [tool.mutmut]

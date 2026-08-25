@@ -59,12 +59,17 @@ from agentic_investment_os.evidence.capture import (
 if TYPE_CHECKING:
     from datetime import datetime
 
+    from agentic_investment_os.application.governance import ConstitutionStatus
+    from agentic_investment_os.domain.governance import (
+        ConstitutionArtifact,
+        ConstitutionUse,
+    )
     from agentic_investment_os.evidence.capture import (
         EvidenceCaptureCapability,
         EvidenceReferenceValidator,
     )
 
-__all__ = ("Advance", "Clock", "Status")
+__all__ = ("Advance", "Clock", "ConstitutionResolver", "Status")
 
 
 _INCOMPLETE_CHECKPOINT_RESULT = "lifecycle ledger returned an incomplete checkpoint result"
@@ -94,6 +99,21 @@ class AttentionInputsCapability(Protocol):
     ) -> AttentionInputs | AttentionRefusalReason: ...
 
 
+class ConstitutionResolver(Protocol):
+    """Resolve the exact immutable Constitution for one Market Session."""
+
+    def activate_due(self, recorded_at: UtcInstant) -> None: ...
+
+    def resolve(
+        self,
+        session: MarketSession,
+        recorded_at: UtcInstant,
+        pinned: ConstitutionUse | None,
+    ) -> ConstitutionArtifact: ...
+
+    def validate_references(self, uses: tuple[ConstitutionUse, ...]) -> None: ...
+
+
 @dataclass(frozen=True, slots=True)
 class Advance:
     """Advance or resume one validated Decision Cycle through bounded attention."""
@@ -108,6 +128,7 @@ class Advance:
     attention_policy: AttentionPolicy
     attention_inputs: AttentionInputsCapability
     clock: Clock
+    constitution_registry: ConstitutionResolver
 
     def __call__(  # noqa: PLR0912 - exhaust each typed lifecycle decision.
         self,
@@ -270,6 +291,28 @@ class Advance:
         if isinstance(parsed, InputRefusal):
             return parsed
         if isinstance(parsed, AdvanceRequest):
+            try:
+                uses = self.ledger.constitution_uses()
+                pinned = self.ledger.pinned_constitution_use(parsed.idempotency_key)
+            except InvalidLifecycleStateError:
+                return InputRefusal(
+                    InputRefusalCode.INVALID_DURABLE_STATE,
+                    parsed.idempotency_key,
+                    parsed.session,
+                )
+            self.constitution_registry.validate_references(uses)
+            if pinned is not None and pinned.session != parsed.session:
+                self.constitution_registry.activate_due(recorded_at)
+                return InputRefusal(
+                    InputRefusalCode.IDEMPOTENCY_KEY_CONFLICT,
+                    parsed.idempotency_key,
+                    parsed.session,
+                )
+            constitution = self.constitution_registry.resolve(
+                parsed.session,
+                recorded_at,
+                pinned,
+            )
             loaded = self.universe_source.load()
             if isinstance(loaded, UniverseRefusal):
                 return InputRefusal(
@@ -289,6 +332,7 @@ class Advance:
                     configuration_version=self.configuration_version,
                     configuration_hash=self.configuration_hash,
                     universe_inputs=universe_identity,
+                    constitution=constitution.reference,
                 )
                 snapshot = build_universe_snapshot(
                     identity.run_id,
@@ -333,8 +377,10 @@ class Status:
 
     projection: LifecycleStatusProjection
     evidence_validator: EvidenceReferenceValidator
+    constitution_status: ConstitutionStatus
 
     def __call__(self) -> LifecycleStatus:
         status = self.projection.rebuild_status()
         self.evidence_validator.validate_references(self.projection.rebuild_evidence_checkpoints())
-        return status
+        uses = self.projection.rebuild_constitution_uses()
+        return replace(status, constitution_governance=self.constitution_status(uses))

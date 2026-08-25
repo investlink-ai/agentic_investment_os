@@ -115,6 +115,19 @@ artifact validation can prove the published counts and allocations obey the pinn
 | `weekly_exploration_budget` | Positive integer below `weekly_dossier_budget` and exactly 10–20 percent of it | Reserves weekly capacity for otherwise eligible exploration subjects without bypassing later gates |
 | `exploration_seed` | Lowercase bounded identifier | Pins deterministic weekly exploration selection; it is policy material, not ambient randomness |
 
+## Constitution governance composition
+
+Constitution governance adds no runtime configuration field or default. Version 1 is the exact
+baseline owned by `investment-domain.md`; an amendment enters through `Govern` as a complete immutable
+artifact plus its public approval proof and exact future Market Session. Composition injects an
+operator-approval verifier and an exchange-session policy. The policy uses a trusted UTC instant and
+the exchange calendar to classify the approved boundary as past, current, future, or ineligible;
+host-local time is not a fallback. Their implementations, operator identity, signing ceremony, key
+provisioning, rotation, and revocation are outside the implemented runtime configuration contract.
+Signing secrets never enter the database, configuration fingerprint, receipt, lifecycle state, or
+model context. Any future configurable key reference must be typed, non-secret, resolved only at
+composition, and documented here before use.
+
 ## Repository tooling configuration
 
 | Source | Owns | Editing policy |

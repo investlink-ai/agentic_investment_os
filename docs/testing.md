@@ -186,11 +186,13 @@ The implemented candidate inventory is:
 | --- | --- |
 | `adapters/filesystem_evidence.py` | Non-critical Evidence Vault filesystem mechanics and append-only observation durability; integration, corruption, and coverage evidence |
 | `adapters/recorded_evidence.py` | Non-critical recorded-boundary validation and normalization; contract, hostile-input, and coverage evidence |
-| `adapters/sqlite_lifecycle.py` | Non-critical SQL mechanics and non-authorizing lifecycle durability; integration, corruption, architecture, and coverage evidence |
+| `adapters/sqlite_lifecycle.py` | Non-critical SQL mechanics and non-authorizing lifecycle and Constitution-governance durability; integration, corruption, architecture, and critical-coverage evidence |
 | `adapters/sqlite_memory.py` | Non-critical belief SQL mechanics and authoritative-history validation; integration, concurrency, corruption, and coverage evidence |
-| `application/lifecycle.py` | Non-critical orchestration through evidence capture and bounded attention; unit, integration, system-journey, and coverage evidence |
+| `application/governance.py` | Non-critical Constitution scheduling and resolution orchestration with no packet or broker authority; unit, integration, and critical-coverage evidence |
+| `application/lifecycle.py` | Non-critical orchestration through Constitution pinning, evidence capture, and bounded attention; unit, integration, system-journey, and critical-coverage evidence |
 | `application/memory.py` | Non-critical Record orchestration; integration, system-journey, and coverage evidence |
 | `domain/attention.py` | Safety-supporting, non-authorizing admission to bounded research capacity with no stance, sizing, packet, order, or execution effect; unit, property, integration, hostile-input, and coverage evidence |
+| `domain/governance.py` | Non-critical Constitution validation, reconstruction, idempotency, and session-bound regime selection with no packet or broker authority; unit, hostile-input, integration, and critical-coverage evidence |
 | `domain/identity.py` | Non-critical current identity serialization with no implemented packet or broker effect; unit, property, contract, and coverage evidence |
 | `domain/lifecycle.py` | Non-authorizing lifecycle, evidence-intent, and reconstruction decisions; unit, state-machine, integration, corruption, and coverage evidence |
 | `domain/temporal.py` | Non-critical time and provenance validation; unit, property, contract, and coverage evidence |
@@ -198,6 +200,7 @@ The implemented candidate inventory is:
 | `evidence/capture.py` | Non-critical evidence identity, availability, staleness, and capture policy; unit, integration, contract, corruption, and coverage evidence |
 | `evidence/attention.py` | Safety-supporting derivation of approved local attention features from exact captured evidence; unit, integration, corruption, and coverage evidence |
 | `entrypoints/configuration.py` | Non-critical configuration parsing; integration, hostile-input, and coverage evidence |
+| `entrypoints/governance.py` | Non-critical operator-only governance composition; integration and safety-supporting coverage evidence |
 | `entrypoints/lifecycle.py` | Non-critical composition; integration, system-journey, architecture, and coverage evidence |
 | `entrypoints/memory.py` | Non-critical Record composition; integration, system-journey, architecture, and coverage evidence |
 | `memory/admission.py` | Critical canonical Belief Event types, hostile-input parsing, serialization, and evidence admission; unit, contract, refusal, and mutation evidence |
@@ -274,6 +277,20 @@ evidence. A scenario becomes mandatory when its owning behavior is implemented.
   this remains true after reopen and a current-clock regression. Changed material under the same event
   identity and invalid stream transitions fail closed.
 - Constitution, model, prompt, tool, policy, data, and source hashes remain pinned within a run.
+- Govern rejects malformed or unknown artifact schemas, inconsistent hashes, missing or mismatched
+  approval, invalid signatures, unauthorized operators, non-future boundaries, and ineligible Market
+  Sessions before scheduling. An exact retry replays one receipt without another event; reuse of its
+  identity with changed material appends a bounded conflict.
+- Constitution amendments activate only at their exact approved future Market Session. Advance pins
+  the selected version and content hash before downstream work, resolves an interrupted retry from
+  the governance prefix visible at its first event even when an amendment later activates for that
+  same session, and fails closed on a missed boundary, retroactive event time, corrupt or missing
+  governance history, unverifiable approval, or a lifecycle pin that cannot be reconstructed from
+  its historical regime. Tests supply a recorded exchange-session policy and trusted UTC instants;
+  host-local time is not evidence. Contract tests keep the `Govern` object capability confined to its
+  operator composition root. Status revalidates lifecycle pins and rebuilds active, pending,
+  superseded, refused, and conflicting state from the append-only ledger without exposing signature
+  material.
 - Universe snapshots retain every current position by canonical instrument identity, apply the
   versioned structural and threshold policy at the pinned cutoff, and fail closed on partial, stale,
   contradictory, mixed-variant, or changed retry inputs.

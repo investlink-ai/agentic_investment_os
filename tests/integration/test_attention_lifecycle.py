@@ -24,6 +24,7 @@ from agentic_investment_os.domain.lifecycle import (
     AdvanceFailureReason,
     AdvanceReceipt,
     AdvanceRecovery,
+    IdempotencyKey,
     LifecycleCommand,
     LifecycleDecision,
     LifecycleLedger,
@@ -32,10 +33,12 @@ from agentic_investment_os.domain.lifecycle import (
 from agentic_investment_os.entrypoints.configuration import ConfigurationSource
 from agentic_investment_os.entrypoints.lifecycle import configure_advance
 from tests._evidence import recorded_evidence
+from tests._governance import RecordedSessionEligibility
 from tests._universe import recorded_universe, runtime_configuration
 
 if TYPE_CHECKING:
     from agentic_investment_os.domain.attention import AttentionInputs
+    from agentic_investment_os.domain.governance import ConstitutionUse
     from agentic_investment_os.domain.temporal import UtcInstant
     from agentic_investment_os.domain.universe import UniverseSnapshot
 
@@ -83,6 +86,15 @@ class _CorruptEvidenceBeforeAttention:
     vault_root: Path
     corrupted: bool = False
 
+    def pinned_constitution_use(
+        self,
+        idempotency_key: IdempotencyKey,
+    ) -> ConstitutionUse | None:
+        return self.delegate.pinned_constitution_use(idempotency_key)
+
+    def constitution_uses(self) -> tuple[ConstitutionUse, ...]:
+        return self.delegate.constitution_uses()
+
     def advance_step(
         self,
         command: LifecycleCommand,
@@ -113,6 +125,7 @@ def _configure(
         repository_root=REPOSITORY_ROOT,
         recorded_universe=recorded_universe(),
         recorded_evidence=recorded_evidence() if evidence is None else evidence,
+        session_eligibility=RecordedSessionEligibility(),
         clock=_FixedClock(),
     )
     assert isinstance(configured, Advance)

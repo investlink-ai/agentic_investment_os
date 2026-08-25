@@ -13,21 +13,29 @@ from agentic_investment_os.adapters.sqlite_lifecycle import SQLiteLifecycleLedge
 from agentic_investment_os.application.lifecycle import Advance, Status
 from agentic_investment_os.domain.identity import MarketSession
 from agentic_investment_os.domain.lifecycle import (
+    AdvanceAttempt,
+    AdvanceCommand,
     AdvanceDisposition,
     AdvanceFailureReason,
+    AdvanceReceipt,
+    AdvanceRequest,
     InvalidLifecycleStateError,
     LifecyclePhase,
     parse_advance_receipt,
 )
+from agentic_investment_os.domain.temporal import UtcInstant
 from agentic_investment_os.entrypoints.configuration import ConfigurationSource
 from agentic_investment_os.entrypoints.lifecycle import configure_advance, configure_status
 from agentic_investment_os.evidence.capture import EvidencePersistenceError, InvalidEvidenceError
 from tests._evidence import evidence_item, recorded_evidence
+from tests._governance import RecordedSessionEligibility
 from tests._universe import (
     mutable_mapping,
     mutable_mapping_list,
+    pinned_run_identity,
     recorded_universe,
     runtime_configuration,
+    universe_snapshot,
 )
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
@@ -52,6 +60,7 @@ def test_advance_captures_market_and_news_after_the_pinned_universe(
         repository_root=REPOSITORY_ROOT,
         recorded_universe=recorded_universe(),
         recorded_evidence=recorded_evidence(),
+        session_eligibility=RecordedSessionEligibility(),
         clock=_FixedClock(),
     )
     assert isinstance(configured, Advance)
@@ -98,6 +107,7 @@ def test_completed_lifecycle_replay_revalidates_referenced_vault_content(
         repository_root=REPOSITORY_ROOT,
         recorded_universe=recorded_universe(),
         recorded_evidence=recorded_evidence(),
+        session_eligibility=RecordedSessionEligibility(),
         clock=_FixedClock(),
     )
     assert isinstance(configured, Advance)
@@ -114,6 +124,7 @@ def test_completed_lifecycle_replay_revalidates_referenced_vault_content(
             repository_root=REPOSITORY_ROOT,
             recorded_universe=recorded_universe(),
             recorded_evidence=recorded_evidence(),
+            session_eligibility=RecordedSessionEligibility(),
             clock=_FixedClock(),
         )
         assert isinstance(reopened, Advance)
@@ -141,6 +152,7 @@ def test_status_requires_each_artifact_to_resolve_to_its_pinned_capture_intent(
         repository_root=REPOSITORY_ROOT,
         recorded_universe=recorded_universe(),
         recorded_evidence=recorded_evidence(),
+        session_eligibility=RecordedSessionEligibility(),
         clock=_FixedClock(),
     )
     assert isinstance(first, Advance)
@@ -158,6 +170,7 @@ def test_status_requires_each_artifact_to_resolve_to_its_pinned_capture_intent(
         repository_root=REPOSITORY_ROOT,
         recorded_universe=recorded_universe(),
         recorded_evidence=later_evidence,
+        session_eligibility=RecordedSessionEligibility(),
         clock=_FixedClock(),
     )
     assert isinstance(second, Advance)
@@ -199,6 +212,7 @@ def test_status_reconstructs_each_run_with_its_pinned_historical_evidence_policy
         repository_root=REPOSITORY_ROOT,
         recorded_universe=recorded_universe(),
         recorded_evidence=recorded_evidence(),
+        session_eligibility=RecordedSessionEligibility(),
         clock=_FixedClock(),
     )
     assert isinstance(first, Advance)
@@ -219,6 +233,7 @@ def test_status_reconstructs_each_run_with_its_pinned_historical_evidence_policy
         repository_root=REPOSITORY_ROOT,
         recorded_universe=recorded_universe(),
         recorded_evidence=recorded_evidence(),
+        session_eligibility=RecordedSessionEligibility(),
         clock=_FixedClock(),
     )
     assert isinstance(second, Advance)
@@ -262,6 +277,7 @@ def test_required_evidence_refusal_is_durable_and_replays_without_recapture(
         repository_root=REPOSITORY_ROOT,
         recorded_universe=recorded_universe(),
         recorded_evidence=unavailable,
+        session_eligibility=RecordedSessionEligibility(),
         clock=_FixedClock(),
     )
     assert isinstance(configured, Advance)
@@ -293,6 +309,7 @@ def test_required_evidence_refusal_is_durable_and_replays_without_recapture(
         repository_root=REPOSITORY_ROOT,
         recorded_universe=recorded_universe(),
         recorded_evidence=recorded_evidence(),
+        session_eligibility=RecordedSessionEligibility(),
         clock=_FixedClock(),
     )
     assert isinstance(replay_capability, Advance)
@@ -328,6 +345,7 @@ def test_evidence_refusal_retry_with_changed_pinned_inputs_returns_a_typed_confl
         repository_root=REPOSITORY_ROOT,
         recorded_universe=recorded_universe(),
         recorded_evidence=unavailable,
+        session_eligibility=RecordedSessionEligibility(),
         clock=_FixedClock(),
     )
     assert isinstance(first, Advance)
@@ -345,6 +363,7 @@ def test_evidence_refusal_retry_with_changed_pinned_inputs_returns_a_typed_confl
         repository_root=REPOSITORY_ROOT,
         recorded_universe=changed_universe,
         recorded_evidence=recorded_evidence(),
+        session_eligibility=RecordedSessionEligibility(),
         clock=_FixedClock(),
     )
     assert isinstance(retry, Advance)
@@ -383,6 +402,7 @@ def test_evidence_refusal_retry_rejects_a_changed_durable_policy_reference(
         repository_root=REPOSITORY_ROOT,
         recorded_universe=recorded_universe(),
         recorded_evidence=unavailable,
+        session_eligibility=RecordedSessionEligibility(),
         clock=_FixedClock(),
     )
     assert isinstance(configured, Advance)
@@ -398,6 +418,7 @@ def test_evidence_refusal_retry_rejects_a_changed_durable_policy_reference(
         repository_root=REPOSITORY_ROOT,
         recorded_universe=recorded_universe(),
         recorded_evidence=recorded_evidence(),
+        session_eligibility=RecordedSessionEligibility(),
         clock=_FixedClock(),
     )
     assert isinstance(retry, Advance)
@@ -426,6 +447,7 @@ def test_changed_evidence_refusal_retry_ignores_unrelated_corrupt_history(
         repository_root=REPOSITORY_ROOT,
         recorded_universe=recorded_universe(),
         recorded_evidence=recorded_evidence(),
+        session_eligibility=RecordedSessionEligibility(),
         clock=_FixedClock(),
     )
     assert isinstance(healthy, Advance)
@@ -452,6 +474,7 @@ def test_changed_evidence_refusal_retry_ignores_unrelated_corrupt_history(
         repository_root=REPOSITORY_ROOT,
         recorded_universe=recorded_universe(),
         recorded_evidence=unavailable,
+        session_eligibility=RecordedSessionEligibility(),
         clock=_FixedClock(),
     )
     assert isinstance(refused_capability, Advance)
@@ -467,6 +490,7 @@ def test_changed_evidence_refusal_retry_ignores_unrelated_corrupt_history(
         repository_root=REPOSITORY_ROOT,
         recorded_universe=changed_universe,
         recorded_evidence=recorded_evidence(),
+        session_eligibility=RecordedSessionEligibility(),
         clock=_FixedClock(),
     )
     assert isinstance(retry, Advance)
@@ -508,6 +532,7 @@ def test_evidence_refusal_retry_fails_closed_when_its_own_history_is_corrupt(
         repository_root=REPOSITORY_ROOT,
         recorded_universe=recorded_universe(),
         recorded_evidence=unavailable,
+        session_eligibility=RecordedSessionEligibility(),
         clock=_FixedClock(),
     )
     assert isinstance(refused_capability, Advance)
@@ -521,6 +546,7 @@ def test_evidence_refusal_retry_fails_closed_when_its_own_history_is_corrupt(
         repository_root=REPOSITORY_ROOT,
         recorded_universe=recorded_universe(),
         recorded_evidence=recorded_evidence(),
+        session_eligibility=RecordedSessionEligibility(),
         clock=_FixedClock(),
     )
     assert isinstance(retry, Advance)
@@ -530,6 +556,31 @@ def test_evidence_refusal_retry_fails_closed_when_its_own_history_is_corrupt(
             "UPDATE lifecycle_events SET event_envelope = '{}' "
             "WHERE idempotency_key = 'refusal-with-corrupt-own-history' AND sequence = 1"
         )
+
+    request = AdvanceRequest.parse(
+        session="2026-08-21",
+        mode="champion",
+        idempotency_key="refusal-with-corrupt-own-history",
+    )
+    assert isinstance(request, AdvanceRequest)
+    identity = pinned_run_identity(
+        request,
+        configuration_version=retry.configuration_version,
+        configuration_hash=retry.configuration_hash,
+    )
+    direct_replay = retry.ledger.advance_step(
+        AdvanceCommand(
+            request,
+            identity,
+            universe_snapshot(identity),
+        ),
+        AdvanceAttempt(),
+        UtcInstant.from_datetime(_FixedClock().now()),
+    )
+    assert direct_replay == AdvanceReceipt.failed_closed(
+        AdvanceFailureReason.INVALID_DURABLE_STATE,
+        cycle=request.session,
+    )
 
     receipt = retry(
         cycle=MarketSession(date(2026, 8, 21)).to_payload(),
@@ -561,6 +612,7 @@ def test_evidence_failure_row_cannot_claim_a_complete_capture(tmp_path: Path) ->
         repository_root=REPOSITORY_ROOT,
         recorded_universe=recorded_universe(),
         recorded_evidence=unavailable,
+        session_eligibility=RecordedSessionEligibility(),
         clock=_FixedClock(),
     )
     assert isinstance(configured, Advance)

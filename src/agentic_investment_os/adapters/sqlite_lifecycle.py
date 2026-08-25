@@ -17,6 +17,27 @@ from agentic_investment_os.domain.attention import (
     AttentionRefusalReason,
     parse_attention_artifact,
 )
+from agentic_investment_os.domain.governance import (
+    ApprovalVerification,
+    ConstitutionActivation,
+    ConstitutionArtifact,
+    ConstitutionGovernanceHistory,
+    ConstitutionGovernanceState,
+    ConstitutionGovernanceStatus,
+    ConstitutionReference,
+    ConstitutionUse,
+    GovernanceCommand,
+    GovernanceEvent,
+    GovernanceReceipt,
+    GovernanceStateError,
+    OperatorApprovalProof,
+    OperatorApprovalVerifier,
+    activate_constitution,
+    constitution_for_use,
+    decide_governance,
+    parse_governance_event,
+    validate_constitution_uses,
+)
 from agentic_investment_os.domain.identity import (
     MarketSession,
     parse_decision_cycle_identity,
@@ -55,6 +76,7 @@ from agentic_investment_os.domain.lifecycle import (
     derive_lifecycle_status,
     is_sha256,
     parse_lifecycle_checkpoint,
+    reconstruct_constitution_uses,
     reconstruct_evidence_checkpoints,
 )
 from agentic_investment_os.domain.temporal import InvalidUtcInstantError, UtcInstant
@@ -71,6 +93,7 @@ if TYPE_CHECKING:
 __all__ = (
     "PreparedRuntimeDatabase",
     "RuntimeRootRefusal",
+    "SQLiteConstitutionGovernance",
     "SQLiteLifecycleLedger",
     "open_runtime_database",
     "prepare_runtime_database",
@@ -113,6 +136,9 @@ _RECORDED_AT_NOT_CANONICAL = "recorded_at must use canonical UTC format"
 _INVALID_CHECKPOINT_ORDER = "lifecycle stream checkpoint order is invalid"
 _INVALID_DATA_REGIME = "invalid data_regime in lifecycle ledger"
 _FUTURE_EVIDENCE_CUTOFF = "evidence_cutoff cannot be later than recorded_at"
+_INVALID_GOVERNANCE_HISTORY = "invalid Constitution governance history"
+_MISSING_APPROVAL_VERIFIER = "operator approval verifier required for governance history"
+
 _CURRENT_SCHEMA = (
     """
 CREATE TABLE lifecycle_events (
@@ -123,6 +149,8 @@ CREATE TABLE lifecycle_events (
     mode TEXT NOT NULL CHECK (mode = 'champion'),
     configuration_version INTEGER NOT NULL CHECK (configuration_version = 1),
     configuration_hash TEXT NOT NULL CHECK (length(configuration_hash) = 64),
+    constitution_version INTEGER NOT NULL CHECK (constitution_version >= 1),
+    constitution_hash TEXT NOT NULL CHECK (length(constitution_hash) = 64),
     run_id TEXT NOT NULL CHECK (length(run_id) = 64),
     data_regime TEXT NOT NULL,
     evidence_cutoff TEXT NOT NULL,
@@ -363,6 +391,41 @@ CREATE TRIGGER belief_ledger_head_cannot_be_deleted
 BEFORE DELETE ON belief_ledger_head
 BEGIN SELECT RAISE(ABORT, 'durable belief ledger head'); END
 """,
+    """
+CREATE TABLE constitution_governance_events (
+    sequence INTEGER PRIMARY KEY CHECK (sequence >= 0),
+    event_kind TEXT NOT NULL CHECK (
+        event_kind IN (
+            'constitution_scheduled', 'constitution_activated',
+            'constitution_refused', 'constitution_conflicted'
+        )
+    ),
+    request_identity TEXT,
+    request_fingerprint TEXT NOT NULL CHECK (length(request_fingerprint) = 64),
+    event_envelope TEXT NOT NULL,
+    recorded_at TEXT NOT NULL,
+    CHECK (
+        request_identity IS NOT NULL
+        OR event_kind = 'constitution_refused'
+    )
+) STRICT
+""",
+    """
+CREATE UNIQUE INDEX one_constitution_governance_fact_per_kind_request_and_material
+ON constitution_governance_events(
+    event_kind, COALESCE(request_identity, ''), request_fingerprint
+)
+""",
+    """
+CREATE TRIGGER constitution_governance_events_are_append_only_update
+BEFORE UPDATE ON constitution_governance_events
+BEGIN SELECT RAISE(ABORT, 'append-only Constitution governance ledger'); END
+""",
+    """
+CREATE TRIGGER constitution_governance_events_are_append_only_delete
+BEFORE DELETE ON constitution_governance_events
+BEGIN SELECT RAISE(ABORT, 'append-only Constitution governance ledger'); END
+""",
 )
 
 
@@ -371,7 +434,7 @@ class _DatabaseOpenMode(StrEnum):
     EXISTING_ONLY = "rw"
 
 
-_CURRENT_DATABASE_VERSION = 8
+_CURRENT_DATABASE_VERSION = 9
 _CURRENT_SCHEMA_SIGNATURE = frozenset(" ".join(statement.split()) for statement in _CURRENT_SCHEMA)
 
 _PROJECTION_SCHEMA = """
@@ -382,6 +445,8 @@ CREATE TABLE lifecycle_status_projection (
     run_id TEXT,
     configuration_version INTEGER,
     configuration_hash TEXT,
+    constitution_version INTEGER,
+    constitution_hash TEXT,
     data_regime TEXT,
     evidence_cutoff TEXT,
     instrument_snapshot_hash TEXT,
@@ -688,6 +753,48 @@ class SQLiteLifecycleLedger:
 
         return self._write(operation)
 
+    def pinned_constitution_use(self, idempotency_key: IdempotencyKey) -> ConstitutionUse | None:
+        """Return an existing stream's fully validated historical Constitution use."""
+
+        def operation(connection: sqlite3.Connection) -> ConstitutionUse | None:
+            target_events = tuple(_load_events(connection, key=idempotency_key))
+            if not target_events:
+                return None
+            events = (
+                tuple(
+                    _load_events(
+                        connection,
+                        key=idempotency_key,
+                        include_attention_history=True,
+                    )
+                )
+                if any(event.attention_artifact is not None for event in target_events)
+                else target_events
+            )
+            history = LifecycleHistory(events=events)
+            stream_starts = tuple(event for event in events if event.sequence == 0)
+            uses = reconstruct_constitution_uses(history)
+            if len(stream_starts) != len(uses):
+                raise InvalidLifecycleStateError(_INVALID_CHECKPOINT_ORDER)
+            matching = tuple(
+                use
+                for event, use in zip(stream_starts, uses, strict=True)
+                if event.request.idempotency_key == idempotency_key
+            )
+            if len(matching) != 1:
+                raise InvalidLifecycleStateError(_INVALID_CHECKPOINT_ORDER)
+            return matching[0]
+
+        return self._write(operation)
+
+    def constitution_uses(self) -> tuple[ConstitutionUse, ...]:
+        """Read every lifecycle Constitution pin without coupling unrelated streams."""
+
+        def operation(connection: sqlite3.Connection) -> tuple[ConstitutionUse, ...]:
+            return _load_constitution_uses(connection)
+
+        return self._write(operation)
+
     def rebuild_evidence_checkpoints(self) -> tuple[EvidenceCaptureReference, ...]:
         """Reconstruct every validated lifecycle reference into Evidence Vault state."""
 
@@ -698,6 +805,16 @@ class SQLiteLifecycleLedger:
                 conflicts=tuple(_load_conflicts(connection)),
             )
             return reconstruct_evidence_checkpoints(history)
+
+        return self._write(operation)
+
+    def rebuild_constitution_uses(self) -> tuple[ConstitutionUse, ...]:
+        """Reconstruct exact lifecycle-to-Constitution references for Status validation."""
+
+        def operation(connection: sqlite3.Connection) -> tuple[ConstitutionUse, ...]:
+            return reconstruct_constitution_uses(
+                LifecycleHistory(events=tuple(_load_events(connection)))
+            )
 
         return self._write(operation)
 
@@ -713,6 +830,221 @@ class SQLiteLifecycleLedger:
             raise LifecyclePersistenceError(_CHECKPOINT_FAILED) from error
 
 
+class SQLiteConstitutionGovernance:
+    """Persist and reconstruct operator-approved Constitution governance facts."""
+
+    def __init__(self, database: Path) -> None:
+        self._database = database
+        _prepare_database(database, mode=_DatabaseOpenMode.CREATE_IF_MISSING)
+
+    @classmethod
+    def open_existing(cls, database: Path) -> Self:
+        """Validate existing storage without recreating a missing database."""
+        instance = cls.__new__(cls)
+        instance._database = database
+        if database.exists():
+            _prepare_database(database, mode=_DatabaseOpenMode.EXISTING_ONLY)
+        return instance
+
+    def govern(
+        self,
+        command: GovernanceCommand,
+        verifier: OperatorApprovalVerifier,
+        verification: ApprovalVerification | None,
+        recorded_at: UtcInstant,
+    ) -> GovernanceReceipt:
+        """Select and append one governance fact inside an atomic transaction."""
+        _, timestamp = _canonical_write_timestamp(recorded_at)
+
+        def operation(connection: sqlite3.Connection) -> GovernanceReceipt:
+            history = _load_governance_history(connection)
+            uses = _load_constitution_uses(connection)
+            _validate_governance_history(history, verifier, uses)
+            decision = decide_governance(history, command, verification, recorded_at)
+            if decision.record is not None:
+                _append_governance_event(connection, decision.record, timestamp)
+            return decision.receipt
+
+        return self._write(operation)
+
+    def resolve_constitution(
+        self,
+        session: MarketSession,
+        verifier: OperatorApprovalVerifier | None,
+        recorded_at: UtcInstant,
+    ) -> ConstitutionActivation:
+        """Resolve a session Constitution and append a due activation atomically."""
+        _, timestamp = _canonical_write_timestamp(recorded_at)
+
+        def operation(connection: sqlite3.Connection) -> ConstitutionActivation:
+            history = _load_governance_history(connection)
+            uses = _load_constitution_uses(connection)
+            _validate_governance_history(history, verifier, uses)
+            activation = activate_constitution(history, session, recorded_at)
+            if activation.record is not None:
+                _validate_governance_history(
+                    history.append(activation.record),
+                    verifier,
+                    uses,
+                )
+                _append_governance_event(connection, activation.record, timestamp)
+            return activation
+
+        return self._write(operation)
+
+    def constitution_for(
+        self,
+        session: MarketSession,
+        verifier: OperatorApprovalVerifier | None,
+    ) -> ConstitutionArtifact:
+        """Resolve one historical session without activating pending governance."""
+
+        def operation(connection: sqlite3.Connection) -> ConstitutionArtifact:
+            history = _load_governance_history(connection)
+            state = _validate_governance_history(history, verifier)
+            return state.constitution_for(session)
+
+        return self._write(operation)
+
+    def constitution_for_use(
+        self,
+        use: ConstitutionUse,
+        verifier: OperatorApprovalVerifier | None,
+    ) -> ConstitutionArtifact:
+        """Resolve one lifecycle pin from the governance prefix visible at its pin time."""
+
+        def operation(connection: sqlite3.Connection) -> ConstitutionArtifact:
+            history = _load_governance_history(connection)
+            if history.events and verifier is None:
+                raise GovernanceStateError(_MISSING_APPROVAL_VERIFIER)
+            verification = _approval_unavailable if verifier is None else verifier.verify
+            return constitution_for_use(history, verification, use)
+
+        return self._write(operation)
+
+    def next_activation_session(
+        self,
+        verifier: OperatorApprovalVerifier | None,
+    ) -> MarketSession | None:
+        """Return the sole pending activation boundary after validating history."""
+
+        def operation(connection: sqlite3.Connection) -> MarketSession | None:
+            history = _load_governance_history(connection)
+            state = _validate_governance_history(history, verifier)
+            return None if not state.pending else state.pending[0].activation_session
+
+        return self._write(operation)
+
+    def validate_constitution_uses(
+        self,
+        uses: tuple[ConstitutionUse, ...],
+        verifier: OperatorApprovalVerifier | None,
+    ) -> None:
+        """Require lifecycle pins to resolve from authoritative governance history."""
+
+        def operation(connection: sqlite3.Connection) -> None:
+            history = _load_governance_history(connection)
+            _validate_governance_history(history, verifier, uses)
+
+        self._write(operation)
+
+    def rebuild_constitution_status(
+        self,
+        verifier: OperatorApprovalVerifier | None,
+        uses: tuple[ConstitutionUse, ...] = (),
+    ) -> ConstitutionGovernanceStatus:
+        """Reconstruct bounded status after reverifying durable approvals."""
+
+        def operation(connection: sqlite3.Connection) -> ConstitutionGovernanceStatus:
+            history = _load_governance_history(connection)
+            state = _validate_governance_history(history, verifier, uses)
+            return ConstitutionGovernanceStatus.from_state(state)
+
+        return self._write(operation)
+
+    def _connect(self) -> sqlite3.Connection:
+        return _connect_database(self._database, mode=_DatabaseOpenMode.EXISTING_ONLY)
+
+    def _write(self, operation: Callable[[sqlite3.Connection], _T]) -> _T:
+        try:
+            with closing(self._connect()) as connection, connection:
+                connection.execute(_BEGIN_IMMEDIATE_SQL)
+                return operation(connection)
+        except sqlite3.Error as error:
+            raise LifecyclePersistenceError(_CHECKPOINT_FAILED) from error
+
+
+def _load_governance_history(connection: sqlite3.Connection) -> ConstitutionGovernanceHistory:
+    rows = connection.execute(
+        """
+        SELECT sequence, event_kind, request_identity, request_fingerprint,
+               event_envelope, recorded_at
+        FROM constitution_governance_events ORDER BY sequence
+        """
+    ).fetchall()
+    events: list[GovernanceEvent] = []
+    for row in rows:
+        envelope = _text(row[4], "event_envelope")
+        try:
+            decoded: object = json.loads(envelope)
+        except (RecursionError, ValueError) as error:
+            raise GovernanceStateError(_INVALID_GOVERNANCE_HISTORY) from error
+        event = parse_governance_event(decoded)
+        if event is None or _canonical_json(event.to_payload()) != envelope:
+            raise GovernanceStateError(_INVALID_GOVERNANCE_HISTORY)
+        request_identity = None if event.request_identity is None else event.request_identity.value
+        if (
+            event.sequence != _integer(row[0], "sequence")
+            or event.kind.value != _text(row[1], "event_kind")
+            or request_identity != row[2]
+            or event.request_fingerprint != _hash(row[3], "request_fingerprint")
+            or event.recorded_at != _canonical_timestamp(row[5], "recorded_at")
+        ):
+            raise GovernanceStateError(_INVALID_GOVERNANCE_HISTORY)
+        events.append(event)
+    return ConstitutionGovernanceHistory(tuple(events))
+
+
+def _validate_governance_history(
+    history: ConstitutionGovernanceHistory,
+    verifier: OperatorApprovalVerifier | None,
+    uses: tuple[ConstitutionUse, ...] = (),
+) -> ConstitutionGovernanceState:
+    if history.events and verifier is None:
+        raise GovernanceStateError(_MISSING_APPROVAL_VERIFIER)
+    verification = _approval_unavailable if verifier is None else verifier.verify
+    return validate_constitution_uses(history, verification, uses)
+
+
+def _approval_unavailable(_proof: OperatorApprovalProof) -> ApprovalVerification:
+    return (
+        ApprovalVerification.INVALID_SIGNATURE
+    )  # pragma: no cover - empty history never verifies.
+
+
+def _append_governance_event(
+    connection: sqlite3.Connection,
+    event: GovernanceEvent,
+    timestamp: str,
+) -> None:
+    connection.execute(
+        """
+        INSERT INTO constitution_governance_events (
+            sequence, event_kind, request_identity, request_fingerprint,
+            event_envelope, recorded_at
+        ) VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (
+            event.sequence,
+            event.kind.value,
+            None if event.request_identity is None else event.request_identity.value,
+            event.request_fingerprint,
+            _canonical_json(event.to_payload()),
+            timestamp,
+        ),
+    )
+
+
 def _load_events(
     connection: sqlite3.Connection,
     *,
@@ -723,7 +1055,8 @@ def _load_events(
         rows = connection.execute(
             """
             SELECT stream_id, sequence, idempotency_key, cycle_identity, mode,
-                   configuration_version, configuration_hash, run_id,
+                   configuration_version, configuration_hash,
+                   constitution_version, constitution_hash, run_id,
                    data_regime, evidence_cutoff, instrument_snapshot_hash,
                    position_snapshot_hash, eligibility_policy_hash,
                    event_kind, completed_phase, universe_snapshot_id,
@@ -738,7 +1071,8 @@ def _load_events(
         rows = connection.execute(
             """
             SELECT stream_id, sequence, idempotency_key, cycle_identity, mode,
-                   configuration_version, configuration_hash, run_id,
+                   configuration_version, configuration_hash,
+                   constitution_version, constitution_hash, run_id,
                    data_regime, evidence_cutoff, instrument_snapshot_hash,
                    position_snapshot_hash, eligibility_policy_hash,
                    event_kind, completed_phase, universe_snapshot_id,
@@ -759,7 +1093,8 @@ def _load_events(
         rows = connection.execute(
             """
             SELECT stream_id, sequence, idempotency_key, cycle_identity, mode,
-                   configuration_version, configuration_hash, run_id,
+                   configuration_version, configuration_hash,
+                   constitution_version, constitution_hash, run_id,
                    data_regime, evidence_cutoff, instrument_snapshot_hash,
                    position_snapshot_hash, eligibility_policy_hash,
                    event_kind, completed_phase, universe_snapshot_id,
@@ -774,6 +1109,37 @@ def _load_events(
     return [_load_event(row) for row in rows]
 
 
+def _load_constitution_uses(
+    connection: sqlite3.Connection,
+) -> tuple[ConstitutionUse, ...]:
+    """Validate only governance-owned columns so unrelated stream damage stays isolated."""
+    rows = connection.execute(
+        """
+        SELECT DISTINCT cycle_identity, constitution_version, constitution_hash, recorded_at
+        FROM lifecycle_events
+        WHERE sequence = 0
+        ORDER BY cycle_identity, constitution_version, constitution_hash, recorded_at
+        """
+    ).fetchall()
+    uses: list[ConstitutionUse] = []
+    for row in rows:
+        try:
+            reference = ConstitutionReference(
+                _integer(row[1], "constitution_version"),
+                _hash(row[2], "constitution_hash"),
+            )
+        except ValueError as error:
+            raise InvalidLifecycleStateError(_INVALID_CHECKPOINT_ORDER) from error
+        uses.append(
+            ConstitutionUse(
+                _market_session(row[0]),
+                reference,
+                _canonical_timestamp(row[3], "recorded_at"),
+            )
+        )
+    return tuple(uses)
+
+
 def _load_event(row: tuple[object, ...]) -> LifecycleEvent:
     cycle = _market_session(row[3])
     request = AdvanceRequest.parse(session=cycle, mode=row[4], idempotency_key=row[2])
@@ -786,31 +1152,33 @@ def _load_event(row: tuple[object, ...]) -> LifecycleEvent:
     sequence = _integer(row[1], "sequence")
     version = _integer(row[5], "configuration_version")
     configuration_hash = _hash(row[6], "configuration_hash")
-    run_id = _hash(row[7], "run_id")
-    data_regime = _data_regime(row[8])
-    evidence_cutoff = _canonical_timestamp(row[9], "evidence_cutoff")
-    instrument_snapshot_hash = _hash(row[10], "instrument_snapshot_hash")
-    position_snapshot_hash = _hash(row[11], "position_snapshot_hash")
-    eligibility_policy_hash = _hash(row[12], "eligibility_policy_hash")
-    recorded_at = _canonical_timestamp(row[23], "recorded_at")
+    constitution_version = _integer(row[7], "constitution_version")
+    constitution_hash = _hash(row[8], "constitution_hash")
+    run_id = _hash(row[9], "run_id")
+    data_regime = _data_regime(row[10])
+    evidence_cutoff = _canonical_timestamp(row[11], "evidence_cutoff")
+    instrument_snapshot_hash = _hash(row[12], "instrument_snapshot_hash")
+    position_snapshot_hash = _hash(row[13], "position_snapshot_hash")
+    eligibility_policy_hash = _hash(row[14], "eligibility_policy_hash")
+    recorded_at = _canonical_timestamp(row[25], "recorded_at")
     if evidence_cutoff.value > recorded_at.value:
         raise InvalidLifecycleStateError(_FUTURE_EVIDENCE_CUTOFF)
     try:
-        event_kind = LifecycleEventKind(_text(row[13], "event_kind"))
+        event_kind = LifecycleEventKind(_text(row[15], "event_kind"))
     except ValueError as error:
         raise InvalidLifecycleStateError(_INVALID_CHECKPOINT_ORDER) from error
-    completed_phase = _optional_checkpoint(row[14])
+    completed_phase = _optional_checkpoint(row[16])
     prepared_snapshot, published_snapshot_id = _load_universe_reference(
-        row[15],
-        row[16],
+        row[17],
+        row[18],
         event_kind=event_kind,
         run_id=run_id,
         recorded_at=recorded_at,
     )
-    evidence_capture = _load_evidence_capture(row[17], row[18], row[19], event_kind=event_kind)
+    evidence_capture = _load_evidence_capture(row[19], row[20], row[21], event_kind=event_kind)
     attention_artifact = _load_attention_artifact(
-        row[20],
-        row[21],
+        row[22],
+        row[23],
         event_kind=event_kind,
         recorded_at=recorded_at,
     )
@@ -823,6 +1191,8 @@ def _load_event(row: tuple[object, ...]) -> LifecycleEvent:
             cycle,
             version,
             configuration_hash,
+            constitution_version,
+            constitution_hash,
             data_regime,
             evidence_cutoff,
             instrument_snapshot_hash,
@@ -831,13 +1201,14 @@ def _load_event(row: tuple[object, ...]) -> LifecycleEvent:
         ),
         event_kind=event_kind,
         completed_phase=completed_phase,
+        recorded_at=recorded_at,
         prepared_universe_snapshot=prepared_snapshot,
         published_universe_snapshot_id=published_snapshot_id,
         evidence_capture=evidence_capture,
         attention_artifact=attention_artifact,
     )
-    envelope = _text(row[22], "event_envelope")
-    if _canonical_json(event.to_envelope(recorded_at)) != envelope:
+    envelope = _text(row[24], "event_envelope")
+    if _canonical_json(event.to_envelope()) != envelope:
         raise InvalidLifecycleStateError(_INVALID_CHECKPOINT_ORDER)
     return event
 
@@ -1152,13 +1523,16 @@ def _append_record(
     timestamp: str,
 ) -> None:
     if isinstance(record, LifecycleEvent):
+        if record.recorded_at != recorded_at:
+            raise InvalidLifecycleStateError(_INVALID_CHECKPOINT_ORDER)
         request = record.request
         identity = record.pinned_run_identity
         connection.execute(
             """
             INSERT INTO lifecycle_events (
                 stream_id, sequence, idempotency_key, cycle_identity, mode,
-                configuration_version, configuration_hash, run_id,
+                configuration_version, configuration_hash,
+                constitution_version, constitution_hash, run_id,
                 data_regime, evidence_cutoff, instrument_snapshot_hash,
                 position_snapshot_hash, eligibility_policy_hash,
                 event_kind, completed_phase, universe_snapshot_id,
@@ -1166,7 +1540,7 @@ def _append_record(
                 evidence_artifact_ids, evidence_refusal_ids,
                 attention_artifact_id, attention_artifact,
                 event_envelope, recorded_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 record.stream_id,
@@ -1176,6 +1550,8 @@ def _append_record(
                 request.mode.value,
                 identity.configuration_version,
                 identity.configuration_hash,
+                identity.constitution_version,
+                identity.constitution_hash,
                 identity.run_id,
                 identity.data_regime,
                 identity.evidence_cutoff.isoformat(),
@@ -1215,7 +1591,7 @@ def _append_record(
                     if record.attention_artifact is None
                     else _canonical_json(record.attention_artifact.to_payload())
                 ),
-                _canonical_json(record.to_envelope(recorded_at)),
+                _canonical_json(record.to_envelope()),
                 timestamp,
             ),
         )
@@ -1278,11 +1654,12 @@ def _replace_status_projection(
         """
         INSERT INTO lifecycle_status_projection (
             singleton, active_phase, last_completed_cycle, run_id,
-            configuration_version, configuration_hash, data_regime, evidence_cutoff,
+            configuration_version, configuration_hash,
+            constitution_version, constitution_hash, data_regime, evidence_cutoff,
             instrument_snapshot_hash, position_snapshot_hash, eligibility_policy_hash,
             liveness, durable_reason, universe_snapshot_cycle, universe_snapshot_id,
             attention_artifact_cycle, attention_artifact_id
-        ) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             (
@@ -1298,6 +1675,8 @@ def _replace_status_projection(
             None if identity is None else identity.run_id,
             None if identity is None else identity.configuration_version,
             None if identity is None else identity.configuration_hash,
+            None if identity is None else identity.constitution_version,
+            None if identity is None else identity.constitution_hash,
             None if identity is None else identity.data_regime,
             (None if identity is None else identity.evidence_cutoff.isoformat()),
             None if identity is None else identity.instrument_snapshot_hash,

@@ -18,6 +18,11 @@ from agentic_investment_os.domain.attention import (
     parse_attention_artifact,
     validate_attention_history,
 )
+from agentic_investment_os.domain.governance import (
+    ConstitutionGovernanceStatus,
+    ConstitutionReference,
+    ConstitutionUse,
+)
 from agentic_investment_os.domain.identity import (
     CryptoDecisionWindow,
     DecisionCycleIdentity,
@@ -70,6 +75,7 @@ __all__ = (
     "is_sha256",
     "parse_advance_receipt",
     "parse_lifecycle_checkpoint",
+    "reconstruct_constitution_uses",
     "reconstruct_evidence_checkpoints",
 )
 
@@ -143,6 +149,8 @@ _PINNED_IDENTITY_FIELDS = frozenset(
         "cycle",
         "configuration_version",
         "configuration_hash",
+        "constitution_version",
+        "constitution_hash",
         "data_regime",
         "evidence_cutoff",
         "instrument_snapshot_hash",
@@ -151,7 +159,13 @@ _PINNED_IDENTITY_FIELDS = frozenset(
     }
 )
 _MATERIAL_FINGERPRINT_FIELDS = frozenset(
-    {"configuration", "instrument_snapshot", "position_snapshot", "eligibility_policy"}
+    {
+        "configuration",
+        "constitution",
+        "instrument_snapshot",
+        "position_snapshot",
+        "eligibility_policy",
+    }
 )
 
 
@@ -277,15 +291,17 @@ class AdvanceRecovery(StrEnum):
 
 
 class InputRefusalCode(StrEnum):
-    """Classify hostile or incomplete Advance arguments without retaining their values."""
+    """Classify a bounded refusal detected before lifecycle effects begin."""
 
     INVALID_SESSION = "invalid_session"
     INVALID_MODE = "invalid_mode"
     INVALID_IDEMPOTENCY_KEY = "invalid_idempotency_key"
+    IDEMPOTENCY_KEY_CONFLICT = "idempotency_key_conflict"
     MISSING_UNIVERSE_INPUT = "missing_universe_input"
     INVALID_UNIVERSE_INPUT = "invalid_universe_input"
     STALE_UNIVERSE_INPUT = "stale_universe_input"
     CONTRADICTORY_UNIVERSE_INPUT = "contradictory_universe_input"
+    INVALID_DURABLE_STATE = "invalid_durable_state"
 
 
 class AdvanceFailureReason(StrEnum):
@@ -368,6 +384,8 @@ class PinnedRunIdentity:
     cycle: DecisionCycleIdentity
     configuration_version: int
     configuration_hash: str
+    constitution_version: int
+    constitution_hash: str
     data_regime: str
     evidence_cutoff: UtcInstant
     instrument_snapshot_hash: str
@@ -382,12 +400,15 @@ class PinnedRunIdentity:
         configuration_version: int,
         configuration_hash: str,
         universe_inputs: UniverseInputIdentity,
+        constitution: ConstitutionReference,
     ) -> PinnedRunIdentity:
         return cls(
             run_id=_fingerprint(
                 (
                     configuration_hash,
                     configuration_version,
+                    constitution.content_hash,
+                    constitution.version,
                     request.mode.value,
                     canonical_cycle_bytes(request.session).decode(),
                     universe_inputs.data_regime,
@@ -400,6 +421,8 @@ class PinnedRunIdentity:
             cycle=request.session,
             configuration_version=configuration_version,
             configuration_hash=configuration_hash,
+            constitution_version=constitution.version,
+            constitution_hash=constitution.content_hash,
             data_regime=universe_inputs.data_regime,
             evidence_cutoff=universe_inputs.evidence_cutoff,
             instrument_snapshot_hash=universe_inputs.instrument_snapshot_hash,
@@ -853,6 +876,7 @@ class LifecycleEvent:
     pinned_run_identity: PinnedRunIdentity
     event_kind: LifecycleEventKind
     completed_phase: LifecycleCheckpoint | None
+    recorded_at: UtcInstant
     prepared_universe_snapshot: UniverseSnapshot | None = None
     published_universe_snapshot_id: str | None = None
     evidence_capture: EvidenceCaptureCheckpoint | None = None
@@ -865,10 +889,10 @@ class LifecycleEvent:
             return self.prepared_universe_snapshot.snapshot_id
         return self.published_universe_snapshot_id
 
-    def to_envelope(self, recorded_at: UtcInstant) -> dict[str, object]:
+    def to_envelope(self) -> dict[str, object]:
         """Serialize one equity event through the stable hashed lifecycle envelope."""
         try:
-            recorded_at_text = _instant_text(recorded_at)
+            recorded_at_text = _instant_text(self.recorded_at)
         except InvalidUtcInstantError as error:
             raise ValueError(_INVALID_EVENT_TIME) from error
         identity = self.pinned_run_identity
@@ -884,6 +908,7 @@ class LifecycleEvent:
             "authority_scope": _LIFECYCLE_AUTHORITY_SCOPE,
             "material_fingerprints": {
                 "configuration": identity.configuration_hash,
+                "constitution": identity.constitution_hash,
                 "instrument_snapshot": identity.instrument_snapshot_hash,
                 "position_snapshot": identity.position_snapshot_hash,
                 "eligibility_policy": identity.eligibility_policy_hash,
@@ -894,6 +919,7 @@ class LifecycleEvent:
                 "idempotency_key": self.request.idempotency_key.value,
                 "mode": self.request.mode.value,
                 "configuration_version": identity.configuration_version,
+                "constitution_version": identity.constitution_version,
                 "run_id": identity.run_id,
                 "event_kind": self.event_kind.value,
                 "completed_phase": (
@@ -971,6 +997,7 @@ class LifecycleStatus:
     universe_snapshot_id: str | None
     attention_artifact_cycle: DecisionCycleIdentity | None = None
     attention_artifact_id: str | None = None
+    constitution_governance: ConstitutionGovernanceStatus | None = None
 
     @classmethod
     def not_started(cls) -> LifecycleStatus:
@@ -1242,9 +1269,14 @@ def _terminal_input_refusal(
     )
     if refusal is None:
         return None
-    if refusal_key is not None and (
-        refusal.cycle != command.cycle or refusal.reason is not current_reason
-    ):
+    if refusal_key is not None and refusal.cycle != command.cycle:
+        return AdvanceReceipt.failed_closed(
+            AdvanceFailureReason.IDEMPOTENCY_KEY_CONFLICT,
+            cycle=command.cycle,
+        )
+    if current_reason is AdvanceFailureReason.INVALID_DURABLE_STATE:
+        return AdvanceReceipt.failed_closed(current_reason, cycle=command.cycle)
+    if refusal_key is not None and refusal.reason is not current_reason:
         return AdvanceReceipt.failed_closed(
             AdvanceFailureReason.IDEMPOTENCY_KEY_CONFLICT,
             cycle=command.cycle,
@@ -1341,6 +1373,28 @@ def reconstruct_evidence_checkpoints(
         if refusal.evidence_capture is not None and refusal.idempotency_key is not None
     )
     return (*completed, *refused)
+
+
+def reconstruct_constitution_uses(
+    history: LifecycleHistory,
+) -> tuple[ConstitutionUse, ...]:
+    """Return every exact Constitution reference used by validated lifecycle history."""
+    return tuple(
+        ConstitutionUse(
+            progress.request.session,
+            ConstitutionReference(
+                progress.pinned_run_identity.constitution_version,
+                progress.pinned_run_identity.constitution_hash,
+            ),
+            next(
+                event.recorded_at
+                for event in history.events
+                if event.request.idempotency_key == progress.request.idempotency_key
+                and event.sequence == 0
+            ),
+        )
+        for progress in reconstruct_lifecycle(history)
+    )
 
 
 def _evidence_reference(
@@ -1446,6 +1500,8 @@ def _reconstruct_stream(  # noqa: PLR0912 - validate each durable checkpoint inv
         (
             identity.configuration_hash,
             identity.configuration_version,
+            identity.constitution_hash,
+            identity.constitution_version,
             request.mode.value,
             canonical_cycle_bytes(request.session).decode(),
             identity.data_regime,
@@ -1457,6 +1513,8 @@ def _reconstruct_stream(  # noqa: PLR0912 - validate each durable checkpoint inv
     )
     if identity.configuration_version != 1:
         raise InvalidLifecycleStateError(_UNSUPPORTED_CONFIGURATION_VERSION)
+    if identity.constitution_version < 1 or not is_sha256(identity.constitution_hash):
+        raise InvalidLifecycleStateError(_INVALID_DERIVED_IDENTITY)
     if identity.cycle != request.session:
         raise InvalidLifecycleStateError(_INVALID_DERIVED_IDENTITY)
     if first.stream_id != request.stream_id or identity.run_id != expected_run_id:
@@ -1554,7 +1612,13 @@ def _decide_valid_advance(
     key = request.idempotency_key
     progress = progress_by_key.get(key.value)
     if progress is None:
-        return _decide_new_stream(history, tuple(progress_by_key.values()), command, attempt)
+        return _decide_new_stream(
+            history,
+            tuple(progress_by_key.values()),
+            command,
+            attempt,
+            recorded_at,
+        )
     if not _advance_matches_progress(progress, command):
         return _decide_idempotency_conflict(history, progress, key, request.session)
     recovery = _recovery_for_progress(progress, attempt)
@@ -1591,6 +1655,7 @@ def _decide_new_stream(
     progresses: tuple[LifecycleProgress, ...],
     command: AdvanceCommand,
     attempt: AdvanceAttempt,
+    recorded_at: UtcInstant,
 ) -> LifecycleDecision:
     request = command.request
     key = request.idempotency_key
@@ -1617,6 +1682,7 @@ def _decide_new_stream(
         pinned_run_identity=command.pinned_run_identity,
         event_kind=LifecycleEventKind.ADVANCE_REQUESTED,
         completed_phase=None,
+        recorded_at=recorded_at,
     )
     return AppendLifecycleRecord(
         record,
@@ -1646,6 +1712,8 @@ def _input_failure_reason(code: InputRefusalCode) -> AdvanceFailureReason:
         reason = AdvanceFailureReason.INVALID_MODE
     elif code is InputRefusalCode.INVALID_IDEMPOTENCY_KEY:
         reason = AdvanceFailureReason.INVALID_IDEMPOTENCY_KEY
+    elif code is InputRefusalCode.IDEMPOTENCY_KEY_CONFLICT:
+        reason = AdvanceFailureReason.IDEMPOTENCY_KEY_CONFLICT
     elif code is InputRefusalCode.MISSING_UNIVERSE_INPUT:
         reason = AdvanceFailureReason.MISSING_UNIVERSE_INPUT
     elif code is InputRefusalCode.INVALID_UNIVERSE_INPUT:
@@ -1654,13 +1722,19 @@ def _input_failure_reason(code: InputRefusalCode) -> AdvanceFailureReason:
         reason = AdvanceFailureReason.STALE_UNIVERSE_INPUT
     elif code is InputRefusalCode.CONTRADICTORY_UNIVERSE_INPUT:
         reason = AdvanceFailureReason.CONTRADICTORY_UNIVERSE_INPUT
+    elif code is InputRefusalCode.INVALID_DURABLE_STATE:
+        reason = AdvanceFailureReason.INVALID_DURABLE_STATE
     else:
         # Strict mypy proves this line unreachable; removing it is runtime-equivalent.
         assert_never(code)  # pragma: no cover
     return reason
 
 
-_INPUT_FAILURE_REASONS = frozenset(_input_failure_reason(code) for code in InputRefusalCode)
+_INPUT_FAILURE_REASONS = frozenset(
+    _input_failure_reason(code)
+    for code in InputRefusalCode
+    if code is not InputRefusalCode.INVALID_DURABLE_STATE
+)
 
 
 def _decide_idempotency_conflict(
@@ -1749,6 +1823,7 @@ def _append_next_event(  # noqa: PLR0911 - exhaust each lifecycle phase explicit
         pinned_run_identity=command.pinned_run_identity,
         event_kind=event_kind,
         completed_phase=None if phase is None else LifecycleCheckpoint.equity(phase),
+        recorded_at=recorded_at,
         prepared_universe_snapshot=prepared_snapshot,
         published_universe_snapshot_id=published_snapshot_id,
         evidence_capture=(
@@ -2003,6 +2078,12 @@ class LifecycleLedger(Protocol):
         recorded_at: UtcInstant,
     ) -> LifecycleDecision: ...
 
+    def pinned_constitution_use(
+        self, idempotency_key: IdempotencyKey
+    ) -> ConstitutionUse | None: ...
+
+    def constitution_uses(self) -> tuple[ConstitutionUse, ...]: ...
+
 
 class LifecycleStatusProjection(Protocol):
     """Rebuild the disposable operator projection from authoritative history."""
@@ -2010,6 +2091,8 @@ class LifecycleStatusProjection(Protocol):
     def rebuild_status(self) -> LifecycleStatus: ...
 
     def rebuild_evidence_checkpoints(self) -> tuple[EvidenceCaptureReference, ...]: ...
+
+    def rebuild_constitution_uses(self) -> tuple[ConstitutionUse, ...]: ...
 
 
 def is_sha256(value: object) -> TypeGuard[str]:
@@ -2083,6 +2166,8 @@ def _pinned_identity_payload(identity: PinnedRunIdentity) -> dict[str, object]:
         "cycle": identity.cycle.to_payload(),
         "configuration_version": identity.configuration_version,
         "configuration_hash": identity.configuration_hash,
+        "constitution_version": identity.constitution_version,
+        "constitution_hash": identity.constitution_hash,
         "data_regime": identity.data_regime,
         "evidence_cutoff": _instant_text(identity.evidence_cutoff),
         "instrument_snapshot_hash": identity.instrument_snapshot_hash,
@@ -2094,6 +2179,7 @@ def _pinned_identity_payload(identity: PinnedRunIdentity) -> dict[str, object]:
 def _material_fingerprints(identity: PinnedRunIdentity) -> dict[str, object]:
     return {
         "configuration": identity.configuration_hash,
+        "constitution": identity.constitution_hash,
         "instrument_snapshot": identity.instrument_snapshot_hash,
         "position_snapshot": identity.position_snapshot_hash,
         "eligibility_policy": identity.eligibility_policy_hash,
@@ -2112,9 +2198,12 @@ def _parse_pinned_identity(value: object) -> PinnedRunIdentity | None:
         or cutoff is None
         or type(fields["configuration_version"]) is not int
         or fields["configuration_version"] != 1
+        or type(fields["constitution_version"]) is not int
+        or fields["constitution_version"] < 1
         or not is_data_regime(data_regime)
         or not is_sha256(fields["run_id"])
         or not is_sha256(fields["configuration_hash"])
+        or not is_sha256(fields["constitution_hash"])
         or not is_sha256(fields["instrument_snapshot_hash"])
         or not is_sha256(fields["position_snapshot_hash"])
         or not is_sha256(fields["eligibility_policy_hash"])
@@ -2125,6 +2214,8 @@ def _parse_pinned_identity(value: object) -> PinnedRunIdentity | None:
         cycle=cycle,
         configuration_version=fields["configuration_version"],
         configuration_hash=fields["configuration_hash"],
+        constitution_version=fields["constitution_version"],
+        constitution_hash=fields["constitution_hash"],
         data_regime=data_regime,
         evidence_cutoff=cutoff,
         instrument_snapshot_hash=fields["instrument_snapshot_hash"],
@@ -2135,6 +2226,8 @@ def _parse_pinned_identity(value: object) -> PinnedRunIdentity | None:
         (
             identity.configuration_hash,
             identity.configuration_version,
+            identity.constitution_hash,
+            identity.constitution_version,
             SessionMode.CHAMPION.value,
             canonical_cycle_bytes(identity.cycle).decode(),
             identity.data_regime,

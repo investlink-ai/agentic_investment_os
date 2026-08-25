@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime
 from pathlib import Path
 
@@ -32,6 +32,7 @@ from agentic_investment_os.entrypoints.configuration import (
 )
 from agentic_investment_os.entrypoints.lifecycle import configure_advance, configure_status
 from tests._evidence import recorded_evidence
+from tests._governance import BASELINE_GOVERNANCE_STATUS, RecordedSessionEligibility
 from tests._universe import recorded_universe, runtime_configuration
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
@@ -86,6 +87,7 @@ def _advance_at(state_root: Path, instant: datetime) -> Advance:
         repository_root=REPOSITORY_ROOT,
         recorded_universe=recorded_universe(),
         recorded_evidence=recorded_evidence(),
+        session_eligibility=RecordedSessionEligibility(),
         clock=FixedClock(instant),
     )
     assert isinstance(capability, Advance)
@@ -163,7 +165,10 @@ def test_database_preparation_refuses_a_database_create_failure(
 def test_status_reports_empty_incomplete_and_universe_snapshot_history(tmp_path: Path) -> None:
     state_root = tmp_path / "runtime"
     status = _status(state_root)
-    assert status() == LifecycleStatus.not_started()
+    assert status() == replace(
+        LifecycleStatus.not_started(),
+        constitution_governance=BASELINE_GOVERNANCE_STATUS,
+    )
     advance = _advance(state_root)
     database = state_root / "lifecycle.sqlite3"
     with sqlite3.connect(database) as connection:
@@ -252,6 +257,8 @@ def test_status_reports_empty_incomplete_and_universe_snapshot_history(tmp_path:
             receipt.pinned_run_identity.run_id,
             receipt.pinned_run_identity.configuration_version,
             receipt.pinned_run_identity.configuration_hash,
+            receipt.pinned_run_identity.constitution_version,
+            receipt.pinned_run_identity.constitution_hash,
             receipt.pinned_run_identity.data_regime,
             receipt.pinned_run_identity.evidence_cutoff.isoformat(),
             receipt.pinned_run_identity.instrument_snapshot_hash,
@@ -293,6 +300,7 @@ def test_status_exposes_a_durable_fail_closed_reason(tmp_path: Path) -> None:
         liveness=LifecycleLiveness.FAILED_CLOSED,
         durable_reason=AdvanceFailureReason.INVALID_MODE,
         universe_snapshot_id=None,
+        constitution_governance=BASELINE_GOVERNANCE_STATUS,
     )
 
     _advance(state_root)(
@@ -529,7 +537,8 @@ def test_status_rejects_corrupt_authoritative_history_instead_of_using_projectio
         rows = connection.execute(
             """
             SELECT stream_id, sequence, idempotency_key, cycle_identity, mode,
-                   configuration_version, configuration_hash, run_id,
+                   configuration_version, configuration_hash,
+                   constitution_version, constitution_hash, run_id,
                    data_regime, evidence_cutoff, instrument_snapshot_hash,
                    position_snapshot_hash, eligibility_policy_hash,
                    event_kind, completed_phase, universe_snapshot_id,
@@ -545,7 +554,8 @@ def test_status_rejects_corrupt_authoritative_history_instead_of_using_projectio
             """
             CREATE TABLE lifecycle_events (
                 stream_id, sequence, idempotency_key, cycle_identity, mode,
-                configuration_version, configuration_hash, run_id,
+                configuration_version, configuration_hash,
+                constitution_version, constitution_hash, run_id,
                 data_regime, evidence_cutoff, instrument_snapshot_hash,
                 position_snapshot_hash, eligibility_policy_hash,
                 event_kind, completed_phase, universe_snapshot_id,
@@ -558,7 +568,7 @@ def test_status_rejects_corrupt_authoritative_history_instead_of_using_projectio
         )
         connection.executemany(
             "INSERT INTO lifecycle_events VALUES "
-            "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             rows,
         )
         connection.execute(
@@ -956,7 +966,8 @@ def _replace_event_table(database: Path, statement: str) -> None:
         rows = connection.execute(
             """
             SELECT stream_id, sequence, idempotency_key, cycle_identity, mode,
-                   configuration_version, configuration_hash, run_id,
+                   configuration_version, configuration_hash,
+                   constitution_version, constitution_hash, run_id,
                    data_regime, evidence_cutoff, instrument_snapshot_hash,
                    position_snapshot_hash, eligibility_policy_hash,
                    event_kind, completed_phase, universe_snapshot_id,
@@ -972,7 +983,8 @@ def _replace_event_table(database: Path, statement: str) -> None:
             """
             CREATE TABLE lifecycle_events (
                 stream_id, sequence, idempotency_key, cycle_identity, mode,
-                configuration_version, configuration_hash, run_id,
+                configuration_version, configuration_hash,
+                constitution_version, constitution_hash, run_id,
                 data_regime, evidence_cutoff, instrument_snapshot_hash,
                 position_snapshot_hash, eligibility_policy_hash,
                 event_kind, completed_phase, universe_snapshot_id,
@@ -985,7 +997,7 @@ def _replace_event_table(database: Path, statement: str) -> None:
         )
         connection.executemany(
             "INSERT INTO lifecycle_events VALUES "
-            "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             rows,
         )
         connection.execute(statement)
