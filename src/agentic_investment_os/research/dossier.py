@@ -24,6 +24,7 @@ __all__ = (
     "ResearchLensRecord",
     "StatementKind",
     "StatementUncertainty",
+    "contains_prohibited_research_directive",
     "parse_dossier",
 )
 
@@ -72,6 +73,80 @@ _PROHIBITED_FIELDS = frozenset(
         "credential",
     }
 )
+_DIRECTIVE_PREFIX = (
+    r"(?:^|[.!?;:][ \t]*|\n[ \t]*|[\u2014\u2013][ \t]*)"
+    r"[ \t]*(?:[\"'\u201c\u201d\u2018\u2019(\[{\u2014\u2013-][ \t]*)*"
+)
+_DIRECTIVE_TICKER = r"(?:\$[A-Za-z][A-Za-z0-9.-]{0,9}|[A-Z][A-Z0-9.-]{0,9})\b"
+_PROHIBITED_RESEARCH_DIRECTIVES = (
+    re.compile(
+        r"\b(?:submit|place|route|cancel|execute|send|transmit)\b.{0,48}\b(?:order|trade)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b(?:buy|purchase|sell|short|cover|acquire|dispose\s+of)\b.{0,48}"
+        r"\b(?:shares?|units?|position|stock|equity)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        _DIRECTIVE_PREFIX + r"(?:please\s+)?"
+        r"(?:buy|purchase|sell|short|cover|acquire)\s+"
+        r"\$?(?!ratings?\b|side\b)[a-z][a-z0-9.-]{0,9}\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b(?i:(?:you|we|investors?|traders?|clients?)\s+"
+        r"(?:should|must|need\s+to|ought\s+to)\s+"
+        r"(?:(?:buy|purchase|sell|short|cover|acquire)\s+"
+        r"|(?:invest|divest)\s+(?:in|from)\s+))" + _DIRECTIVE_TICKER
+    ),
+    re.compile(
+        r"\b(?i:(?:recommend|suggest|advise)(?:s|ed|ing)?\s+(?:"
+        r"(?:(?:that\s+)?(?:you|we|investors?|traders?|clients?)\s+)?"
+        r"(?:should\s+)?(?:buy|purchase|sell|short|cover|acquire)\s+"
+        r"|(?:buying|purchasing|selling|shorting|covering|acquiring)\s+"
+        r"|(?:opening|closing)\s+(?:a\s+)?(?:(?:long|short)\s+)?"
+        r"(?:position|trade)\s+(?:in\s+)?))" + _DIRECTIVE_TICKER
+    ),
+    re.compile(
+        r"\b(?i:(?:recommendation|suggestion|advice)\s+(?:is|was)\s+to\s+"
+        r"(?:buy|purchase|sell|short|cover|acquire)\s+)" + _DIRECTIVE_TICKER
+    ),
+    re.compile(r"\bgo\s+(?:long|short)\b", re.IGNORECASE),
+    re.compile(
+        _DIRECTIVE_PREFIX + r"(?:please\s+)?(?:use|set|create)\b.{0,32}"
+        r"\b(?:market|limit|stop(?:-loss)?)\s+orders?\b",
+        re.IGNORECASE,
+    ),
+    re.compile(r"\b(?:enter|exit)\b.{0,32}\b(?:position|holding|trade)\b", re.IGNORECASE),
+    re.compile(r"\b(?:position|target)\s+(?:size|weight|allocation)\b", re.IGNORECASE),
+    re.compile(
+        r"\b(?:decision\s+packet|broker\s+instruction|client[_ -]?order[_ -]?id)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(r"\b(?:allocate|weight)\b.{0,24}(?:%|basis\s+points|bps)\b", re.IGNORECASE),
+    re.compile(
+        r"\b(?:invest|allocate|commit|put)\b.{0,48}"
+        r"\b(?:percent|per\s+cent|%|basis\s+points|bps)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b(?:increase|decrease|reduce|exit)\b.{0,32}"
+        r"\b(?:position|holding|weight|allocation)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        _DIRECTIVE_PREFIX + r"(?:please\s+)?"
+        r"(?:open|close)\b.{0,32}\b(?:long|short|position|holding|trade)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"(?:^|[.!?;:]\s+|\n[ \t]*)(?:please\s+)?"
+        r"(?:ignore|disregard|override)\b.{0,32}"
+        r"\b(?:instructions?|prompts?|polic(?:y|ies)|safety)\b",
+        re.IGNORECASE,
+    ),
+)
 _IDENTIFIER = re.compile(r"[a-z0-9][a-z0-9._:-]{0,127}\Z")
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 _MAXIMUM_ASSERTIONS = 50
@@ -80,6 +155,7 @@ _MAXIMUM_MISSING_EVIDENCE = 50
 _MAXIMUM_STATEMENT_CHARACTERS = 4_000
 _MAXIMUM_EXPLANATION_CHARACTERS = 2_000
 _MAXIMUM_CITATIONS_PER_ASSERTION = 10
+_EVIDENCE_BINDING_SIZE = 2
 _INVALID_DOSSIER = "invalid non-production Dossier"
 
 
@@ -146,6 +222,7 @@ class EvidenceAssertion:
             or type(self.statement) is not str
             or not self.statement.strip()
             or len(self.statement) > _MAXIMUM_STATEMENT_CHARACTERS
+            or contains_prohibited_research_directive(self.statement)
             or type(self.citation_artifact_ids) is not tuple
             or not 1 <= len(self.citation_artifact_ids) <= _MAXIMUM_CITATIONS_PER_ASSERTION
             or self.citation_artifact_ids != tuple(sorted(set(self.citation_artifact_ids)))
@@ -191,6 +268,7 @@ class ContradictingEvidence:
             or type(self.explanation) is not str
             or not self.explanation.strip()
             or len(self.explanation) > _MAXIMUM_EXPLANATION_CHARACTERS
+            or contains_prohibited_research_directive(self.explanation)
         ):
             raise ValueError(_INVALID_DOSSIER)
 
@@ -213,6 +291,7 @@ class ResearchLensRecord:
             or type(self.rationale) is not str
             or not self.rationale.strip()
             or len(self.rationale) > _MAXIMUM_EXPLANATION_CHARACTERS
+            or contains_prohibited_research_directive(self.rationale)
         ):
             raise ValueError(_INVALID_DOSSIER)
 
@@ -234,6 +313,7 @@ class Dossier:
     contradicting_evidence: tuple[ContradictingEvidence, ...]
     missing_evidence: tuple[str, ...]
     lenses: tuple[ResearchLensRecord, ...]
+    evidence_manifest_hash: str | None
     content_hash: str
     authority_scope: str = _AUTHORITY_SCOPE
     non_production: bool = True
@@ -263,6 +343,7 @@ class Dossier:
                 type(item) is not str
                 or not item.strip()
                 or len(item) > _MAXIMUM_EXPLANATION_CHARACTERS
+                or contains_prohibited_research_directive(item)
                 for item in self.missing_evidence
             )
             or self.missing_evidence != tuple(sorted(set(self.missing_evidence)))
@@ -270,6 +351,13 @@ class Dossier:
             or any(type(item) is not ResearchLensRecord for item in self.lenses)
             or {item.lens for item in self.lenses} != set(ResearchLens)
             or self.lenses != tuple(sorted(self.lenses, key=lambda item: item.lens.value))
+            or (
+                self.evidence_manifest_hash is not None
+                and (
+                    type(self.evidence_manifest_hash) is not str
+                    or _SHA256.fullmatch(self.evidence_manifest_hash) is None
+                )
+            )
             or len({item.assertion_id for item in (*self.facts, *self.interpretations)})
             != len(self.facts) + len(self.interpretations)
             or len({item.artifact_id for item in self.contradicting_evidence})
@@ -291,6 +379,7 @@ class Dossier:
         contradicting_evidence: tuple[ContradictingEvidence, ...],
         missing_evidence: tuple[str, ...],
         lenses: tuple[ResearchLensRecord, ...],
+        evidence_manifest_hash: str | None = None,
     ) -> Dossier:
         material = _dossier_material_payload(
             subject=subject,
@@ -299,6 +388,7 @@ class Dossier:
             contradicting_evidence=contradicting_evidence,
             missing_evidence=missing_evidence,
             lenses=lenses,
+            evidence_manifest_hash=evidence_manifest_hash,
         )
         return cls(
             subject,
@@ -307,11 +397,24 @@ class Dossier:
             contradicting_evidence,
             missing_evidence,
             lenses,
+            evidence_manifest_hash,
             _content_hash(material),
         )
 
     def material_payload(self) -> dict[str, object]:
         return _dossier_material_payload(
+            subject=self.subject,
+            facts=self.facts,
+            interpretations=self.interpretations,
+            contradicting_evidence=self.contradicting_evidence,
+            missing_evidence=self.missing_evidence,
+            lenses=self.lenses,
+            evidence_manifest_hash=self.evidence_manifest_hash,
+        )
+
+    def model_output_payload(self) -> dict[str, object]:
+        """Return only fields emitted by the untrusted Evidence Collector."""
+        return _dossier_model_output_payload(
             subject=self.subject,
             facts=self.facts,
             interpretations=self.interpretations,
@@ -329,10 +432,11 @@ def parse_dossier(  # noqa: PLR0911 - retain distinct hostile-output refusal rea
     *,
     expected_subject: EquityInstrumentIdentity,
     available_artifact_ids: tuple[str, ...],
+    available_artifact_bindings: tuple[tuple[str, str], ...] | None = None,
     cutoff: UtcInstant,
 ) -> Dossier | DossierRefusalReason:
     """Validate hostile Evidence Collector output against pinned replay inputs."""
-    if _contains_prohibited_field(value):
+    if _contains_prohibited_field(value) or contains_prohibited_research_directive(value):
         return DossierRefusalReason.PROHIBITED_AUTHORITY
     root = _exact_mapping(value, _DOSSIER_FIELDS)
     if root is None:
@@ -347,6 +451,7 @@ def parse_dossier(  # noqa: PLR0911 - retain distinct hostile-output refusal rea
         or type(available_artifact_ids) is not tuple
         or tuple(sorted(set(available_artifact_ids))) != available_artifact_ids
         or any(_SHA256.fullmatch(item) is None for item in available_artifact_ids)
+        or not _valid_evidence_bindings(available_artifact_bindings, available_artifact_ids)
     ):
         return DossierRefusalReason.INVALID_SCHEMA
     subject = parse_instrument_identity(root["subject"])
@@ -392,6 +497,16 @@ def parse_dossier(  # noqa: PLR0911 - retain distinct hostile-output refusal rea
         contradicting_evidence=contradictions,
         missing_evidence=missing,
         lenses=lenses,
+        evidence_manifest_hash=(
+            None
+            if available_artifact_bindings is None
+            else _content_hash(
+                [
+                    {"artifact_id": artifact_id, "content_hash": content_hash}
+                    for artifact_id, content_hash in available_artifact_bindings
+                ]
+            )
+        ),
     )
 
 
@@ -550,6 +665,17 @@ def _contains_prohibited_field(value: object) -> bool:
     return False
 
 
+def contains_prohibited_research_directive(value: object) -> bool:
+    """Detect prompt, sizing, trading, or execution directives in research prose."""
+    if type(value) is dict:
+        return any(contains_prohibited_research_directive(item) for item in value.values())
+    if type(value) is list:
+        return any(contains_prohibited_research_directive(item) for item in value)
+    if type(value) is str:
+        return any(pattern.search(value) is not None for pattern in _PROHIBITED_RESEARCH_DIRECTIVES)
+    return False
+
+
 def _exact_mapping(value: object, fields: frozenset[str]) -> dict[str, object] | None:
     if (
         type(value) is not dict
@@ -586,6 +712,29 @@ def _dossier_material_payload(  # noqa: PLR0913 - canonical identity binds every
     contradicting_evidence: tuple[ContradictingEvidence, ...],
     missing_evidence: tuple[str, ...],
     lenses: tuple[ResearchLensRecord, ...],
+    evidence_manifest_hash: str | None,
+) -> dict[str, object]:
+    payload = _dossier_model_output_payload(
+        subject=subject,
+        facts=facts,
+        interpretations=interpretations,
+        contradicting_evidence=contradicting_evidence,
+        missing_evidence=missing_evidence,
+        lenses=lenses,
+    )
+    if evidence_manifest_hash is not None:
+        payload["evidence_manifest_hash"] = evidence_manifest_hash
+    return payload
+
+
+def _dossier_model_output_payload(  # noqa: PLR0913
+    *,
+    subject: EquityInstrumentIdentity,
+    facts: tuple[EvidenceAssertion, ...],
+    interpretations: tuple[EvidenceAssertion, ...],
+    contradicting_evidence: tuple[ContradictingEvidence, ...],
+    missing_evidence: tuple[str, ...],
+    lenses: tuple[ResearchLensRecord, ...],
 ) -> dict[str, object]:
     return {
         "schema_version": 1,
@@ -599,3 +748,25 @@ def _dossier_material_payload(  # noqa: PLR0913 - canonical identity binds every
         "missing_evidence": list(missing_evidence),
         "lenses": [item.to_payload() for item in lenses],
     }
+
+
+def _valid_evidence_bindings(
+    value: tuple[tuple[str, str], ...] | None,
+    available_artifact_ids: tuple[str, ...],
+) -> bool:
+    if value is None:
+        return True
+    return (
+        type(value) is tuple
+        and all(
+            type(item) is tuple
+            and len(item) == _EVIDENCE_BINDING_SIZE
+            and type(item[0]) is str
+            and _SHA256.fullmatch(item[0]) is not None
+            and type(item[1]) is str
+            and _SHA256.fullmatch(item[1]) is not None
+            for item in value
+        )
+        and tuple(item[0] for item in value) == available_artifact_ids
+        and value == tuple(sorted(set(value)))
+    )

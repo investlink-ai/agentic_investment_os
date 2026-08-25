@@ -57,7 +57,9 @@ make check
 ```
 
 `make check` is the handoff gate: harness and architecture checks, formatting, lint, strict mypy, and
-the deterministic pytest suite.
+the deterministic pytest suite. Its test phase concurrently runs the coverage-producing suite and the
+full lifecycle state machine. Both legs are mandatory; the state-machine leg disables pytest caching
+and coverage instrumentation but retains the default Hypothesis example and step budgets.
 
 The default Hypothesis profile in `tests/conftest.py` uses derandomized generation, no example
 database or wall-clock deadline, bounded example and state-machine step counts, one reported failure,
@@ -121,7 +123,9 @@ passing suite remains supporting evidence rather than proof of complete semantic
 ## Coverage
 
 `make check` produces machine-readable line and branch coverage through pytest, then applies the
-consequence tiers configured in `pyproject.toml`:
+consequence tiers configured in `pyproject.toml`. The persistence-level lifecycle state machine runs
+concurrently without coverage because its generated sequences are behavioral evidence and the rest of
+the suite independently satisfies every tier; it is not removed from the handoff gate.
 
 - **Critical authority code:** 100% line and 100% branch coverage. This tier contains deterministic
   portfolio sizing, risk clamps, cash preservation, whole-share conversion, Target Bands,
@@ -212,6 +216,7 @@ The implemented candidate inventory is:
 | `memory/reducer.py` | Critical append-only belief-transition reducer, projection identity, and ledger commitment; unit, property, refusal, and mutation evidence |
 | `research/dossier.py` | Safety-supporting exact-schema, citation, cutoff, lens, and prohibited-authority validation; unit, hostile-input, and coverage evidence |
 | `research/model.py` | Safety-supporting owner-defined model and Lab-ledger contracts with no direct effect implementation; contract, integration, and coverage evidence |
+| `research/resolution.py` | Safety-supporting Thesis, Skeptic, scenario, CIO, horizon, evidence, and prohibited-authority validation with no sizing, packet, or broker effect; unit, hostile-input, integration, and coverage evidence |
 | `domain/__init__.py` | Non-critical package scaffold with no callable |
 | `execution/__init__.py`, `portfolio/__init__.py` | Critical-authority package scaffolds with no callable; explicit mutation scaffold exemption |
 
@@ -392,8 +397,36 @@ evidence. A scenario becomes mandatory when its owning behavior is implemented.
   Regime, portfolio-context, namespace, and material hashes. Belief-node bitemporal state and graph
   provenance are revalidated before the model boundary. Exact completed retry and reopen return the
   prior Lab observation; changed request material conflicts without another model call.
+- A resolution Replay accepts one validated Dossier and exactly ordered Thesis Builder, Independent
+  Skeptic, Scenario Forecaster, and CIO contracts. Each role has a distinct call identity and receives
+  only validated declared artifacts; the Skeptic context contains no Thesis Builder raw response,
+  prompt, or conversation state. Role inputs use exact role-specific schemas; adding undeclared
+  context and coherently recomputing its hashes fails closed when the ledger reopens. A prompt
+  fingerprint binds its version, identifier, content, and declared content hash; a tool fingerprint
+  binds its name and canonical schema. Prompt, model-configuration, and tool-contract fingerprints are
+  rederived from stored material, so inconsistent nested metadata or content also fails reopen. The
+  copied evidence manifest binds every artifact ID to its content hash and contributes to the validated
+  Dossier identity; changing any binding while retaining the Dossier fails before a role effect.
+  Thesis identity, claim-local evidence references, required
+  distinctions, and one-to-twenty-day horizon are exact, while a Dossier with no contradicting
+  evidence remains valid. The Skeptic's strongest countercase and findings require local citations;
+  rejection and evidence requests remain observable, and an evidence request may preserve empty
+  contradiction and base-rate lists. Forecasts contain exactly bull, base, and bear outcomes with the
+  Thesis horizon, locally cited outcomes and downside paths, one closed allowed-source metric, the
+  latest allowed release available by that horizon, a gap-free exclusive threshold partition with
+  explicit finite-bound ownership, and either absent probabilities or basis-point totals of exactly
+  10,000. An unbounded next-release window, unknown metric or resolution-source class, or ambiguous
+  boundary ownership fails closed. CIO output is limited to `long`, `hold`,
+  `reduce`, `exit`, or `abstain` with a closed evidence-bound rationale. Missing evidence, an active
+  uninvestable condition, or an unresolved evidence request permits only abstention; overlapping
+  blockers accept any active-blocker rationale for abstention and use deterministic refusal precedence
+  for an active stance. Without a blocker or rejection, an active stance requires a supported-Thesis
+  basis and abstention may instead record insufficient confidence. A rejected Thesis cannot become
+  `long` or `hold`.
 - The Lab ledger records intent before the scripted model effect and appends the raw-response identity,
-  validated Dossier or bounded refusal, exposed model identity, tokens, turns, and timing afterward.
+  validated role artifact or bounded refusal, exposed model identity, tokens, turns, and timing
+  afterward. Every role receipt distinguishes a fresh required effect from exact replay, and every
+  role resumes independently without duplicating a completed call.
   An interruption that leaves an intent without an observation returns a typed indeterminate-effect
   refusal after reopen and never repeats the call. Timeout, quota, adapter refusal, malformed or
   oversized output, and schema or citation failure never select another service.

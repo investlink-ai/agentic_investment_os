@@ -30,13 +30,14 @@ explicitly bounded as-of Belief Graph with provenance and omission counts. Stage
 `Govern` for immutable, signed Constitution amendments scheduled at an exact future Market Session.
 Advance resolves and pins one Constitution version and content hash before universe, evidence,
 attention, or model work; Status rebuilds active, pending, superseded, refused, and conflicting
-governance state. The isolated Research Lab exposes `Replay` for one stateless Evidence Collector call
-over copied or synthetic inputs. It records intent before the scripted model boundary, validates a
-cited non-production Dossier, replays completed calls, and fails closed on an interrupted call whose
-effect lacks a durable observation. It refuses production roots, changed retry material, unsupported
-citations, prohibited authority, invalid model output, timeout, or quota exhaustion without a network
-or metered fallback. Thesis construction and the later research roles, portfolio, execution,
-evaluation, and remaining lifecycle phases remain scaffolds.
+governance state. The isolated Research Lab exposes `Replay` for stateless model calls over copied or
+synthetic inputs. It can validate a cited non-production Dossier, then run Thesis Builder,
+clean-context Independent Skeptic, Scenario Forecaster, and CIO resolution with a separate durable
+identity and pinned context for every role. Completed calls replay without another effect; an
+interrupted unobserved effect, changed retry material, unsupported claim, invalid forecast, prohibited
+sizing or execution directive, timeout, or quota exhaustion fails closed without a network or metered
+fallback. Production research, portfolio, execution, evaluation, and remaining lifecycle phases
+remain scaffolds.
 Active repository documentation owns implementation authority, and the runtime has no dependency on
 the design's Second Brain origin.
 

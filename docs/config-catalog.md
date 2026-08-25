@@ -142,8 +142,10 @@ names and modes are safety constants, not tunable policy. The namespace is immut
 metadata, and a different namespace cannot reopen the ledger. Model identity, reasoning limits,
 prompt, inert canonical tool schemas and fingerprints, Data Regime, cutoff, Constitution, bounded
 Belief Graph, portfolio-context fingerprint, and material input hashes belong to each `Replay` request
-and durable call intent rather than ambient configuration. The model port has no default. The keyless
-recorded adapter is the only implemented adapter; no metered or network fallback exists.
+and role-specific durable call intent rather than ambient configuration. A resolution request supplies
+exactly one ordered contract for Thesis Builder, Independent Skeptic, Scenario Forecaster, and CIO;
+there is no ambient role prompt or inherited model conversation. The model port has no default. The
+keyless recorded adapter is the only implemented adapter; no metered or network fallback exists.
 
 ## Repository tooling configuration
 

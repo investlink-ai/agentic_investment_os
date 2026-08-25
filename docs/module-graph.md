@@ -70,7 +70,9 @@ the dependency. Prefer passing typed values and ports over adding an edge.
 - `entrypoints` select a closed set of asset variants explicitly. Observed provider entitlements and
   dynamic discovery cannot add a dependency or activate a capability.
 - Research Lab composition may import the research contracts it assembles and reuse capability code,
-  but it never imports or writes Champion execution state.
+  but it never imports or writes Champion execution state. Application orchestration constructs each
+  stateless role context from validated artifacts and the role's declared contract; adapters receive
+  only the research-owned model-call request.
 - A cycle, a reverse edge into adapters, or a new cross-capability edge requires an architecture
   review. Record a durable exception in an ADR.
 

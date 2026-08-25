@@ -321,28 +321,65 @@ Lab and can write only to its own namespace.
 ## Research Lab interface
 
 `Replay` is the public capability of one explicitly named, non-production Research Lab namespace. Its
-Evidence Collector boundary accepts only copied or synthetic evidence content and canonical subject
+Evidence Collector request accepts only copied or synthetic evidence content and canonical subject
 mapping, an Evidence Cutoff and Data Regime, the pinned Constitution, one bounded Belief Graph, a
 portfolio-context fingerprint, versioned prompt and model configuration, inert canonical tool schemas
-and their fingerprints, and the complete material-input hash set. The canonical model context records
-every one of those values; missing, ambient, unversioned, hash-inconsistent, future-available, or
-changed retry material is refused before a model effect. Belief nodes, evidence nodes, and graph edges
-are revalidated against the subject, cutoff, copied evidence, and bitemporal bounds before admission.
+and their fingerprints, and the complete material-input hash set. A resolution request carries the
+validated Dossier, an artifact-ID-to-content-hash evidence manifest, and exactly ordered Thesis
+Builder, Independent Skeptic, Scenario Forecaster, and CIO role contracts. Missing, ambient,
+unversioned, hash-inconsistent, future-available, rebound, reordered, or changed retry material is
+refused before the affected model effect. Belief nodes, evidence nodes, and graph edges are
+revalidated against the subject, cutoff, copied evidence, and bitemporal bounds before admission.
 
-The stateless call crosses a research-owned model port implemented by `adapters`. A Lab-local SQLite
-ledger appends the canonical intent before the call and appends the raw-response identity, exposed
-model identity, resource use, timing disposition, and validated Dossier or bounded refusal afterward.
-The stable call identity reaches the adapter. A completed retry reads its prior observation without
-invoking the model port. An intent without an observation is an indeterminate prior effect after a
-possible interruption; retry returns a typed non-production refusal and never repeats the model call.
+Each stateless call crosses one research-owned model port implemented by `adapters`. A Lab-local
+SQLite ledger appends its role-specific canonical intent before the call and appends the raw-response
+identity, exposed model identity, resource use, timing disposition, and validated artifact or bounded
+refusal afterward. The stable effect-local call identity includes the namespace, Replay request, and
+role. A completed retry reads its prior observation without invoking the model port. An intent without
+an observation is an indeterminate prior effect after a possible interruption; retry returns a typed
+non-production refusal and never repeats that role call. A changed later role may reuse exact prior
+observations but conflicts before another effect under the changed identity.
 
 The Dossier validator admits only the exact Evidence Collector schema. It binds canonical subject and
-entity mapping, resolves every citation against evidence available by the cutoff, separates facts
-from interpretation, names contradictions and missing evidence, and records every required research
-lens or an explicit irrelevance rationale. Weight, order, packet, tool instruction, lifecycle,
+entity mapping, resolves every citation against evidence available by the cutoff, and includes the
+hash of the complete artifact-ID-to-content-hash evidence manifest in the validated Dossier identity.
+A supplied Dossier whose manifest differs from the current resolution request is refused before any
+resolution role effect. The validator separates facts from interpretation, names contradictions and
+missing evidence, and records every required research lens or an explicit irrelevance rationale.
+Weight, order, packet, tool instruction, lifecycle,
 governance, memory-write, credential, broker, Champion, or other undeclared fields fail closed. Every
 validated Dossier and `Replay` receipt is marked `research_lab_non_production`; no Lab composition
 receives a Champion store or execution port.
+
+The Thesis validator requires distinct apparent expectation and variant view, a bounded causal path,
+catalyst, one-to-twenty-trading-day horizon, bull/base/bear summaries, invalidators, and prospective
+uninvestable conditions. Every material claim carries validated Dossier assertion or
+contradicting-artifact references; aggregate evidence lists must equal the union of those claim-local
+references. The Independent Skeptic receives only the
+pinned Constitution, bounded context, validated Dossier and Thesis, its own prompt/model/tool contract,
+and their fingerprints; it cannot inherit Thesis Builder raw output, prompt, or conversation state.
+Its strongest countercase and every other material finding carry local Dossier artifact citations;
+its closed result preserves `accept`, `reject`, or `request_evidence`. An evidence request may leave
+contradictions and base rates empty rather than inventing findings, but its strongest countercase
+remains cited. The Scenario Forecaster binds exactly bull, base, and bear outcomes to the Thesis
+horizon. Every outcome and downside path carries claim-local Dossier evidence references. All cases
+share one metric from the closed observable metric set, one closed allowed-source class, the latest
+allowed official release available by the Thesis horizon, and a gap-free, non-overlapping basis-point
+threshold partition. A release first available after that horizon leaves the forecast unresolved.
+Each finite bound records inclusive or exclusive ownership; the
+canonical partition assigns the lower threshold to the base case and the upper threshold to the bull
+case so an observation resolves to exactly one outcome.
+Probabilities are either absent or integer basis points totaling exactly 10,000. The CIO consumes only
+validated artifacts and emits `long`, `hold`, `reduce`, `exit`, or `abstain` with uncertainty and a
+closed rationale basis bound to Dossier assertions and all three resolution-artifact hashes. Missing
+evidence, an active uninvestable condition, or an unresolved evidence request permits only abstention.
+When blockers overlap, any rationale basis owned by an active blocker permits that safe abstention;
+active-stance refusals use deterministic precedence: missing evidence, active uninvestable condition,
+then unresolved Skeptic. With no blocker or rejection, an active stance requires `supported_thesis`;
+abstention may instead use `insufficient_confidence`. A rejected Thesis cannot become `long` or
+`hold`. Every schema recursively rejects authority fields
+and directive-bearing prose for sizing, targets, orders, packets, brokers, governance, lifecycle
+control, memory writes, credentials, and tools.
 
 The Lab state root is an explicit private path rather than production runtime configuration. It must
 be symlink-free, repository-safe, and disjoint from every declared production root before its fixed
@@ -624,7 +661,7 @@ captured evidence -> validated research -> HouseView -> deterministic portfolio
 | Lifecycle checkpoints and refusals | Lifecycle event ledger | Append transitions and bounded conflict or refusal records under stable idempotency keys |
 | Eligible-universe snapshots | Lifecycle event ledger | Append one complete asset-neutral envelope with typed instrument and position variants, applied policy, dispositions, and immutable identity |
 | Attention Artifacts | Lifecycle event ledger | Append one content-addressed zero-token selection or a typed terminal refusal; never rewrite subject transitions |
-| Research Lab model calls and Dossiers | Namespace-local Lab ledger | Append intent before each effect, then one raw-response identity and validated non-production artifact or bounded refusal; never update or delete |
+| Research Lab model calls and artifacts | Namespace-local Lab ledger | Append role-specific intent before each effect, then one raw-response identity and validated non-production Dossier, Thesis, Skeptic result, forecast, CIO result, or bounded refusal; never update or delete |
 | Graphs, reports, indexes | Projection stores | Replace only by deterministic rebuild |
 | Executable packets | Atomic packet store | Publish complete validated artifacts only |
 

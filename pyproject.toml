@@ -312,6 +312,7 @@ safety_supporting_paths = [
   "entrypoints/lab.py",
   "research/dossier.py",
   "research/model.py",
+  "research/resolution.py",
 ]
 
 [tool.mutmut]
