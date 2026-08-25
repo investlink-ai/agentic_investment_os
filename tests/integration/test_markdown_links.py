@@ -132,6 +132,46 @@ def test_escaping_markdown_target_symlink_fails(tmp_path: Path) -> None:
     assert result.violations[0].message == ("target resolves outside the repository: guide.md")
 
 
+def test_cyclic_markdown_source_symlink_has_bounded_diagnostic(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    (tmp_path / "README.md").symlink_to("README.md")
+
+    exit_code = main(
+        ("--root", str(tmp_path)),
+        tracked_paths=(PurePosixPath("README.md"),),
+    )
+
+    assert exit_code == 1
+    diagnostic = capsys.readouterr().err
+    assert diagnostic == (
+        "README.md:1:1: tracked Markdown source cannot be resolved within repository: README.md\n"
+    )
+    assert str(tmp_path) not in diagnostic
+
+
+def test_cyclic_markdown_target_symlink_has_bounded_diagnostic(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    source = _write_markdown(tmp_path, "README.md", "# Project\n\n[Cycle](guide.md)\n")
+    (tmp_path / "guide.md").symlink_to("guide.md")
+
+    exit_code = main(
+        ("--root", str(tmp_path)),
+        tracked_paths=(source, PurePosixPath("guide.md")),
+    )
+
+    assert exit_code == 1
+    diagnostic = capsys.readouterr().err
+    assert diagnostic == (
+        "README.md:3:9: target cannot be resolved within repository: guide.md\n"
+        "guide.md:1:1: tracked Markdown source cannot be resolved within repository: guide.md\n"
+    )
+    assert str(tmp_path) not in diagnostic
+
+
 @pytest.mark.parametrize(
     ("fragment", "expected_message"),
     [

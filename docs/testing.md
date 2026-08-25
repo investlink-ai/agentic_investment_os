@@ -506,8 +506,8 @@ repository's supported inline links and image destinations. It validates same-fi
 parent-relative local targets. A local target must remain inside the repository, be tracked, and exist
 in the worktree. A fragment on a Markdown target must match its GitHub-style ATX heading identifier,
 including the numeric suffix assigned to a duplicate heading. Tracked source and target symlinks may
-resolve within the repository; resolution outside its canonical root fails before the checker reads
-the file.
+resolve within the repository; resolution outside its canonical root or an unresolvable symlink cycle
+fails with a bounded diagnostic before the checker reads the file.
 
 The checker ignores fenced and inline code plus destinations with an external URI scheme; it performs
 no network or external-site availability check. Its parser is deliberately not a general Markdown or

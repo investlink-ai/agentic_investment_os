@@ -192,6 +192,8 @@ def _resolved_repository_file(
 ) -> tuple[Path | None, str | None]:
     try:
         resolved = (root / relative_path).resolve(strict=True)
+    except RuntimeError:
+        return None, "unresolvable"
     except OSError:
         return None, "missing"
     if not resolved.is_relative_to(root):
@@ -270,6 +272,8 @@ def _target_path_or_violation(
         resolved_target, resolution = _resolved_repository_file(root, parsed.target)
         if resolution == "outside":
             message = f"target resolves outside the repository: {parsed.target}"
+        elif resolution == "unresolvable":
+            message = f"target cannot be resolved within repository: {parsed.target}"
         elif resolution == "missing":
             message = f"tracked target is missing from the worktree: {parsed.target}"
         elif parsed.fragment is not None and parsed.target.suffix.lower() != ".md":
@@ -347,6 +351,16 @@ def check_markdown_links(
                     1,
                     1,
                     f"tracked Markdown source resolves outside repository: {source}",
+                )
+            )
+            continue
+        if resolution == "unresolvable":
+            violations.append(
+                MarkdownLinkViolation(
+                    source,
+                    1,
+                    1,
+                    f"tracked Markdown source cannot be resolved within repository: {source}",
                 )
             )
             continue
