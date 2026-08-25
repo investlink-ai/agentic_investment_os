@@ -397,15 +397,19 @@ evidence. A scenario becomes mandatory when its owning behavior is implemented.
   Skeptic, Scenario Forecaster, and CIO contracts. Each role has a distinct call identity and receives
   only validated declared artifacts; the Skeptic context contains no Thesis Builder raw response,
   prompt, or conversation state. The copied evidence manifest binds every artifact ID to its content
-  hash. Thesis identity, claim-local evidence references, required distinctions, and one-to-twenty-day
-  horizon are exact. Skeptic rejection and evidence requests remain observable. Forecasts contain
-  exactly bull, base, and bear outcomes with the Thesis horizon, downside paths, one allowed-source
-  metric and window, a gap-free exclusive threshold partition with explicit finite-bound ownership,
-  and either absent probabilities or basis-point totals of exactly 10,000. Unknown resolution-source
-  classes or ambiguous boundary ownership fail closed. CIO output is limited to `long`, `hold`,
+  hash and contributes to the validated Dossier identity; changing any binding while retaining the
+  Dossier fails before a role effect. Thesis identity, claim-local evidence references, required
+  distinctions, and one-to-twenty-day horizon are exact, while a Dossier with no contradicting
+  evidence remains valid. The Skeptic's strongest countercase and findings require local citations;
+  rejection and evidence requests remain observable. Forecasts contain exactly bull, base, and bear
+  outcomes with the Thesis horizon, locally cited outcomes and downside paths, one closed
+  allowed-source metric and window, a gap-free exclusive threshold partition with explicit
+  finite-bound ownership, and either absent probabilities or basis-point totals of exactly 10,000.
+  Unknown metrics, resolution-source classes, or ambiguous boundary ownership fail closed. CIO output is limited to `long`, `hold`,
   `reduce`, `exit`, or `abstain` with a closed evidence-bound rationale. Missing evidence, an active
-  uninvestable condition, or an unresolved evidence request permits only abstention, and a rejected
-  Thesis cannot become `long` or `hold`.
+  uninvestable condition, or an unresolved evidence request permits only abstention; overlapping
+  blockers accept any active-blocker rationale for abstention and use deterministic refusal precedence
+  for an active stance. A rejected Thesis cannot become `long` or `hold`.
 - The Lab ledger records intent before the scripted model effect and appends the raw-response identity,
   validated role artifact or bounded refusal, exposed model identity, tokens, turns, and timing
   afterward. Every role receipt distinguishes a fresh required effect from exact replay, and every

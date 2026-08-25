@@ -913,9 +913,12 @@ def _parse_resolution_request(  # noqa: PLR0911
     except (AttributeError, TypeError, ValueError):
         return None, ReplayRefusalReason.INVALID_REQUEST
     reparsed_dossier = parse_dossier(
-        {key: item for key, item in dossier_value.to_payload().items() if key != "content_hash"},
+        dossier_value.model_output_payload(),
         expected_subject=subject,
         available_artifact_ids=tuple(item.artifact_id for item in evidence),
+        available_artifact_bindings=tuple(
+            (item.artifact_id, item.content_hash) for item in evidence
+        ),
         cutoff=cutoff,
     )
     if not isinstance(reparsed_dossier, Dossier) or reparsed_dossier != dossier_value:
@@ -1199,6 +1202,9 @@ def _observe_response(request: ReplayRequest, response: ModelCallResponse) -> La
                 decoded,
                 expected_subject=request.subject,
                 available_artifact_ids=tuple(item.artifact_id for item in request.evidence),
+                available_artifact_bindings=tuple(
+                    (item.artifact_id, item.content_hash) for item in request.evidence
+                ),
                 cutoff=request.evidence_cutoff,
             )
             if isinstance(parsed, Dossier):

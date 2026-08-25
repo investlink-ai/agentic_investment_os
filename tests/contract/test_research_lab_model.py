@@ -179,6 +179,7 @@ def test_valid_scripted_output_returns_a_cited_non_production_dossier() -> None:
         (0, "purchase_shares_directive", ThesisRefusalReason.PROHIBITED_AUTHORITY),
         (0, "send_market_order_directive", ThesisRefusalReason.PROHIBITED_AUTHORITY),
         (0, "go_long_directive", ThesisRefusalReason.PROHIBITED_AUTHORITY),
+        (0, "plain_language_sizing_directive", ThesisRefusalReason.PROHIBITED_AUTHORITY),
         (1, "hallucinated_skeptic_citation", SkepticRefusalReason.UNSUPPORTED_CITATION),
         (2, "inconsistent_horizon", ForecastRefusalReason.INCONSISTENT_HORIZON),
         (2, "invalid_probability_total", ForecastRefusalReason.INVALID_PROBABILITIES),
@@ -202,6 +203,7 @@ def test_hostile_resolution_role_output_stops_the_chain_without_authority(
         "purchase_shares_directive",
         "send_market_order_directive",
         "go_long_directive",
+        "plain_language_sizing_directive",
     ):
         variant = payload["variant_view"]
         assert isinstance(variant, dict)
@@ -210,6 +212,7 @@ def test_hostile_resolution_role_output_stops_the_chain_without_authority(
             "purchase_shares_directive": "Purchase 100 AAPL shares.",
             "send_market_order_directive": "Send a market order for AAPL.",
             "go_long_directive": "Go long 100 shares of AAPL.",
+            "plain_language_sizing_directive": "Invest five percent of the portfolio in AAPL.",
         }[mutation]
     elif mutation == "hallucinated_skeptic_citation":
         contradictions = payload["contradictions"]

@@ -341,9 +341,12 @@ non-production refusal and never repeats that role call. A changed later role ma
 observations but conflicts before another effect under the changed identity.
 
 The Dossier validator admits only the exact Evidence Collector schema. It binds canonical subject and
-entity mapping, resolves every citation against evidence available by the cutoff, separates facts
-from interpretation, names contradictions and missing evidence, and records every required research
-lens or an explicit irrelevance rationale. Weight, order, packet, tool instruction, lifecycle,
+entity mapping, resolves every citation against evidence available by the cutoff, and includes the
+hash of the complete artifact-ID-to-content-hash evidence manifest in the validated Dossier identity.
+A supplied Dossier whose manifest differs from the current resolution request is refused before any
+resolution role effect. The validator separates facts from interpretation, names contradictions and
+missing evidence, and records every required research lens or an explicit irrelevance rationale.
+Weight, order, packet, tool instruction, lifecycle,
 governance, memory-write, credential, broker, Champion, or other undeclared fields fail closed. Every
 validated Dossier and `Replay` receipt is marked `research_lab_non_production`; no Lab composition
 receives a Champion store or execution port.
@@ -355,17 +358,21 @@ contradicting-artifact references; aggregate evidence lists must equal the union
 references. The Independent Skeptic receives only the
 pinned Constitution, bounded context, validated Dossier and Thesis, its own prompt/model/tool contract,
 and their fingerprints; it cannot inherit Thesis Builder raw output, prompt, or conversation state.
-Its closed result preserves `accept`, `reject`, or `request_evidence`. The Scenario Forecaster binds
-exactly bull, base, and bear outcomes to the Thesis horizon, one common closed allowed-source metric
-and observation window, downside paths, and a gap-free, non-overlapping basis-point threshold
-partition. Each finite bound records inclusive or exclusive ownership; the canonical partition assigns
-the lower threshold to the base case and the upper threshold to the bull case so an observation
-resolves to exactly one outcome.
+Its strongest countercase and every other material finding carry local Dossier artifact citations;
+its closed result preserves `accept`, `reject`, or `request_evidence`. The Scenario Forecaster binds
+exactly bull, base, and bear outcomes to the Thesis horizon. Every outcome and downside path carries
+claim-local Dossier evidence references. All cases share one metric from the closed observable metric
+set, one closed allowed-source class, one observation window, and a gap-free, non-overlapping
+basis-point threshold partition. Each finite bound records inclusive or exclusive ownership; the
+canonical partition assigns the lower threshold to the base case and the upper threshold to the bull
+case so an observation resolves to exactly one outcome.
 Probabilities are either absent or integer basis points totaling exactly 10,000. The CIO consumes only
 validated artifacts and emits `long`, `hold`, `reduce`, `exit`, or `abstain` with uncertainty and a
 closed rationale basis bound to Dossier assertions and all three resolution-artifact hashes. Missing
-evidence, an active uninvestable condition, or an unresolved evidence request permits only abstention;
-a rejected Thesis cannot become `long` or `hold`. Every schema recursively rejects authority fields
+evidence, an active uninvestable condition, or an unresolved evidence request permits only abstention.
+When blockers overlap, any rationale basis owned by an active blocker permits that safe abstention;
+active-stance refusals use deterministic precedence: missing evidence, active uninvestable condition,
+then unresolved Skeptic. A rejected Thesis cannot become `long` or `hold`. Every schema recursively rejects authority fields
 and directive-bearing prose for sizing, targets, orders, packets, brokers, governance, lifecycle
 control, memory writes, credentials, and tools.
 

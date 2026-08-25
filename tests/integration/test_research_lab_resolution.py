@@ -3,7 +3,6 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
-from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -293,7 +292,7 @@ def test_skeptic_rejection_remains_visible_and_cannot_become_hold(tmp_path: Path
     assert completed.cio_resolution.stance is CioStance.EXIT
 
 
-def test_changed_unreferenced_evidence_binding_conflicts_before_another_role_effect(
+def test_dossier_bound_to_prior_evidence_manifest_is_refused_before_any_role_effect(
     tmp_path: Path,
 ) -> None:
     request = resolution_replay_request()
@@ -316,31 +315,16 @@ def test_changed_unreferenced_evidence_binding_conflicts_before_another_role_eff
         material_hashes.append(content_hash)
     evidence.extend(added)
     material_hashes.sort()
-    changed = deepcopy(request)
-    changed_evidence = changed["evidence"]
-    assert isinstance(changed_evidence, list)
-    first_extra = changed_evidence[1]
-    second_extra = changed_evidence[2]
-    assert isinstance(first_extra, dict)
-    assert isinstance(second_extra, dict)
-    first_extra["content"], second_extra["content"] = (
-        second_extra["content"],
-        first_extra["content"],
-    )
-    first_extra["content_hash"], second_extra["content_hash"] = (
-        second_extra["content_hash"],
-        first_extra["content_hash"],
-    )
     recorded = RecordedEvidenceCollector(_fixtures())
     replay = _configure(tmp_path / "lab", tmp_path / "production", recorded)
     assert isinstance(replay, Replay)
-    assert replay(request).disposition is ReplayDisposition.COMPLETED
 
-    conflict = replay(changed)
+    refused = replay(request)
 
-    assert conflict.disposition is ReplayDisposition.CONFLICTED
-    assert conflict.failed_role is ResearchRole.THESIS_BUILDER
-    assert recorded.unique_effect_count == ROLE_COUNT
+    assert refused.disposition is ReplayDisposition.REFUSED
+    assert refused.refusal_reason is ReplayRefusalReason.INVALID_REQUEST
+    assert refused.failed_role is None
+    assert recorded.unique_effect_count == 0
 
 
 def test_physical_role_column_corruption_fails_before_reopen(tmp_path: Path) -> None:

@@ -16,6 +16,7 @@ from agentic_investment_os.research.resolution import (
     ObservationWindow,
     ScenarioEvidenceSource,
     ScenarioForecast,
+    ScenarioMetric,
     ScenarioResolutionRule,
     SkepticDecision,
     SkepticResult,
@@ -196,6 +197,59 @@ def test_forecast_refuses_overlapping_or_unobservable_resolution_partition() -> 
     assert result is ForecastRefusalReason.UNOBSERVABLE_RESOLUTION
 
 
+@pytest.mark.parametrize("field", ["outcome", "downside_path"])
+def test_forecast_requires_local_citations_for_each_material_scenario_claim(field: str) -> None:
+    validated_dossier = dossier()
+    thesis = parse_thesis(thesis_payload(), dossier=validated_dossier)
+    assert isinstance(thesis, Thesis)
+    skeptic = parse_skeptic_result(
+        skeptic_payload(thesis), dossier=validated_dossier, thesis=thesis
+    )
+    assert isinstance(skeptic, SkepticResult)
+    invalid = forecast_payload(thesis, skeptic)
+    scenarios = invalid["scenarios"]
+    assert isinstance(scenarios, list)
+    first = scenarios[0]
+    assert isinstance(first, dict)
+    first[field] = "An uncited material scenario claim."
+
+    result = parse_scenario_forecast(
+        invalid,
+        dossier=validated_dossier,
+        thesis=thesis,
+        skeptic=skeptic,
+    )
+
+    assert result is ForecastRefusalReason.UNOBSERVABLE_RESOLUTION
+
+
+def test_forecast_rejects_an_unrecognized_resolution_metric() -> None:
+    validated_dossier = dossier()
+    thesis = parse_thesis(thesis_payload(), dossier=validated_dossier)
+    assert isinstance(thesis, Thesis)
+    skeptic = parse_skeptic_result(
+        skeptic_payload(thesis), dossier=validated_dossier, thesis=thesis
+    )
+    assert isinstance(skeptic, SkepticResult)
+    invalid = forecast_payload(thesis, skeptic)
+    scenarios = invalid["scenarios"]
+    assert isinstance(scenarios, list)
+    for scenario in scenarios:
+        assert isinstance(scenario, dict)
+        rule = scenario["resolution_rule"]
+        assert isinstance(rule, dict)
+        rule["metric"] = "unicorn_magic_score"
+
+    result = parse_scenario_forecast(
+        invalid,
+        dossier=validated_dossier,
+        thesis=thesis,
+        skeptic=skeptic,
+    )
+
+    assert result is ForecastRefusalReason.UNOBSERVABLE_RESOLUTION
+
+
 @pytest.mark.parametrize(
     ("scenario_index", "field", "value"),
     [
@@ -292,7 +346,7 @@ def test_typed_artifact_constructors_reject_hash_consistent_authority_and_invari
         _revalidate_runtime_field(forecast, "scenarios", list(forecast.scenarios))
     with pytest.raises(ValueError, match="invalid scenario resolution rule"):
         ScenarioResolutionRule(
-            metric="operating_margin_change_bps",
+            metric=ScenarioMetric.OPERATING_MARGIN_CHANGE_BPS,
             source=ScenarioEvidenceSource.ALLOWED_OFFICIAL_FILING,
             observation_window=ObservationWindow.NEXT_ALLOWED_RELEASE,
             lower_bound_bps=100,
@@ -300,6 +354,61 @@ def test_typed_artifact_constructors_reject_hash_consistent_authority_and_invari
             upper_bound_bps=0,
             upper_bound_inclusive=False,
         )
+
+
+def test_thesis_accepts_supported_claims_when_the_dossier_has_no_contradictions() -> None:
+    dossier_input = dossier_payload()
+    dossier_input["contradicting_evidence"] = []
+    validated_dossier = parse_dossier(
+        dossier_input,
+        expected_subject=SUBJECT,
+        available_artifact_ids=(ARTIFACT_ID,),
+        cutoff=CUTOFF,
+    )
+    assert isinstance(validated_dossier, Dossier)
+    thesis_input = thesis_payload()
+    thesis_input["dossier_id"] = validated_dossier.content_hash
+    thesis_input["contradicting_artifact_ids"] = []
+    claims: list[dict[str, object]] = []
+    for field in ("apparent_expectation", "variant_view", "catalyst"):
+        claim = thesis_input[field]
+        assert isinstance(claim, dict)
+        claims.append(claim)
+    for field in ("causal_path", "invalidators"):
+        values = thesis_input[field]
+        assert isinstance(values, list)
+        claims.extend(item for item in values if isinstance(item, dict))
+    summaries = thesis_input["scenario_summaries"]
+    assert isinstance(summaries, dict)
+    claims.extend(item for item in summaries.values() if isinstance(item, dict))
+    conditions = thesis_input["uninvestable_conditions"]
+    assert isinstance(conditions, list)
+    for condition in conditions:
+        assert isinstance(condition, dict)
+        claim = condition["condition"]
+        assert isinstance(claim, dict)
+        claims.append(claim)
+    for claim in claims:
+        claim["contradicting_artifact_ids"] = []
+
+    result = parse_thesis(thesis_input, dossier=validated_dossier)
+
+    assert isinstance(result, Thesis)
+    assert result.contradicting_artifact_ids == ()
+
+
+def test_skeptic_requires_a_cited_strongest_countercase() -> None:
+    validated_dossier = dossier()
+    thesis = parse_thesis(thesis_payload(), dossier=validated_dossier)
+    assert isinstance(thesis, Thesis)
+    invalid = skeptic_payload(thesis)
+    countercase = invalid["strongest_countercase"]
+    assert isinstance(countercase, dict)
+    countercase["citation_artifact_ids"] = []
+
+    result = parse_skeptic_result(invalid, dossier=validated_dossier, thesis=thesis)
+
+    assert not isinstance(result, SkepticResult)
 
 
 def test_missing_evidence_and_active_uninvestable_conditions_allow_only_abstention() -> None:
@@ -425,3 +534,86 @@ def test_evidence_request_cannot_be_normalized_into_an_active_cio_stance() -> No
 
     assert not isinstance(active, CioResolution)
     assert isinstance(abstain, CioResolution)
+
+
+@pytest.mark.parametrize("basis", ["uninvestable", "insufficient_confidence"])
+def test_overlapping_uninvestable_and_evidence_request_blockers_allow_safe_abstention(
+    basis: str,
+) -> None:
+    validated_dossier = dossier()
+    thesis = parse_thesis(thesis_payload(active_uninvestable=True), dossier=validated_dossier)
+    assert isinstance(thesis, Thesis)
+    skeptic = parse_skeptic_result(
+        skeptic_payload(thesis, decision="request_evidence"),
+        dossier=validated_dossier,
+        thesis=thesis,
+    )
+    assert isinstance(skeptic, SkepticResult)
+    forecast = parse_scenario_forecast(
+        forecast_payload(thesis, skeptic),
+        dossier=validated_dossier,
+        thesis=thesis,
+        skeptic=skeptic,
+    )
+    assert isinstance(forecast, ScenarioForecast)
+    abstain = resolution_payload(thesis, skeptic, forecast, stance="abstain")
+    rationale = abstain["rationale"]
+    assert isinstance(rationale, dict)
+    rationale["basis"] = basis
+
+    result = parse_cio_resolution(
+        abstain,
+        dossier=validated_dossier,
+        thesis=thesis,
+        skeptic=skeptic,
+        forecast=forecast,
+    )
+
+    assert isinstance(result, CioResolution)
+
+
+@pytest.mark.parametrize("basis", ["missing_evidence", "contested_thesis"])
+def test_overlapping_missing_evidence_and_rejected_thesis_blockers_allow_safe_abstention(
+    basis: str,
+) -> None:
+    dossier_input = dossier_payload()
+    dossier_input["missing_evidence"] = ["Required allowed-source margin evidence is unavailable."]
+    missing = parse_dossier(
+        dossier_input,
+        expected_subject=SUBJECT,
+        available_artifact_ids=(ARTIFACT_ID,),
+        cutoff=CUTOFF,
+    )
+    assert isinstance(missing, Dossier)
+    thesis_input = thesis_payload()
+    thesis_input["dossier_id"] = missing.content_hash
+    thesis = parse_thesis(thesis_input, dossier=missing)
+    assert isinstance(thesis, Thesis)
+    skeptic_input = skeptic_payload(thesis, decision="reject")
+    skeptic_input["dossier_id"] = missing.content_hash
+    skeptic = parse_skeptic_result(skeptic_input, dossier=missing, thesis=thesis)
+    assert isinstance(skeptic, SkepticResult)
+    forecast_input = forecast_payload(thesis, skeptic)
+    forecast_input["dossier_id"] = missing.content_hash
+    forecast = parse_scenario_forecast(
+        forecast_input,
+        dossier=missing,
+        thesis=thesis,
+        skeptic=skeptic,
+    )
+    assert isinstance(forecast, ScenarioForecast)
+    abstain = resolution_payload(thesis, skeptic, forecast, stance="abstain")
+    abstain["dossier_id"] = missing.content_hash
+    rationale = abstain["rationale"]
+    assert isinstance(rationale, dict)
+    rationale["basis"] = basis
+
+    result = parse_cio_resolution(
+        abstain,
+        dossier=missing,
+        thesis=thesis,
+        skeptic=skeptic,
+        forecast=forecast,
+    )
+
+    assert isinstance(result, CioResolution)

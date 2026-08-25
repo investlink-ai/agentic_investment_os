@@ -487,25 +487,26 @@ def _parse_stored_artifact(
         return None
     if intent.role is not ResearchRole.EVIDENCE_COLLECTOR:
         return _parse_stored_resolution_artifact(value, intent)
-    fields = _exact_mapping(
-        value,
-        frozenset(
-            {
-                "schema_version",
-                "record_kind",
-                "authority_scope",
-                "non_production",
-                "subject",
-                "facts",
-                "interpretations",
-                "contradicting_evidence",
-                "missing_evidence",
-                "lenses",
-                "content_hash",
-            }
-        ),
+    legacy_fields = frozenset(
+        {
+            "schema_version",
+            "record_kind",
+            "authority_scope",
+            "non_production",
+            "subject",
+            "facts",
+            "interpretations",
+            "contradicting_evidence",
+            "missing_evidence",
+            "lenses",
+            "content_hash",
+        }
     )
-    if fields is None or type(fields["content_hash"]) is not str:
+    if (
+        type(value) is not dict
+        or set(value) not in (legacy_fields, legacy_fields | {"evidence_manifest_hash"})
+        or type(value.get("content_hash")) is not str
+    ):
         raise LabPersistenceError(_CORRUPT_HISTORY)
     try:
         model_input = json.loads(intent.model_input_json)
@@ -516,15 +517,24 @@ def _parse_stored_artifact(
         raise LabPersistenceError(_CORRUPT_HISTORY) from error
     if type(subject) is not EquityInstrumentIdentity or type(evidence) is not list:
         raise LabPersistenceError(_CORRUPT_HISTORY)
-    artifact_ids = tuple(item["artifact_id"] for item in evidence if type(item) is dict)
-    raw = {key: item for key, item in fields.items() if key != "content_hash"}
+    bindings = _evidence_bindings(evidence)
+    if bindings is None:
+        raise LabPersistenceError(_CORRUPT_HISTORY)
+    artifact_ids = tuple(item[0] for item in bindings)
+    manifest_bound = "evidence_manifest_hash" in value
+    raw = {
+        key: item
+        for key, item in value.items()
+        if key not in ("content_hash", "evidence_manifest_hash")
+    }
     parsed = parse_dossier(
         raw,
         expected_subject=subject,
         available_artifact_ids=artifact_ids,
+        available_artifact_bindings=bindings if manifest_bound else None,
         cutoff=cutoff,
     )
-    if not isinstance(parsed, Dossier) or parsed.content_hash != fields["content_hash"]:
+    if not isinstance(parsed, Dossier) or parsed.content_hash != value["content_hash"]:
         raise LabPersistenceError(_CORRUPT_HISTORY)
     return parsed
 
@@ -580,7 +590,13 @@ def _parse_stored_resolution_artifact(
     ):
         raise LabPersistenceError(_CORRUPT_HISTORY)
     artifact_ids = tuple(artifact_ids_value)
-    dossier = _parse_dossier_payload(dossier_value, subject, artifact_ids, cutoff)
+    dossier = _parse_dossier_payload(
+        dossier_value,
+        subject,
+        artifact_ids,
+        cutoff,
+        _evidence_bindings(evidence_manifest),
+    )
     thesis = _parse_prior_thesis(model_input.get("thesis"), dossier)
     skeptic = _parse_prior_skeptic(model_input.get("skeptic"), dossier, thesis)
     forecast = _parse_prior_forecast(model_input.get("forecast"), dossier, thesis, skeptic)
@@ -632,12 +648,17 @@ def _parse_dossier_payload(
     subject: EquityInstrumentIdentity,
     artifact_ids: tuple[str, ...],
     cutoff: UtcInstant,
+    evidence_bindings: tuple[tuple[str, str], ...] | None,
 ) -> Dossier:
+    if evidence_bindings is None:
+        raise LabPersistenceError(_CORRUPT_HISTORY)
     raw, expected_hash = _split_stored_artifact(value)
+    raw.pop("evidence_manifest_hash", None)
     parsed = parse_dossier(
         raw,
         expected_subject=subject,
         available_artifact_ids=artifact_ids,
+        available_artifact_bindings=evidence_bindings,
         cutoff=cutoff,
     )
     if not isinstance(parsed, Dossier) or parsed.content_hash != expected_hash:
@@ -728,6 +749,27 @@ def _valid_evidence_manifest(
             return False
         parsed_ids.append(artifact_id)
     return parsed_ids == artifact_ids and parsed_ids == sorted(set(parsed_ids))
+
+
+def _evidence_bindings(value: object) -> tuple[tuple[str, str], ...] | None:
+    if type(value) is not list:
+        return None
+    bindings: list[tuple[str, str]] = []
+    for item in value:
+        if type(item) is not dict:
+            return None
+        artifact_id = item.get("artifact_id")
+        content_hash = item.get("content_hash")
+        if (
+            type(artifact_id) is not str
+            or not _is_sha256(artifact_id)
+            or type(content_hash) is not str
+            or not _is_sha256(content_hash)
+        ):
+            return None
+        bindings.append((artifact_id, content_hash))
+    result = tuple(bindings)
+    return result if result == tuple(sorted(set(result))) else None
 
 
 def _require_matching_intent(connection: sqlite3.Connection, intent: LabCallIntent) -> None:

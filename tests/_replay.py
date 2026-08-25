@@ -182,6 +182,7 @@ def dossier() -> Dossier:
         dossier_payload(),
         expected_subject=SUBJECT,
         available_artifact_ids=(ARTIFACT_ID,),
+        available_artifact_bindings=((ARTIFACT_ID, EVIDENCE_CONTENT_HASH),),
         cutoff=CUTOFF,
     )
     assert isinstance(parsed, Dossier)
@@ -248,9 +249,10 @@ def skeptic_payload(thesis: Thesis, *, decision: str = "accept") -> dict[str, ob
         "dossier_id": dossier().content_hash,
         "thesis_id": thesis.content_hash,
         "decision": decision,
-        "strongest_countercase": (
-            "Revenue growth may already reflect temporary price rather than demand."
-        ),
+        "strongest_countercase": {
+            "claim": "Revenue growth may already reflect temporary price rather than demand.",
+            "citation_artifact_ids": [ARTIFACT_ID],
+        },
         "contradictions": [
             {
                 "claim": "Unit-volume weakness contradicts a resilient-demand interpretation.",
@@ -281,7 +283,7 @@ def forecast_payload(thesis: Thesis, skeptic: SkepticResult) -> dict[str, object
         "scenarios": [
             {
                 "kind": "bull",
-                "outcome": "Operating margin expands from the pinned baseline.",
+                "outcome": _thesis_claim("Operating margin expands from the pinned baseline."),
                 "resolution_rule": {
                     "metric": "operating_margin_change_bps",
                     "source": "allowed_official_filing",
@@ -291,12 +293,14 @@ def forecast_payload(thesis: Thesis, skeptic: SkepticResult) -> dict[str, object
                     "upper_bound_bps": None,
                     "upper_bound_inclusive": None,
                 },
-                "downside_path": "Demand resilience fails to translate into margin.",
+                "downside_path": _thesis_claim("Demand resilience fails to translate into margin."),
                 "probability_bps": 2_500,
             },
             {
                 "kind": "base",
-                "outcome": "Operating margin remains within one point of the pinned baseline.",
+                "outcome": _thesis_claim(
+                    "Operating margin remains within one point of the pinned baseline."
+                ),
                 "resolution_rule": {
                     "metric": "operating_margin_change_bps",
                     "source": "allowed_official_filing",
@@ -306,12 +310,12 @@ def forecast_payload(thesis: Thesis, skeptic: SkepticResult) -> dict[str, object
                     "upper_bound_bps": 100,
                     "upper_bound_inclusive": False,
                 },
-                "downside_path": "A mild unit decline offsets price resilience.",
+                "downside_path": _thesis_claim("A mild unit decline offsets price resilience."),
                 "probability_bps": 5_000,
             },
             {
                 "kind": "bear",
-                "outcome": "Operating margin contracts by more than one point.",
+                "outcome": _thesis_claim("Operating margin contracts by more than one point."),
                 "resolution_rule": {
                     "metric": "operating_margin_change_bps",
                     "source": "allowed_official_filing",
@@ -321,7 +325,9 @@ def forecast_payload(thesis: Thesis, skeptic: SkepticResult) -> dict[str, object
                     "upper_bound_bps": -100,
                     "upper_bound_inclusive": False,
                 },
-                "downside_path": "Weaker volume causes material operating deleverage.",
+                "downside_path": _thesis_claim(
+                    "Weaker volume causes material operating deleverage."
+                ),
                 "probability_bps": 2_500,
             },
         ],

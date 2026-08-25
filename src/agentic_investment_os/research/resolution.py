@@ -29,6 +29,7 @@ __all__ = (
     "ScenarioEvidenceSource",
     "ScenarioForecast",
     "ScenarioKind",
+    "ScenarioMetric",
     "ScenarioResolutionRule",
     "SkepticDecision",
     "SkepticFinding",
@@ -193,6 +194,11 @@ _PROHIBITED_DIRECTIVES = (
     ),
     re.compile(r"\b(?:allocate|weight)\b.{0,24}(?:%|basis\s+points|bps)\b", re.IGNORECASE),
     re.compile(
+        r"\b(?:invest|allocate|commit|put)\b.{0,48}"
+        r"\b(?:percent|per\s+cent|%|basis\s+points|bps)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
         r"\b(?:increase|decrease|reduce|exit)\b.{0,32}\b(?:position|holding|weight|allocation)\b",
         re.IGNORECASE,
     ),
@@ -236,6 +242,12 @@ class ScenarioEvidenceSource(StrEnum):
     """Restrict scenario resolution to an allowed captured source class."""
 
     ALLOWED_OFFICIAL_FILING = "allowed_official_filing"
+
+
+class ScenarioMetric(StrEnum):
+    """Name an observable metric with fixed basis-point units and source semantics."""
+
+    OPERATING_MARGIN_CHANGE_BPS = "operating_margin_change_bps"
 
 
 class ForecastRefusalReason(StrEnum):
@@ -374,7 +386,6 @@ class Thesis:
             or self.supporting_assertion_ids != expected_supporting
             or self.contradicting_artifact_ids != expected_contradicting
             or not self.supporting_assertion_ids
-            or not self.contradicting_artifact_ids
             or self.authority_scope != _AUTHORITY_SCOPE
             or self.non_production is not True
             or self.content_hash != _content_hash(self.material_payload())
@@ -439,7 +450,7 @@ class SkepticResult:
     dossier_id: str
     thesis_id: str
     decision: SkepticDecision
-    strongest_countercase: str
+    strongest_countercase: SkepticFinding
     contradictions: tuple[SkepticFinding, ...]
     base_rates: tuple[SkepticFinding, ...]
     requested_evidence: tuple[str, ...]
@@ -449,6 +460,7 @@ class SkepticResult:
 
     def __post_init__(self) -> None:
         try:
+            self.strongest_countercase.__post_init__()
             for finding in (*self.contradictions, *self.base_rates):
                 finding.__post_init__()
         except (AttributeError, TypeError, ValueError) as error:
@@ -461,7 +473,7 @@ class SkepticResult:
             or type(self.contradictions) is not tuple
             or type(self.base_rates) is not tuple
             or type(self.requested_evidence) is not tuple
-            or _bounded_text(self.strongest_countercase) != self.strongest_countercase
+            or type(self.strongest_countercase) is not SkepticFinding
             or not self.contradictions
             or not self.base_rates
             or len(self.contradictions) > _MAXIMUM_ITEMS
@@ -484,7 +496,7 @@ class SkepticResult:
             "dossier_id": self.dossier_id,
             "thesis_id": self.thesis_id,
             "decision": self.decision.value,
-            "strongest_countercase": self.strongest_countercase,
+            "strongest_countercase": self.strongest_countercase.to_payload(),
             "contradictions": [item.to_payload() for item in self.contradictions],
             "base_rates": [
                 {
@@ -502,7 +514,7 @@ class SkepticResult:
 
 @dataclass(frozen=True, slots=True)
 class ScenarioResolutionRule:
-    metric: str
+    metric: ScenarioMetric
     source: ScenarioEvidenceSource
     observation_window: ObservationWindow
     lower_bound_bps: int | None
@@ -512,7 +524,7 @@ class ScenarioResolutionRule:
 
     def __post_init__(self) -> None:
         if (
-            _IDENTIFIER.fullmatch(self.metric) is None
+            type(self.metric) is not ScenarioMetric
             or type(self.source) is not ScenarioEvidenceSource
             or type(self.observation_window) is not ObservationWindow
             or (self.lower_bound_bps is not None and type(self.lower_bound_bps) is not int)
@@ -537,7 +549,7 @@ class ScenarioResolutionRule:
 
     def to_payload(self) -> dict[str, object]:
         return {
-            "metric": self.metric,
+            "metric": self.metric.value,
             "source": self.source.value,
             "observation_window": self.observation_window.value,
             "lower_bound_bps": self.lower_bound_bps,
@@ -550,20 +562,22 @@ class ScenarioResolutionRule:
 @dataclass(frozen=True, slots=True)
 class ScenarioCase:
     kind: ScenarioKind
-    outcome: str
+    outcome: EvidenceBoundClaim
     resolution_rule: ScenarioResolutionRule
-    downside_path: str
+    downside_path: EvidenceBoundClaim
     probability_bps: int | None
 
     def __post_init__(self) -> None:
         try:
+            self.outcome.__post_init__()
             self.resolution_rule.__post_init__()
+            self.downside_path.__post_init__()
         except (AttributeError, TypeError, ValueError) as error:
             raise ValueError(_INVALID_SCENARIO) from error
         if (
             type(self.kind) is not ScenarioKind
-            or _bounded_text(self.outcome) != self.outcome
-            or _bounded_text(self.downside_path) != self.downside_path
+            or type(self.outcome) is not EvidenceBoundClaim
+            or type(self.downside_path) is not EvidenceBoundClaim
             or (
                 self.probability_bps is not None
                 and (
@@ -577,9 +591,9 @@ class ScenarioCase:
     def to_payload(self) -> dict[str, object]:
         return {
             "kind": self.kind.value,
-            "outcome": self.outcome,
+            "outcome": self.outcome.to_payload(),
             "resolution_rule": self.resolution_rule.to_payload(),
-            "downside_path": self.downside_path,
+            "downside_path": self.downside_path.to_payload(),
             "probability_bps": self.probability_bps,
         }
 
@@ -763,7 +777,7 @@ def parse_thesis(  # noqa: PLR0911
         *(item.condition for item in uninvestable),
     )
     supporting = _identifier_tuple(fields["supporting_assertion_ids"], require_nonempty=True)
-    contradicting = _hash_tuple(fields["contradicting_artifact_ids"], require_nonempty=True)
+    contradicting = _hash_tuple(fields["contradicting_artifact_ids"], require_nonempty=False)
     expected_supporting = tuple(
         sorted({item for claim in claims for item in claim.supporting_assertion_ids})
     )
@@ -816,15 +830,17 @@ def parse_skeptic_result(  # noqa: PLR0911
         decision = SkepticDecision(decision_value)
     except ValueError:
         return SkepticRefusalReason.INVALID_SCHEMA
-    countercase = _bounded_text(fields["strongest_countercase"])
+    countercases = _parse_findings([fields["strongest_countercase"]], dossier, base_rate=False)
     contradictions = _parse_findings(fields["contradictions"], dossier, base_rate=False)
     base_rates = _parse_findings(fields["base_rates"], dossier, base_rate=True)
     requested = _text_tuple(fields["requested_evidence"], require_nonempty=False)
+    if isinstance(countercases, SkepticRefusalReason):
+        return countercases
     if isinstance(contradictions, SkepticRefusalReason):
         return contradictions
     if isinstance(base_rates, SkepticRefusalReason):
         return base_rates
-    if countercase is None or requested is None:
+    if requested is None:
         return SkepticRefusalReason.BOUNDS_EXCEEDED
     if (decision is SkepticDecision.REQUEST_EVIDENCE) != bool(requested):
         return SkepticRefusalReason.INVALID_SCHEMA
@@ -834,7 +850,7 @@ def parse_skeptic_result(  # noqa: PLR0911
             dossier.content_hash,
             thesis.content_hash,
             decision,
-            countercase,
+            countercases[0],
             contradictions,
             base_rates,
             requested,
@@ -864,7 +880,7 @@ def parse_scenario_forecast(  # noqa: PLR0911
     horizon = fields["horizon_trading_days"]
     if type(horizon) is not int or horizon != thesis.horizon_trading_days:
         return ForecastRefusalReason.INCONSISTENT_HORIZON
-    scenarios = _parse_scenarios(fields["scenarios"])
+    scenarios = _parse_scenarios(fields["scenarios"], dossier)
     if isinstance(scenarios, ForecastRefusalReason):
         return scenarios
     try:
@@ -918,25 +934,27 @@ def parse_cio_resolution(  # noqa: PLR0911, PLR0912
     if rationale is None:
         return CioRefusalReason.INVALID_SCHEMA
     active_uninvestable = any(item.active for item in thesis.uninvestable_conditions)
+    blocker_bases: set[CioRationaleBasis] = set()
     if dossier.missing_evidence:
-        if stance is not CioStance.ABSTAIN:
-            return CioRefusalReason.MISSING_EVIDENCE
-        if rationale.basis is not CioRationaleBasis.MISSING_EVIDENCE:
-            return CioRefusalReason.INVALID_SCHEMA
-    elif active_uninvestable:
-        if stance is not CioStance.ABSTAIN:
-            return CioRefusalReason.ACTIVE_UNINVESTABLE_CONDITION
-        if rationale.basis is not CioRationaleBasis.UNINVESTABLE:
-            return CioRefusalReason.INVALID_SCHEMA
+        blocker_bases.add(CioRationaleBasis.MISSING_EVIDENCE)
+    if active_uninvestable:
+        blocker_bases.add(CioRationaleBasis.UNINVESTABLE)
     if skeptic.decision is SkepticDecision.REQUEST_EVIDENCE:
+        blocker_bases.update(
+            (CioRationaleBasis.MISSING_EVIDENCE, CioRationaleBasis.INSUFFICIENT_CONFIDENCE)
+        )
+    if blocker_bases:
+        if skeptic.decision is SkepticDecision.REJECT:
+            blocker_bases.add(CioRationaleBasis.CONTESTED_THESIS)
         if stance is not CioStance.ABSTAIN:
+            if dossier.missing_evidence:
+                return CioRefusalReason.MISSING_EVIDENCE
+            if active_uninvestable:
+                return CioRefusalReason.ACTIVE_UNINVESTABLE_CONDITION
             return CioRefusalReason.UNRESOLVED_SKEPTIC
-        if rationale.basis not in (
-            CioRationaleBasis.MISSING_EVIDENCE,
-            CioRationaleBasis.INSUFFICIENT_CONFIDENCE,
-        ):
+        if rationale.basis not in blocker_bases:
             return CioRefusalReason.INVALID_SCHEMA
-    if skeptic.decision is SkepticDecision.REJECT:
+    elif skeptic.decision is SkepticDecision.REJECT:
         if stance in (CioStance.LONG, CioStance.HOLD):
             return CioRefusalReason.UNRESOLVED_SKEPTIC
         if rationale.basis is not CioRationaleBasis.CONTESTED_THESIS:
@@ -1048,7 +1066,7 @@ def _parse_findings(
 
 
 def _parse_scenarios(  # noqa: PLR0911
-    value: object,
+    value: object, dossier: Dossier
 ) -> tuple[ScenarioCase, ...] | ForecastRefusalReason:
     if type(value) is not list or len(value) != _SCENARIO_COUNT:
         return ForecastRefusalReason.INVALID_SCHEMA
@@ -1061,8 +1079,8 @@ def _parse_scenarios(  # noqa: PLR0911
             kind = ScenarioKind(fields["kind"])
         except ValueError:
             return ForecastRefusalReason.INVALID_SCHEMA
-        outcome = _bounded_text(fields["outcome"])
-        downside = _bounded_text(fields["downside_path"])
+        outcome = _parse_claim(fields["outcome"], dossier)
+        downside = _parse_claim(fields["downside_path"], dossier)
         rule = _parse_resolution_rule(fields["resolution_rule"])
         probability = fields["probability_bps"]
         if outcome is None or downside is None or rule is None:
@@ -1084,13 +1102,14 @@ def _parse_resolution_rule(value: object) -> ScenarioResolutionRule | None:
     fields = _exact_mapping(value, _RESOLUTION_RULE_FIELDS)
     if (
         fields is None
+        or type(fields["metric"]) is not str
         or type(fields["source"]) is not str
         or type(fields["observation_window"]) is not str
     ):
         return None
     try:
         return ScenarioResolutionRule(
-            _require_identifier(fields["metric"]),
+            ScenarioMetric(fields["metric"]),
             ScenarioEvidenceSource(fields["source"]),
             ObservationWindow(fields["observation_window"]),
             _optional_int(fields["lower_bound_bps"]),
@@ -1110,7 +1129,7 @@ def _scenario_rules_form_partition(scenarios: tuple[ScenarioCase, ...]) -> bool:
             ScenarioKind.BASE,
             ScenarioKind.BEAR,
         )
-        or len({item.outcome for item in scenarios}) != _SCENARIO_COUNT
+        or len({item.outcome.text for item in scenarios}) != _SCENARIO_COUNT
     ):
         return False
     bull, base, bear = scenarios
