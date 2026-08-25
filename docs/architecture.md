@@ -1,233 +1,47 @@
 # Architecture
 
-This document is the source of truth for the accepted system architecture: runtime shape, module
-seams, authority, lifecycle, durable state, and trust boundaries. It describes the architecture that
-implementation must preserve even while the repository is still a scaffold. The README states
-implementation status.
+This document is the source of truth for accepted runtime topology, module seams, authority,
+lifecycle-state meaning, authoritative state, effect ordering, and trust boundaries. It describes
+contracts that implementation must preserve; the [README status table](../README.md#status) alone says
+which behavior is currently implemented.
 
 Architecture does not own investment rules, product outcomes, Python import edges, runtime values,
-test procedure, or design rationale. Those live in `investment-domain.md`,
-`product-requirements.md`, `module-graph.md`, `config-catalog.md`, `testing.md`, and ADRs respectively.
+test procedure, or design rationale. Those live in [the investment domain](investment-domain.md),
+[product requirements](product-requirements.md), [the module graph](module-graph.md),
+[the configuration catalog](config-catalog.md), [testing policy](testing.md), and
+[ADRs](adr/README.md), respectively.
 
 ## Architectural spine
 
-The system is one modular monolith with three deliberately separate process and trust seams. Each
-process receives only its permitted capabilities; an entrypoint composes owner-defined ports with
-adapters. Capability code never reaches through an adapter to acquire an external effect directly.
+The system is one modular monolith with three separate process and trust seams. Entrypoints compose
+owner-defined ports with adapters and give each process only its permitted capabilities. Capability
+code cannot reach through an adapter to acquire an external effect or credential.
 
 | Process and trust seam | Public capabilities | Effect authority | Authoritative state |
 | --- | --- | --- | --- |
-| Investment Operating System, without broker credentials | `Advance`, `Status`, `Record`, `Govern` | Source, model, and persistence effects only through owner-defined ports implemented by `adapters` | Evidence Vault, append-only lifecycle, belief, governance, decision, and outcome ledgers; published `DecisionPacket` store |
-| Order Execution Module, without model capability | `Apply`, `Reconcile` | Packet reads, executor persistence, and paper-broker effects through execution-owned ports implemented by `adapters` | Published packets as input; append-only order intents, broker observations, and execution receipts |
-| Research Lab, isolated from production state and authority | `Replay` | Model and Lab-persistence effects through research-owned ports implemented by Lab-only `adapters` | Synthetic or copied inputs and one Lab-local append-only ledger |
+| Investment Operating System, without broker credentials | `Advance`, `Status`, `Record`, `Govern` | Source, model, and persistence effects through owner-defined ports | Evidence Vault; lifecycle, belief, governance, decision, and outcome ledgers; published `DecisionPacket` store |
+| Order Execution Module, without model capability | `Apply`, `Reconcile` | Packet reads, executor persistence, and paper-broker effects through execution-owned ports | Published packets as input; order intents, broker observations, and execution receipts |
+| Research Lab, isolated from production state and authority | `Replay` | Model and Lab-persistence effects through research-owned ports | Synthetic or copied inputs and one Lab-local append-only ledger |
 
-The [system topology](#system-topology) shows those seams and effect paths. [Public lifecycle
-interfaces](#public-lifecycle-interfaces) and the [Research Lab interface](#research-lab-interface)
-own the coarse capability contracts; [module ownership](#module-ownership) and the
-[module graph](module-graph.md) place their Python seams. [Authority](#authority-and-trust) and
-[durable state](#durable-state) own the non-negotiable trust and storage rules. The
-[README status table](../README.md#status) is the only current-state inventory: a target contract in
-this document is not evidence that its runtime behavior is enabled.
+The [topology](#system-topology) shows those seams and effect paths. [Public capabilities](#public-lifecycle-interfaces)
+and [Research Lab](#research-lab-interface) own their stable contracts; [module ownership](#module-ownership)
+and the [module graph](module-graph.md) place the Python seams. [Authority](#authority-and-trust),
+[lifecycle](#session-lifecycle), and [durable state](#durable-state) own the non-negotiable rules.
+A target contract here never proves that its runtime behavior is enabled.
 
 ## Design drivers
 
 - Keep a local Python 3.12 modular monolith until measured constraints justify another deployment
   shape.
-- Expose deep lifecycle interfaces while keeping research stages, persistence, and provider mechanics
-  internal.
-- Make evidence, beliefs, decisions, and outcomes append-only and reconstructable as of their original
-  cutoffs.
-- Keep model research outside deterministic portfolio, risk, and broker authority.
-- Persist intent before external effects and make every effect independently idempotent.
+- Expose deep lifecycle capabilities while keeping research stages, persistence, and provider
+  mechanics internal.
+- Make evidence, beliefs, decisions, and outcomes append-only and reconstructable as of their
+  original cutoffs.
+- Keep model research outside deterministic portfolio, risk, governance, and broker authority.
+- Persist intent before an external effect and give every effect an independently idempotent identity.
 - Fail closed with a durable disposition when required state is stale, incomplete, contradictory, or
   invalid.
-- Enforce safety-critical invariants at the earliest stable layer instead of relying only on prose
-  or review convention.
-
-## Multi-asset extension constraint
-
-[PR-CON-006](product-requirements.md#operational-constraints) and
-[ADR 0005](adr/0005-share-core-contracts-with-typed-asset-variants.md) establish one deterministic
-core with closed asset-class-owned variants. The target vocabulary distinguishes `us_equity`,
-`crypto_spot`, and `listed_option`; V0 composition enables only `us_equity`. Describing the other
-variants does not authorize their research, portfolio, risk, market-data, or execution behavior.
-
-The official-provider facts behind this design are traced in the non-authoritative
-[Alpaca capability matrix](research/alpaca-multi-asset-capabilities.md). Provider documentation and
-responses are boundary input. This document and the ADR own the accepted architecture.
-
-Names are fixed across the public and durable contracts: Decision Cycle is the domain concept,
-`DecisionCycleIdentity` is its closed identity union, `MarketSession` is the equity variant and current
-kernel input, and `CryptoDecisionWindow` is a reserved future variant. Option expiration, exercise,
-and assignment are due reconciliation obligations rather than another cycle identity.
-
-### Instrument identity
-
-Every durable instrument reference uses a versioned `InstrumentIdentity` discriminated union. Its
-common envelope carries an asset-class discriminator plus a validated provider-and-environment
-catalog namespace and opaque catalog identifier. The identifier is interpreted only by the adapter
-for that namespace. A display symbol, name, or provider enum is alias provenance and never a join key,
-idempotency input, or durable foreign key.
-
-The variants carry only identity-defining semantics for their asset class:
-
-- `EquityInstrumentIdentity` carries the listing venue. Eligibility facts such as status,
-  tradability, and fractionability belong to the observed instrument record rather than its identity.
-- `CryptoSpotInstrumentIdentity` carries base currency, quote currency, and execution venue. Pair
-  spellings such as `BTC/USD` and `BTCUSD` are aliases of a resolved identity, not interchangeable
-  keys.
-- `ListedOptionInstrumentIdentity` carries its underlying `EquityInstrumentIdentity`, expiration,
-  call or put right, exercise style, strike amount and currency, and a terms version covering the
-  multiplier and deliverable. The option display symbol cannot substitute for the contract identity
-  or underlying relationship. Alpaca's current official surface also contains index-option evidence;
-  an index or unknown underlying is unsupported by this identity variant and fails closed until a
-  separately approved underlying and schedule variant exists.
-
-An adapter may retain the source identifier and aliases in provenance, but it must validate their
-one-to-one mapping at the pinned cutoff before constructing an identity. Missing, reused, or
-contradictory mappings fail closed; a symbol change never creates a new identity by itself.
-
-### Shared core and variant ownership
-
-The shared core owns invariants that have the same meaning for every asset class. A capability owns a
-closed variant where the provider facts change the meaning or allowed state.
-
-| Concept | Shared deterministic core | Asset-class-owned variant |
-| --- | --- | --- |
-| Instrument identity | Versioned discriminator, canonical identity bytes, hashes, alias provenance, and referential integrity | Equity listing identity; crypto base/quote pair and venue; option contract with a supported equity underlying, expiration, strike, style, multiplier, and deliverable terms |
-| Market data | Evidence cutoff, availability time, source identity, entitlement, Data Regime, content hash, and staleness disposition | Feed selection, venue codes, message parser, session coverage, and class-specific quote, trade, bar, chain, or order-book payload |
-| Trading clock and lifecycle | `DecisionCycleIdentity`, pinned cutoff, public disposition and liveness semantics, and due-obligation envelope | NYSE-relative `MarketSession` and its phase policy; a future UTC `CryptoDecisionWindow` and its own phase policy; supported option expiration or late-close obligations |
-| Quantity, currency, and multiplier | Exact decimal representation with explicit unit and currency; no binary-float or implicit conversion | Whole or fractional shares, base or quote crypto quantities and increments, and whole option contracts with explicit multiplier and deliverable |
-| Positions | Versioned snapshot envelope, instrument reference, observed and available times, signed quantity, valuation provenance, and snapshot hash | Share, coin, pair, or contract quantity semantics and any underlying or settlement relationship |
-| Orders and time-in-force | Packet identity, immutable intent, deterministic risk approval, expiry, canonical-instrument effect key, and receipt reconstruction | Allowed order shapes, quantity form, price fields, session eligibility, time-in-force, and cancel or replace policy |
-| Exercise, assignment, and expiration | Append-only broker-activity envelope, independent observations, idempotent activity identity, and reconciliation completion | Option exercise request, assignment, expiration, cash settlement, contract removal, and underlying-position effects |
-| Fills and reconciliation | Intent-before-effect, stable client identity, independent order and activity observations, typed receipts, and rebuildable outcomes | Provider status mapping, fee treatment, fill units, multi-leg grouping, and class-specific position or cash effects |
-
-Alpaca enum values, endpoint defaults, error codes, and response objects remain in `adapters`. Adapters
-map them into owner-defined variants and record the provider contract version in the Data Regime.
-When official sources disagree about a supported value, the adapter capability profile treats the
-combination as unsupported until recorded contract evidence resolves it; the core never widens an
-enum by inference.
-
-Entitlement, status, and buying-power facts in the capability matrix are boundary observations for
-the operator's own Trading API connection, not shared-core or asset-domain models. An adapter may
-validate those raw facts into an existing typed refusal path, but they never activate an asset class
-or create durable account, customer, or multi-account state. Closed configuration is the sole source
-of enabled capability authority.
-
-### Asset-neutral durable contracts
-
-Every shared snapshot, packet, receipt, and durable event has a common versioned envelope containing
-its record kind, envelope schema version, payload discriminator and payload schema version, canonical
-subject or cycle identity where applicable, relevant event and availability times, Data Regime,
-authority scope, material configuration and source fingerprints, and content hash. Asset payloads are
-closed variants validated on write and read. A flat record with unrelated nullable equity, crypto,
-and option fields is invalid.
-
-- Universe, position, and evidence snapshots use the same immutable envelope and canonical hashing
-  rules. Their variant payloads state exact units and never infer an asset class from a symbol.
-- `DecisionPacket` integrity, signature, authority scope, expiry, and deterministic risk approval
-  remain shared. An eventual packet payload is exactly one validated equity, crypto-spot, or
-  listed-option intent variant; the executor cannot reinterpret one variant as another.
-- Execution receipts and broker activities preserve order observations, fills, fees, exercise,
-  assignment, expiration, and position effects as independent facts. A delayed activity and an
-  already changed position may coexist without either being manufactured from the other.
-- Effect idempotency derives from the packet, canonical instrument identity, effect kind, and attempt,
-  never from a display symbol. Reconciliation keys provider observations by their stable source
-  identity and appends corrections rather than overwriting them.
-
-Unknown discriminators, unsupported schema versions, disabled classes, malformed variant payloads,
-stale observations, incompatible capability profiles, or unresolved identity mappings fail closed at
-the first seam. A trustworthy request key receives a bounded durable refusal. Configuration that
-attempts to enable an unsupported class is refused before runtime state or capability composition.
-
-### Composition and extension budget
-
-The V0 entrypoint statically composes only the equity variants and requires the enabled asset-class
-set to equal `{us_equity}`. Observed Alpaca entitlements cannot widen that set. Crypto or option
-configuration is rejected before `Advance` is constructed; a disabled variant arriving through a
-recorded or broker boundary is refused before research, portfolio construction, packet publication,
-or broker effects. A disabled-class holding is never silently dropped: it remains an explicit
-portfolio mismatch that blocks discretionary progress until an authorized capability can reconcile it.
-
-Adding one asset class may add:
-
-- one identity, cycle-plan, instrument, position, order-intent, and broker-activity variant;
-- asset-owned eligibility, portfolio, risk, execution, and reconciliation policy;
-- provider adapters and recorded contract fixtures for the new variant;
-- complete, versioned configuration with an explicit activation gate; and
-- unit, integration, contract, mutation-critical, and explicitly authorized live-rehearsal evidence.
-
-A new asset lifecycle owns its phase and checkpoint sequence. It must not alter the existing
-MarketSession phase order or require rewriting the public lifecycle results, common durable envelope,
-provenance and snapshot hashing, receipt reconstruction, packet-integrity checks, effect-idempotency
-rules, append-only correction behavior, or process authority separation. A demonstrated exception
-updates this document and receives an ADR before implementation. There is no dynamic plugin registry
-or runtime discovery path; composition and every closed union remain explicit and exhaustively
-checked. Later activation must also remain within PR-CON-001's existing-entitlement and
-no-metered-fallback constraint; this extension design adds no service dependency.
-
-## Temporal semantics
-
-[ADR 0006](adr/0006-separate-absolute-instants-from-market-time.md) separates the shared timeline from
-asset-owned calendar meaning. Every Absolute Instant crossing deterministic code, a durable boundary,
-a process or model boundary, or machine telemetry is normalized to UTC at microsecond precision. Its
-canonical durable text is fixed-width ISO 8601 with the `+00:00` offset. Equivalent aware inputs
-therefore have one value for comparison, ordering, hashing, replay, and reconstruction. Naive,
-over-precise, malformed, or noncanonical durable values fail closed at their owning seam.
-
-A `MarketSession` remains an NYSE trading date, not a midnight instant. US-equity schedule policy uses
-the NYSE calendar and `America/New_York` to interpret exchange-relative rules, including holidays,
-early closes, and daylight-saving changes, then resolves a deadline or cutoff to an Absolute Instant.
-Provider timestamp spelling remains raw provenance only when material; it never replaces the
-normalized instant. Operator trading views may derive Eastern Time, but host-local or displayed time
-is not authoritative state. Timeouts and latency use monotonic elapsed time rather than wall-clock
-arithmetic. These invariants are fixed architecture, not runtime timezone configuration.
-
-## Executable invariants
-
-Rules that protect investment authority, determinism, provenance, append-only durability, or process
-isolation must have stable, proportionate mechanical enforcement when one can express the contract
-without weakening or duplicating its owner. Apply the earliest layer that can prove the rule:
-
-1. types and constructors make invalid internal states difficult to represent and exhaust closed
-   state;
-2. module structure prevents forbidden dependencies and authority from becoming reachable;
-3. validation at a seam refuses hostile or untrusted representations before typed construction and
-   before handoff to another authority domain;
-4. deterministic tests exercise observable and temporal invariants that the earlier layers cannot
-   prove; and
-5. human review judges semantics, proportionality, and cases that cannot be encoded reliably.
-
-The [module graph](module-graph.md) owns executable Python dependency direction, while the
-[testing policy](testing.md) owns behavioral evidence and gate selection. A passing mechanical check
-is supporting evidence, not proof that the owning semantic contract is complete or correct. Do not
-add brittle checks merely to mechanize prose, and do not let a changed review or publication gate
-approve itself.
-
-### Capability effect boundaries
-
-[ADR 0007](adr/0007-enforce-bounded-capability-effects.md) makes concrete effect dependencies
-mechanically visible at the production capability boundary. Every Python source under
-`src/agentic_investment_os/` is protected by default except `adapters/` and `entrypoints/`, which own
-external effects and composition. Protected capabilities receive typed values or owner-defined ports;
-they do not obtain wall-clock time, ambient randomness or identifiers, host environment or local-time
-state, network or model access, broker authority, database access, filesystem effects, or process
-control directly.
-
-`make architecture` enforces this boundary with a fixed Ruff banned-API catalog and a small syntax
-check for cases whose acceptability depends on an explicit argument or typed receiver. The contextual
-check recognizes direct construction, annotations, and simple name or attribute aliases for `Path`,
-`Random`, and `datetime`; it requires seeded local generators and explicit timezone conversion. Inline
-lint suppression does not bypass the gate. Diagnostics identify a stable `CAP000`–`CAP010` category,
-repository-relative location, and remediation without printing source content.
-
-This is deliberately bounded static evidence. It does not infer arbitrary control flow, containers,
-protocol implementations, reflection, dynamic imports, or interprocedural types, and it does not
-claim exhaustive detection of evasive code. Extend the catalog or narrow contextual recognizer only
-for a demonstrated, high-signal effect pattern with both denied and allowed fixtures. Adapters and
-entrypoints remain subject to their authority contracts, module direction, behavioral tests, and
-semantic review even though this particular gate exempts them.
+- Enforce safety-critical invariants at the earliest stable layer that can prove them.
 
 ## System topology
 
@@ -309,264 +123,65 @@ flowchart LR
     lab -. reuses capability code .-> research
 ```
 
-The three process seams are the Investment Operating System, Order Execution Module, and Research
-Lab. They may share immutable domain contracts inside one package; they do not share authority or
-credentials. Arrows to public sources, model providers, durable stores, and Alpaca cross an
-owner-defined port and its adapter. The entrypoint nodes wire those implementations; they do not move
-effect authority into the protected capability.
+The Investment Operating System, executor, and Lab may share immutable domain contracts inside one
+package; they do not share authority, credentials, or production state. Every arrow to a source,
+model, durable store, or broker crosses an owner-defined port and its adapter. Entrypoints wire those
+implementations but do not move effect authority into protected capabilities.
 
-## Public lifecycle interfaces
+## Authority and trust
 
-Normal production callers see six capabilities:
+Authority moves only forward:
 
-- **Advance** resolves or resumes a `DecisionCycleIdentity`. V0 accepts only its `MarketSession`
-  variant; its common versioned receipt envelope contains the disposition, a versioned
-  `LifecycleCheckpoint` whose discriminator selects the equity phase, exact cycle and pinned inputs,
-  eligible-universe snapshot identifier, evidence references, bounded Attention Artifact or typed
-  attention refusal, fail-closed reason, and whether the call advanced fresh work, resumed committed
-  progress, or replayed prior completion. A successful receipt's relevant
-  and availability times identify when that call's result was recorded; the Evidence Cutoff remains
-  a separate pinned input. A recognized disabled cycle or malformed cycle is returned as a bounded
-  refusal before the clock, adapter, or authoritative lifecycle ledger is entered. A valid
-  `MarketSession` remains explicit in any later durable refusal and its replay. Before universe,
-  evidence, or model work, Advance validates every existing lifecycle pin against governance
-  history. A lifecycle pin's first event time selects the exact governance-history prefix it
-  observed, so a later amendment may activate globally without rewriting an interrupted run. Only a
-  new request resolves the then-current Constitution regime for its session and pins that version
-  and content hash.
-- **Status** validates authoritative lifecycle history, replaces its disposable projection, and returns
-  the active `LifecycleCheckpoint`, `last_completed_cycle` as a `DecisionCycleIdentity`, the latest
-  eligible-universe checkpoint as an exact `universe_snapshot_cycle` and snapshot-identifier pair,
-  the latest bounded selection as an exact `attention_artifact_cycle` and artifact-identifier pair,
-  pinned run identity, lifecycle liveness, any available durable terminal reason, and bounded active,
-  pending, superseded, refused, and conflicting Constitution governance state. Snapshot and attention
-  references may belong to an earlier completed cycle than the current pinned run; their paired cycle
-  fields prevent that history from being attributed to the active cycle. In V0 each exposed cycle is
-  a `MarketSession` and the checkpoint payload is an equity phase; neither public result exposes a
-  bare equity-only phase as the stable contract.
-- **Record** validates and atomically appends or replays one schema-versioned, evidence-bound Belief
-  Event. Its graph query rebuilds a deterministic as-of Belief Graph under explicit subject and node
-  bounds; returned provenance includes the authoritative-history hash, selected Vault references,
-  and omission counts. Later outcome-recording slices extend the capability without changing prior
-  decision records.
-- **Govern** currently validates and schedules one immutable, signed, operator-approved Constitution
-  artifact for one exact eligible future Market Session. Stable request identity makes exact retries
-  idempotent and changed material conflicting. Its receipt exposes only bounded disposition,
-  reference, boundary, reason, and time fields; approval signatures remain in authoritative history.
-  The `Govern` object capability is constructed only by the operator composition root and is never
-  injected into model, external-text, Research Lab, portfolio, or execution contexts. Champion and
-  controlled-policy governance remain later capabilities behind this interface.
-- **Apply** independently validates one published `DecisionPacket`, manages only its permitted paper
-  orders, and returns an `ExecutionReceipt`.
-- **Reconcile** observes broker orders and positions, matches stable client order identifiers, and
-  returns an `OutcomeBatch` for `Record`.
-
-Production entrypoints do not expose individual research stages. Stage replay belongs to the Research
-Lab and can write only to its own namespace.
-
-## Research Lab interface
-
-`Replay` is the public capability of one explicitly named, non-production Research Lab namespace. Its
-Evidence Collector request accepts only copied or synthetic evidence content and canonical subject
-mapping, an Evidence Cutoff and Data Regime, the pinned Constitution, one bounded Belief Graph, a
-portfolio-context fingerprint, versioned prompt and model configuration, inert canonical tool schemas
-and their fingerprints, and the complete material-input hash set. A resolution request carries the
-validated Dossier, an artifact-ID-to-content-hash evidence manifest, and exactly ordered Thesis
-Builder, Independent Skeptic, Scenario Forecaster, and CIO role contracts. Missing, ambient,
-unversioned, hash-inconsistent, future-available, rebound, reordered, or changed retry material is
-refused before the affected model effect. Belief nodes, evidence nodes, and graph edges are
-revalidated against the subject, cutoff, copied evidence, and bitemporal bounds before admission.
-
-Each stateless call crosses one research-owned model port implemented by `adapters`. A Lab-local
-SQLite ledger appends its role-specific canonical intent before the call and appends the raw-response
-identity, exposed model identity, resource use, timing disposition, and validated artifact or bounded
-refusal afterward. The stable effect-local call identity includes the namespace, Replay request, and
-role. A completed retry reads its prior observation without invoking the model port. An intent without
-an observation is an indeterminate prior effect after a possible interruption; retry returns a typed
-non-production refusal and never repeats that role call. A changed later role may reuse exact prior
-observations but conflicts before another effect under the changed identity.
-
-The Dossier validator admits only the exact Evidence Collector schema. It binds canonical subject and
-entity mapping, resolves every citation against evidence available by the cutoff, and includes the
-hash of the complete artifact-ID-to-content-hash evidence manifest in the validated Dossier identity.
-A supplied Dossier whose manifest differs from the current resolution request is refused before any
-resolution role effect. The validator separates facts from interpretation, names contradictions and
-missing evidence, and records every required research lens or an explicit irrelevance rationale.
-Weight, order, packet, tool instruction, lifecycle,
-governance, memory-write, credential, broker, Champion, or other undeclared fields fail closed. Every
-validated Dossier and `Replay` receipt is marked `research_lab_non_production`; no Lab composition
-receives a Champion store or execution port.
-
-The Thesis validator requires distinct apparent expectation and variant view, a bounded causal path,
-catalyst, one-to-twenty-trading-day horizon, bull/base/bear summaries, invalidators, and prospective
-uninvestable conditions. Every material claim carries validated Dossier assertion or
-contradicting-artifact references; aggregate evidence lists must equal the union of those claim-local
-references. The Independent Skeptic receives only the
-pinned Constitution, bounded context, validated Dossier and Thesis, its own prompt/model/tool contract,
-and their fingerprints; it cannot inherit Thesis Builder raw output, prompt, or conversation state.
-Its strongest countercase and every other material finding carry local Dossier artifact citations;
-its closed result preserves `accept`, `reject`, or `request_evidence`. An evidence request may leave
-contradictions and base rates empty rather than inventing findings, but its strongest countercase
-remains cited. The Scenario Forecaster binds exactly bull, base, and bear outcomes to the Thesis
-horizon. Every outcome and downside path carries claim-local Dossier evidence references. All cases
-share one metric from the closed observable metric set, one closed allowed-source class, the latest
-allowed official release available by the Thesis horizon, and a gap-free, non-overlapping basis-point
-threshold partition. A release first available after that horizon leaves the forecast unresolved.
-Each finite bound records inclusive or exclusive ownership; the
-canonical partition assigns the lower threshold to the base case and the upper threshold to the bull
-case so an observation resolves to exactly one outcome.
-Probabilities are either absent or integer basis points totaling exactly 10,000. The CIO consumes only
-validated artifacts and emits `long`, `hold`, `reduce`, `exit`, or `abstain` with uncertainty and a
-closed rationale basis bound to Dossier assertions and all three resolution-artifact hashes. Missing
-evidence, an active uninvestable condition, or an unresolved evidence request permits only abstention.
-When blockers overlap, any rationale basis owned by an active blocker permits that safe abstention;
-active-stance refusals use deterministic precedence: missing evidence, active uninvestable condition,
-then unresolved Skeptic. With no blocker or rejection, an active stance requires `supported_thesis`;
-abstention may instead use `insufficient_confidence`. A rejected Thesis cannot become `long` or
-`hold`. Every schema recursively rejects authority fields
-and directive-bearing prose for sizing, targets, orders, packets, brokers, governance, lifecycle
-control, memory writes, credentials, and tools.
-
-The Lab state root is an explicit private path rather than production runtime configuration. It must
-be symlink-free, repository-safe, and disjoint from every declared production root before its fixed
-`research-lab.sqlite3` file is created. Namespace metadata, intents, and observations are immutable;
-schema, integrity, namespace, content-hash, or reconstruction failure in any existing row stops replay
-before another model effect. Composition requires an explicit model port. Deterministic tests inject
-scripted recorded fixtures; no network, credential, or metered default exists. A subscription-backed
-adapter remains unimplemented and cannot be selected as a fallback.
-
-## Session lifecycle
-
-The V0 operating system is a checkpointed state machine over append-only records. Each transition
-persists intent before work and appends its observed result before advancing. Repeating a request
-returns its prior disposition or resumes from the last safe checkpoint.
-
-The implemented `domain.lifecycle` kernel remains specific to the `MarketSession` lifecycle under
-[the active kernel decision](../.agents/notes/implemented/2026-08-22-keep-lifecycle-kernel-specific.md).
-The application boundary validates `DecisionCycleIdentity` and unwraps only `MarketSession` before
-invoking that kernel. The equity planner resolves the session, Evidence Cutoff, schedule provenance,
-and due reconciliation obligations; the kernel never reads a calendar or switches on an asset-class
-discriminator.
-
-A separately authorized crypto implementation would first add a concrete `CryptoDecisionWindow`
-planner and its own transition policy while conforming to the public lifecycle results, durable
-envelope, and receipt contracts. Only that second implementation can justify extracting proven common
-transition machinery. Closed composition dispatch occurs before a transition kernel, so neither
-specific kernel accumulates asset-class branches. Option expiration, exercise, and assignment enter
-the equity path through `Reconcile` as due broker activities rather than new MarketSession phases.
-
-A framework-free lifecycle kernel reconstructs typed authoritative history and selects the next
-event, refusal, conflict, or receipt. Application code repeats that operation until it receives a
-terminal receipt. Persistence adapters validate hostile representations, invoke the kernel inside an
-atomic transaction, and append only the selected typed record; they do not encode phase ordering or
-recovery policy. [ADR 0002](adr/0002-lifecycle-policy-in-domain-kernel.md) records this ownership and
-the request-scoped compatibility boundary.
-
-```mermaid
-stateDiagram-v2
-    [*] --> ReconcilePriorState
-    ReconcilePriorState --> PinRunInputs
-    PinRunInputs --> SnapshotUniverse
-    SnapshotUniverse --> CaptureEvidence
-    CaptureEvidence --> SelectAttention
-    SelectAttention --> BuildDossiers
-    BuildDossiers --> RunResearch
-    RunResearch --> UpdateMemory
-    UpdateMemory --> ConstructPortfolio
-    ConstructPortfolio --> PublishDecision
-    PublishDecision --> AwaitExecution
-    AwaitExecution --> RecordOutcomes
-    RecordOutcomes --> PublishDigest
-    PublishDigest --> Complete
-    Complete --> [*]
-
-    ReconcilePriorState --> NoAction: ineligible or already complete
-    SelectAttention --> NoAction: no eligible attention
-    RunResearch --> NoAction: abstain or no valid thesis
-    ConstructPortfolio --> NoAction: deterministic rejection
-    NoAction --> PublishDigest
-
-    ReconcilePriorState --> FailedClosed: invalid authoritative state
-    PinRunInputs --> FailedClosed: incomplete or conflicting inputs
-    SnapshotUniverse --> FailedClosed: missing, stale, or contradictory recorded inputs
-    CaptureEvidence --> FailedClosed: unavailable or stale evidence
-    SelectAttention --> FailedClosed: incomplete or contradictory pinned inputs
-    RunResearch --> FailedClosed: invalid output or missing role
-    ConstructPortfolio --> FailedClosed: invariant failure
-    PublishDecision --> FailedClosed: persistence failure
-    AwaitExecution --> FailedClosed: unreconciled execution state
-    FailedClosed --> PublishDigest
+```text
+captured evidence -> validated research -> HouseView -> deterministic portfolio
+-> published DecisionPacket -> independent executor validation -> broker effect
 ```
 
-`NoAction` is an expected, durable outcome. `FailedClosed` records why the cycle cannot safely
-continue. Neither state publishes a new discretionary order. A later LangGraph adapter may replace
-the transition implementation but must preserve this interface, state meaning, checkpoints, and
-idempotency behavior.
+- External text, provider data, durable representations, and model output remain hostile until their
+  schema, evidence, time, provenance, and authority are validated at the receiving seam.
+- Codex may propose evidence assertions, beliefs, theses, scenarios, stance, and challengers. It
+  cannot choose accepted weights, construct executable packets or orders, control lifecycle or
+  governance, supply operator approval, activate policy, or receive broker credentials.
+- `portfolio` alone owns deterministic sizing and risk clamps. `execution` alone owns broker
+  actions and cannot reinterpret or expand a packet's portfolio intent.
+- The executor receives broker credentials and validated packets but no model capability. The
+  Investment Operating System and Lab receive no broker credentials.
+- Lab artifacts are explicitly non-production and cannot satisfy champion, portfolio, packet, or
+  executor validation.
+- Operator approval is required for the Constitution, objectives, evaluation rules, risk envelopes,
+  execution policy, champion promotion, and any future live-capital design.
 
-A cycle whose due activities are missing, stale, contradictory, or not reconstructable also remains
-failed closed. Its transition policy sees only whether the typed reconciliation obligation is
-complete; asset-owned policy interprets the activity.
+## Executable invariants
 
-### Lifecycle walkthroughs
+Rules protecting investment authority, determinism, provenance, append-only durability, or process
+isolation require proportionate mechanical enforcement when the contract can be expressed without
+duplicating or weakening its owner. Apply the earliest layer that can prove the rule:
 
-#### Equity daily cycle
+1. closed types and constructors make invalid internal states difficult to represent;
+2. module structure prevents forbidden dependencies and unreachable authority from becoming
+   reachable;
+3. seam validation refuses hostile representations before typed construction or authority handoff;
+4. deterministic tests prove observable and temporal rules not established earlier; and
+5. human review judges semantics and cases that cannot be encoded reliably.
 
-The V0 scheduler resolves an NYSE trading date and exchange-relative deadlines into an equity
-`MarketSession`. `ReconcilePriorState` proves cash, positions, pending orders, and prior receipts agree.
-Before any of those checks reach universe, evidence, attention, or model work, Advance reconstructs Constitution
-governance. The injected exchange-session policy classifies the approved boundary against a trusted
-UTC instant as past, current, future, or ineligible; host-local date and time never choose authority.
-Advance activates a due amendment whenever its boundary is the exact current approved session,
-before selecting either a new or resumed run. It resumes an existing stream from the governance
-prefix visible at that stream's first durable event and fails closed if the boundary was missed or
-any governance proof or lifecycle-to-governance reference cannot be validated.
-`PinRunInputs` records the equity cycle identity, Constitution version and hash, equity-feed Data
-Regime and Evidence Cutoff, configuration, instrument catalog, position snapshot, and policy
-fingerprints; the current Basic entitlement uses IEX, while a later SIP entitlement is a different
-regime. `SnapshotUniverse` publishes the eligible universe before `CaptureEvidence` appends
-intent-first market, news, SEC, issuer, and official-macro capture outcomes to the Evidence Vault.
-`SelectAttention` derives only the approved local features from that exact checkpoint, publishes
-bounded Candidate Cards and Dossier requests, and records due-holding refreshes outside the
-new-Dossier cap. It consumes neither a model nor an external adapter and cannot publish a Dossier,
-Thesis, portfolio weight, packet, or order. The remaining phases run once and publish at most one
-Champion decision and packet for that cycle. A
-non-equity activation
-request or position is refused before evidence or research; an NYSE holiday produces the existing
-durable no-action path rather than a synthetic session.
+The [module graph](module-graph.md) owns Python dependency direction; [testing policy](testing.md)
+owns behavioral evidence and gate selection. A passing mechanical gate supports but never replaces
+semantic review. A changed review or publication gate cannot approve itself.
 
-#### Crypto while US equities are closed
+### Capability effect boundaries
 
-In a separately authorized future composition, a crypto planner can produce a UTC-bounded
-`CryptoDecisionWindow` while the NYSE planner produces none. Its concrete transition policy must
-own its phase and checkpoint sequence while conforming to the public lifecycle results, durable
-envelope, receipt, packet-integrity, and reconciliation contracts. Crypto policy also owns 24/7
-scheduling, base/quote quantities, venue data, order increments, time-in-force, and fee-currency
-observations; composition dispatches before transition logic rather than adding an `if crypto` branch.
-Under V0, the same activation attempt is a configuration refusal and creates no research, packet,
-order, or broker effect.
+[ADR 0007](adr/0007-enforce-bounded-capability-effects.md) protects every production module except
+`adapters/` and `entrypoints/`, which own external effects and composition. Protected capabilities
+receive typed values or owner-defined ports; they cannot directly obtain wall-clock time, ambient
+randomness or identifiers, host environment or local-time state, network or model access, broker
+authority, database access, filesystem effects, or process control.
 
-#### Option expiration or assignment
-
-In a separately authorized future composition, the option planner marks expiration obligations in
-the cycle plan, while `Reconcile` independently consumes provider position snapshots and stable
-exercise, assignment, expiration, and paired underlying-transaction activities. The option variant
-links the contract identity to its underlying equity identity and applies the recorded multiplier and
-deliverable. Reconciliation appends each observation once, updates no prior record, and exposes the
-resulting option, the owner's underlying position, and cash state to the next cycle. A position change
-observed before a delayed activity remains an unresolved independent fact and blocks discretionary
-progress; the system neither invents the activity nor repeats an effect. The MarketSession transition
-graph gains no option-specific branch. An option with an index or unknown underlying is also refused
-rather than coerced into an equity identity. V0 refuses every option variant before this path is
-reachable.
-
-Lifecycle status is derived only from the append-only event, refusal, and conflict ledgers. Rebuilding
-validates the complete authoritative history before atomically replacing the projection; missing or
-malformed projection state is discarded, while malformed authoritative history fails closed. A
-completed phase does not imply a completed Decision Cycle: `last_completed_cycle` advances only from
-a durable `Complete` event. The separately named `universe_snapshot_cycle` advances atomically with
-its exact snapshot identifier when `SnapshotUniverse` completes. Status liveness describes whether
-the recorded lifecycle is not started, active, or failed closed; scheduler heartbeat and schedule
-health are separate operational concerns.
+`make architecture` supplies bounded static evidence for this contract. Its fixed banned-API and
+contextual checks reject known high-signal effect acquisition while allowing explicit injected
+values, seeded local generators, and timezone conversion. It does not infer arbitrary control flow,
+reflection, dynamic imports, protocol implementations, or interprocedural types. Extend the gate only
+for a demonstrated pattern with denied and allowed fixtures. Adapters and entrypoints remain governed
+by their process authority, module direction, behavioral tests, and review.
 
 ## Safe execution handoff
 
@@ -608,262 +223,314 @@ sequenceDiagram
     OS->>OSStore: Append outcomes and preserve original decision
 ```
 
-Timeout and broker acceptance remain independent facts. Reconciliation resolves ambiguity by stable
-client order identity; it never guesses or repeats exposure blindly. Persistence, model, and broker
-participants denote owner-defined ports with their configured adapters, not capabilities that own
-those effects directly.
+Model, persistence, and broker participants denote owner-defined ports and their configured adapters,
+not capabilities that own those effects. Broker acceptance and timeout are independent facts.
+Reconciliation resolves ambiguity by stable client order identity; it never guesses acceptance or
+blindly repeats exposure.
 
 ## Module ownership
 
-| Module | Owns | Interface presented to callers |
+| Module | Owns | Public surface |
 | --- | --- | --- |
-| `domain` | Framework-free values, lifecycle transition policy, events, identifiers, and invariants | Immutable domain contracts and lifecycle decisions |
-| `application` | Lifecycle and isolated-Lab use-case orchestration | `Advance`, `Status`, `Record`, `Govern`, `Replay` |
+| `domain` | Framework-free values, lifecycle transition policy, events, identifiers, invariants | Immutable contracts and lifecycle decisions |
+| `application` | Production lifecycle and isolated-Lab orchestration | `Advance`, `Status`, `Record`, `Govern`, `Replay` |
 | `evidence` | Content-addressed artifacts, assertions, as-of provenance | Evidence capture and lookup |
 | `memory` | Belief ledger, graph projection, decision journal | Append and as-of retrieval |
 | `research` | Typed Codex roles and evidence-bound workflow | Validated research artifacts |
 | `portfolio` | HouseView validation, sizing, limits, target bands, packets | Deterministic construction |
 | `execution` | Packet verification, order policy, idempotency, reconciliation | `Apply`, `Reconcile` |
 | `evaluation` | Outcome resolution, benchmarks, calibration, challengers | Evaluation records |
-| `adapters` | SQLite, filesystem, clock, recorded-model, Codex, SEC, Alpaca implementations | Owner-defined ports |
-| `entrypoints` | Production and Research Lab composition, configuration, paths, credentials | CLI and scheduler surfaces |
+| `adapters` | SQLite, filesystem, clocks, recorded-model, Codex, SEC, Alpaca | Owner-defined ports |
+| `entrypoints` | Process composition, configuration, paths, credentials | CLI and scheduler surfaces |
 
-An interface lives with the module that owns its behavior. Adapters satisfy those interfaces;
-entrypoints assemble them. `module-graph.md` owns allowed Python import directions and the distinction
-between policy and executable edges.
+An interface lives with the capability that owns its behavior. Adapters implement those interfaces;
+entrypoints assemble them. [The module graph](module-graph.md) alone owns allowed import directions
+and the distinction between policy and executable edges.
 
-## Eligible-universe compatibility contract
+## Public lifecycle interfaces
 
-The following is the permanent contract for the first and every later eligible-universe
-implementation. It must hold before evidence work can depend on eligible-universe records.
+Production entrypoints expose complete lifecycle capabilities, never individual research stages:
 
-- **Instrument identity:** Replace symbol keys with the versioned `InstrumentIdentity` union and its
-  equity, crypto-spot, and listed-option variants. Only `EquityInstrumentIdentity` is eligible in V0;
-  the disabled variants preserve explicit portfolio mismatches. Aliases remain provenance, while
-  deduplication, ordering, membership, retry, and hashes use canonical identity bytes. The Alpaca V0
-  adapter accepts only the `alpaca-paper` provider-and-environment catalog namespace, including for an
-  option's equity underlying. Every alias and provider catalog key maps to exactly one canonical
-  identity across the complete snapshot; missing, reused, or contradictory mappings fail closed. An
-  option whose underlying does not resolve to the supported equity identity is unsupported rather
-  than eligible.
-- **Universe snapshots:** Replace flat equity-shaped asset and symbol-only holding records with
-  common versioned instrument and position snapshot envelopes containing exactly one discriminated
-  payload, observed and available times, Data Regime, authority scope, source fingerprint, and content
-  hash. Position variants carry a signed exact quantity, explicit unit, and valuation amount,
-  currency, and source. Subjects reference canonical identity, new-entry eligibility remains distinct
-  from holding refresh, and disabled-class holdings remain explicit portfolio mismatches.
-- **Lifecycle boundary:** The application accepts `DecisionCycleIdentity`, permits only its
-  `MarketSession` variant in V0, and unwraps it before the current Market-Session-specific kernel. The
-  public receipt, durable event, and Status projection expose common versioned checkpoint and event
-  envelopes whose discriminators select the equity phase and event payload. Status exposes the
-  latest completed `SnapshotUniverse` as a distinct cycle-and-snapshot pair without advancing
-  `last_completed_cycle` before a durable `Complete` event. Cycle, instrument-snapshot,
-  position-snapshot, eligibility-policy, cutoff, and Data Regime fingerprints are pinned; changed
-  retry inputs conflict before further work. The success receipt discriminator accepts only a
-  `MarketSession`; a crypto identity cannot be represented as successful equity progress.
-- **Persistence:** Parse discriminators before payloads, validate exact fields and identity references,
-  and reconstruct canonical bytes and hashes on every reopen. Persist common cycle and snapshot
-  envelopes rather than Alpaca enums or symbol foreign keys. Physical-schema tampering fails at the
-  ADR 0004 startup boundary; content or reference tampering fails reconstruction under ADR 0002.
-  Under ADR 0004's current-schema policy, provisional pre-deployment shapes are replaced rather than
-  migrated, and every unsupported non-empty shape fails closed.
-- **Configuration:** Require a validated enabled-asset-class set and an explicitly discriminated equity
-  universe policy. V0 accepts only the equity class with the matching policy; crypto, options, unknown
-  or duplicate classes, missing policy, policy mismatch, and provider entitlement alone fail before
-  runtime state preparation. The implementation change records any concrete key and default in
-  `config-catalog.md`; this contract does not name an unimplemented configuration surface.
-- **Compatibility evidence:** The observable scenarios in
-  [Asset extension seams](testing.md#asset-extension-seams) are required through public `Advance` and
-  `Status`. They preserve the existing equity daily behavior while proving canonical identity,
-  snapshot reconstruction, cycle/status compatibility, retry conflict, reopen, disabled-class
-  refusal, and absence of downstream effects.
+| Capability | Stable contract |
+| --- | --- |
+| **Advance** | Resolve or resume one supported `DecisionCycleIdentity`; validate governance history and pinned material before downstream work; return a versioned disposition, checkpoint, exact cycle, provenance references, and bounded refusal or replay. V0 unwraps only `MarketSession`. A malformed or disabled cycle is refused before a clock, adapter, authoritative ledger, or state preparation is entered. |
+| **Status** | Validate authoritative history, rebuild its disposable projection, and report checkpoint, liveness, durable terminal reason, pinned run, Constitution state, and cycle-qualified snapshot and attention references. `last_completed_cycle` advances only from a durable `Complete` event. |
+| **Record** | Validate and atomically append or replay an evidence-bound Belief Event; rebuild bounded as-of Belief Graph results from authoritative history. Outcome extensions append without changing ex-ante decisions. |
+| **Govern** | Schedule one immutable, signed, operator-approved Constitution artifact at one exact eligible future `MarketSession`. Exact retry is idempotent; changed material conflicts. Only the operator composition root receives this object capability. |
+| **Apply** | Independently validate one published `DecisionPacket`, manage only its authorized paper orders, and return an `ExecutionReceipt`. |
+| **Reconcile** | Observe orders, activities, positions, and cash as independent broker facts; match stable identities and return an `OutcomeBatch` for `Record`. |
 
-Crypto and option eligibility, strategy, portfolio, risk, data, and execution remain unauthorized.
-Their identity variants preserve explicit refusal so a later authorized variant can expand an owned
-union instead of replacing durable identity or lifecycle contracts.
+Typed interfaces own field-level schemas and [testing policy](testing.md#required-deterministic-scenarios)
+owns observable success and refusal scenarios. Public results remain versioned, bounded, and explicit
+about fresh work, resumed progress, prior completion, no action, conflict, or failed-closed outcome.
 
-## Authority and trust
+## Research Lab interface
 
-The authority chain is monotonic:
+`Replay` is the only public capability of an explicitly named non-production Lab namespace. It
+accepts copied or synthetic evidence available by its pinned cutoff plus canonical subject mapping,
+Constitution, bounded Belief Graph, portfolio-context fingerprint, prompt, model, tool schemas,
+Data Regime, and material hashes. Every input is explicit, versioned, bounded, and revalidated before
+the affected model boundary; ambient, future-available, inconsistent, reordered, or changed retry
+material fails closed.
 
-```text
-captured evidence -> validated research -> HouseView -> deterministic portfolio
--> published DecisionPacket -> independent executor validation -> broker effect
+Each stateless role call crosses a research-owned model port. A Lab-owned persistence port appends the
+canonical role intent before that effect and appends raw-response identity, exposed model identity,
+resource use, timing disposition, and validated artifact or bounded refusal afterward. Stable
+effect-local identity includes namespace, Replay request, and role. A completed retry returns its
+prior observation without invoking the model. An intent without an observation is an indeterminate
+prior effect and is never repeated automatically.
+
+The fixed role order and investment meaning belong to
+[the research workflow](investment-domain.md#research-workflow); typed contracts own their exact
+schemas. The Lab admits only declared, evidence-bound fields and recursively refuses position sizing,
+targets, packets, orders, broker, governance, lifecycle-control, memory-write, credential, tool, or
+other authority directives. Every accepted artifact and receipt is marked
+`research_lab_non_production`; no Lab composition receives a Champion store, production-state
+writer, execution port, or broker credential.
+
+The Lab state root is an explicit private path, symlink-free, repository-safe, and disjoint from every
+production root. Its namespace metadata, intents, and observations are immutable. Existing schema,
+integrity, namespace, hash, or reconstruction failure stops replay before another model effect.
+Composition requires an explicit model port; deterministic tests use scripted recorded fixtures.
+There is no network, credential, metered default, or fallback.
+
+## Session lifecycle
+
+The V0 operating system is a checkpointed state machine over append-only records. A pure,
+framework-free domain kernel reconstructs typed authoritative history and selects the next event,
+refusal, conflict, or receipt. Application code drives the kernel to a terminal receipt. Persistence
+adapters validate hostile representations and atomically append only the selected record; they do not
+own phase ordering or recovery policy. [ADR 0002](adr/0002-lifecycle-policy-in-domain-kernel.md)
+records this ownership.
+
+The active kernel remains specific to `MarketSession`. The application boundary validates the closed
+`DecisionCycleIdentity` and unwraps only that variant; the equity planner resolves schedule,
+Evidence Cutoff, and due reconciliation obligations. The kernel reads no calendar and contains no
+asset-class switch. A future lifecycle owns its own planner and transitions and may justify common
+machinery only after a second concrete implementation proves it.
+
+```mermaid
+stateDiagram-v2
+    [*] --> ReconcilePriorState
+    ReconcilePriorState --> PinRunInputs
+    PinRunInputs --> SnapshotUniverse
+    SnapshotUniverse --> CaptureEvidence
+    CaptureEvidence --> SelectAttention
+    SelectAttention --> BuildDossiers
+    BuildDossiers --> RunResearch
+    RunResearch --> UpdateMemory
+    UpdateMemory --> ConstructPortfolio
+    ConstructPortfolio --> PublishDecision
+    PublishDecision --> AwaitExecution
+    AwaitExecution --> RecordOutcomes
+    RecordOutcomes --> PublishDigest
+    PublishDigest --> Complete
+    Complete --> [*]
+
+    ReconcilePriorState --> NoAction: ineligible or already complete
+    SelectAttention --> NoAction: no eligible attention
+    RunResearch --> NoAction: abstain or no valid thesis
+    ConstructPortfolio --> NoAction: deterministic rejection
+    NoAction --> PublishDigest
+
+    ReconcilePriorState --> FailedClosed: invalid authoritative state
+    PinRunInputs --> FailedClosed: incomplete or conflicting inputs
+    SnapshotUniverse --> FailedClosed: missing, stale, or contradictory inputs
+    CaptureEvidence --> FailedClosed: unavailable or stale evidence
+    SelectAttention --> FailedClosed: incomplete or contradictory inputs
+    RunResearch --> FailedClosed: invalid output or missing role
+    ConstructPortfolio --> FailedClosed: invariant failure
+    PublishDecision --> FailedClosed: persistence failure
+    AwaitExecution --> FailedClosed: unreconciled execution state
+    FailedClosed --> PublishDigest
 ```
 
-- External text and model output are hostile data until schema, evidence, time, and authority
-  validation succeeds.
-- Codex may propose evidence assertions, beliefs, theses, scenarios, stance, and challengers. It has
-  no broker credentials and cannot choose accepted weights, construct executable packets, create
-  orders, change lifecycle control, govern a Constitution, supply operator approval, or activate
-  policy.
-- `portfolio` alone owns deterministic sizing and risk clamps. `execution` alone owns broker actions
-  and cannot change the packet's portfolio intent.
-- The executor process receives broker credentials and validated packets but no model capability.
-- Research Lab artifacts are marked non-production and cannot satisfy champion or executor
-  validation.
-- Operator approval is required for Constitution, objectives, evaluation rules, risk envelopes,
-  execution policy, champion promotion, and any future live-capital design.
+The state meanings and transition contracts are:
+
+- Every effect has a durable intent before work and an observed result before the lifecycle advances.
+  Retry replays a completed disposition or resumes only from the last safe checkpoint.
+- `PinRunInputs` fixes cycle identity, Constitution version and hash, configuration, Data Regime,
+  Evidence Cutoff, universe and position inputs, and material policy fingerprints. Changed retry
+  material conflicts before further work.
+- A new request selects governance for its eligible session. An existing stream always reconstructs
+  the governance prefix visible at its first event, so later activation never rewrites an interrupted
+  run. Missed boundaries, invalid proofs, or unresolved lifecycle-to-governance references fail closed.
+- `SnapshotUniverse` publishes the prepared canonical envelope once. `CaptureEvidence` and all
+  later effectful phases reuse the exact pinned inputs and identities rather than consulting ambient
+  state.
+- `NoAction` is an expected durable outcome; `FailedClosed` records why safe progress is impossible.
+  Neither publishes a new discretionary order. Required missing or unreconstructable reconciliation
+  obligations force `FailedClosed`.
+- Option expiration, exercise, and assignment enter the equity lifecycle as due reconciliation
+  obligations, never as extra `MarketSession` phases.
+- Status derives only from validated event, refusal, and conflict ledgers. It may discard and rebuild
+  a projection, but malformed authoritative history fails closed. Operational scheduler heartbeat is
+  not lifecycle liveness.
+
+Narrative journeys and transition fault cases belong to
+[required deterministic scenarios](testing.md#lifecycle-and-durability), not this document. A future
+orchestration adapter may change implementation mechanics only if it preserves these states,
+checkpoints, effects, dispositions, and idempotency rules.
 
 ## Durable state
 
-| State | Authority | Mutation rule |
+| Authoritative state | Owner | Mutation contract |
 | --- | --- | --- |
-| Evidence artifacts | Content-addressed Evidence Vault | Immutable; repeated observations append metadata |
-| Beliefs | Bitemporal Belief Ledger | Append transitions and corrections |
-| Decisions | Decision Journal | Freeze ex-ante record; append later observations |
-| Order intent and receipts | Executor ledger | Persist intent before effect; append observations |
-| Constitution governance | Governance event ledger | Append scheduled, activated, refused, and conflicting facts; never alter a prior version or approval record |
-| Lifecycle checkpoints and refusals | Lifecycle event ledger | Append transitions and bounded conflict or refusal records under stable idempotency keys |
-| Eligible-universe snapshots | Lifecycle event ledger | Append one complete asset-neutral envelope with typed instrument and position variants, applied policy, dispositions, and immutable identity |
-| Attention Artifacts | Lifecycle event ledger | Append one content-addressed zero-token selection or a typed terminal refusal; never rewrite subject transitions |
-| Research Lab model calls and artifacts | Namespace-local Lab ledger | Append role-specific intent before each effect, then one raw-response identity and validated non-production Dossier, Thesis, Skeptic result, forecast, CIO result, or bounded refusal; never update or delete |
-| Graphs, reports, indexes | Projection stores | Replace only by deterministic rebuild |
-| Executable packets | Atomic packet store | Publish complete validated artifacts only |
+| Evidence artifacts and observations | Content-addressed Evidence Vault | Store content immutably; append source observations, availability, mappings, and refusals |
+| Beliefs | Bitemporal Belief Ledger | Append transitions and corrections; preserve the complete chain and integrity anchor |
+| Decisions and outcomes | Decision Journal | Freeze ex-ante decisions; append observations, attribution, and lessons |
+| Governance | Constitution governance ledger | Append scheduled, activated, refused, and conflicting facts plus approval proof |
+| Lifecycle and attention | Lifecycle event ledger | Append intents, transitions, checkpoints, artifacts, refusals, and conflicts under stable identities |
+| Published packets | Atomic packet store | Publish only complete, validated, immutable packets |
+| Executor intent and observations | Executor ledger | Persist effect intent first; append broker observations and receipts independently |
+| Research Lab calls and artifacts | Namespace-local Lab ledger | Append role intent before effect and one observation or bounded refusal afterward |
+| Graphs, reports, indexes, status | Projection stores | Replace only by deterministic rebuild from validated authority |
 
-Every model-visible input and material decision is reconstructable from content hashes, relevant time
-dimensions, configuration, prompt and model identity, and durable records. Corrections name what they
-supersede; they do not rewrite prior financial history.
+Every authoritative record has a closed, versioned envelope whose discriminator is parsed before its
+payload. Relevant event and availability times, authority scope, material configuration and source
+fingerprints, canonical subject or cycle identity, and content hash are explicit where applicable.
+Readers reconstruct canonical values and hashes instead of trusting stored summaries. Unknown
+variants, unsupported versions, missing references, incompatible authority, or corrupt hashes fail
+closed at the first seam.
 
-The Belief Ledger stores the exact canonical Belief Event, its bitemporal instants, trusted durable
-record time, immutable Evidence Vault references, an append-chain projection identity, and a
-separately stored append-only commitment chain. A singleton integrity anchor records the expected
-terminal ledger position and commitment. Each append writes the event and commitment before advancing
-that anchor from its exact predecessor in the same transaction; the anchor can start only at position
-one, advance only one position, and cannot be deleted. Reconstruction requires the anchor to match the
-validated chain terminal, so removing the same suffix from both append-only relations leaves a
-detectable mismatch instead of a valid shorter history. The anchor is integrity metadata, never
-financial history or a projection.
+Financial history is append-only. Corrections name what they supersede; exact redelivery replays its
+receipt; changed material under an existing identity conflicts. Content-addressed bytes may be shared,
+but separate observations and effects keep distinct identities. An effect's idempotency key derives
+from canonical authority inputs, never a display symbol or mutable alias.
 
-The pure memory reducer admits only a new active belief or a transition from the current head,
-preserves every prior status, and treats exact redelivery as replay while refusing changed material
-under an existing event identity. SQLite resolves every referenced artifact and its availability
-against the event's Evidence Cutoff before the selected append commits. `Record.graph` reconstructs
-from validated authoritative rows and Vault facts admitted by the requested subjects and as-of
-cutoff. It excludes events not yet durably known, never trusts the disposable belief-graph projection,
-and fails closed on corrupt history or admitted evidence.
+All model-visible inputs and material decisions are reconstructable from their content, relevant
+times, Data Regime, configuration, prompt and model identity, tool contract, source provenance, and
+durable records. Evidence availability—not merely source-event time—must satisfy the pinned cutoff.
+Official source identity binds immutably to its observed content and publication facts; amendments
+append rather than replace. Projections never authorize behavior and cannot become a second source of
+truth.
 
-`PinRunInputs` records the canonical Decision Cycle identity, Constitution version and content hash,
-configuration, Data Regime, Evidence Cutoff, instrument-snapshot, position-snapshot, and
-eligibility-policy fingerprints in the run identity. The Constitution selection is reconstructed for
-the requested session before the run exists, so a later governance change cannot silently move an
-in-progress cycle. It also persists the first complete normalized universe envelope as prepared
-provenance,
-including aliases that do not participate in authority identity. `SnapshotUniverse` publishes that
-prepared envelope by immutable identifier rather than rebuilding it from later adapter input. Its
-event and `Advance` receipt carry the same identifier; the complete envelope exists once in
-authoritative history. Reopen and retry revalidate it from canonical bytes, and an alias-only retry
-cannot replace the provenance pinned before an interruption. The cutoff cannot be later than the
-lifecycle record time. Missing identity, future or changed material, or a conflicting retry fails
-closed without another snapshot event.
+Lifecycle, belief, governance, executor, and Lab ledgers validate their complete request-relevant
+history before replay or append. A commitment chain plus non-rewindable integrity anchor makes
+truncating a belief suffix detectable. Governance is selected from validated approval history visible
+to a lifecycle stream. Capture, model, and broker effects persist their exact intent before crossing
+the port, then append the independent observation before progress. Ambiguous prior effects remain
+indeterminate until reconciliation; retry never manufactures an observation or repeats exposure.
 
-`CaptureEvidence` derives each artifact's availability from its applicable source-event or
-publication instant, first-observed instant, and entity-mapping availability, then admits it only at
-the pinned Evidence Cutoff. For SEC artifacts, the common publication-time slot carries the EDGAR
-acceptance instant. The filesystem Evidence Vault stores content once by SHA-256 while appending
-distinct observation metadata in the common evidence-snapshot envelope and typed unavailable, stale,
-invalid, ambiguous, or refused outcomes. Each effect-local intent supplies the observation identity,
-so separate retrieval effects retain distinct observation envelopes even when every source timestamp
-and byte is unchanged; same-intent retry reuses its prior outcome. The artifact identifier hashes that
-observation envelope, while the separate source-content fingerprint addresses the deduplicated bytes.
-Owner-defined closed
-market, news, SEC filing, issuer release, and official Federal Reserve, BLS, or BEA variants validate
-canonical content at the recorded boundary, Vault publication, and reopen. SEC identity is the
-accession; amendments append their own accession and link to the amended accession rather than
-replacing prior content. Before publishing an official observation, the Vault atomically establishes
-an append-only binding from feed and source identity to content and publication facts. Concurrent
-conflicts therefore produce a typed invalid outcome, and reopen revalidates every official artifact
-against that binding. Issuer and official-macro variants retain their source document identity.
-Every artifact pins its source, coverage or entitlement, parser and normalization version, and
-versioned entity mapping when one applies; an ambiguous mapping outcome retains its own version and
-availability for cutoff evaluation. Before the first capture intent, the Vault appends the
-complete canonical retrieval policy under its content hash; the lifecycle
-checkpoint pins that policy identifier beside its artifact and refusal identifiers. A durable
-capture intent precedes each source consultation; reopen and retry reuse its completed outcome or
-safely resume an intent that has no outcome only while its pinned policy snapshot remains valid; it
-never recreates that snapshot over related durable intent or outcome state. Lifecycle reconstruction
-loads each run's historical policy and rebuilds its complete configured intent set for the exact run,
-Universe Snapshot, cutoff, and Data Regime, then requires exact equality with the referenced artifact
-and required-refusal identifiers. Optional non-capture outcomes remain explicit in the Vault but do
-not by themselves fail the lifecycle; any required non-capture outcome does. Only captured outcomes
-enter lifecycle artifact references, while rejected observations remain available for Vault audit.
-A terminal refusal retry
-reconstructs only its owning request stream before
-comparing pinned material, including the policy identifier returned for application-boundary Vault
-validation, so unrelated corrupt history cannot replay stale evidence references. The final lifecycle
-event and `Advance` receipt expose only bounded policy, artifact, and refusal identifiers. Any required
-refusal prevents the final event and appends an
-`evidence_capture_failed` terminal refusal without erasing valid observations captured in the same
-attempt.
+SQLite owns one database-wide physical schema version, independent of durable-record and run schema
+versions. Its adapter atomically initializes an empty database or validates the exact current schema;
+every other non-empty version or shape fails before lifecycle writes. Disposable projections remain
+outside authoritative schema identity and may be rebuilt, but they cannot mask corruption in
+authoritative or global structures. [ADR 0004](adr/0004-require-current-sqlite-schema.md) owns this
+current-schema decision.
 
-`SelectAttention` validates the complete evidence checkpoint before loading or deriving any attention
-input. It loads only the artifact identifiers named by that checkpoint and revalidates their immutable
-content, source bindings, Data Regime, availability, universe identity, and cutoff. An unavailable
-optional source remains an explicit missing feature rather than becoming a known-negative signal. The
-feature boundary also refuses distinct captures that assign different market values to the same
-instrument and observation timestamp. The versioned attention policy fixes per-cycle and weekly
-capacity plus a deterministic exploration seed.
-Selection advances an active subject by at most one funnel state, emits an explicit terminal card when
-a previously active subject becomes ineligible, places holding refreshes outside new-research capacity,
-and records exact card, Dossier-request, refresh, weekly exploration, model-token, model-turn, and
-adapter-quota counts.
-
-The Attention Artifact carries the complete policy preimage, the ordered history fingerprint used for
-state transitions, and the exact observed features supporting each card reason. Its `relevant_at` is
-the evidence cutoff, while `available_at` is the lifecycle event time at which the selection became
-observable. The artifact identifier hashes every deterministic selection input and output; the
-separate envelope content hash also binds that truthful observation time. Subject ordering, retry,
-interruption, and reopen therefore preserve selection identity even when an interrupted publication
-resumes at a later wall-clock time. History reconstruction checks every artifact against its preceding
-chain of ordered deterministic artifact identifiers while independently validating each full envelope
-and content hash. It refuses an older interrupted cycle after a later cycle has already published;
-inserting that cycle retroactively would rewrite the later transition context.
-Missing, stale, contradictory, corrupt, or inconsistent evidence or history appends
-`attention_selection_failed` with a typed reason and publishes no Attention Artifact.
-
-SQLite is the initial event and checkpoint store, while the filesystem holds content-addressed
-artifacts and atomic publications. Runtime state uses ignored, configurable roots such as `var/`,
+SQLite is the initial event and checkpoint store; the filesystem holds content-addressed artifacts
+and atomic packet publications. Runtime state uses ignored configurable roots such as `var/`,
 `data/`, and `artifacts/`; source directories never serve as runtime storage.
 
-The Constitution governance ledger stores canonical event envelopes and public approval proofs as
-append-only authority. Reopen, Advance, and Status revalidate every artifact hash, envelope hash, and
-stored signature before selecting a regime, and Advance and Status require every lifecycle
-Constitution version and hash to resolve exactly for its recorded Market Session from the governance
-prefix visible at the lifecycle stream's first recorded event. Governance event times cannot move
-backward. Scheduling or activation validates those historical uses in the same database transaction,
-so a new global regime cannot invalidate an earlier run. A missing verifier in the presence of
-governed history, corrupt proof, missing governed artifact, conflicting identity, or skipped
-activation boundary fails closed before downstream work. The baseline remains the document-owned
-version 1 when no governed event exists. A projection may summarize governance state but never
-authorizes activation or substitutes for the event ledger.
+## Temporal semantics
 
-The SQLite database carries one database-wide physical schema version independent of run
-configuration and durable-record schema versions. The adapter owns one current schema definition. It
-atomically initializes an empty, unversioned database or validates a database already carrying the
-current version and exact schema; every other non-empty shape or version fails before lifecycle
-writes. The disposable lifecycle-status and belief-graph projection tables and their indexes or
-triggers are outside the authoritative schema signature and remain replaceable from validated
-ledgers; views and same-named objects attached to authoritative tables remain inside the signature.
-Startup runs the full SQLite integrity check with recognized projections temporarily removed under a
-rolled-back savepoint, so projection-only corruption remains rebuildable without masking damage to
-authoritative or global database structures.
-Current-schema ownership is recorded in [ADR 0004](adr/0004-require-current-sqlite-schema.md).
+[ADR 0006](adr/0006-separate-absolute-instants-from-market-time.md) separates the shared timeline from
+asset-owned calendar meaning. Every Absolute Instant crossing deterministic code, a durable boundary,
+a process or model boundary, or telemetry is UTC at microsecond precision. Canonical durable text is
+fixed-width ISO 8601 with `+00:00`. Naive, over-precise, malformed, or noncanonical durable values
+fail closed at their owner.
+
+A `MarketSession` is an NYSE trading date, not a midnight instant. Equity schedule policy interprets
+holidays, early closes, and daylight-saving changes through the NYSE calendar and
+`America/New_York`, then resolves each cutoff or deadline to an Absolute Instant. Host-local,
+displayed, or provider-spelled time is not authoritative. Timeouts and latency use monotonic elapsed
+time. These are fixed architecture, not runtime timezone configuration.
 
 ## Configuration and deployment
 
 Entrypoints resolve typed configuration, explicit defaults, paths, and secret references before
 constructing a process. Material policy is versioned and hashed into the run record. Secret values
-exist only in the credentialed entrypoint or adapter environment and never enter configuration
-artifacts, logs, fixtures, or model context. `config-catalog.md` owns the implemented configuration
-surface.
+exist only in their credentialed entrypoint or adapter environment and never enter configuration
+artifacts, logs, fixtures, durable research, or model context.
+[The configuration catalog](config-catalog.md) owns implemented keys and defaults.
 
 V0 runs locally on one Mac under an NYSE-calendar-aware scheduler. Live network rehearsals and Alpaca
-paper access remain explicitly invoked operations outside the deterministic developer gate.
+paper access remain explicitly invoked operations outside deterministic developer gates.
+
+## Multi-asset extension constraint
+
+[PR-CON-006](product-requirements.md#operational-constraints) and
+[ADR 0005](adr/0005-share-core-contracts-with-typed-asset-variants.md) require one deterministic core
+with closed asset-class-owned variants. The target vocabulary includes `us_equity`, `crypto_spot`,
+and `listed_option`; V0 composition enables only `us_equity`. Provider capability is boundary
+evidence, never activation authority. Describing a variant here does not authorize its research,
+portfolio, risk, data, or execution behavior.
+
+`DecisionCycleIdentity` is the closed cycle union. `MarketSession` is the equity variant and the
+only V0 kernel input; `CryptoDecisionWindow` is reserved. Option expiration, exercise, and assignment
+are reconciliation obligations rather than cycle identities.
+
+Every durable instrument reference uses a versioned `InstrumentIdentity` union with asset-class
+discriminator, provider-and-environment catalog namespace, and opaque catalog identifier. Display
+symbols and provider enums are alias provenance, never join keys, foreign keys, or idempotency inputs.
+Adapters must prove one-to-one mappings at the pinned cutoff before constructing an identity.
+Missing, reused, or contradictory mappings fail closed.
+
+- Equity identity carries its listing venue; status, tradability, and fractionability are observations.
+- Crypto spot identity carries base and quote currencies plus execution venue; pair spellings are
+  aliases.
+- Listed-option identity carries a supported equity underlying, expiration, right, exercise style,
+  exact strike and currency, and versioned multiplier and deliverable. An index or unknown underlying
+  is unsupported until a separately approved variant exists.
+
+### Shared core and variant ownership
+
+| Concept | Shared deterministic core | Asset-owned variant |
+| --- | --- | --- |
+| Identity and provenance | Closed discriminators, canonical bytes, hashes, aliases, referential integrity | Equity listing; crypto pair and venue; option contract and terms |
+| Data and time | Cutoff, availability, source, entitlement, Data Regime, staleness, cycle envelope | Feed, venue, parser, calendar, payload, and phase policy |
+| Quantity and positions | Exact decimal, explicit unit and currency, versioned snapshot | Shares, coin or pair units, contracts, multiplier, settlement relation |
+| Orders and packets | Packet integrity, authority, expiry, deterministic risk approval, stable effect identity | Allowed shape, quantity, price, session, time-in-force, replace policy |
+| Activities and reconciliation | Intent-before-effect, independent observations, receipts, rebuildable outcomes | Fills, fees, exercise, assignment, expiration, position and cash effects |
+
+Common snapshots, events, packets, and receipts carry one versioned envelope and exactly one closed
+payload variant. Flat records with unrelated nullable asset fields are invalid. Asset payloads state
+exact units and never infer class from symbols. Unknown discriminators, disabled classes, incompatible
+capability profiles, or malformed variants fail closed on write and read.
+
+### Eligible-universe compatibility
+
+Universe and position snapshots use canonical instrument references, observed and available times,
+Data Regime, authority scope, source fingerprint, content hash, exact quantity and unit, and explicit
+valuation provenance. New-entry eligibility remains distinct from holding refresh. A disabled-class
+holding is an explicit portfolio mismatch that blocks discretionary progress; it is never dropped or
+silently activated.
+
+The application accepts the common cycle envelope but V0 unwraps only `MarketSession`.
+`Status` keeps completed cycle, universe snapshot cycle and identifier, and attention cycle and
+identifier distinct. Cycle, snapshots, eligibility policy, cutoff, and Data Regime are pinned; changed
+retry inputs conflict. Persistence validates discriminators, exact fields, canonical hashes, and
+references on every reopen rather than storing provider enums or symbol foreign keys.
+
+Validated configuration must contain exactly the supported equity class and matching equity-universe
+policy. Crypto, options, unknown or duplicate classes, policy mismatch, and provider entitlement alone
+fail before state preparation or any source, model, packet, credential, or broker effect. The
+[asset-extension scenarios](testing.md#asset-extension-seams) own executable compatibility evidence.
+
+### Composition and extension budget
+
+The V0 entrypoint statically composes only equity variants; there is no dynamic plugin registry or
+runtime discovery. Adding an asset class may add one closed identity, cycle-plan, instrument,
+position, order-intent, and activity variant; asset-owned eligibility, portfolio, risk, execution,
+and reconciliation policy; provider adapters and fixtures; versioned configuration with explicit
+activation; and proportionate verification.
+
+A new lifecycle owns its phase and checkpoint sequence. It cannot add class branches to the
+`MarketSession` kernel or change existing public lifecycle dispositions, common durable envelopes,
+canonical hashing, packet integrity, receipt reconstruction, intent-before-effect, idempotency,
+append-only correction, projection rebuild, or process authority separation. Any demonstrated
+exception changes this document and receives an ADR before implementation. Later activation must
+also satisfy PR-CON-001's existing-entitlement and no-metered-fallback constraint.
 
 ## Changing the architecture
 
-Update this document when a change alters runtime topology, a module seam or interface, authority,
-lifecycle states, authoritative state, or a trust boundary. Record an ADR only when the choice is
-costly to reverse, surprising without context, and the result of a real trade-off. Update the module
-graph, defensive patterns, configuration catalog, and testing policy only when their owned facts also
-change.
+Update this document only when a change alters runtime topology, trust, authority, module ownership,
+public capability meaning, lifecycle states, authoritative state, effect ordering, reconstruction, or
+cross-capability compatibility. A field inventory, validator rule, test scenario, configuration key,
+or design rationale belongs to its typed interface, domain document, testing policy, configuration
+catalog, or ADR.
+
+Record an ADR when the architecture choice is costly to reverse, surprising without context, and
+made through a real trade-off. Update the module graph, defensive patterns, configuration catalog,
+and testing policy only when their owned facts also change.
