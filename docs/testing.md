@@ -57,7 +57,9 @@ make check
 ```
 
 `make check` is the handoff gate: harness and architecture checks, formatting, lint, strict mypy, and
-the deterministic pytest suite.
+the deterministic pytest suite. Its test phase concurrently runs the coverage-producing suite and the
+full lifecycle state machine. Both legs are mandatory; the state-machine leg disables pytest caching
+and coverage instrumentation but retains the default Hypothesis example and step budgets.
 
 The default Hypothesis profile in `tests/conftest.py` uses derandomized generation, no example
 database or wall-clock deadline, bounded example and state-machine step counts, one reported failure,
@@ -121,7 +123,9 @@ passing suite remains supporting evidence rather than proof of complete semantic
 ## Coverage
 
 `make check` produces machine-readable line and branch coverage through pytest, then applies the
-consequence tiers configured in `pyproject.toml`:
+consequence tiers configured in `pyproject.toml`. The persistence-level lifecycle state machine runs
+concurrently without coverage because its generated sequences are behavioral evidence and the rest of
+the suite independently satisfies every tier; it is not removed from the handoff gate.
 
 - **Critical authority code:** 100% line and 100% branch coverage. This tier contains deterministic
   portfolio sizing, risk clamps, cash preservation, whole-share conversion, Target Bands,

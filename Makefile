@@ -1,4 +1,9 @@
-.PHONY: agent-workflow architecture bootstrap check format harness lint mutation sync test typecheck
+LIFECYCLE_STATE_MACHINE := tests/integration/test_advance_lifecycle.py::TestLifecycleStateMachine::runTest
+PYTEST_COMMAND := uv run pytest
+COVERAGE_TIER_COMMAND := uv run python -m scripts.check_coverage_tiers --root .
+
+.PHONY: agent-workflow architecture bootstrap check format harness lint mutation sync test \
+	test-coverage test-lifecycle-state-machine typecheck
 
 bootstrap: sync
 	git config core.hooksPath .githooks
@@ -81,8 +86,15 @@ typecheck:
 	uv run mypy src tests scripts
 
 test:
-	uv run pytest
-	uv run python -m scripts.check_coverage_tiers --root .
+	$(MAKE) --no-print-directory -j2 test-coverage test-lifecycle-state-machine
+
+test-coverage:
+	$(PYTEST_COMMAND) --deselect=$(LIFECYCLE_STATE_MACHINE)
+	$(COVERAGE_TIER_COMMAND)
+
+test-lifecycle-state-machine:
+	$(PYTEST_COMMAND) -o 'addopts=--strict-config --strict-markers -ra' \
+		-p no:cacheprovider $(LIFECYCLE_STATE_MACHINE)
 
 mutation:
 	uv run python scripts/run_mutation.py
