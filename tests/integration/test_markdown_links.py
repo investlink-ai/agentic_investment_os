@@ -59,18 +59,46 @@ def test_duplicate_github_heading_slugs_are_supported(tmp_path: Path) -> None:
         _write_markdown(
             tmp_path,
             "README.md",
-            "# Project\n\n[Second](guide.md#safe-handoff-1)\n",
+            "# Project\n\n[Collision](guide.md#foo-2)\n",
         ),
         _write_markdown(
             tmp_path,
             "guide.md",
-            "# Guide\n\n## Safe `handoff`!\n\n## Safe handoff!\n",
+            "# Guide\n\n## Foo\n\n## Foo-1\n\n## Foo\n",
         ),
     )
 
     result = check_markdown_links(tmp_path, tracked_paths)
 
     assert result.violations == ()
+
+
+@pytest.mark.parametrize(
+    ("fragment", "expected_message"),
+    [
+        ("current-state", None),
+        ("stale-state", "heading fragment does not exist: stale-state"),
+    ],
+)
+def test_multiline_link_labels_are_checked(
+    tmp_path: Path,
+    fragment: str,
+    expected_message: str | None,
+) -> None:
+    tracked_paths = (
+        _write_markdown(
+            tmp_path,
+            "README.md",
+            f"# Project\n\n[Current\nstate](guide.md#{fragment})\n",
+        ),
+        _write_markdown(tmp_path, "guide.md", "# Guide\n\n## Current state\n"),
+    )
+
+    result = check_markdown_links(tmp_path, tracked_paths)
+
+    assert result.local_reference_count == 1
+    messages = tuple(violation.message for violation in result.violations)
+    assert messages == (() if expected_message is None else (expected_message,))
 
 
 def test_external_links_and_code_examples_are_not_checked(tmp_path: Path) -> None:
@@ -86,6 +114,27 @@ def test_external_links_and_code_examples_are_not_checked(tmp_path: Path) -> Non
 
 ```markdown
 [fenced](also-missing.md)
+```
+""",
+        ),
+    )
+
+    result = check_markdown_links(tmp_path, tracked_paths)
+
+    assert result.local_reference_count == 0
+    assert result.violations == ()
+
+
+def test_fence_with_info_text_does_not_close_an_existing_fence(tmp_path: Path) -> None:
+    tracked_paths = (
+        _write_markdown(
+            tmp_path,
+            "README.md",
+            """# Project
+
+```text
+```python
+[example](missing.md)
 ```
 """,
         ),

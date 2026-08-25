@@ -20,8 +20,8 @@ MAX_DIAGNOSTICS = 20
 _ATX_HEADING = re.compile(r"^ {0,3}#{1,6}[\t ]+(.+?)[\t ]*$")
 _CLOSING_HEADING_MARKS = re.compile(r"[\t ]+#+[\t ]*$")
 _EXTERNAL_SCHEME = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*:")
-_FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
-_INLINE_LINK = re.compile(r"!?\[[^\]\n]*\]\(([^)\n]*)\)")
+_FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
+_INLINE_LINK = re.compile(r"!?\[[^\]]*\]\(([^)\n]*)\)")
 _INVALID_PERCENT_ESCAPE = re.compile(r"%(?![0-9A-Fa-f]{2})")
 _MARKDOWN_LINK_LABEL = re.compile(r"!?\[([^\]]*)\]\([^)]*\)")
 _HTML_TAG = re.compile(r"<[^>]*>")
@@ -86,38 +86,59 @@ def _mask_inline_code(line: str) -> str:
     return "".join(masked)
 
 
-def _supported_references(text: str) -> tuple[_LocalReference, ...]:
-    references: list[_LocalReference] = []
+def _blank_except_line_ending(line: str) -> str:
+    return "".join(character if character in "\r\n" else " " for character in line)
+
+
+def _mask_fenced_code(text: str) -> str:
+    masked_lines: list[str] = []
     fence_character: str | None = None
     fence_length = 0
-    for line_number, line in enumerate(text.splitlines(), start=1):
-        fence = _FENCE.match(line)
-        if fence is not None:
+    for line in text.splitlines(keepends=True):
+        content = line.rstrip("\r\n")
+        fence = _FENCE.match(content)
+        if fence_character is None:
+            if fence is None:
+                masked_lines.append(line)
+                continue
             marker = fence.group(1)
-            if fence_character is None:
-                fence_character = marker[0]
-                fence_length = len(marker)
-            elif marker[0] == fence_character and len(marker) >= fence_length:
+            fence_character = marker[0]
+            fence_length = len(marker)
+        elif fence is not None:
+            marker = fence.group(1)
+            trailing = fence.group(2)
+            if (
+                marker[0] == fence_character
+                and len(marker) >= fence_length
+                and not trailing.strip()
+            ):
                 fence_character = None
                 fence_length = 0
-            continue
-        if fence_character is not None:
-            continue
+        masked_lines.append(_blank_except_line_ending(line))
+    return "".join(masked_lines)
 
-        visible_line = _mask_inline_code(line)
-        for match in _INLINE_LINK.finditer(visible_line):
-            destination = match.group(1).strip()
-            if destination.startswith("<") and destination.endswith(">"):
-                destination = destination[1:-1]
-            if _EXTERNAL_SCHEME.match(destination) or destination.startswith("//"):
-                continue
-            references.append(
-                _LocalReference(
-                    line=line_number,
-                    column=match.start(1) + 1,
-                    destination=destination,
-                )
+
+def _supported_references(text: str) -> tuple[_LocalReference, ...]:
+    references: list[_LocalReference] = []
+    fence_masked = _mask_fenced_code(text)
+    visible_text = "".join(
+        _mask_inline_code(line) for line in fence_masked.splitlines(keepends=True)
+    )
+    for match in _INLINE_LINK.finditer(visible_text):
+        destination = match.group(1).strip()
+        if destination.startswith("<") and destination.endswith(">"):
+            destination = destination[1:-1]
+        if _EXTERNAL_SCHEME.match(destination) or destination.startswith("//"):
+            continue
+        destination_start = match.start(1)
+        previous_newline = visible_text.rfind("\n", 0, destination_start)
+        references.append(
+            _LocalReference(
+                line=visible_text.count("\n", 0, destination_start) + 1,
+                column=destination_start - previous_newline,
+                destination=destination,
             )
+        )
     return tuple(references)
 
 
@@ -133,29 +154,17 @@ def _github_slug(heading: str) -> str:
 def _heading_fragments(text: str) -> frozenset[str]:
     fragments: set[str] = set()
     occurrences: dict[str, int] = {}
-    fence_character: str | None = None
-    fence_length = 0
-    for line in text.splitlines():
-        fence = _FENCE.match(line)
-        if fence is not None:
-            marker = fence.group(1)
-            if fence_character is None:
-                fence_character = marker[0]
-                fence_length = len(marker)
-            elif marker[0] == fence_character and len(marker) >= fence_length:
-                fence_character = None
-                fence_length = 0
-            continue
-        if fence_character is not None:
-            continue
-
+    for line in _mask_fenced_code(text).splitlines():
         heading = _ATX_HEADING.match(line)
         if heading is None:
             continue
         base = _github_slug(heading.group(1))
-        occurrence = occurrences.get(base, 0)
-        fragment = base if occurrence == 0 else f"{base}-{occurrence}"
-        occurrences[base] = occurrence + 1
+        suffix = occurrences.get(base, 0)
+        fragment = base if suffix == 0 else f"{base}-{suffix}"
+        while fragment in fragments:
+            suffix += 1
+            fragment = f"{base}-{suffix}"
+        occurrences[base] = suffix + 1
         fragments.add(fragment)
     return frozenset(fragments)
 

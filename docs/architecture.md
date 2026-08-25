@@ -283,6 +283,7 @@ flowchart LR
     lifecycle --> research
     lifecycle --> portfolio
     lifecycle --> evaluation
+    lifecycle -->|lifecycle and governance storage ports| os_persistence
     evidence -->|source port| source_adapter --> public_sources
     research -->|model port| model_adapter --> model_provider
     evidence -->|storage port| os_persistence
