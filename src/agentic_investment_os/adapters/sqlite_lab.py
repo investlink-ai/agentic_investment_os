@@ -1,0 +1,534 @@
+"""Persist isolated Research Lab model-call intent and observations in SQLite."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import sqlite3
+import stat
+from contextlib import closing
+from dataclasses import dataclass
+from pathlib import Path
+
+from agentic_investment_os.domain.identity import (
+    EquityInstrumentIdentity,
+    parse_instrument_identity,
+)
+from agentic_investment_os.domain.temporal import InvalidUtcInstantError, UtcInstant
+from agentic_investment_os.research.dossier import Dossier, DossierRefusalReason, parse_dossier
+from agentic_investment_os.research.model import (
+    LabCallIntent,
+    LabCallObservation,
+    LabCallPreparation,
+    LabCallPreparationDisposition,
+    LabObservationDisposition,
+    ModelTimingDisposition,
+)
+
+__all__ = (
+    "LabPersistenceError",
+    "LabRootRefusal",
+    "PreparedLabDatabase",
+    "SQLiteLabCallLedger",
+    "prepare_lab_database",
+)
+
+_DATABASE_NAME = "research-lab.sqlite3"
+_DATABASE_VERSION = 1
+_BEGIN_IMMEDIATE = "BEGIN IMMEDIATE"
+_PRIVATE_DATABASE_FLAGS = os.O_CREAT | os.O_EXCL | os.O_WRONLY
+_SCHEMA = (
+    """
+    CREATE TABLE lab_metadata (
+        singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+        namespace TEXT NOT NULL
+    ) STRICT
+    """,
+    """
+    CREATE TABLE lab_call_intents (
+        call_id TEXT PRIMARY KEY CHECK (length(call_id) = 64),
+        request_id TEXT NOT NULL UNIQUE,
+        request_fingerprint TEXT NOT NULL CHECK (length(request_fingerprint) = 64),
+        intent_json TEXT NOT NULL,
+        intent_hash TEXT NOT NULL CHECK (length(intent_hash) = 64),
+        recorded_at TEXT NOT NULL
+    ) STRICT
+    """,
+    """
+    CREATE TABLE lab_call_observations (
+        call_id TEXT PRIMARY KEY REFERENCES lab_call_intents(call_id),
+        observation_json TEXT NOT NULL,
+        raw_response BLOB,
+        observation_hash TEXT NOT NULL CHECK (length(observation_hash) = 64),
+        recorded_at TEXT NOT NULL
+    ) STRICT
+    """,
+    """
+    CREATE TRIGGER lab_metadata_no_update
+    BEFORE UPDATE ON lab_metadata BEGIN SELECT RAISE(ABORT, 'lab metadata is immutable'); END
+    """,
+    """
+    CREATE TRIGGER lab_metadata_no_delete
+    BEFORE DELETE ON lab_metadata BEGIN SELECT RAISE(ABORT, 'lab metadata is immutable'); END
+    """,
+    """
+    CREATE TRIGGER lab_call_intents_no_update
+    BEFORE UPDATE ON lab_call_intents BEGIN SELECT RAISE(ABORT, 'Lab intents are append-only'); END
+    """,
+    """
+    CREATE TRIGGER lab_call_intents_no_delete
+    BEFORE DELETE ON lab_call_intents BEGIN SELECT RAISE(ABORT, 'Lab intents are append-only'); END
+    """,
+    """
+    CREATE TRIGGER lab_call_observations_no_update
+    BEFORE UPDATE ON lab_call_observations
+    BEGIN SELECT RAISE(ABORT, 'Lab observations are append-only'); END
+    """,
+    """
+    CREATE TRIGGER lab_call_observations_no_delete
+    BEFORE DELETE ON lab_call_observations
+    BEGIN SELECT RAISE(ABORT, 'Lab observations are append-only'); END
+    """,
+)
+_EXPECTED_OBJECTS = frozenset(
+    {
+        "table:lab_metadata",
+        "table:lab_call_intents",
+        "table:lab_call_observations",
+        "index:sqlite_autoindex_lab_call_intents_1",
+        "index:sqlite_autoindex_lab_call_intents_2",
+        "index:sqlite_autoindex_lab_call_observations_1",
+        "trigger:lab_metadata_no_update",
+        "trigger:lab_metadata_no_delete",
+        "trigger:lab_call_intents_no_update",
+        "trigger:lab_call_intents_no_delete",
+        "trigger:lab_call_observations_no_update",
+        "trigger:lab_call_observations_no_delete",
+    }
+)
+_EXPECTED_SCHEMA_SQL = frozenset(" ".join(statement.split()) for statement in _SCHEMA)
+_PREPARATION_FAILED = "isolated Research Lab persistence could not prepare a model call"
+_OBSERVATION_FAILED = "isolated Research Lab persistence could not append an observation"
+_CORRUPT_HISTORY = "isolated Research Lab history is invalid"
+
+
+class LabPersistenceError(RuntimeError):
+    """Report Lab-local history that cannot be trusted or appended."""
+
+
+@dataclass(frozen=True, slots=True)
+class LabRootRefusal:
+    """Signal that a private isolated Lab root cannot be established safely."""
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedLabDatabase:
+    """Identify the private database path for one Research Lab namespace."""
+
+    path: Path
+    created: bool
+
+
+def prepare_lab_database(  # noqa: PLR0911 - reject each unsafe filesystem shape directly.
+    lab_root: Path,
+    *,
+    production_state_roots: tuple[Path, ...],
+) -> PreparedLabDatabase | LabRootRefusal:
+    """Create private Lab storage only when it is disjoint from production state."""
+    try:
+        if not lab_root.is_absolute() or _has_symlink_component(lab_root):
+            return LabRootRefusal()
+        resolved_lab = lab_root.resolve()
+        if any(
+            not root.is_absolute() or _has_symlink_component(root)
+            for root in production_state_roots
+        ):
+            return LabRootRefusal()
+        production_roots = tuple(root.resolve() for root in production_state_roots)
+        if any(_paths_overlap(resolved_lab, root) for root in production_roots):
+            return LabRootRefusal()
+        created_root = not resolved_lab.exists()
+        if created_root:
+            resolved_lab.mkdir(mode=0o700)
+        elif not resolved_lab.is_dir() or stat.S_IMODE(resolved_lab.stat().st_mode) & 0o077:
+            return LabRootRefusal()
+        database = resolved_lab / _DATABASE_NAME
+        if database.is_symlink():
+            return LabRootRefusal()
+        if database.exists():
+            if not database.is_file() or stat.S_IMODE(database.stat().st_mode) & 0o077:
+                return LabRootRefusal()
+            return PreparedLabDatabase(database, created=False)
+        descriptor = os.open(database, _PRIVATE_DATABASE_FLAGS, 0o600)
+        os.close(descriptor)
+        return PreparedLabDatabase(database, created=True)
+    except (OSError, RuntimeError, ValueError):
+        return LabRootRefusal()
+
+
+class SQLiteLabCallLedger:
+    """Append and reconstruct one namespace's model-call intent and observations."""
+
+    def __init__(self, database: Path, namespace: str) -> None:
+        self._database = database
+        self._namespace = namespace
+        self._initialize_or_validate()
+
+    def prepare_call(self, intent: LabCallIntent, recorded_at: UtcInstant) -> LabCallPreparation:
+        intent_json = _canonical_json(intent.to_payload())
+        timestamp = recorded_at.isoformat()
+        try:
+            with closing(self._connect()) as connection, connection:
+                connection.execute(_BEGIN_IMMEDIATE)
+                row = connection.execute(
+                    "SELECT call_id, request_fingerprint, intent_json, intent_hash "
+                    "FROM lab_call_intents WHERE request_id = ?",
+                    (intent.request_id,),
+                ).fetchone()
+                if row is None:
+                    connection.execute(
+                        "INSERT INTO lab_call_intents "
+                        "(call_id, request_id, request_fingerprint, intent_json, intent_hash, "
+                        "recorded_at) VALUES (?, ?, ?, ?, ?, ?)",
+                        (
+                            intent.call_id,
+                            intent.request_id,
+                            intent.request_fingerprint,
+                            intent_json,
+                            intent.content_hash,
+                            timestamp,
+                        ),
+                    )
+                    return LabCallPreparation(LabCallPreparationDisposition.EFFECT_REQUIRED)
+                call_id, fingerprint, stored_json, stored_hash = row
+                if (
+                    type(stored_json) is not str
+                    or type(stored_hash) is not str
+                    or hashlib.sha256(stored_json.encode()).hexdigest() != stored_hash
+                    or not _is_canonical_json(stored_json)
+                ):
+                    raise LabPersistenceError(_CORRUPT_HISTORY)
+                if (
+                    call_id != intent.call_id
+                    or fingerprint != intent.request_fingerprint
+                    or stored_json != intent_json
+                    or stored_hash != intent.content_hash
+                ):
+                    return LabCallPreparation(LabCallPreparationDisposition.CONFLICT)
+                observation = self._load_observation(connection, intent)
+                if observation is None:
+                    return LabCallPreparation(LabCallPreparationDisposition.EFFECT_REQUIRED)
+                return LabCallPreparation(LabCallPreparationDisposition.REPLAY, observation)
+        except sqlite3.Error as error:
+            raise LabPersistenceError(_PREPARATION_FAILED) from error
+
+    def append_observation(
+        self,
+        intent: LabCallIntent,
+        observation: LabCallObservation,
+        recorded_at: UtcInstant,
+    ) -> LabCallObservation:
+        observation_json = _canonical_json(observation.to_payload())
+        observation_hash = hashlib.sha256(observation_json.encode()).hexdigest()
+        try:
+            with closing(self._connect()) as connection, connection:
+                connection.execute(_BEGIN_IMMEDIATE)
+                _require_matching_intent(connection, intent)
+                prior = self._load_observation(connection, intent)
+                if prior is not None:
+                    if prior != observation:
+                        raise LabPersistenceError(_CORRUPT_HISTORY)
+                    return prior
+                connection.execute(
+                    "INSERT INTO lab_call_observations "
+                    "(call_id, observation_json, raw_response, observation_hash, recorded_at) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (
+                        intent.call_id,
+                        observation_json,
+                        observation.raw_response,
+                        observation_hash,
+                        recorded_at.isoformat(),
+                    ),
+                )
+                return observation
+        except sqlite3.Error as error:
+            raise LabPersistenceError(_OBSERVATION_FAILED) from error
+
+    def _initialize_or_validate(self) -> None:
+        try:
+            with closing(self._connect()) as connection, connection:
+                connection.execute(_BEGIN_IMMEDIATE)
+                version = connection.execute("PRAGMA user_version").fetchone()
+                if version == (0,) and not _user_objects(connection):
+                    for statement in _SCHEMA:
+                        connection.execute(statement)
+                    connection.execute(
+                        "INSERT INTO lab_metadata (singleton, namespace) VALUES (1, ?)",
+                        (self._namespace,),
+                    )
+                    connection.execute(f"PRAGMA user_version = {_DATABASE_VERSION}")
+                elif version != (_DATABASE_VERSION,):
+                    raise LabPersistenceError(_CORRUPT_HISTORY)
+                if _object_signature(connection) != _EXPECTED_OBJECTS:
+                    raise LabPersistenceError(_CORRUPT_HISTORY)
+                if _schema_signature(connection) != _EXPECTED_SCHEMA_SQL:
+                    raise LabPersistenceError(_CORRUPT_HISTORY)
+                metadata = connection.execute(
+                    "SELECT namespace FROM lab_metadata WHERE singleton = 1"
+                ).fetchone()
+                if metadata != (self._namespace,):
+                    raise LabPersistenceError(_CORRUPT_HISTORY)
+                if connection.execute("PRAGMA integrity_check").fetchall() != [("ok",)]:
+                    raise LabPersistenceError(_CORRUPT_HISTORY)
+        except sqlite3.Error as error:
+            raise LabPersistenceError(_CORRUPT_HISTORY) from error
+
+    def _load_observation(
+        self,
+        connection: sqlite3.Connection,
+        intent: LabCallIntent,
+    ) -> LabCallObservation | None:
+        row = connection.execute(
+            "SELECT observation_json, raw_response, observation_hash "
+            "FROM lab_call_observations WHERE call_id = ?",
+            (intent.call_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        observation_json, raw_response, observation_hash = row
+        if (
+            type(observation_json) is not str
+            or type(observation_hash) is not str
+            or hashlib.sha256(observation_json.encode()).hexdigest() != observation_hash
+            or (raw_response is not None and type(raw_response) is not bytes)
+        ):
+            raise LabPersistenceError(_CORRUPT_HISTORY)
+        return _parse_observation(observation_json, raw_response, intent)
+
+    def _connect(self) -> sqlite3.Connection:
+        connection = sqlite3.connect(self._database)
+        connection.execute("PRAGMA foreign_keys = ON")
+        connection.execute("PRAGMA busy_timeout = 5000")
+        return connection
+
+
+def _parse_observation(
+    observation_json: str,
+    raw_response: bytes | None,
+    intent: LabCallIntent,
+) -> LabCallObservation:
+    try:
+        payload = json.loads(observation_json)
+    except json.JSONDecodeError as error:
+        raise LabPersistenceError(_CORRUPT_HISTORY) from error
+    fields = _exact_mapping(
+        payload,
+        frozenset(
+            {
+                "schema_version",
+                "record_kind",
+                "call_id",
+                "disposition",
+                "raw_response_hash",
+                "exposed_model_identity",
+                "input_tokens",
+                "output_tokens",
+                "turns",
+                "elapsed_milliseconds",
+                "timing_disposition",
+                "dossier",
+                "dossier_refusal",
+            }
+        ),
+    )
+    if fields is None or fields["schema_version"] != 1 or fields["call_id"] != intent.call_id:
+        raise LabPersistenceError(_CORRUPT_HISTORY)
+    raw_hash = None if raw_response is None else hashlib.sha256(raw_response).hexdigest()
+    if fields["raw_response_hash"] != raw_hash:
+        raise LabPersistenceError(_CORRUPT_HISTORY)
+    disposition_value = fields["disposition"]
+    timing_value = fields["timing_disposition"]
+    if type(disposition_value) is not str or type(timing_value) is not str:
+        raise LabPersistenceError(_CORRUPT_HISTORY)
+    try:
+        disposition = LabObservationDisposition(disposition_value)
+        timing = ModelTimingDisposition(timing_value)
+    except (TypeError, ValueError) as error:
+        raise LabPersistenceError(_CORRUPT_HISTORY) from error
+    dossier = _parse_stored_dossier(fields["dossier"], intent)
+    dossier_refusal_value = fields["dossier_refusal"]
+    if dossier_refusal_value is not None and type(dossier_refusal_value) is not str:
+        raise LabPersistenceError(_CORRUPT_HISTORY)
+    try:
+        dossier_refusal = (
+            None if dossier_refusal_value is None else DossierRefusalReason(dossier_refusal_value)
+        )
+    except (TypeError, ValueError) as error:
+        raise LabPersistenceError(_CORRUPT_HISTORY) from error
+    exposed = fields["exposed_model_identity"]
+    elapsed = fields["elapsed_milliseconds"]
+    input_tokens = fields["input_tokens"]
+    output_tokens = fields["output_tokens"]
+    turns = fields["turns"]
+    if (
+        (exposed is not None and type(exposed) is not str)
+        or type(input_tokens) is not int
+        or input_tokens < 0
+        or type(output_tokens) is not int
+        or output_tokens < 0
+        or type(turns) is not int
+        or turns < 0
+        or (elapsed is not None and (type(elapsed) is not int or elapsed < 0))
+    ):
+        raise LabPersistenceError(_CORRUPT_HISTORY)
+    validated = disposition is LabObservationDisposition.VALIDATED
+    invalid_dossier = disposition is LabObservationDisposition.INVALID_DOSSIER
+    if (
+        validated != (dossier is not None and dossier_refusal is None)
+        or invalid_dossier != (dossier is None and dossier_refusal is not None)
+        or (
+            not validated
+            and not invalid_dossier
+            and (dossier is not None or dossier_refusal is not None)
+        )
+    ):
+        raise LabPersistenceError(_CORRUPT_HISTORY)
+    return LabCallObservation(
+        intent.call_id,
+        disposition,
+        raw_response,
+        raw_hash,
+        exposed,
+        input_tokens,
+        output_tokens,
+        turns,
+        elapsed,
+        timing,
+        dossier,
+        dossier_refusal,
+    )
+
+
+def _parse_stored_dossier(value: object, intent: LabCallIntent) -> Dossier | None:
+    if value is None:
+        return None
+    fields = _exact_mapping(
+        value,
+        frozenset(
+            {
+                "schema_version",
+                "record_kind",
+                "authority_scope",
+                "non_production",
+                "subject",
+                "facts",
+                "interpretations",
+                "contradicting_evidence",
+                "missing_evidence",
+                "lenses",
+                "content_hash",
+            }
+        ),
+    )
+    if fields is None or type(fields["content_hash"]) is not str:
+        raise LabPersistenceError(_CORRUPT_HISTORY)
+    try:
+        model_input = json.loads(intent.model_input_json)
+        subject = parse_instrument_identity(model_input["subject"])
+        cutoff = UtcInstant.parse(model_input["evidence_cutoff"])
+        evidence = model_input["evidence"]
+    except (InvalidUtcInstantError, KeyError, TypeError, json.JSONDecodeError) as error:
+        raise LabPersistenceError(_CORRUPT_HISTORY) from error
+    if type(subject) is not EquityInstrumentIdentity or type(evidence) is not list:
+        raise LabPersistenceError(_CORRUPT_HISTORY)
+    artifact_ids = tuple(item["artifact_id"] for item in evidence if type(item) is dict)
+    raw = {key: item for key, item in fields.items() if key != "content_hash"}
+    parsed = parse_dossier(
+        raw,
+        expected_subject=subject,
+        available_artifact_ids=artifact_ids,
+        cutoff=cutoff,
+    )
+    if not isinstance(parsed, Dossier) or parsed.content_hash != fields["content_hash"]:
+        raise LabPersistenceError(_CORRUPT_HISTORY)
+    return parsed
+
+
+def _require_matching_intent(connection: sqlite3.Connection, intent: LabCallIntent) -> None:
+    row = connection.execute(
+        "SELECT request_id, request_fingerprint, intent_json, intent_hash "
+        "FROM lab_call_intents WHERE call_id = ?",
+        (intent.call_id,),
+    ).fetchone()
+    if row != (
+        intent.request_id,
+        intent.request_fingerprint,
+        _canonical_json(intent.to_payload()),
+        intent.content_hash,
+    ):
+        raise LabPersistenceError(_CORRUPT_HISTORY)
+
+
+def _has_symlink_component(path: Path) -> bool:
+    current = Path(path.anchor)
+    for part in path.parts[1:]:
+        current /= part
+        if current.is_symlink():
+            return True
+    return False
+
+
+def _paths_overlap(left: Path, right: Path) -> bool:
+    return left == right or left.is_relative_to(right) or right.is_relative_to(left)
+
+
+def _user_objects(connection: sqlite3.Connection) -> tuple[tuple[str, str], ...]:
+    return tuple(
+        connection.execute(
+            "SELECT type, name FROM sqlite_master "
+            "WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name"
+        ).fetchall()
+    )
+
+
+def _object_signature(connection: sqlite3.Connection) -> frozenset[str]:
+    return frozenset(
+        f"{kind}:{name}"
+        for kind, name in connection.execute(
+            "SELECT type, name FROM sqlite_master "
+            "WHERE name NOT LIKE 'sqlite_sequence' ORDER BY type, name"
+        ).fetchall()
+    )
+
+
+def _schema_signature(connection: sqlite3.Connection) -> frozenset[str]:
+    return frozenset(
+        " ".join(sql.split())
+        for (sql,) in connection.execute(
+            "SELECT sql FROM sqlite_master "
+            "WHERE sql IS NOT NULL AND name NOT LIKE 'sqlite_%' ORDER BY type, name"
+        ).fetchall()
+    )
+
+
+def _is_canonical_json(value: str) -> bool:
+    try:
+        return _canonical_json(json.loads(value)) == value
+    except json.JSONDecodeError:
+        return False
+
+
+def _exact_mapping(value: object, fields: frozenset[str]) -> dict[str, object] | None:
+    if (
+        type(value) is not dict
+        or set(value) != fields
+        or any(type(key) is not str for key in value)
+    ):
+        return None
+    return value
+
+
+def _canonical_json(value: object) -> str:
+    return json.dumps(value, sort_keys=True, separators=(",", ":"))

@@ -318,6 +318,38 @@ Normal production callers see six capabilities:
 Production entrypoints do not expose individual research stages. Stage replay belongs to the Research
 Lab and can write only to its own namespace.
 
+## Research Lab interface
+
+`Replay` is the public capability of one explicitly named, non-production Research Lab namespace. Its
+Evidence Collector boundary accepts only copied or synthetic evidence content and canonical subject
+mapping, an Evidence Cutoff and Data Regime, the pinned Constitution, one bounded Belief Graph, a
+portfolio-context fingerprint, versioned prompt and model configuration, inert canonical tool schemas
+and their fingerprints, and the complete material-input hash set. The canonical model context records every one
+of those values; missing, ambient, unversioned, hash-inconsistent, future-available, or changed retry
+material is refused before a model effect.
+
+The stateless call crosses a research-owned model port implemented by `adapters`. A Lab-local SQLite
+ledger appends the canonical intent before the call and appends the raw-response identity, exposed
+model identity, resource use, timing disposition, and validated Dossier or bounded refusal afterward.
+The stable call identity reaches the recorded adapter, so an interrupted retry resumes the same
+logical effect; a completed retry reads its prior observation without invoking the model port.
+
+The Dossier validator admits only the exact Evidence Collector schema. It binds canonical subject and
+entity mapping, resolves every citation against evidence available by the cutoff, separates facts
+from interpretation, names contradictions and missing evidence, and records every required research
+lens or an explicit irrelevance rationale. Weight, order, packet, tool instruction, lifecycle,
+governance, memory-write, credential, broker, Champion, or other undeclared fields fail closed. Every
+validated Dossier and `Replay` receipt is marked `research_lab_non_production`; no Lab composition
+receives a Champion store or execution port.
+
+The Lab state root is an explicit private path rather than production runtime configuration. It must
+be symlink-free, repository-safe, and disjoint from every declared production root before its fixed
+`research-lab.sqlite3` file is created. Namespace metadata, intents, and observations are immutable;
+schema, integrity, namespace, content-hash, or reconstruction failure stops replay before another
+model effect. Default composition uses scripted recorded model fixtures and no network, credential,
+or metered service. A subscription-backed adapter remains unimplemented and cannot be selected as a
+fallback.
+
 ## Session lifecycle
 
 The V0 operating system is a checkpointed state machine over append-only records. Each transition
@@ -491,15 +523,15 @@ client order identity; it never guesses or repeats exposure blindly.
 | Module | Owns | Interface presented to callers |
 | --- | --- | --- |
 | `domain` | Framework-free values, lifecycle transition policy, events, identifiers, and invariants | Immutable domain contracts and lifecycle decisions |
-| `application` | Lifecycle use-case orchestration | `Advance`, `Status`, `Record`, `Govern` |
+| `application` | Lifecycle and isolated-Lab use-case orchestration | `Advance`, `Status`, `Record`, `Govern`, `Replay` |
 | `evidence` | Content-addressed artifacts, assertions, as-of provenance | Evidence capture and lookup |
 | `memory` | Belief ledger, graph projection, decision journal | Append and as-of retrieval |
 | `research` | Typed Codex roles and evidence-bound workflow | Validated research artifacts |
 | `portfolio` | HouseView validation, sizing, limits, target bands, packets | Deterministic construction |
 | `execution` | Packet verification, order policy, idempotency, reconciliation | `Apply`, `Reconcile` |
 | `evaluation` | Outcome resolution, benchmarks, calibration, challengers | Evaluation records |
-| `adapters` | SQLite, filesystem, clock, Codex, SEC, Alpaca implementations | Owner-defined ports |
-| `entrypoints` | Process composition, configuration, paths, credentials | CLI and scheduler surfaces |
+| `adapters` | SQLite, filesystem, clock, recorded-model, Codex, SEC, Alpaca implementations | Owner-defined ports |
+| `entrypoints` | Production and Research Lab composition, configuration, paths, credentials | CLI and scheduler surfaces |
 
 An interface lives with the module that owns its behavior. Adapters satisfy those interfaces;
 entrypoints assemble them. `module-graph.md` owns allowed Python import directions and the distinction
@@ -590,6 +622,7 @@ captured evidence -> validated research -> HouseView -> deterministic portfolio
 | Lifecycle checkpoints and refusals | Lifecycle event ledger | Append transitions and bounded conflict or refusal records under stable idempotency keys |
 | Eligible-universe snapshots | Lifecycle event ledger | Append one complete asset-neutral envelope with typed instrument and position variants, applied policy, dispositions, and immutable identity |
 | Attention Artifacts | Lifecycle event ledger | Append one content-addressed zero-token selection or a typed terminal refusal; never rewrite subject transitions |
+| Research Lab model calls and Dossiers | Namespace-local Lab ledger | Append intent before each effect, then one raw-response identity and validated non-production artifact or bounded refusal; never update or delete |
 | Graphs, reports, indexes | Projection stores | Replace only by deterministic rebuild |
 | Executable packets | Atomic packet store | Publish complete validated artifacts only |
 

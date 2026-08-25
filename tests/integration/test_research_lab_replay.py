@@ -1,0 +1,285 @@
+from __future__ import annotations
+
+import sqlite3
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from pathlib import Path
+
+import pytest
+
+from agentic_investment_os.adapters.recorded_model import (
+    RecordedEvidenceCollector,
+    RecordedModelFixture,
+)
+from agentic_investment_os.adapters.sqlite_lab import LabPersistenceError, SQLiteLabCallLedger
+from agentic_investment_os.application.replay import (
+    Replay,
+    ReplayDisposition,
+    ReplayRefusalReason,
+)
+from agentic_investment_os.entrypoints.lab import (
+    LabCompositionRefusal,
+    LabCompositionRefusalCode,
+    configure_replay,
+)
+from agentic_investment_os.research.model import (
+    EvidenceCollectorModel,
+    ModelCallDisposition,
+    ModelCallRequest,
+    ModelCallResponse,
+)
+from tests._replay import dossier_bytes, replay_request
+
+REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
+NAMESPACE = "lab.synthetic.aapl"
+
+
+class SimulatedInterruptionError(RuntimeError):
+    """Stop after the recorded adapter completes but before observation append."""
+
+
+@dataclass(frozen=True, slots=True)
+class FixedClock:
+    value: datetime = datetime(2026, 8, 24, 20, tzinfo=UTC)
+
+    def now(self) -> datetime:
+        return self.value
+
+
+@dataclass(slots=True)
+class InterruptAfterModelEffect:
+    delegate: RecordedEvidenceCollector
+    interrupted: bool = False
+
+    def call(self, request: ModelCallRequest) -> ModelCallResponse:
+        response = self.delegate.call(request)
+        if not self.interrupted:
+            self.interrupted = True
+            raise SimulatedInterruptionError
+        return response
+
+
+@dataclass(frozen=True, slots=True)
+class IntentCheckingModel:
+    database: Path
+    delegate: RecordedEvidenceCollector
+
+    def call(self, request: ModelCallRequest) -> ModelCallResponse:
+        with sqlite3.connect(self.database) as connection:
+            intents = connection.execute("SELECT COUNT(*) FROM lab_call_intents").fetchone()
+            observations = connection.execute(
+                "SELECT COUNT(*) FROM lab_call_observations"
+            ).fetchone()
+        assert intents == (1,)
+        assert observations == (0,)
+        return self.delegate.call(request)
+
+
+def _fixture() -> RecordedModelFixture:
+    return RecordedModelFixture(
+        ModelCallDisposition.RESPONDED,
+        dossier_bytes(),
+        "codex-subscription/test-model",
+        input_tokens=100,
+        output_tokens=50,
+        turns=1,
+        elapsed_milliseconds=25,
+    )
+
+
+def _configure(
+    lab_root: Path,
+    production_root: Path,
+    model: EvidenceCollectorModel,
+) -> Replay | LabCompositionRefusal:
+    return configure_replay(
+        namespace=NAMESPACE,
+        lab_state_root=str(lab_root),
+        production_state_roots=(production_root,),
+        repository_root=REPOSITORY_ROOT,
+        model=model,
+        clock=FixedClock(),
+    )
+
+
+def test_replay_persists_intent_before_effect_and_reopens_without_another_call(
+    tmp_path: Path,
+) -> None:
+    lab_root = tmp_path / "lab"
+    production_root = tmp_path / "production"
+    recorded = RecordedEvidenceCollector((_fixture(),))
+    model = IntentCheckingModel(lab_root / "research-lab.sqlite3", recorded)
+    replay = _configure(lab_root, production_root, model)
+    assert isinstance(replay, Replay)
+
+    completed = replay(replay_request())
+    replayed = replay(replay_request())
+
+    assert completed.disposition is ReplayDisposition.COMPLETED
+    assert completed.dossier is not None
+    assert completed.dossier.non_production is True
+    assert replayed.disposition is ReplayDisposition.REPLAYED
+    assert replayed.dossier_id == completed.dossier_id
+    assert replayed.raw_response_hash == completed.raw_response_hash
+    assert recorded.unique_effect_count == 1
+    with sqlite3.connect(lab_root / "research-lab.sqlite3") as connection:
+        counts = (
+            connection.execute("SELECT COUNT(*) FROM lab_call_intents").fetchone(),
+            connection.execute("SELECT COUNT(*) FROM lab_call_observations").fetchone(),
+        )
+    assert counts == ((1,), (1,))
+
+    unused_model = RecordedEvidenceCollector(())
+    reopened = _configure(lab_root, production_root, unused_model)
+    assert isinstance(reopened, Replay)
+    reopened_receipt = reopened(replay_request())
+    assert reopened_receipt.disposition is ReplayDisposition.REPLAYED
+    assert reopened_receipt.dossier_id == completed.dossier_id
+    assert unused_model.unique_effect_count == 0
+
+
+def test_interruption_after_model_effect_reuses_one_logical_call(tmp_path: Path) -> None:
+    lab_root = tmp_path / "lab"
+    production_root = tmp_path / "production"
+    recorded = RecordedEvidenceCollector((_fixture(),))
+    replay = _configure(lab_root, production_root, InterruptAfterModelEffect(recorded))
+    assert isinstance(replay, Replay)
+
+    with pytest.raises(SimulatedInterruptionError):
+        replay(replay_request())
+    with sqlite3.connect(lab_root / "research-lab.sqlite3") as connection:
+        assert connection.execute("SELECT COUNT(*) FROM lab_call_intents").fetchone() == (1,)
+        assert connection.execute("SELECT COUNT(*) FROM lab_call_observations").fetchone() == (0,)
+
+    completed = replay(replay_request())
+
+    assert completed.disposition is ReplayDisposition.COMPLETED
+    assert recorded.unique_effect_count == 1
+    with sqlite3.connect(lab_root / "research-lab.sqlite3") as connection:
+        assert connection.execute("SELECT COUNT(*) FROM lab_call_observations").fetchone() == (1,)
+
+
+def test_changed_request_conflicts_and_append_only_history_refuses_mutation(
+    tmp_path: Path,
+) -> None:
+    lab_root = tmp_path / "lab"
+    recorded = RecordedEvidenceCollector((_fixture(),))
+    replay = _configure(lab_root, tmp_path / "production", recorded)
+    assert isinstance(replay, Replay)
+    completed = replay(replay_request())
+    assert completed.disposition is ReplayDisposition.COMPLETED
+
+    conflict = replay(
+        replay_request(prompt_content="Changed prompt under the same request identity.")
+    )
+
+    assert conflict.disposition is ReplayDisposition.CONFLICTED
+    assert conflict.refusal_reason is ReplayRefusalReason.IDENTITY_CONFLICT
+    assert recorded.unique_effect_count == 1
+    database = lab_root / "research-lab.sqlite3"
+    with sqlite3.connect(database) as connection:
+        with pytest.raises(sqlite3.IntegrityError, match="append-only"):
+            connection.execute("DELETE FROM lab_call_intents")
+        with pytest.raises(sqlite3.IntegrityError, match="append-only"):
+            connection.execute("UPDATE lab_call_observations SET raw_response = NULL")
+
+
+def test_composition_refuses_production_roots_and_namespace_mismatch_before_model(
+    tmp_path: Path,
+) -> None:
+    production_root = tmp_path / "production"
+    production_root.mkdir(mode=0o700)
+    model = RecordedEvidenceCollector((_fixture(),))
+
+    overlap = _configure(production_root, production_root, model)
+
+    assert overlap == LabCompositionRefusal(LabCompositionRefusalCode.INVALID_STATE_ROOT)
+    assert tuple(production_root.iterdir()) == ()
+    lab_root = tmp_path / "lab"
+    replay = _configure(lab_root, production_root, model)
+    assert isinstance(replay, Replay)
+    wrong_namespace = replay(replay_request(namespace="lab.synthetic.other"))
+    assert wrong_namespace.disposition is ReplayDisposition.REFUSED
+    assert wrong_namespace.refusal_reason is ReplayRefusalReason.NAMESPACE_MISMATCH
+    assert model.unique_effect_count == 0
+    with sqlite3.connect(lab_root / "research-lab.sqlite3") as connection:
+        assert connection.execute("SELECT COUNT(*) FROM lab_call_intents").fetchone() == (0,)
+
+
+def test_composition_refuses_incomplete_or_unsafe_isolation_before_state_creation(
+    tmp_path: Path,
+) -> None:
+    model = RecordedEvidenceCollector((_fixture(),))
+    lab_root = tmp_path / "lab"
+    broad_root = tmp_path / "broad"
+    broad_root.mkdir(mode=0o755)
+
+    invalid_namespace = configure_replay(
+        namespace="Production Lab",
+        lab_state_root=str(lab_root),
+        production_state_roots=(tmp_path / "production",),
+        repository_root=REPOSITORY_ROOT,
+        model=model,
+        clock=FixedClock(),
+    )
+    missing_production_roots = configure_replay(
+        namespace=NAMESPACE,
+        lab_state_root=str(lab_root),
+        production_state_roots=(),
+        repository_root=REPOSITORY_ROOT,
+        model=model,
+        clock=FixedClock(),
+    )
+    unsafe_root = _configure(broad_root, tmp_path / "production", model)
+    relative_production_root = configure_replay(
+        namespace=NAMESPACE,
+        lab_state_root=str(lab_root),
+        production_state_roots=(Path("relative-production"),),
+        repository_root=REPOSITORY_ROOT,
+        model=model,
+        clock=FixedClock(),
+    )
+
+    assert invalid_namespace == LabCompositionRefusal(LabCompositionRefusalCode.INVALID_NAMESPACE)
+    assert missing_production_roots == LabCompositionRefusal(
+        LabCompositionRefusalCode.PRODUCTION_ROOTS_REQUIRED
+    )
+    assert unsafe_root == LabCompositionRefusal(LabCompositionRefusalCode.INVALID_STATE_ROOT)
+    assert relative_production_root == LabCompositionRefusal(
+        LabCompositionRefusalCode.INVALID_STATE_ROOT
+    )
+    assert not lab_root.exists()
+    assert model.unique_effect_count == 0
+
+
+def test_namespace_schema_and_content_corruption_fail_closed_before_another_effect(
+    tmp_path: Path,
+) -> None:
+    lab_root = tmp_path / "lab"
+    model = RecordedEvidenceCollector((_fixture(),))
+    replay = _configure(lab_root, tmp_path / "production", model)
+    assert isinstance(replay, Replay)
+    assert replay(replay_request()).disposition is ReplayDisposition.COMPLETED
+    database = lab_root / "research-lab.sqlite3"
+
+    with pytest.raises(LabPersistenceError, match="history is invalid"):
+        SQLiteLabCallLedger(database, "lab.synthetic.other")
+
+    with sqlite3.connect(database) as connection:
+        connection.execute("DROP TRIGGER lab_call_intents_no_update")
+        connection.execute("UPDATE lab_call_intents SET intent_json = '{}' ")
+        connection.execute(
+            "CREATE TRIGGER lab_call_intents_no_update "
+            "BEFORE UPDATE ON lab_call_intents "
+            "BEGIN SELECT RAISE(ABORT, 'Lab intents are append-only'); END"
+        )
+
+    with pytest.raises(LabPersistenceError, match="history is invalid"):
+        replay(replay_request())
+    assert model.unique_effect_count == 1
+
+    with sqlite3.connect(database) as connection:
+        connection.execute("DROP TRIGGER lab_call_observations_no_update")
+
+    with pytest.raises(LabPersistenceError, match="history is invalid"):
+        SQLiteLabCallLedger(database, NAMESPACE)

@@ -26,7 +26,7 @@ MUTATING_ALL_METHODS = frozenset(
     }
 )
 ALLOWED_EDGES = {
-    "entrypoints": {"application", "domain", "execution", "adapters", "evidence"},
+    "entrypoints": {"application", "domain", "execution", "adapters", "evidence", "research"},
     "application": {"evidence", "memory", "research", "portfolio", "evaluation", "domain"},
     "evidence": {"domain"},
     "memory": {"domain"},
