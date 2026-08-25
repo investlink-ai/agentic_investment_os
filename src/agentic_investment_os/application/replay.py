@@ -38,6 +38,9 @@ from agentic_investment_os.research.model import (
     ModelTimingDisposition,
     ResearchRole,
     ResearchRoleModel,
+    parse_model_configuration_contract_payload,
+    parse_prompt_contract_payload,
+    parse_tool_contract_payloads,
 )
 from agentic_investment_os.research.resolution import (
     CioRefusalReason,
@@ -87,10 +90,6 @@ _REQUEST_FIELDS = frozenset(
     }
 )
 _EVIDENCE_FIELDS = frozenset({"artifact_id", "content_hash", "available_at", "subject", "content"})
-_PROMPT_FIELDS = frozenset({"schema_version", "prompt_id", "content", "content_hash"})
-_MODEL_FIELDS = frozenset({"schema_version", "model_identity", "reasoning", "content_hash"})
-_REASONING_FIELDS = frozenset({"effort", "maximum_output_tokens", "maximum_turns"})
-_TOOL_FIELDS = frozenset({"name", "schema_json", "schema_hash"})
 _RESOLUTION_REQUEST_FIELDS = frozenset(
     {
         "schema_version",
@@ -115,11 +114,6 @@ _IDENTIFIER = re.compile(r"[a-z0-9][a-z0-9._:-]{0,127}\Z")
 _MODEL_IDENTITY = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}\Z")
 _MAXIMUM_EVIDENCE_ITEMS = 50
 _MAXIMUM_EVIDENCE_CHARACTERS = 250_000
-_MAXIMUM_PROMPT_CHARACTERS = 20_000
-_MAXIMUM_OUTPUT_TOKENS = 20_000
-_MAXIMUM_TURNS = 10
-_MAXIMUM_TOOL_FINGERPRINTS = 10
-_MAXIMUM_TOOL_SCHEMA_CHARACTERS = 20_000
 _CLOCK_INVALID = "Research Lab clock must return a timezone-aware instant representable in UTC"
 _AUTHORITY_SCOPE = "research_lab_non_production"
 _INVALID_RECEIPT = "invalid non-production Replay receipt"
@@ -209,6 +203,11 @@ class PromptArtifact:
             "content_hash": self.content_hash,
         }
 
+    @property
+    def fingerprint(self) -> str:
+        """Bind prompt identity, content, version, and declared content hash."""
+        return _content_hash(self.to_payload())
+
 
 @dataclass(frozen=True, slots=True)
 class ModelConfiguration:
@@ -247,6 +246,11 @@ class ToolContract:
             "schema_json": self.schema_json,
             "schema_hash": self.schema_hash,
         }
+
+    @property
+    def fingerprint(self) -> str:
+        """Bind the inert tool name to its canonical schema identity."""
+        return _content_hash(self.to_payload())
 
 
 @dataclass(frozen=True, slots=True)
@@ -374,9 +378,9 @@ class ResolutionRoleCall:
             self.request.belief_graph.content_hash,
             self.request.portfolio_context_fingerprint,
             self.request.dossier.content_hash,
-            self.contract.prompt.content_hash,
+            self.contract.prompt.fingerprint,
             self.contract.model_configuration.content_hash,
-            *(item.schema_hash for item in self.contract.tools),
+            *(item.fingerprint for item in self.contract.tools),
         }
         for artifact in (self.thesis, self.skeptic, self.forecast):
             if artifact is not None:
@@ -442,10 +446,10 @@ class ResolutionRoleCall:
             ),
             model_input_json=self.model_input_json,
             model_input_hash=self.model_input_hash,
-            prompt_fingerprint=self.contract.prompt.content_hash,
+            prompt_fingerprint=self.contract.prompt.fingerprint,
             requested_model_identity=self.contract.model_configuration.model_identity,
             model_configuration_fingerprint=self.contract.model_configuration.content_hash,
-            tool_fingerprints=tuple(item.schema_hash for item in self.contract.tools),
+            tool_fingerprints=tuple(item.fingerprint for item in self.contract.tools),
             material_input_hashes=self.material_input_hashes,
             maximum_output_bytes=MAXIMUM_MODEL_OUTPUT_BYTES,
         )
@@ -528,10 +532,10 @@ class ReplayRequest:
             request_fingerprint=self.request_fingerprint,
             model_input_json=self.model_input_json,
             model_input_hash=self.model_input_hash,
-            prompt_fingerprint=self.prompt.content_hash,
+            prompt_fingerprint=self.prompt.fingerprint,
             requested_model_identity=self.model_configuration.model_identity,
             model_configuration_fingerprint=self.model_configuration.content_hash,
-            tool_fingerprints=tuple(item.schema_hash for item in self.tools),
+            tool_fingerprints=tuple(item.fingerprint for item in self.tools),
             material_input_hashes=self.material_input_hashes,
             maximum_output_bytes=MAXIMUM_MODEL_OUTPUT_BYTES,
         )
@@ -843,9 +847,9 @@ def _parse_replay_request(  # noqa: PLR0911 - refuse each hostile boundary dimen
         constitution.content_hash,
         belief_graph.content_hash,
         root["portfolio_context_fingerprint"],
-        prompt.content_hash,
+        prompt.fingerprint,
         model_configuration.content_hash,
-        *(item.schema_hash for item in tools),
+        *(item.fingerprint for item in tools),
     }
     if material_hashes != tuple(sorted(required_hashes)):
         return None, ReplayRefusalReason.INVALID_REQUEST
@@ -933,9 +937,9 @@ def _parse_resolution_request(  # noqa: PLR0911
         graph.content_hash,
         root["portfolio_context_fingerprint"],
         dossier_value.content_hash,
-        *(contract.prompt.content_hash for contract in role_contracts),
+        *(contract.prompt.fingerprint for contract in role_contracts),
         *(contract.model_configuration.content_hash for contract in role_contracts),
-        *(tool.schema_hash for contract in role_contracts for tool in contract.tools),
+        *(tool.fingerprint for contract in role_contracts for tool in contract.tools),
     }
     if material_hashes != tuple(sorted(required_hashes)):
         return None, ReplayRefusalReason.INVALID_REQUEST
@@ -1023,80 +1027,27 @@ def _parse_evidence(  # noqa: PLR0911 - distinguish unavailable evidence from in
 
 
 def _parse_prompt(value: object) -> PromptArtifact | None:
-    fields = _exact_mapping(value, _PROMPT_FIELDS)
-    if fields is None:
+    parsed = parse_prompt_contract_payload(value)
+    if parsed is None:
         return None
-    prompt_id = _bounded_identifier(fields["prompt_id"])
-    content = fields["content"]
-    content_hash = fields["content_hash"]
-    if (
-        fields["schema_version"] != 1
-        or prompt_id is None
-        or type(content) is not str
-        or not content
-        or len(content) > _MAXIMUM_PROMPT_CHARACTERS
-        or not is_sha256(content_hash)
-        or hashlib.sha256(content.encode()).hexdigest() != content_hash
-    ):
-        return None
+    prompt_id, content, content_hash, _ = parsed
     return PromptArtifact(prompt_id, content, content_hash)
 
 
 def _parse_model_configuration(value: object) -> ModelConfiguration | None:
-    fields = _exact_mapping(value, _MODEL_FIELDS)
-    if fields is None:
+    parsed = parse_model_configuration_contract_payload(value)
+    if parsed is None:
         return None
-    reasoning = _exact_mapping(fields["reasoning"], _REASONING_FIELDS)
-    model_identity = fields["model_identity"]
-    content_hash = fields["content_hash"]
-    material = {key: item for key, item in fields.items() if key != "content_hash"}
-    if (
-        reasoning is None
-        or fields["schema_version"] != 1
-        or type(model_identity) is not str
-        or _MODEL_IDENTITY.fullmatch(model_identity) is None
-        or reasoning["effort"] not in ("low", "medium", "high", "xhigh")
-        or type(reasoning["maximum_output_tokens"]) is not int
-        or not 1 <= reasoning["maximum_output_tokens"] <= _MAXIMUM_OUTPUT_TOKENS
-        or type(reasoning["maximum_turns"]) is not int
-        or not 1 <= reasoning["maximum_turns"] <= _MAXIMUM_TURNS
-        or content_hash != _content_hash(material)
-    ):
-        return None
-    return ModelConfiguration(
-        model_identity,
-        reasoning["effort"],
-        reasoning["maximum_output_tokens"],
-        reasoning["maximum_turns"],
-        content_hash,
-    )
+    return ModelConfiguration(*parsed)
 
 
 def _parse_tools(value: object) -> tuple[ToolContract, ...] | None:
-    if type(value) is not list or len(value) > _MAXIMUM_TOOL_FINGERPRINTS:
+    parsed = parse_tool_contract_payloads(value)
+    if parsed is None:
         return None
-    tools: list[ToolContract] = []
-    for item in value:
-        fields = _exact_mapping(item, _TOOL_FIELDS)
-        if fields is None:
-            return None
-        name = _bounded_identifier(fields["name"])
-        schema_json = fields["schema_json"]
-        schema_hash = fields["schema_hash"]
-        if (
-            name is None
-            or type(schema_json) is not str
-            or not schema_json
-            or len(schema_json) > _MAXIMUM_TOOL_SCHEMA_CHARACTERS
-            or not _is_canonical_json_object(schema_json)
-            or not is_sha256(schema_hash)
-            or hashlib.sha256(schema_json.encode()).hexdigest() != schema_hash
-        ):
-            return None
-        tools.append(ToolContract(name, schema_json, schema_hash))
-    if tuple(item.name for item in tools) != tuple(sorted({item.name for item in tools})):
-        return None
-    return tuple(tools)
+    return tuple(
+        ToolContract(name, schema_json, schema_hash) for name, schema_json, schema_hash, _ in parsed
+    )
 
 
 def _parse_hashes(value: object) -> tuple[str, ...] | None:
@@ -1606,11 +1557,3 @@ def _canonical_json(value: object) -> str:
 
 def _content_hash(value: object) -> str:
     return hashlib.sha256(_canonical_json(value).encode()).hexdigest()
-
-
-def _is_canonical_json_object(value: str) -> bool:
-    try:
-        parsed = json.loads(value)
-    except json.JSONDecodeError:
-        return False
-    return type(parsed) is dict and _canonical_json(parsed) == value

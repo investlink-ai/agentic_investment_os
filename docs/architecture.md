@@ -359,11 +359,14 @@ references. The Independent Skeptic receives only the
 pinned Constitution, bounded context, validated Dossier and Thesis, its own prompt/model/tool contract,
 and their fingerprints; it cannot inherit Thesis Builder raw output, prompt, or conversation state.
 Its strongest countercase and every other material finding carry local Dossier artifact citations;
-its closed result preserves `accept`, `reject`, or `request_evidence`. The Scenario Forecaster binds
-exactly bull, base, and bear outcomes to the Thesis horizon. Every outcome and downside path carries
-claim-local Dossier evidence references. All cases share one metric from the closed observable metric
-set, one closed allowed-source class, one observation window, and a gap-free, non-overlapping
-basis-point threshold partition. Each finite bound records inclusive or exclusive ownership; the
+its closed result preserves `accept`, `reject`, or `request_evidence`. An evidence request may leave
+contradictions and base rates empty rather than inventing findings, but its strongest countercase
+remains cited. The Scenario Forecaster binds exactly bull, base, and bear outcomes to the Thesis
+horizon. Every outcome and downside path carries claim-local Dossier evidence references. All cases
+share one metric from the closed observable metric set, one closed allowed-source class, the latest
+allowed official release available by the Thesis horizon, and a gap-free, non-overlapping basis-point
+threshold partition. A release first available after that horizon leaves the forecast unresolved.
+Each finite bound records inclusive or exclusive ownership; the
 canonical partition assigns the lower threshold to the base case and the upper threshold to the bull
 case so an observation resolves to exactly one outcome.
 Probabilities are either absent or integer basis points totaling exactly 10,000. The CIO consumes only
@@ -372,7 +375,9 @@ closed rationale basis bound to Dossier assertions and all three resolution-arti
 evidence, an active uninvestable condition, or an unresolved evidence request permits only abstention.
 When blockers overlap, any rationale basis owned by an active blocker permits that safe abstention;
 active-stance refusals use deterministic precedence: missing evidence, active uninvestable condition,
-then unresolved Skeptic. A rejected Thesis cannot become `long` or `hold`. Every schema recursively rejects authority fields
+then unresolved Skeptic. With no blocker or rejection, an active stance requires `supported_thesis`;
+abstention may instead use `insufficient_confidence`. A rejected Thesis cannot become `long` or
+`hold`. Every schema recursively rejects authority fields
 and directive-bearing prose for sizing, targets, orders, packets, brokers, governance, lifecycle
 control, memory writes, credentials, and tools.
 

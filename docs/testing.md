@@ -396,20 +396,29 @@ evidence. A scenario becomes mandatory when its owning behavior is implemented.
 - A resolution Replay accepts one validated Dossier and exactly ordered Thesis Builder, Independent
   Skeptic, Scenario Forecaster, and CIO contracts. Each role has a distinct call identity and receives
   only validated declared artifacts; the Skeptic context contains no Thesis Builder raw response,
-  prompt, or conversation state. The copied evidence manifest binds every artifact ID to its content
-  hash and contributes to the validated Dossier identity; changing any binding while retaining the
-  Dossier fails before a role effect. Thesis identity, claim-local evidence references, required
+  prompt, or conversation state. Role inputs use exact role-specific schemas; adding undeclared
+  context and coherently recomputing its hashes fails closed when the ledger reopens. A prompt
+  fingerprint binds its version, identifier, content, and declared content hash; a tool fingerprint
+  binds its name and canonical schema. Prompt, model-configuration, and tool-contract fingerprints are
+  rederived from stored material, so inconsistent nested metadata or content also fails reopen. The
+  copied evidence manifest binds every artifact ID to its content hash and contributes to the validated
+  Dossier identity; changing any binding while retaining the Dossier fails before a role effect.
+  Thesis identity, claim-local evidence references, required
   distinctions, and one-to-twenty-day horizon are exact, while a Dossier with no contradicting
   evidence remains valid. The Skeptic's strongest countercase and findings require local citations;
-  rejection and evidence requests remain observable. Forecasts contain exactly bull, base, and bear
-  outcomes with the Thesis horizon, locally cited outcomes and downside paths, one closed
-  allowed-source metric and window, a gap-free exclusive threshold partition with explicit
-  finite-bound ownership, and either absent probabilities or basis-point totals of exactly 10,000.
-  Unknown metrics, resolution-source classes, or ambiguous boundary ownership fail closed. CIO output is limited to `long`, `hold`,
+  rejection and evidence requests remain observable, and an evidence request may preserve empty
+  contradiction and base-rate lists. Forecasts contain exactly bull, base, and bear outcomes with the
+  Thesis horizon, locally cited outcomes and downside paths, one closed allowed-source metric, the
+  latest allowed release available by that horizon, a gap-free exclusive threshold partition with
+  explicit finite-bound ownership, and either absent probabilities or basis-point totals of exactly
+  10,000. An unbounded next-release window, unknown metric or resolution-source class, or ambiguous
+  boundary ownership fails closed. CIO output is limited to `long`, `hold`,
   `reduce`, `exit`, or `abstain` with a closed evidence-bound rationale. Missing evidence, an active
   uninvestable condition, or an unresolved evidence request permits only abstention; overlapping
   blockers accept any active-blocker rationale for abstention and use deterministic refusal precedence
-  for an active stance. A rejected Thesis cannot become `long` or `hold`.
+  for an active stance. Without a blocker or rejection, an active stance requires a supported-Thesis
+  basis and abstention may instead record insufficient confidence. A rejected Thesis cannot become
+  `long` or `hold`.
 - The Lab ledger records intent before the scripted model effect and appends the raw-response identity,
   validated role artifact or bounded refusal, exposed model identity, tokens, turns, and timing
   afterward. Every role receipt distinguishes a fresh required effect from exact replay, and every

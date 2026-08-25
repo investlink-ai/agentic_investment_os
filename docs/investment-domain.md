@@ -155,7 +155,9 @@ The logical role order is fixed; batching may reduce cost without weakening role
 3. **Independent Skeptic** receives the Dossier and Thesis in a clean context, constructs the strongest
    countercase, checks contradictions and base rates, and may reject or request evidence.
 4. **Scenario Forecaster** produces bull, base, and bear cases with observable resolutions,
-   probabilities where valid, downside paths, and evaluation horizons.
+   probabilities where valid, downside paths, and evaluation horizons. A resolution may use only an
+   allowed observation available no later than its Thesis horizon; a later release never resolves the
+   forecast.
 5. **CIO** applies the Constitution, resolves the Thesis and Skeptic disagreement, and emits `long`,
    `hold`, `reduce`, `exit`, or `abstain` with uncertainty but no position weight.
 

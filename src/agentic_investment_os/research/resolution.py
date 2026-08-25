@@ -12,7 +12,7 @@ from agentic_investment_os.domain.identity import (
     EquityInstrumentIdentity,
     parse_instrument_identity,
 )
-from agentic_investment_os.research.dossier import Dossier
+from agentic_investment_os.research.dossier import Dossier, contains_prohibited_research_directive
 
 __all__ = (
     "CioRationale",
@@ -174,35 +174,6 @@ _PROHIBITED_FIELDS = frozenset(
         "weight",
     }
 )
-_PROHIBITED_DIRECTIVES = (
-    re.compile(
-        r"\b(?:submit|place|route|cancel|execute|send|transmit)\b.{0,48}\b(?:order|trade)\b",
-        re.IGNORECASE,
-    ),
-    re.compile(
-        r"\b(?:buy|purchase|sell|short|cover|acquire|dispose\s+of)\b.{0,48}"
-        r"\b(?:shares?|units?|position|stock|equity)\b",
-        re.IGNORECASE,
-    ),
-    re.compile(r"\bgo\s+(?:long|short)\b", re.IGNORECASE),
-    re.compile(r"\b(?:market|limit|stop(?:-loss)?)\s+order\b", re.IGNORECASE),
-    re.compile(r"\b(?:enter|exit)\b.{0,32}\b(?:position|holding|trade)\b", re.IGNORECASE),
-    re.compile(r"\b(?:position|target)\s+(?:size|weight|allocation)\b", re.IGNORECASE),
-    re.compile(
-        r"\b(?:decision\s+packet|broker\s+instruction|client[_ -]?order[_ -]?id)\b",
-        re.IGNORECASE,
-    ),
-    re.compile(r"\b(?:allocate|weight)\b.{0,24}(?:%|basis\s+points|bps)\b", re.IGNORECASE),
-    re.compile(
-        r"\b(?:invest|allocate|commit|put)\b.{0,48}"
-        r"\b(?:percent|per\s+cent|%|basis\s+points|bps)\b",
-        re.IGNORECASE,
-    ),
-    re.compile(
-        r"\b(?:increase|decrease|reduce|exit)\b.{0,32}\b(?:position|holding|weight|allocation)\b",
-        re.IGNORECASE,
-    ),
-)
 
 
 class ThesisRefusalReason(StrEnum):
@@ -235,7 +206,7 @@ class ScenarioKind(StrEnum):
 
 
 class ObservationWindow(StrEnum):
-    NEXT_ALLOWED_RELEASE = "next_allowed_release"
+    LATEST_ALLOWED_RELEASE_BY_THESIS_HORIZON = "latest_allowed_release_by_thesis_horizon"
 
 
 class ScenarioEvidenceSource(StrEnum):
@@ -474,8 +445,10 @@ class SkepticResult:
             or type(self.base_rates) is not tuple
             or type(self.requested_evidence) is not tuple
             or type(self.strongest_countercase) is not SkepticFinding
-            or not self.contradictions
-            or not self.base_rates
+            or (
+                self.decision is not SkepticDecision.REQUEST_EVIDENCE
+                and (not self.contradictions or not self.base_rates)
+            )
             or len(self.contradictions) > _MAXIMUM_ITEMS
             or len(self.base_rates) > _MAXIMUM_ITEMS
             or not _valid_text_tuple(self.requested_evidence, require_nonempty=False)
@@ -830,9 +803,16 @@ def parse_skeptic_result(  # noqa: PLR0911
         decision = SkepticDecision(decision_value)
     except ValueError:
         return SkepticRefusalReason.INVALID_SCHEMA
-    countercases = _parse_findings([fields["strongest_countercase"]], dossier, base_rate=False)
-    contradictions = _parse_findings(fields["contradictions"], dossier, base_rate=False)
-    base_rates = _parse_findings(fields["base_rates"], dossier, base_rate=True)
+    countercases = _parse_findings(
+        [fields["strongest_countercase"]], dossier, base_rate=False, require_nonempty=True
+    )
+    require_findings = decision is not SkepticDecision.REQUEST_EVIDENCE
+    contradictions = _parse_findings(
+        fields["contradictions"], dossier, base_rate=False, require_nonempty=require_findings
+    )
+    base_rates = _parse_findings(
+        fields["base_rates"], dossier, base_rate=True, require_nonempty=require_findings
+    )
     requested = _text_tuple(fields["requested_evidence"], require_nonempty=False)
     if isinstance(countercases, SkepticRefusalReason):
         return countercases
@@ -959,6 +939,10 @@ def parse_cio_resolution(  # noqa: PLR0911, PLR0912
             return CioRefusalReason.UNRESOLVED_SKEPTIC
         if rationale.basis is not CioRationaleBasis.CONTESTED_THESIS:
             return CioRefusalReason.INVALID_SCHEMA
+    elif rationale.basis is not CioRationaleBasis.SUPPORTED_THESIS and not (
+        stance is CioStance.ABSTAIN and rationale.basis is CioRationaleBasis.INSUFFICIENT_CONFIDENCE
+    ):
+        return CioRefusalReason.INVALID_SCHEMA
     try:
         return CioResolution(
             subject,
@@ -1039,9 +1023,13 @@ def _parse_uninvestable_conditions(
 
 
 def _parse_findings(
-    value: object, dossier: Dossier, *, base_rate: bool
+    value: object,
+    dossier: Dossier,
+    *,
+    base_rate: bool,
+    require_nonempty: bool,
 ) -> tuple[SkepticFinding, ...] | SkepticRefusalReason:
-    if type(value) is not list or not value or len(value) > _MAXIMUM_ITEMS:
+    if type(value) is not list or (require_nonempty and not value) or len(value) > _MAXIMUM_ITEMS:
         return SkepticRefusalReason.BOUNDS_EXCEEDED
     available = {
         artifact_id
@@ -1222,7 +1210,12 @@ def _valid_envelope(fields: dict[str, object], record_kind: str) -> bool:
 def _bounded_text(value: object) -> str | None:
     return (
         value
-        if type(value) is str and value.strip() == value and 1 <= len(value) <= _MAXIMUM_TEXT
+        if (
+            type(value) is str
+            and value.strip() == value
+            and 1 <= len(value) <= _MAXIMUM_TEXT
+            and not contains_prohibited_research_directive(value)
+        )
         else None
     )
 
@@ -1287,7 +1280,7 @@ def _contains_prohibited_authority(value: object) -> bool:
     if type(value) is list:
         return any(_contains_prohibited_authority(item) for item in value)
     if type(value) is str:
-        return any(pattern.search(value) is not None for pattern in _PROHIBITED_DIRECTIVES)
+        return contains_prohibited_research_directive(value)
     return False
 
 

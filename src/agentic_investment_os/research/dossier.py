@@ -24,6 +24,7 @@ __all__ = (
     "ResearchLensRecord",
     "StatementKind",
     "StatementUncertainty",
+    "contains_prohibited_research_directive",
     "parse_dossier",
 )
 
@@ -71,6 +72,80 @@ _PROHIBITED_FIELDS = frozenset(
         "broker",
         "credential",
     }
+)
+_DIRECTIVE_PREFIX = (
+    r"(?:^|[.!?;:][ \t]*|\n[ \t]*|[\u2014\u2013][ \t]*)"
+    r"[ \t]*(?:[\"'\u201c\u201d\u2018\u2019(\[{\u2014\u2013-][ \t]*)*"
+)
+_DIRECTIVE_TICKER = r"(?:\$[A-Za-z][A-Za-z0-9.-]{0,9}|[A-Z][A-Z0-9.-]{0,9})\b"
+_PROHIBITED_RESEARCH_DIRECTIVES = (
+    re.compile(
+        r"\b(?:submit|place|route|cancel|execute|send|transmit)\b.{0,48}\b(?:order|trade)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b(?:buy|purchase|sell|short|cover|acquire|dispose\s+of)\b.{0,48}"
+        r"\b(?:shares?|units?|position|stock|equity)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        _DIRECTIVE_PREFIX + r"(?:please\s+)?"
+        r"(?:buy|purchase|sell|short|cover|acquire)\s+"
+        r"\$?(?!ratings?\b|side\b)[a-z][a-z0-9.-]{0,9}\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b(?i:(?:you|we|investors?|traders?|clients?)\s+"
+        r"(?:should|must|need\s+to|ought\s+to)\s+"
+        r"(?:(?:buy|purchase|sell|short|cover|acquire)\s+"
+        r"|(?:invest|divest)\s+(?:in|from)\s+))" + _DIRECTIVE_TICKER
+    ),
+    re.compile(
+        r"\b(?i:(?:recommend|suggest|advise)(?:s|ed|ing)?\s+(?:"
+        r"(?:(?:that\s+)?(?:you|we|investors?|traders?|clients?)\s+)?"
+        r"(?:should\s+)?(?:buy|purchase|sell|short|cover|acquire)\s+"
+        r"|(?:buying|purchasing|selling|shorting|covering|acquiring)\s+"
+        r"|(?:opening|closing)\s+(?:a\s+)?(?:(?:long|short)\s+)?"
+        r"(?:position|trade)\s+(?:in\s+)?))" + _DIRECTIVE_TICKER
+    ),
+    re.compile(
+        r"\b(?i:(?:recommendation|suggestion|advice)\s+(?:is|was)\s+to\s+"
+        r"(?:buy|purchase|sell|short|cover|acquire)\s+)" + _DIRECTIVE_TICKER
+    ),
+    re.compile(r"\bgo\s+(?:long|short)\b", re.IGNORECASE),
+    re.compile(
+        _DIRECTIVE_PREFIX + r"(?:please\s+)?(?:use|set|create)\b.{0,32}"
+        r"\b(?:market|limit|stop(?:-loss)?)\s+orders?\b",
+        re.IGNORECASE,
+    ),
+    re.compile(r"\b(?:enter|exit)\b.{0,32}\b(?:position|holding|trade)\b", re.IGNORECASE),
+    re.compile(r"\b(?:position|target)\s+(?:size|weight|allocation)\b", re.IGNORECASE),
+    re.compile(
+        r"\b(?:decision\s+packet|broker\s+instruction|client[_ -]?order[_ -]?id)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(r"\b(?:allocate|weight)\b.{0,24}(?:%|basis\s+points|bps)\b", re.IGNORECASE),
+    re.compile(
+        r"\b(?:invest|allocate|commit|put)\b.{0,48}"
+        r"\b(?:percent|per\s+cent|%|basis\s+points|bps)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b(?:increase|decrease|reduce|exit)\b.{0,32}"
+        r"\b(?:position|holding|weight|allocation)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        _DIRECTIVE_PREFIX + r"(?:please\s+)?"
+        r"(?:open|close)\b.{0,32}\b(?:long|short|position|holding|trade)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"(?:^|[.!?;:]\s+|\n[ \t]*)(?:please\s+)?"
+        r"(?:ignore|disregard|override)\b.{0,32}"
+        r"\b(?:instructions?|prompts?|polic(?:y|ies)|safety)\b",
+        re.IGNORECASE,
+    ),
 )
 _IDENTIFIER = re.compile(r"[a-z0-9][a-z0-9._:-]{0,127}\Z")
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
@@ -147,6 +222,7 @@ class EvidenceAssertion:
             or type(self.statement) is not str
             or not self.statement.strip()
             or len(self.statement) > _MAXIMUM_STATEMENT_CHARACTERS
+            or contains_prohibited_research_directive(self.statement)
             or type(self.citation_artifact_ids) is not tuple
             or not 1 <= len(self.citation_artifact_ids) <= _MAXIMUM_CITATIONS_PER_ASSERTION
             or self.citation_artifact_ids != tuple(sorted(set(self.citation_artifact_ids)))
@@ -192,6 +268,7 @@ class ContradictingEvidence:
             or type(self.explanation) is not str
             or not self.explanation.strip()
             or len(self.explanation) > _MAXIMUM_EXPLANATION_CHARACTERS
+            or contains_prohibited_research_directive(self.explanation)
         ):
             raise ValueError(_INVALID_DOSSIER)
 
@@ -214,6 +291,7 @@ class ResearchLensRecord:
             or type(self.rationale) is not str
             or not self.rationale.strip()
             or len(self.rationale) > _MAXIMUM_EXPLANATION_CHARACTERS
+            or contains_prohibited_research_directive(self.rationale)
         ):
             raise ValueError(_INVALID_DOSSIER)
 
@@ -265,6 +343,7 @@ class Dossier:
                 type(item) is not str
                 or not item.strip()
                 or len(item) > _MAXIMUM_EXPLANATION_CHARACTERS
+                or contains_prohibited_research_directive(item)
                 for item in self.missing_evidence
             )
             or self.missing_evidence != tuple(sorted(set(self.missing_evidence)))
@@ -357,7 +436,7 @@ def parse_dossier(  # noqa: PLR0911 - retain distinct hostile-output refusal rea
     cutoff: UtcInstant,
 ) -> Dossier | DossierRefusalReason:
     """Validate hostile Evidence Collector output against pinned replay inputs."""
-    if _contains_prohibited_field(value):
+    if _contains_prohibited_field(value) or contains_prohibited_research_directive(value):
         return DossierRefusalReason.PROHIBITED_AUTHORITY
     root = _exact_mapping(value, _DOSSIER_FIELDS)
     if root is None:
@@ -583,6 +662,17 @@ def _contains_prohibited_field(value: object) -> bool:
         )
     if type(value) is list:
         return any(_contains_prohibited_field(item) for item in value)
+    return False
+
+
+def contains_prohibited_research_directive(value: object) -> bool:
+    """Detect prompt, sizing, trading, or execution directives in research prose."""
+    if type(value) is dict:
+        return any(contains_prohibited_research_directive(item) for item in value.values())
+    if type(value) is list:
+        return any(contains_prohibited_research_directive(item) for item in value)
+    if type(value) is str:
+        return any(pattern.search(value) is not None for pattern in _PROHIBITED_RESEARCH_DIRECTIVES)
     return False
 
 

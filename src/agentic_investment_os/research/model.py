@@ -42,6 +42,9 @@ __all__ = (
     "ResearchRole",
     "ResearchRoleModel",
     "observation_matches_role",
+    "parse_model_configuration_contract_payload",
+    "parse_prompt_contract_payload",
+    "parse_tool_contract_payloads",
 )
 
 MAXIMUM_MODEL_OUTPUT_BYTES = 200_000
@@ -50,6 +53,64 @@ _MODEL_IDENTITY = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}\Z")
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 _INVALID_INTENT = "invalid Research Lab model-call intent"
 _INVALID_OBSERVATION = "invalid Research Lab model-call observation"
+_EVIDENCE_COLLECTOR_INPUT_FIELDS = frozenset(
+    {
+        "schema_version",
+        "role",
+        "authority_scope",
+        "non_production",
+        "namespace",
+        "input_kind",
+        "subject",
+        "evidence",
+        "evidence_cutoff",
+        "data_regime",
+        "constitution",
+        "belief_graph",
+        "portfolio_context_fingerprint",
+        "prompt",
+        "model_configuration",
+        "tools",
+        "material_input_hashes",
+    }
+)
+_RESOLUTION_INPUT_FIELDS = frozenset(
+    {
+        "schema_version",
+        "role",
+        "authority_scope",
+        "non_production",
+        "namespace",
+        "input_kind",
+        "subject",
+        "evidence_cutoff",
+        "available_artifact_ids",
+        "evidence_manifest",
+        "data_regime",
+        "constitution",
+        "belief_graph",
+        "portfolio_context_fingerprint",
+        "dossier",
+        "thesis",
+        "skeptic",
+        "forecast",
+        "prompt",
+        "model_configuration",
+        "tools",
+        "material_input_hashes",
+    }
+)
+_PROMPT_FIELDS = frozenset({"schema_version", "prompt_id", "content", "content_hash"})
+_MODEL_CONFIGURATION_FIELDS = frozenset(
+    {"schema_version", "model_identity", "reasoning", "content_hash"}
+)
+_REASONING_FIELDS = frozenset({"effort", "maximum_output_tokens", "maximum_turns"})
+_TOOL_FIELDS = frozenset({"name", "schema_json", "schema_hash"})
+_MAXIMUM_PROMPT_CHARACTERS = 20_000
+_MAXIMUM_OUTPUT_TOKENS = 20_000
+_MAXIMUM_TURNS = 10
+_MAXIMUM_TOOL_FINGERPRINTS = 10
+_MAXIMUM_TOOL_SCHEMA_CHARACTERS = 20_000
 
 
 class ModelCallDisposition(StrEnum):
@@ -77,6 +138,95 @@ class ResearchRole(StrEnum):
     INDEPENDENT_SKEPTIC = "independent_skeptic"
     SCENARIO_FORECASTER = "scenario_forecaster"
     CIO = "cio"
+
+
+def parse_prompt_contract_payload(value: object) -> tuple[str, str, str, str] | None:
+    """Validate one prompt contract and return its identity-bound material."""
+    fields = _exact_mapping(value, _PROMPT_FIELDS)
+    if fields is None:
+        return None
+    prompt_id = fields["prompt_id"]
+    content = fields["content"]
+    content_hash = fields["content_hash"]
+    if (
+        fields["schema_version"] != 1
+        or type(prompt_id) is not str
+        or _IDENTIFIER.fullmatch(prompt_id) is None
+        or type(content) is not str
+        or not content
+        or len(content) > _MAXIMUM_PROMPT_CHARACTERS
+        or type(content_hash) is not str
+        or _SHA256.fullmatch(content_hash) is None
+        or hashlib.sha256(content.encode()).hexdigest() != content_hash
+    ):
+        return None
+    return prompt_id, content, content_hash, _content_hash(fields)
+
+
+def parse_model_configuration_contract_payload(
+    value: object,
+) -> tuple[str, str, int, int, str] | None:
+    """Validate one model configuration and return its bounded material."""
+    fields = _exact_mapping(value, _MODEL_CONFIGURATION_FIELDS)
+    if fields is None:
+        return None
+    reasoning = _exact_mapping(fields["reasoning"], _REASONING_FIELDS)
+    if reasoning is None:
+        return None
+    model_identity = fields["model_identity"]
+    effort = reasoning["effort"]
+    maximum_output_tokens = reasoning["maximum_output_tokens"]
+    maximum_turns = reasoning["maximum_turns"]
+    content_hash = fields["content_hash"]
+    material = {key: item for key, item in fields.items() if key != "content_hash"}
+    if (
+        fields["schema_version"] != 1
+        or type(model_identity) is not str
+        or _MODEL_IDENTITY.fullmatch(model_identity) is None
+        or type(effort) is not str
+        or effort not in ("low", "medium", "high", "xhigh")
+        or type(maximum_output_tokens) is not int
+        or not 1 <= maximum_output_tokens <= _MAXIMUM_OUTPUT_TOKENS
+        or type(maximum_turns) is not int
+        or not 1 <= maximum_turns <= _MAXIMUM_TURNS
+        or type(content_hash) is not str
+        or _SHA256.fullmatch(content_hash) is None
+        or _content_hash(material) != content_hash
+    ):
+        return None
+    return model_identity, effort, maximum_output_tokens, maximum_turns, content_hash
+
+
+def parse_tool_contract_payloads(
+    value: object,
+) -> tuple[tuple[str, str, str, str], ...] | None:
+    """Validate ordered inert tool contracts and bind names to their schemas."""
+    if type(value) is not list or len(value) > _MAXIMUM_TOOL_FINGERPRINTS:
+        return None
+    tools: list[tuple[str, str, str, str]] = []
+    for item in value:
+        fields = _exact_mapping(item, _TOOL_FIELDS)
+        if fields is None:
+            return None
+        name = fields["name"]
+        schema_json = fields["schema_json"]
+        schema_hash = fields["schema_hash"]
+        if (
+            type(name) is not str
+            or _IDENTIFIER.fullmatch(name) is None
+            or type(schema_json) is not str
+            or not schema_json
+            or len(schema_json) > _MAXIMUM_TOOL_SCHEMA_CHARACTERS
+            or not _is_canonical_json_object(schema_json)
+            or type(schema_hash) is not str
+            or _SHA256.fullmatch(schema_hash) is None
+            or hashlib.sha256(schema_json.encode()).hexdigest() != schema_hash
+        ):
+            return None
+        tools.append((name, schema_json, schema_hash, _content_hash(fields)))
+    if tuple(item[0] for item in tools) != tuple(sorted({item[0] for item in tools})):
+        return None
+    return tuple(tools)
 
 
 class LabObservationDisposition(StrEnum):
@@ -353,23 +503,49 @@ def _model_input_matches_intent(model_input: dict[object, object], intent: LabCa
     model_configuration = model_input.get("model_configuration")
     tools = model_input.get("tools")
     material_hashes = model_input.get("material_input_hashes")
+    parsed_prompt = parse_prompt_contract_payload(prompt)
+    parsed_model = parse_model_configuration_contract_payload(model_configuration)
+    parsed_tools = parse_tool_contract_payloads(tools)
     return (
-        model_input.get("schema_version") == 1
+        _model_input_has_exact_role_context(model_input, intent.role)
+        and model_input.get("schema_version") == 1
         and model_input.get("role") == intent.role.value
         and model_input.get("authority_scope") == "research_lab_non_production"
         and model_input.get("non_production") is True
         and model_input.get("namespace") == intent.namespace
-        and type(prompt) is dict
-        and prompt.get("content_hash") == intent.prompt_fingerprint
-        and type(model_configuration) is dict
-        and model_configuration.get("model_identity") == intent.requested_model_identity
-        and model_configuration.get("content_hash") == intent.model_configuration_fingerprint
-        and type(tools) is list
-        and tuple(item.get("schema_hash") if type(item) is dict else None for item in tools)
-        == intent.tool_fingerprints
+        and parsed_prompt is not None
+        and parsed_prompt[3] == intent.prompt_fingerprint
+        and parsed_model is not None
+        and parsed_model[0] == intent.requested_model_identity
+        and parsed_model[4] == intent.model_configuration_fingerprint
+        and parsed_tools is not None
+        and tuple(item[3] for item in parsed_tools) == intent.tool_fingerprints
         and type(material_hashes) is list
         and tuple(material_hashes) == intent.material_input_hashes
     )
+
+
+def _model_input_has_exact_role_context(
+    model_input: dict[object, object], role: ResearchRole
+) -> bool:
+    if role is ResearchRole.EVIDENCE_COLLECTOR:
+        return set(model_input) == _EVIDENCE_COLLECTOR_INPUT_FIELDS
+    if set(model_input) != _RESOLUTION_INPUT_FIELDS:
+        return False
+    thesis = model_input.get("thesis")
+    skeptic = model_input.get("skeptic")
+    forecast = model_input.get("forecast")
+    if role is ResearchRole.THESIS_BUILDER:
+        return thesis is None and skeptic is None and forecast is None
+    if role is ResearchRole.INDEPENDENT_SKEPTIC:
+        return type(thesis) is dict and skeptic is None and forecast is None
+    if role is ResearchRole.SCENARIO_FORECASTER:
+        return type(thesis) is dict and type(skeptic) is dict and forecast is None
+    return type(thesis) is dict and type(skeptic) is dict and type(forecast) is dict
+
+
+def _exact_mapping(value: object, fields: frozenset[str]) -> dict[object, object] | None:
+    return value if type(value) is dict and set(value) == fields else None
 
 
 def _valid_hash_tuple(value: object, *, allow_empty: bool) -> bool:
@@ -378,6 +554,16 @@ def _valid_hash_tuple(value: object, *, allow_empty: bool) -> bool:
         and (allow_empty or bool(value))
         and value == tuple(sorted(set(value)))
         and all(type(item) is str and _SHA256.fullmatch(item) is not None for item in value)
+    )
+
+
+def _is_canonical_json_object(value: str) -> bool:
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError:
+        return False
+    return (
+        type(parsed) is dict and json.dumps(parsed, sort_keys=True, separators=(",", ":")) == value
     )
 
 

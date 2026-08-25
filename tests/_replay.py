@@ -70,6 +70,17 @@ def replay_request(
     prompt_content: str = PROMPT_CONTENT,
 ) -> dict[str, object]:
     prompt_hash = hashlib.sha256(prompt_content.encode()).hexdigest()
+    prompt: dict[str, object] = {
+        "schema_version": 1,
+        "prompt_id": "evidence-collector-v1",
+        "content": prompt_content,
+        "content_hash": prompt_hash,
+    }
+    tool: dict[str, object] = {
+        "name": "structured_output",
+        "schema_json": TOOL_SCHEMA_JSON,
+        "schema_hash": TOOL_SCHEMA_HASH,
+    }
     model = model_configuration()
     model_hash = model["content_hash"]
     assert isinstance(model_hash, str)
@@ -80,9 +91,9 @@ def replay_request(
             ACTIVE_CONSTITUTION.content_hash,
             graph.content_hash,
             PORTFOLIO_FINGERPRINT,
-            prompt_hash,
+            content_hash(prompt),
             model_hash,
-            TOOL_SCHEMA_HASH,
+            content_hash(tool),
         }
     )
     return {
@@ -106,20 +117,9 @@ def replay_request(
         "constitution": ACTIVE_CONSTITUTION,
         "belief_graph": graph,
         "portfolio_context_fingerprint": PORTFOLIO_FINGERPRINT,
-        "prompt": {
-            "schema_version": 1,
-            "prompt_id": "evidence-collector-v1",
-            "content": prompt_content,
-            "content_hash": prompt_hash,
-        },
+        "prompt": prompt,
         "model_configuration": model,
-        "tools": [
-            {
-                "name": "structured_output",
-                "schema_json": TOOL_SCHEMA_JSON,
-                "schema_hash": TOOL_SCHEMA_HASH,
-            }
-        ],
+        "tools": [tool],
         "material_input_hashes": material_hashes,
     }
 
@@ -287,7 +287,7 @@ def forecast_payload(thesis: Thesis, skeptic: SkepticResult) -> dict[str, object
                 "resolution_rule": {
                     "metric": "operating_margin_change_bps",
                     "source": "allowed_official_filing",
-                    "observation_window": "next_allowed_release",
+                    "observation_window": "latest_allowed_release_by_thesis_horizon",
                     "lower_bound_bps": 100,
                     "lower_bound_inclusive": True,
                     "upper_bound_bps": None,
@@ -304,7 +304,7 @@ def forecast_payload(thesis: Thesis, skeptic: SkepticResult) -> dict[str, object
                 "resolution_rule": {
                     "metric": "operating_margin_change_bps",
                     "source": "allowed_official_filing",
-                    "observation_window": "next_allowed_release",
+                    "observation_window": "latest_allowed_release_by_thesis_horizon",
                     "lower_bound_bps": -100,
                     "lower_bound_inclusive": True,
                     "upper_bound_bps": 100,
@@ -319,7 +319,7 @@ def forecast_payload(thesis: Thesis, skeptic: SkepticResult) -> dict[str, object
                 "resolution_rule": {
                     "metric": "operating_margin_change_bps",
                     "source": "allowed_official_filing",
-                    "observation_window": "next_allowed_release",
+                    "observation_window": "latest_allowed_release_by_thesis_horizon",
                     "lower_bound_bps": None,
                     "lower_bound_inclusive": None,
                     "upper_bound_bps": -100,
@@ -419,7 +419,7 @@ def resolution_replay_request(
         assert isinstance(prompt, dict)
         assert isinstance(model, dict)
         assert isinstance(tools, list)
-        prompt_hash = prompt["content_hash"]
+        prompt_hash = content_hash(prompt)
         model_hash = model["content_hash"]
         assert isinstance(prompt_hash, str)
         assert isinstance(model_hash, str)
@@ -427,9 +427,7 @@ def resolution_replay_request(
         material_hashes.add(model_hash)
         for tool in tools:
             assert isinstance(tool, dict)
-            schema_hash = tool["schema_hash"]
-            assert isinstance(schema_hash, str)
-            material_hashes.add(schema_hash)
+            material_hashes.add(content_hash(tool))
     return {
         "schema_version": 2,
         "record_kind": "lab_replay_request",
