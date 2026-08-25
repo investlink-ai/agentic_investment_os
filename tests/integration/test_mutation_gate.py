@@ -9,13 +9,21 @@ from scripts import run_mutation
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 MUTATION_WORKFLOW = REPOSITORY_ROOT / ".github/workflows/mutation.yml"
-EXPECTED_SCAFFOLD_SOURCES = [
+EXPECTED_MUTATION_SOURCES = [
     "src/agentic_investment_os/execution/__init__.py",
+    "src/agentic_investment_os/memory/admission.py",
+    "src/agentic_investment_os/memory/reducer.py",
     "src/agentic_investment_os/portfolio/__init__.py",
 ]
 EXPECTED_AUTHORITY_ROOTS = [
     "src/agentic_investment_os/execution",
+    "src/agentic_investment_os/memory",
     "src/agentic_investment_os/portfolio",
+]
+EXPECTED_NONCRITICAL_MODULES = ["src/agentic_investment_os/memory/beliefs.py"]
+EXPECTED_MUTATION_TESTS = [
+    "tests/unit/test_beliefs.py",
+    "tests/contract/test_belief_event_contract.py",
 ]
 INVALID_CONFIGURATION_EXIT = 2
 REJECTED_RESULT_KEYS = (
@@ -35,15 +43,15 @@ def test_repository_scope_is_an_exact_static_authority_allowlist() -> None:
     config = tool["mutmut"]
     classification = tool["mutation_gate"]
 
-    assert config["only_mutate"] == EXPECTED_SCAFFOLD_SOURCES
-    assert config["pytest_add_cli_args_test_selection"] == []
+    assert config["only_mutate"] == EXPECTED_MUTATION_SOURCES
+    assert config["pytest_add_cli_args_test_selection"] == EXPECTED_MUTATION_TESTS
     assert config["mutate_only_covered_lines"] is False
     assert "do_not_mutate" not in config
     assert all("*" not in path for path in config["only_mutate"])
     assert classification == {
         "schema_version": 1,
         "authority_roots": EXPECTED_AUTHORITY_ROOTS,
-        "noncritical_modules": [],
+        "noncritical_modules": EXPECTED_NONCRITICAL_MODULES,
     }
 
 

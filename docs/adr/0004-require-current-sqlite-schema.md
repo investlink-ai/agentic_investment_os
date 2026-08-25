@@ -32,11 +32,12 @@ Opening a current database validates its exact schema and full SQLite integrity 
 Semantic row validation follows the capability boundaries in [ADR 0002](0002-lifecycle-policy-in-domain-kernel.md):
 Advance selects request-relevant history, while Status reconstructs and validates global history.
 
-Only the lifecycle-status projection table and its owned indexes or triggers are excluded from the
-authoritative signature. A view or same-named object with another owner remains part of the signature.
-Integrity validation temporarily drops a recognized projection under a savepoint, runs the full
-database check, and rolls back that temporary change. Projection-only corruption remains rebuildable,
-while corruption shared with authoritative or global SQLite structures fails startup.
+Only the lifecycle-status and belief-graph projection tables and their owned indexes or triggers are
+excluded from the authoritative signature. A view or same-named object with another owner remains
+part of the signature. Integrity validation temporarily drops recognized projections under a
+savepoint, runs the full database check, and rolls back that temporary change. Projection-only
+corruption remains rebuildable, while corruption shared with authoritative or global SQLite
+structures fails startup.
 
 ## Alternatives considered
 

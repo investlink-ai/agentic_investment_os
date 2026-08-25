@@ -28,7 +28,7 @@ from tests._attention import attention_artifact
 from tests._evidence import evidence_capture_checkpoint
 from tests._universe import advance_command
 
-CURRENT_DATABASE_VERSION = 7
+CURRENT_DATABASE_VERSION = 8
 CONFIGURATION_HASH = "a" * 64
 RECORDED_AT = "2026-08-21T22:00:00.000000+00:00"
 MAX_DIAGNOSTIC_LENGTH = 100
@@ -180,6 +180,17 @@ def test_fresh_database_records_its_physical_schema_version(tmp_path: Path) -> N
         "advance_refusals",
         "advance_refusals_are_append_only_delete",
         "advance_refusals_are_append_only_update",
+        "belief_events",
+        "belief_events_are_append_only_delete",
+        "belief_events_are_append_only_update",
+        "belief_events_by_belief",
+        "belief_ledger_commitments",
+        "belief_ledger_commitments_are_append_only_delete",
+        "belief_ledger_commitments_are_append_only_update",
+        "belief_ledger_head",
+        "belief_ledger_head_advances_monotonically",
+        "belief_ledger_head_cannot_be_deleted",
+        "belief_ledger_head_starts_at_first_commitment",
         "lifecycle_events",
         "lifecycle_events_are_append_only_delete",
         "lifecycle_events_are_append_only_update",

@@ -88,6 +88,7 @@ _DROP_PROJECTION_SQL = (
     "DROP TABLE IF EXISTS lifecycle_status_projection"
     # SQLite keywords and identifiers are case-insensitive, so case-only mutants are equivalent.
 )
+_DROP_BELIEF_GRAPH_PROJECTION_SQL = "DROP TABLE IF EXISTS belief_graph_projection"
 _USER_VERSION_SQL = "PRAGMA user_version"
 _USER_SCHEMA_OBJECT_EXISTS_SQL = """
 SELECT EXISTS (
@@ -112,7 +113,6 @@ _RECORDED_AT_NOT_CANONICAL = "recorded_at must use canonical UTC format"
 _INVALID_CHECKPOINT_ORDER = "lifecycle stream checkpoint order is invalid"
 _INVALID_DATA_REGIME = "invalid data_regime in lifecycle ledger"
 _FUTURE_EVIDENCE_CUTOFF = "evidence_cutoff cannot be later than recorded_at"
-
 _CURRENT_SCHEMA = (
     """
 CREATE TABLE lifecycle_events (
@@ -289,6 +289,80 @@ BEFORE UPDATE ON advance_conflicts BEGIN SELECT RAISE(ABORT, 'append-only confli
 CREATE TRIGGER advance_conflicts_are_append_only_delete
 BEFORE DELETE ON advance_conflicts BEGIN SELECT RAISE(ABORT, 'append-only conflict ledger'); END
 """,
+    """
+CREATE TABLE belief_events (
+    ledger_position INTEGER PRIMARY KEY CHECK (ledger_position > 0),
+    event_id TEXT NOT NULL UNIQUE,
+    belief_id TEXT NOT NULL,
+    event_json TEXT NOT NULL,
+    projection_identity TEXT NOT NULL CHECK (length(projection_identity) = 64),
+    recorded_at TEXT NOT NULL
+) STRICT
+""",
+    """
+CREATE INDEX belief_events_by_belief
+ON belief_events(belief_id, ledger_position)
+""",
+    """
+CREATE TRIGGER belief_events_are_append_only_update
+BEFORE UPDATE ON belief_events BEGIN SELECT RAISE(ABORT, 'append-only belief ledger'); END
+""",
+    """
+CREATE TRIGGER belief_events_are_append_only_delete
+BEFORE DELETE ON belief_events BEGIN SELECT RAISE(ABORT, 'append-only belief ledger'); END
+""",
+    """
+CREATE TABLE belief_ledger_commitments (
+    ledger_position INTEGER PRIMARY KEY CHECK (ledger_position > 0),
+    projection_identity TEXT NOT NULL UNIQUE CHECK (length(projection_identity) = 64),
+    commitment_identity TEXT NOT NULL UNIQUE CHECK (length(commitment_identity) = 64)
+) STRICT
+""",
+    """
+CREATE TRIGGER belief_ledger_commitments_are_append_only_update
+BEFORE UPDATE ON belief_ledger_commitments
+BEGIN SELECT RAISE(ABORT, 'append-only belief commitment'); END
+""",
+    """
+CREATE TRIGGER belief_ledger_commitments_are_append_only_delete
+BEFORE DELETE ON belief_ledger_commitments
+BEGIN SELECT RAISE(ABORT, 'append-only belief commitment'); END
+""",
+    """
+CREATE TABLE belief_ledger_head (
+    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+    ledger_position INTEGER NOT NULL CHECK (ledger_position > 0),
+    commitment_identity TEXT NOT NULL CHECK (length(commitment_identity) = 64)
+) STRICT
+""",
+    """
+CREATE TRIGGER belief_ledger_head_starts_at_first_commitment
+BEFORE INSERT ON belief_ledger_head
+WHEN NEW.ledger_position != 1
+  OR NOT EXISTS (
+      SELECT 1 FROM belief_ledger_commitments
+      WHERE ledger_position = NEW.ledger_position
+        AND commitment_identity = NEW.commitment_identity
+  )
+BEGIN SELECT RAISE(ABORT, 'invalid belief ledger head'); END
+""",
+    """
+CREATE TRIGGER belief_ledger_head_advances_monotonically
+BEFORE UPDATE ON belief_ledger_head
+WHEN NEW.singleton != OLD.singleton
+  OR NEW.ledger_position != OLD.ledger_position + 1
+  OR NOT EXISTS (
+      SELECT 1 FROM belief_ledger_commitments
+      WHERE ledger_position = NEW.ledger_position
+        AND commitment_identity = NEW.commitment_identity
+  )
+BEGIN SELECT RAISE(ABORT, 'invalid belief ledger head'); END
+""",
+    """
+CREATE TRIGGER belief_ledger_head_cannot_be_deleted
+BEFORE DELETE ON belief_ledger_head
+BEGIN SELECT RAISE(ABORT, 'durable belief ledger head'); END
+""",
 )
 
 
@@ -297,7 +371,7 @@ class _DatabaseOpenMode(StrEnum):
     EXISTING_ONLY = "rw"
 
 
-_CURRENT_DATABASE_VERSION = 7
+_CURRENT_DATABASE_VERSION = 8
 _CURRENT_SCHEMA_SIGNATURE = frozenset(" ".join(statement.split()) for statement in _CURRENT_SCHEMA)
 
 _PROJECTION_SCHEMA = """
@@ -319,6 +393,15 @@ CREATE TABLE lifecycle_status_projection (
     universe_snapshot_id TEXT,
     attention_artifact_cycle TEXT,
     attention_artifact_id TEXT
+) STRICT;
+"""
+
+_BELIEF_GRAPH_PROJECTION_SCHEMA = """
+CREATE TABLE belief_graph_projection (
+    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+    projection_identity TEXT NOT NULL CHECK (length(projection_identity) = 64),
+    query_json TEXT NOT NULL,
+    graph_json TEXT NOT NULL
 ) STRICT;
 """
 
@@ -456,7 +539,7 @@ def _schema_signature(connection: sqlite3.Connection) -> frozenset[str]:
         WHERE name NOT LIKE 'sqlite!_%' ESCAPE '!'
           AND NOT (
               type IN ('table', 'index', 'trigger')
-              AND tbl_name = 'lifecycle_status_projection'
+              AND tbl_name IN ('lifecycle_status_projection', 'belief_graph_projection')
           )
           AND sql IS NOT NULL
         """
@@ -479,6 +562,7 @@ def _validate_database_integrity(connection: sqlite3.Connection) -> None:
         # The projection is disposable, so exclude its b-trees while retaining a full
         # database check for authoritative objects and global SQLite consistency.
         connection.execute(_DROP_PROJECTION_SQL)
+        connection.execute(_DROP_BELIEF_GRAPH_PROJECTION_SQL)
         rows = connection.execute(_INTEGRITY_CHECK_SQL).fetchall()
     finally:
         connection.execute(_ROLLBACK_INTEGRITY_SAVEPOINT_SQL)

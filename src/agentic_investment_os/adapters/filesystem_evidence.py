@@ -28,6 +28,11 @@ from agentic_investment_os.evidence.capture import (
     parse_capture_outcome,
     validate_capture_outcome_association,
 )
+from agentic_investment_os.memory.admission import (
+    BeliefEvidenceArtifact,
+    BeliefEvidenceReference,
+    RecordRefusalCode,
+)
 
 __all__ = ("FilesystemEvidenceVault",)
 
@@ -252,6 +257,31 @@ class FilesystemEvidenceVault:
         ordered = tuple(records[key] for key in sorted(records))
         self._validate_source_bindings(ordered)
         return ordered
+
+    def resolve_belief_evidence(
+        self,
+        references: tuple[BeliefEvidenceReference, ...],
+    ) -> tuple[BeliefEvidenceArtifact, ...] | RecordRefusalCode:
+        """Resolve immutable artifact facts without exposing source content to memory."""
+        if type(references) is not tuple or any(
+            type(reference) is not BeliefEvidenceReference for reference in references
+        ):
+            return RecordRefusalCode.INVALID_EVIDENCE
+        requested = frozenset(reference.artifact_id for reference in references)
+        try:
+            records = self.stored_records()
+        except EvidencePersistenceError:
+            return RecordRefusalCode.INVALID_EVIDENCE
+        resolved = {
+            record.artifact.artifact_id: BeliefEvidenceArtifact(
+                record.artifact.artifact_id,
+                record.artifact.content_hash,
+                record.artifact.available_at,
+            )
+            for record in records
+            if record.artifact.artifact_id in requested
+        }
+        return tuple(resolved[key] for key in sorted(resolved))
 
     def validate_references(
         self,

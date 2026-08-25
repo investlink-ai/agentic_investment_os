@@ -287,37 +287,47 @@ critical_paths = [
   "domain/universe.py",
   "entrypoints/configuration.py",
   "execution/**/*.py",
+  "memory/admission.py",
+  "memory/reducer.py",
   "portfolio/**/*.py",
 ]
 safety_supporting_paths = [
   "adapters/filesystem_evidence.py",
   "adapters/recorded_evidence.py",
   "adapters/recorded_universe.py",
+  "adapters/sqlite_memory.py",
   "domain/attention.py",
   "domain/identity.py",
   "domain/temporal.py",
   "evidence/attention.py",
   "evidence/capture.py",
   "entrypoints/lifecycle.py",
+  "memory/beliefs.py",
 ]
 
 [tool.mutmut]
 source_paths = ["src"]
 only_mutate = [
   "src/agentic_investment_os/execution/__init__.py",
+  "src/agentic_investment_os/memory/admission.py",
+  "src/agentic_investment_os/memory/reducer.py",
   "src/agentic_investment_os/portfolio/__init__.py",
 ]
 pytest_add_cli_args = [
   "-o",
   "addopts=--strict-config --strict-markers -ra",
 ]
-pytest_add_cli_args_test_selection = []
+pytest_add_cli_args_test_selection = [
+  "tests/unit/test_beliefs.py",
+  "tests/contract/test_belief_event_contract.py",
+]
 mutate_only_covered_lines = false
 
 [tool.mutation_gate]
 schema_version = 1
 authority_roots = [
   "src/agentic_investment_os/execution",
+  "src/agentic_investment_os/memory",
   "src/agentic_investment_os/portfolio",
 ]
-noncritical_modules = []
+noncritical_modules = ["src/agentic_investment_os/memory/beliefs.py"]

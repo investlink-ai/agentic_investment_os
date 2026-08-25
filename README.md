@@ -20,7 +20,14 @@ network, credential, portfolio, packet, or broker authority. Canonical asset-neu
 common hashed envelopes, explicit position valuation provenance, and exact cycle-to-snapshot Status
 identity keep future variants additive without activating non-equity behavior in V0. The lifecycle
 ledger accepts one current database-wide schema, while the status projection is disposable and never
-substitutes for invalid authoritative records. Research beyond the Dossier request, portfolio,
+substitutes for invalid authoritative records. Absolute instants use canonical UTC text while Market
+Sessions retain NYSE-date meaning. A pure domain kernel owns reconstruction and transition decisions
+while SQLite validates representations and atomically appends the selected record. Evidence Capture
+publishes immutable, cutoff-bound artifacts and append-only observations to the Evidence Vault. The
+public `Record` capability appends schema-versioned, bitemporal Belief Events after resolving their
+immutable Vault references, returns bounded idempotent receipts, and deterministically rebuilds an
+explicitly bounded as-of Belief Graph with provenance and omission counts. Research beyond the Dossier
+request, portfolio,
 execution, evaluation, and later lifecycle phases remain scaffolds.
 Active repository documentation owns implementation authority, and the runtime has no dependency on
 the design's Second Brain origin.

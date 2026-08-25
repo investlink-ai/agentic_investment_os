@@ -33,6 +33,16 @@ Authoritative financial records are immutable events. Correct an error with a ne
 what it supersedes. Derived graphs, reports, and indexes may be replaced only by deterministic rebuild
 from authoritative records.
 
+## Anchor the terminal length of append-only history
+
+A hash chain proves the links that remain; by itself it cannot distinguish an intact history from a
+valid shorter prefix after coordinated suffix deletion. When missing-tail detection is required,
+retain the expected terminal position and commitment in separately governed monotonic state. Advance
+the anchor atomically from its exact predecessor only after the new record and commitment exist,
+prohibit deletion or rollback, and validate the empty and nonempty states on every reconstruction.
+Corruption tests must remove the matching suffix from both append-only relations while retaining the
+anchor and require a fail-closed result.
+
 ## Bind immutable source identities to immutable facts
 
 When an external authority assigns an immutable document identity, the first accepted content and

@@ -187,7 +187,9 @@ The implemented candidate inventory is:
 | `adapters/filesystem_evidence.py` | Non-critical Evidence Vault filesystem mechanics and append-only observation durability; integration, corruption, and coverage evidence |
 | `adapters/recorded_evidence.py` | Non-critical recorded-boundary validation and normalization; contract, hostile-input, and coverage evidence |
 | `adapters/sqlite_lifecycle.py` | Non-critical SQL mechanics and non-authorizing lifecycle durability; integration, corruption, architecture, and coverage evidence |
+| `adapters/sqlite_memory.py` | Non-critical belief SQL mechanics and authoritative-history validation; integration, concurrency, corruption, and coverage evidence |
 | `application/lifecycle.py` | Non-critical orchestration through evidence capture and bounded attention; unit, integration, system-journey, and coverage evidence |
+| `application/memory.py` | Non-critical Record orchestration; integration, system-journey, and coverage evidence |
 | `domain/attention.py` | Safety-supporting, non-authorizing admission to bounded research capacity with no stance, sizing, packet, order, or execution effect; unit, property, integration, hostile-input, and coverage evidence |
 | `domain/identity.py` | Non-critical current identity serialization with no implemented packet or broker effect; unit, property, contract, and coverage evidence |
 | `domain/lifecycle.py` | Non-authorizing lifecycle, evidence-intent, and reconstruction decisions; unit, state-machine, integration, corruption, and coverage evidence |
@@ -197,18 +199,24 @@ The implemented candidate inventory is:
 | `evidence/attention.py` | Safety-supporting derivation of approved local attention features from exact captured evidence; unit, integration, corruption, and coverage evidence |
 | `entrypoints/configuration.py` | Non-critical configuration parsing; integration, hostile-input, and coverage evidence |
 | `entrypoints/lifecycle.py` | Non-critical composition; integration, system-journey, architecture, and coverage evidence |
+| `entrypoints/memory.py` | Non-critical Record composition; integration, system-journey, architecture, and coverage evidence |
+| `memory/admission.py` | Critical canonical Belief Event types, hostile-input parsing, serialization, and evidence admission; unit, contract, refusal, and mutation evidence |
+| `memory/beliefs.py` | Non-critical typed belief history, receipt, and bounded as-of graph projection; unit, property, contract, integration, corruption, and coverage evidence |
+| `memory/reducer.py` | Critical append-only belief-transition reducer, projection identity, and ledger commitment; unit, property, refusal, and mutation evidence |
 | `domain/__init__.py` | Non-critical package scaffold with no callable |
 | `execution/__init__.py`, `portfolio/__init__.py` | Critical-authority package scaffolds with no callable; explicit mutation scaffold exemption |
 
 `tool.mutmut.only_mutate` is the single static mutation source allowlist. It contains exact implemented
 critical module paths, never package globs or an engine exclusion list. `source_paths = ["src"]` is only
-the engine's copy root and confers no mutation scope. The current exact entries are the empty
-`execution` and `portfolio` initializers; they bound direct diagnostic runs without claiming that a
-critical callable exists. The separate `tool.mutation_gate` inventory names the authority-owning
-capability roots and any callable module a human has classified as non-critical; it never adds or
-removes a mutation source. A callable below those roots that appears in neither exact classification
-fails the gate, so the scaffold exemption cannot hide a new module while classification remains
-consequence-based rather than inferred from its path.
+the engine's copy root and confers no mutation scope. The current exact entries are the critical
+`memory/admission.py` and `memory/reducer.py` kernels and the empty `execution` and `portfolio`
+initializers. Their exact test selection is `tests/unit/test_beliefs.py` and
+`tests/contract/test_belief_event_contract.py`; the scaffold files add no unrelated tests. The separate
+`tool.mutation_gate` inventory names the authority-owning capability roots and any callable module a
+human has classified as non-critical; it never adds or removes a mutation source. A callable below
+those roots that appears in neither exact classification fails the gate, so a scaffold exemption
+cannot hide a new module while classification remains consequence-based rather than inferred from its
+path.
 
 Adding the first critical callable adds its exact module and its owning unit or property test files in
 the same change. `pytest_add_cli_args_test_selection` contains exact test files, not whole test tiers;
@@ -262,11 +270,15 @@ evidence. A scenario becomes mandatory when its owning behavior is implemented.
   after each durable write.
 - One Market Session has exactly one Champion Decision Record and at most one active packet.
 - Repeated Record calls do not duplicate Outcome Observations.
+- Repeated Belief Event delivery returns the original bounded receipt without another ledger row;
+  this remains true after reopen and a current-clock regression. Changed material under the same event
+  identity and invalid stream transitions fail closed.
 - Constitution, model, prompt, tool, policy, data, and source hashes remain pinned within a run.
 - Universe snapshots retain every current position by canonical instrument identity, apply the
   versioned structural and threshold policy at the pinned cutoff, and fail closed on partial, stale,
   contradictory, mixed-variant, or changed retry inputs.
-- Corrupted projections rebuild deterministically; corrupted authoritative ledgers fail closed.
+- Corrupted projections rebuild deterministically; corrupted authoritative ledgers fail closed,
+  including when matching event and commitment suffixes are removed together.
 - Lifecycle records persist one fixed-width UTC timestamp representation; retry, reopen, and
   reconstruction preserve it independently of the clock's supplied offset or the host timezone.
 - SQLite startup atomically initializes the one current schema or validates that exact current shape.
@@ -330,7 +342,12 @@ evidence. A scenario becomes mandatory when its owning behavior is implemented.
   cannot leak future information into an as-of read; mapping availability participates in the derived
   evidence availability.
 - Belief transitions preserve prior values, evidence, falsifiers, and contradiction history.
-- Belief Graph rebuild produces the same as-of projection from the Evidence Vault and Belief Ledger.
+- Belief Graph rebuild produces the same as-of projection from validated Evidence Vault facts and the
+  append-only Belief Ledger after retry, reopen, process interruption, or projection corruption.
+- Belief Graph queries require explicit canonical subjects, valid and transaction-time cutoffs, and
+  belief and evidence caps. Stable history and bounds reproduce the same hash, selected nodes, edges,
+  provenance, and omission counts; corrupt history, missing or changed artifacts, and evidence first
+  available after an event cutoff return bounded refusals without stale projection data.
 - Attention caps, holding refresh, and weekly exploration budgets remain invariant as universe size
   and ordering change. Identical pinned retry and reopen preserve cards, transitions, selections,
   counts, and artifact identifiers without duplicate authoritative rows. Hostile tests reject policy
