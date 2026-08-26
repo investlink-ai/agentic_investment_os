@@ -54,6 +54,7 @@ Git hooks. Dependencies live only in `pyproject.toml` and `uv.lock`.
 - `CONTEXT.md`: canonical investment-system terminology
 - `docs/product-requirements.md`: V0 outcomes, scope, acceptance, and implementation order
 - `docs/architecture.md`: system topology, module seams, lifecycle, authority, and durable state
+- `docs/threat-model.md`: material threats, control coverage, verification, and residual risk
 - `docs/investment-domain.md`: evidence, research, memory, portfolio, execution, and evaluation rules
 - `docs/config-catalog.md`: implemented configuration sources and ownership
 - `docs/defensive-patterns.md`: reusable prevention rules for high-risk bug classes

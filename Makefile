@@ -58,6 +58,7 @@ harness:
 	test -f docs/product-requirements.md
 	test -f docs/testing.md
 	test -f docs/module-graph.md
+	test -f docs/threat-model.md
 	test ! -e docs/SPEC.md
 	test ! -d docs/archive
 	test ! -e pytest.ini

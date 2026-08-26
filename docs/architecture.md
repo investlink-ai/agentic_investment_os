@@ -9,6 +9,9 @@ Investment rules, outcomes, import edges, runtime values, tests, and rationale l
 [module graph](module-graph.md), [configuration catalog](config-catalog.md), [testing](testing.md),
 and [ADRs](adr/README.md).
 
+The [threat model](threat-model.md) owns material threat enumeration, control coverage, and residual
+risk without changing the contracts declared here.
+
 ## Architectural spine
 
 The system is a local Python modular monolith with three process and trust seams:
