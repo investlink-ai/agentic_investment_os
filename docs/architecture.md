@@ -154,7 +154,7 @@ sequenceDiagram
     Broker-->>Executor: Observation or ambiguous timeout
     Executor->>ExStore: Append independent observations and receipt
     Executor-->>OS: OutcomeBatch
-    OS->>OSStore: Append outcomes; preserve original decision
+    OS->>OSStore: Append outcomes without changing original decision
 ```
 
 Each external effect has a durable intent and effect-local idempotency identity before invocation;
