@@ -24,6 +24,11 @@ Capabilities expose lifecycle outcomes, not internal stages; evidence, beliefs, 
 outcomes remain append-only and reconstructable. Deterministic code alone owns portfolio, risk,
 packet, order, and reconciliation decisions; invalid required state produces a durable refusal.
 
+Navigate by [topology and trust](#system-topology), [authority and effects](#authority-and-trust),
+[module and capability seams](#module-ownership), [lifecycle](#session-lifecycle),
+[durable state](#durable-state), [time and configuration](#temporal-semantics), and
+[multi-asset compatibility](#multi-asset-extension-constraint).
+
 ## System topology
 
 ```mermaid
@@ -124,11 +129,11 @@ owns the enforcement trade-off.
 sequenceDiagram
     actor Operator
     participant OS as Investment OS
-    participant OSStore as OS Store
+    participant OSStore as OS Persistence Port / Adapter
     participant Model as Model Port
     participant Risk as Deterministic Portfolio
     participant Executor
-    participant ExStore as Executor Store
+    participant ExStore as Executor Persistence Port / Adapter
     participant Broker as Broker Port
 
     Operator->>OS: Advance(cycle, mode, idempotency key)
@@ -139,8 +144,9 @@ sequenceDiagram
     OS->>Risk: Validated HouseView and market/risk inputs
     Risk-->>OS: Risk-clamped packet candidate
     OS->>OSStore: Append decision and atomically publish packet
-    Executor->>ExStore: Load packet and persist order intent
-    Executor->>Executor: Revalidate scope, expiry, account, risk
+    Executor->>ExStore: Load published packet
+    Executor->>Executor: Revalidate signature, scope, expiry, account, risk
+    Executor->>ExStore: Persist effect-local order intent
     Executor->>Broker: Submit stable client order identity
     Broker-->>Executor: Observation or ambiguous timeout
     Executor->>ExStore: Append independent observations and receipt
@@ -233,8 +239,9 @@ stateDiagram-v2
   reconciliation state cannot be validated.
 - `PinRunInputs` fixes the cycle, Constitution, configuration, Data Regime, Evidence Cutoff, universe,
   positions, and material policy. Changed retry material conflicts before further work.
-- A new stream selects governance for its eligible session; an existing stream preserves the
-  governance prefix visible at its first event. Missing or invalid proofs fail closed.
+- A new stream selects governance at its exact eligible session; an existing stream preserves the
+  governance prefix visible at its first event. Missed activation boundaries, invalid approval proof,
+  or unresolved lifecycle-to-Constitution references fail closed.
 - `SnapshotUniverse` publishes canonical inputs once. Later phases reuse those exact pins and
   identities rather than ambient state.
 - `NoAction` is an expected durable outcome; `FailedClosed` records why progress is unsafe. Neither
@@ -260,9 +267,12 @@ stateDiagram-v2
   changed material under the same identity conflicts. Mutable aliases never become durable keys.
 - Every model-visible input and material decision is reconstructable as of its pinned cutoff.
   Availability, not source-event time alone, gates evidence; projections never authorize behavior.
-- Ledgers validate relevant history before replay or append. The belief anchor advances atomically
-  with each append and must equal the complete chain terminal. Governance time is monotonic, and a
-  lifecycle Constitution use in the same append transaction.
+- Ledgers validate relevant history before replay or append. The singleton belief anchor starts at
+  position one, advances atomically by exactly one from its exact predecessor, cannot be deleted or
+  rolled back, and must equal the complete chain terminal.
+- Governance time is monotonic. Scheduling or activation validates candidate governance history
+  against every lifecycle Constitution use in the same append transaction, so a new regime cannot
+  invalidate an earlier or interrupted run.
 - Effects preserve intent and observation independently; ambiguous effects remain indeterminate until
   reconciliation. SQLite initializes or validates one exact current physical schema; other non-empty
   shapes fail before writes. [ADR 0004](adr/0004-require-current-sqlite-schema.md) owns that decision.
@@ -296,11 +306,12 @@ research, portfolio, risk, data, or execution authority.
 | --- | --- |
 | Public lifecycle results, provenance envelopes, append-only events, packet integrity, effect identity, receipts, reconstruction | Instrument identity and terms, schedule and lifecycle policy, quantities and units, order constraints, activities and settlement |
 
-`MarketSession` is the only current cycle. A future crypto window owns UTC-bounded 24/7 scheduling;
-option exercise, assignment, and expiration remain reconciliation facts. Durable instrument identity
-combines a canonical asset discriminator with provider-and-environment catalog identity. Symbols and
-provider enums are aliases, never keys. Adapters prove one-to-one mapping at the pinned cutoff;
-variants carry exact units and reject unrelated nullable fields, unknown variants, or disabled classes.
+`MarketSession` is the only current cycle. A future crypto window owns UTC-bounded 24/7 scheduling and
+may exist when the equity planner has no eligible session; option exercise, assignment, and expiration
+remain reconciliation facts. Durable instrument identity combines a canonical asset discriminator
+with provider-and-environment catalog identity. Symbols and provider enums are aliases, never keys.
+Adapters prove one-to-one mapping at the pinned cutoff; variants carry exact units and reject unrelated
+nullable fields, unknown variants, or disabled classes.
 
 Universe and position snapshots pin identity, cutoff, availability, Data Regime, authority, source,
 hash, quantity, unit, and valuation provenance. Entry eligibility differs from holding refresh; a
