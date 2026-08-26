@@ -498,6 +498,26 @@ evidence. A scenario becomes mandatory when its owning behavior is implemented.
   instead asserts exactly its permitted bounded refusal under the configured runtime-state root; a
   configuration refusal before state-root preparation asserts no filesystem change.
 
+## Documentation link integrity
+
+`make harness` runs `scripts.check_markdown_links` and its focused integration fixtures. The checker
+enumerates tracked repository files with Git, then inspects every tracked Markdown source for the
+repository's supported inline links and image destinations. It validates same-file, cross-file, and
+parent-relative local targets. A local target must remain inside the repository, be tracked, and exist
+in the worktree. A fragment on a Markdown target must match its GitHub-style ATX heading identifier,
+including the numeric suffix assigned to a duplicate heading. Tracked source and target symlinks may
+resolve within the repository; resolution outside its canonical root or an unresolvable symlink cycle
+fails with a bounded diagnostic before the checker reads the file.
+
+The checker ignores fenced and inline code plus destinations with an external URI scheme; it performs
+no network or external-site availability check. Its parser is deliberately not a general Markdown or
+GitHub renderer. Empty destinations or fragments, absolute and escaping paths, query parameters,
+malformed percent encoding, whitespace-bearing destinations, untracked or missing targets, and stale
+heading fragments fail with repository-relative source locations. At most twenty diagnostics are
+printed before one omission count. This gate proves local navigability within the supported syntax;
+it does not prove that link labels, external content, or the surrounding prose are semantically
+correct.
+
 ## Project skill catalog
 
 Project skill frontmatter is routing metadata, not a duplicate workflow contract. Every

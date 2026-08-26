@@ -12,6 +12,8 @@ repository owns implementation authority, executable code, and runtime state.
   changing evidence, research, belief, portfolio, execution-policy, evaluation, or learning rules.
 - Read `docs/architecture.md` before changing runtime topology, module seams, lifecycle, authority,
   durable state, or trust boundaries; record durable architecture decisions in `docs/adr/`.
+- Read `docs/threat-model.md` before changing a trust seam, hostile-input admission, model or tool
+  capability, credential flow, authoritative persistence, filesystem root, packet, or broker effect.
 - Search relevant `.agents/notes/implemented/` and `.agents/notes/proposed/` records before planning or
   reviewing a feature, simplification, testing strategy, bug-prevention rule, or development-process
   change. Notes preserve reasoning but never override active documents, ADRs, or code.
@@ -137,8 +139,9 @@ details in the relevant ADR or issue rather than in the pattern.
   with a concise imperative summary; omit boilerplate that restates the signature or implementation.
 - Documentation authority is explicit: product outcomes live in `docs/product-requirements.md`,
   investment rules in `docs/investment-domain.md`, architecture in `docs/architecture.md`, canonical
-  terms in `CONTEXT.md`, operational testing in `docs/testing.md`, hard-to-reverse rationale in ADRs,
-  and lower-threshold decision reasoning in Agent Notes. Issues own work state.
+  terms in `CONTEXT.md`, material threat analysis in `docs/threat-model.md`, operational testing in
+  `docs/testing.md`, hard-to-reverse rationale in ADRs, and lower-threshold decision reasoning in
+  Agent Notes. Issues own work state.
 - Update affected documentation with the code change. Keep each fact in one authoritative location
   and link to it elsewhere.
 - Use Git history for superseded documentation; keep no archive copies in the working tree.

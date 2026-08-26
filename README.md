@@ -10,34 +10,26 @@ isolated Research Lab.
 
 ## Status
 
-Stage 2 implements `Advance` through durable `SnapshotUniverse`, `CaptureEvidence`, and
-`SelectAttention` checkpoints, with rebuildable operator `Status` over validated append-only SQLite
-lifecycle history. The zero-token attention scan publishes at most twenty reconstructable Candidate
-Cards and five new Dossier requests, reserves a pinned weekly exploration share, and refreshes every
-retained holding outside that research cap. Exact evidence and policy fingerprints bind the artifact;
-retry and reopen reproduce its identifiers, counts, transitions, and refusal reasons without model,
-network, credential, portfolio, packet, or broker authority. Canonical asset-neutral identities,
-common hashed envelopes, explicit position valuation provenance, and exact cycle-to-snapshot Status
-identity keep future variants additive without activating non-equity behavior in V0. The lifecycle
-ledger accepts one current database-wide schema, while the status projection is disposable and never
-substitutes for invalid authoritative records. Absolute instants use canonical UTC text while Market
-Sessions retain NYSE-date meaning. A pure domain kernel owns reconstruction and transition decisions
-while SQLite validates representations and atomically appends the selected record. Evidence Capture
-publishes immutable, cutoff-bound artifacts and append-only observations to the Evidence Vault. The
-public `Record` capability appends schema-versioned, bitemporal Belief Events after resolving their
-immutable Vault references, returns bounded idempotent receipts, and deterministically rebuilds an
-explicitly bounded as-of Belief Graph with provenance and omission counts. Stage 3 adds operator-only
-`Govern` for immutable, signed Constitution amendments scheduled at an exact future Market Session.
-Advance resolves and pins one Constitution version and content hash before universe, evidence,
-attention, or model work; Status rebuilds active, pending, superseded, refused, and conflicting
-governance state. The isolated Research Lab exposes `Replay` for stateless model calls over copied or
-synthetic inputs. It can validate a cited non-production Dossier, then run Thesis Builder,
-clean-context Independent Skeptic, Scenario Forecaster, and CIO resolution with a separate durable
-identity and pinned context for every role. Completed calls replay without another effect; an
-interrupted unobserved effect, changed retry material, unsupported claim, invalid forecast, prohibited
-sizing or execution directive, timeout, or quota exhaustion fails closed without a network or metered
-fallback. Production research, portfolio, execution, evaluation, and remaining lifecycle phases
-remain scaffolds.
+| Surface | Delivery state | Code owner | Verification surface |
+| --- | --- | --- | --- |
+| Production lifecycle, evidence, and attention | **Implemented:** `Advance` persists `SnapshotUniverse`, `CaptureEvidence`, and `SelectAttention`; `Status` rebuilds from authoritative history | `application`, `domain`, `evidence`, `adapters` | [Lifecycle journey](tests/integration/system/test_lifecycle_journey.py), [attention lifecycle](tests/integration/test_attention_lifecycle.py) |
+| Belief memory | **Implemented:** `Record` appends evidence-bound Belief Events and rebuilds bounded as-of Belief Graphs | `application`, `memory`, `adapters` | [Belief journey](tests/integration/system/test_belief_record_journey.py), [Belief Event contract](tests/contract/test_belief_event_contract.py) |
+| Constitution governance | **Implemented:** operator-only `Govern` schedules signed amendments; `Advance` pins the active version before work | `application`, `domain`, `adapters`, `entrypoints` | [Governance integration](tests/integration/test_constitution_governance.py), [governance contract](tests/contract/test_constitution_governance.py) |
+| Isolated Research Lab | **Implemented:** `Replay` validates a non-production Dossier and runs Thesis, Skeptic, Scenario, and CIO roles | `application`, `research`, `adapters`, `entrypoints` | [Resolution journey](tests/integration/system/test_research_lab_resolution_journey.py), [model contract](tests/contract/test_research_lab_model.py) |
+| Production research, portfolio, execution, evaluation, and later lifecycle phases | **Scaffolded:** accepted contracts exist, but production behavior and composition are not enabled | `research`, `portfolio`, `execution`, `evaluation`, `application` | No production behavior gate yet; [stage acceptance](docs/product-requirements.md) remains authoritative |
+| Crypto spot and listed options | **Reserved and disabled:** shared typed contracts exist; V0 composition remains US-equity-only | `domain`, `entrypoints` | [Identity unit tests](tests/unit/test_identity.py), [runtime configuration](tests/integration/test_runtime_configuration.py) |
+
+Implemented production retries reproduce durable identities, transitions, bounded refusals, and
+pinned evidence, policy, governance, and time provenance without widening model or broker authority.
+The attention scan admits at most twenty Candidate Cards and five new Dossier requests, while retained
+holdings are refreshed outside that research cap. Authoritative records are append-only; projections
+remain disposable and rebuildable.
+
+Research Lab calls use copied or synthetic inputs and a separate durable namespace. A completed call
+replays without another effect; an unobserved prior effect, changed retry material, invalid artifact,
+prohibited authority, timeout, or quota exhaustion fails closed without a network or metered fallback.
+Implemented Lab behavior does not activate production research.
+
 Active repository documentation owns implementation authority, and the runtime has no dependency on
 the design's Second Brain origin.
 
@@ -62,6 +54,7 @@ Git hooks. Dependencies live only in `pyproject.toml` and `uv.lock`.
 - `CONTEXT.md`: canonical investment-system terminology
 - `docs/product-requirements.md`: V0 outcomes, scope, acceptance, and implementation order
 - `docs/architecture.md`: system topology, module seams, lifecycle, authority, and durable state
+- `docs/threat-model.md`: material threats, control coverage, verification, and residual risk
 - `docs/investment-domain.md`: evidence, research, memory, portfolio, execution, and evaluation rules
 - `docs/config-catalog.md`: implemented configuration sources and ownership
 - `docs/defensive-patterns.md`: reusable prevention rules for high-risk bug classes
