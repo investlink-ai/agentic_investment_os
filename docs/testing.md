@@ -407,11 +407,13 @@ evidence. A scenario becomes mandatory when its owning behavior is implemented.
 - Every production role records intent before the model effect and one validated observation or
   bounded refusal afterward. Interruption after the intent of each of the five roles leaves an
   indeterminate call that retry resolves with a durable typed observation without repeating the
-  effect. Completed calls replay independently; token and turn totals and call and artifact IDs enter
-  lifecycle checkpoints. `Status` revalidates exact stored inputs, re-derives every response-backed
-  disposition and artifact from the retained response, binds failed observations to lifecycle refusal
-  identities, and validates every checkpoint reference; mutation or removal of referenced production
-  rows fails closed.
+  effect. The observation keeps bounded raw identity and safe reported adapter metadata separate from
+  its validated result; malformed or out-of-range metadata becomes a durable adapter refusal without
+  inventing effect facts. Completed calls replay independently; token and turn totals and call and
+  artifact IDs enter lifecycle checkpoints. `Status` revalidates exact stored inputs, re-derives every
+  response-backed disposition and artifact from the retained response, binds failed observations to
+  lifecycle refusal identities, and validates every checkpoint reference; mutation or removal of
+  referenced production rows fails closed.
 - Production malformed JSON, oversized output, timeout, quota exhaustion, output-token overflow,
   turn overflow, citation failure, missing official evidence, over-bound evidence, evidence failure,
   and memory refusal are durable failures with no model-service substitution and no invalid Belief

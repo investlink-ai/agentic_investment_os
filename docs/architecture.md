@@ -287,12 +287,14 @@ stateDiagram-v2
   request, exact role input, Constitution, cutoff, Data Regime, research-policy fingerprint, prompt,
   model, reasoning, inert tools, material hashes, and resource bounds before the effect. An intent
   without an observation is indeterminate; reopen appends a typed terminal indeterminate observation
-  and never calls the model again automatically. Lifecycle research checkpoints retain call IDs,
-  artifact IDs, tokens, and turns; `Status` revalidates the exact Attention-owned evidence set and the
-  model ledger by re-parsing every retained response, binds each failed observation to its lifecycle
-  refusal, proves exact phase ownership and resource totals, and proves every checkpoint and memory
-  reference still resolves. SQLite initializes or validates one exact current physical schema; other
-  non-empty shapes fail before writes.
+  and never calls the model again automatically. The observation preserves the bounded raw-response
+  identity, safely representable reported metadata, per-field validation results, and the separately
+  derived research disposition. Lifecycle research checkpoints retain call IDs, artifact IDs, tokens,
+  and turns; `Status` revalidates the exact Attention-owned evidence set and the model ledger by
+  re-parsing every retained response, binds each failed observation to its lifecycle refusal, proves
+  exact phase ownership and resource totals, and proves every checkpoint and memory reference still
+  resolves. SQLite initializes or validates one exact current physical schema; other non-empty shapes
+  fail before writes.
   [ADR 0004](adr/0004-require-current-sqlite-schema.md) owns that decision. Runtime stores use explicit
   ignored roots; source directories never hold runtime state.
 

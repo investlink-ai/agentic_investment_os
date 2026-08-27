@@ -60,6 +60,7 @@ from agentic_investment_os.research.model import (
 from agentic_investment_os.research.production import (
     ProductionCallIntent,
     ProductionCallPreparation,
+    ProductionModelResponseRecord,
     ProductionResearchEvidence,
     production_call_refusal_identity,
     production_response_disposition,
@@ -177,17 +178,18 @@ class SQLiteProductionCallLedger:
         self,
         intent: ProductionCallIntent,
         observation: LabCallObservation,
-        model_disposition: ModelCallDisposition,
+        response_record: ProductionModelResponseRecord,
         recorded_at: UtcInstant,
     ) -> LabCallObservation:
         observation.__post_init__()
-        if type(model_disposition) is not ModelCallDisposition or not observation_matches_role(
-            observation, intent.role
-        ):
+        response_record.__post_init__()
+        normalized_response = response_record.normalized_response()
+        if not observation_matches_role(observation, intent.role):
             raise LifecyclePersistenceError(_WRITE_FAILED)
         observation_payload = observation.to_payload()
         observation_payload["record_kind"] = "production_research_call_observation"
-        observation_payload["model_disposition"] = model_disposition.value
+        observation_payload["model_disposition"] = normalized_response.disposition.value
+        observation_payload["reported_response"] = response_record.to_payload()
         observation_json = _canonical_json(observation_payload)
         observation_hash = hashlib.sha256(observation_json.encode()).hexdigest()
         try:
@@ -196,7 +198,10 @@ class SQLiteProductionCallLedger:
                 self._require_intent(connection, intent)
                 prior = self._load_observation(connection, intent)
                 if prior is not None:
-                    if prior != (observation, model_disposition):
+                    if (
+                        prior[0] != observation
+                        or prior[1].to_payload() != response_record.to_payload()
+                    ):
                         raise LifecyclePersistenceError(_CORRUPT)
                     return prior[0]
                 connection.execute(
@@ -206,7 +211,7 @@ class SQLiteProductionCallLedger:
                     (
                         intent.call_id,
                         observation_json,
-                        observation.raw_response,
+                        response_record.persisted_raw_response,
                         observation_hash,
                         recorded_at.isoformat(),
                     ),
@@ -459,7 +464,7 @@ class SQLiteProductionCallLedger:
         self,
         connection: sqlite3.Connection,
         intent: ProductionCallIntent,
-    ) -> tuple[LabCallObservation, ModelCallDisposition] | None:
+    ) -> tuple[LabCallObservation, ProductionModelResponseRecord] | None:
         row = connection.execute(
             "SELECT observation_json, raw_response, observation_hash, recorded_at "
             "FROM production_research_call_observations WHERE call_id = ?",
@@ -660,7 +665,7 @@ def _parse_intent_row(row: tuple[object, ...]) -> ProductionCallIntent:
     try:
         role = ResearchRole(role_value)
         payload = json.loads(intent_json)
-    except (ValueError, json.JSONDecodeError) as error:
+    except (ValueError, RecursionError) as error:
         raise LifecyclePersistenceError(_CORRUPT) from error
     intent = _parse_intent_payload(payload)
     if (
@@ -752,15 +757,15 @@ def _canonical_instant(value: object) -> UtcInstant:
     return instant
 
 
-def _parse_observation(
+def _parse_observation(  # noqa: PLR0912 - validate every hostile record field locally.
     observation_json: str,
     raw_response: bytes | None,
     intent: ProductionCallIntent,
     configuration: ModelConfiguration,
-) -> tuple[LabCallObservation, ModelCallDisposition]:
+) -> tuple[LabCallObservation, ProductionModelResponseRecord]:
     try:
         fields = json.loads(observation_json)
-    except json.JSONDecodeError as error:
+    except (ValueError, RecursionError) as error:
         raise LifecyclePersistenceError(_CORRUPT) from error
     required = {
         "schema_version",
@@ -768,6 +773,7 @@ def _parse_observation(
         "call_id",
         "disposition",
         "model_disposition",
+        "reported_response",
         "raw_response_hash",
         "raw_response_retained",
         "exposed_model_identity",
@@ -793,11 +799,21 @@ def _parse_observation(
         timing = ModelTimingDisposition(fields["timing_disposition"])
     except (TypeError, ValueError) as error:
         raise LifecyclePersistenceError(_CORRUPT) from error
+    response_record = ProductionModelResponseRecord.parse(
+        fields["reported_response"],
+        raw_response,
+    )
+    if response_record is None:
+        raise LifecyclePersistenceError(_CORRUPT)
+    normalized_response = response_record.normalized_response()
     raw_hash = fields["raw_response_hash"]
     retained = fields["raw_response_retained"]
     if (
         type(retained) is not bool
         or retained != (raw_response is not None)
+        or response_record.raw_response_hash != raw_hash
+        or response_record.raw_response_retained is not retained
+        or normalized_response.disposition is not model_disposition
         or (raw_hash is not None and not is_sha256(raw_hash))
         or (
             raw_response is not None
@@ -844,6 +860,15 @@ def _parse_observation(
         raise LifecyclePersistenceError(_CORRUPT) from error
     if not observation_matches_role(observation, intent.role):
         raise LifecyclePersistenceError(_CORRUPT)
+    if (
+        observation.exposed_model_identity != normalized_response.exposed_model_identity
+        or observation.input_tokens != normalized_response.input_tokens
+        or observation.output_tokens != normalized_response.output_tokens
+        or observation.turns != normalized_response.turns
+        or observation.elapsed_milliseconds != normalized_response.elapsed_milliseconds
+        or observation.timing_disposition is not normalized_response.timing_disposition
+    ):
+        raise LifecyclePersistenceError(_CORRUPT)
     if raw_response is not None:
         expected_disposition, expected_artifact, expected_refusal = (
             _rederive_response_backed_observation(
@@ -870,7 +895,7 @@ def _parse_observation(
         )
         if observation.disposition is not expected_disposition:
             raise LifecyclePersistenceError(_CORRUPT)
-    return observation, model_disposition
+    return observation, response_record
 
 
 def _rederive_response_backed_observation(
@@ -907,7 +932,7 @@ def _rederive_response_backed_observation(
     try:
         decoded = json.loads(raw_response.decode())
         artifact, refusal = _parse_raw_role_output(decoded, intent)
-    except (UnicodeDecodeError, json.JSONDecodeError, RecursionError):
+    except (UnicodeDecodeError, ValueError, RecursionError):
         return LabObservationDisposition.INVALID_JSON, None, None
     if artifact is not None:
         return LabObservationDisposition.VALIDATED, artifact, None
@@ -1171,6 +1196,6 @@ def _canonical_json(value: object) -> str:
 def _is_canonical_json(value: str) -> bool:
     try:
         parsed = json.loads(value)
-    except json.JSONDecodeError:
+        return _canonical_json(parsed) == value
+    except (ValueError, RecursionError):
         return False
-    return _canonical_json(parsed) == value

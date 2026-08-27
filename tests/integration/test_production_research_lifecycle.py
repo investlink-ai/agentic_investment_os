@@ -85,6 +85,7 @@ EXPECTED_RESOLUTION_ARTIFACTS = 8
 EXPECTED_NO_THESIS_CALLS = 2
 EXPECTED_INVALID_THESIS_CALLS = 2
 DEEP_JSON_RESPONSE = b"[" * 1_200 + b"0" + b"]" * 1_200
+LARGE_INTEGER_JSON_RESPONSE = b'{"value":' + b"9" * 5_000 + b"}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -630,6 +631,15 @@ def test_status_rejects_corrupt_structured_research_refusal(
         (
             RecordedModelFixture(
                 ModelCallDisposition.RESPONDED,
+                LARGE_INTEGER_JSON_RESPONSE,
+                MODEL_IDENTITY,
+            ),
+            LabObservationDisposition.INVALID_JSON,
+            ModelCallDisposition.RESPONDED,
+        ),
+        (
+            RecordedModelFixture(
+                ModelCallDisposition.RESPONDED,
                 b"{" + b"x" * MAXIMUM_MODEL_OUTPUT_BYTES,
                 MODEL_IDENTITY,
             ),
@@ -740,12 +750,54 @@ def test_production_research_resource_or_boundary_failure_stops_before_memory(
         observation = json.loads(observation_json)
         assert observation["disposition"] == expected_disposition.value
         assert observation["model_disposition"] == expected_model_disposition.value
+        reported = observation["reported_response"]
+        assert reported["disposition"] == fixture.disposition.value
+        assert reported["exposed_model_identity"] == fixture.exposed_model_identity
+        assert reported["metadata_valid"] is (expected_model_disposition is fixture.disposition)
         assert connection.execute("SELECT COUNT(*) FROM belief_events").fetchone() == (0,)
     if expected_disposition is LabObservationDisposition.OVERSIZED_OUTPUT:
         assert raw_response is None
     status = _configured_status(state_root)()
     assert status.liveness is LifecycleLiveness.FAILED_CLOSED
     assert status.durable_reason is AdvanceFailureReason.RESEARCH_FAILED
+
+
+def test_production_research_bounds_unpersistable_model_resource_metadata(
+    tmp_path: Path,
+) -> None:
+    state_root = tmp_path / "runtime"
+    model = RecordedResearchModel(
+        (
+            RecordedModelFixture(
+                ModelCallDisposition.RESPONDED,
+                b"{}",
+                MODEL_IDENTITY,
+                input_tokens=10**5_000,
+            ),
+        )
+    )
+    capability = _configure(state_root, universe=recorded_universe(), model=model)
+
+    receipt = _advance(capability, "stage-three-unbounded-resource-metadata")
+
+    assert receipt.failure_reason is AdvanceFailureReason.RESEARCH_FAILED
+    with sqlite3.connect(state_root / "lifecycle.sqlite3") as connection:
+        row = connection.execute(
+            "SELECT observation_json, raw_response FROM production_research_call_observations"
+        ).fetchone()
+    assert row is not None
+    observation = json.loads(row[0])
+    reported = observation["reported_response"]
+    assert observation["disposition"] == LabObservationDisposition.ADAPTER_REFUSED.value
+    assert observation["model_disposition"] == ModelCallDisposition.REFUSED.value
+    assert observation["raw_response_hash"] == hashlib.sha256(b"{}").hexdigest()
+    assert row[1] == b"{}"
+    assert reported["metadata_valid"] is False
+    assert reported["input_tokens_valid"] is False
+    assert reported["input_tokens"] is None
+    assert reported["disposition"] == ModelCallDisposition.RESPONDED.value
+    status = _configured_status(state_root)()
+    assert status.liveness is LifecycleLiveness.FAILED_CLOSED
 
 
 @pytest.mark.parametrize("role", tuple(ResearchRole))
@@ -1276,6 +1328,46 @@ def test_status_rederives_observation_content_timing_and_discriminator(
         status()
 
 
+def test_status_translates_unparseable_durable_integer_to_history_corruption(
+    tmp_path: Path,
+) -> None:
+    state_root = tmp_path / "runtime"
+    _, status = _complete_research(state_root)
+    database = state_root / "lifecycle.sqlite3"
+    with sqlite3.connect(database) as connection:
+        row = connection.execute(
+            "SELECT call_id, observation_json FROM production_research_call_observations "
+            "ORDER BY call_id LIMIT 1"
+        ).fetchone()
+        assert row is not None
+        observation_json = row[1]
+        assert isinstance(observation_json, str)
+        corrupted_json = observation_json.replace(
+            '"input_tokens":100',
+            '"input_tokens":' + "9" * 5_000,
+            1,
+        )
+        assert corrupted_json != observation_json
+        connection.execute(
+            "DROP TRIGGER production_research_call_observations_are_append_only_update"
+        )
+        connection.execute(
+            "UPDATE production_research_call_observations "
+            "SET observation_json = ?, observation_hash = ? WHERE call_id = ?",
+            (
+                corrupted_json,
+                hashlib.sha256(corrupted_json.encode()).hexdigest(),
+                row[0],
+            ),
+        )
+
+    with pytest.raises(
+        LifecyclePersistenceError,
+        match="invalid production research call history",
+    ):
+        status()
+
+
 @pytest.mark.parametrize("corruption", ["stored_disposition", "coherent_failure_identity"])
 def test_status_rederives_failed_response_and_binds_its_refusal_identity(
     tmp_path: Path,
@@ -1442,3 +1534,7 @@ def test_invalid_response_timing_is_normalized_to_bounded_adapter_refusal(
     assert observation["disposition"] == LabObservationDisposition.ADAPTER_REFUSED.value
     assert observation["model_disposition"] == ModelCallDisposition.REFUSED.value
     assert observation["timing_disposition"] == ModelTimingDisposition.UNAVAILABLE.value
+    reported = observation["reported_response"]
+    assert reported["metadata_valid"] is False
+    assert reported["disposition"] == ModelCallDisposition.RESPONDED.value
+    assert reported["timing_disposition"] == ModelTimingDisposition.TIMED_OUT.value

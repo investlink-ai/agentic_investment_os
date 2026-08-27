@@ -62,6 +62,7 @@ __all__ = (
     "ProductionCallIntent",
     "ProductionCallLedger",
     "ProductionCallPreparation",
+    "ProductionModelResponseRecord",
     "ProductionResearch",
     "ProductionResearchBuild",
     "ProductionResearchContext",
@@ -77,6 +78,8 @@ __all__ = (
 _INVALID_INTENT = "invalid production research call intent"
 _MISSING_REPLAY_OBSERVATION = "production research replay omitted its observation"
 _SHA256_LENGTH = 64
+_MAXIMUM_MODEL_RESOURCE_VALUE = 2**63 - 1
+_MAXIMUM_REPORTED_TEXT_LENGTH = 256
 _MODEL_IDENTITY = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}\Z")
 _MODEL_INPUT_FIELDS = frozenset(
     {
@@ -301,6 +304,298 @@ class ProductionCallPreparation:
     observation: LabCallObservation | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class ProductionModelResponseRecord:
+    """Preserve safe reported model fields and their boundary-validation results."""
+
+    response_type_valid: bool
+    metadata_valid: bool
+    disposition_valid: bool
+    disposition: str | None
+    raw_response_valid: bool
+    raw_response: bytes | None
+    raw_response_hash: str | None
+    raw_response_retained: bool
+    exposed_model_identity_valid: bool
+    exposed_model_identity: str | None
+    input_tokens_valid: bool
+    input_tokens: int | None
+    output_tokens_valid: bool
+    output_tokens: int | None
+    turns_valid: bool
+    turns: int | None
+    elapsed_milliseconds_valid: bool
+    elapsed_milliseconds: int | None
+    timing_disposition_valid: bool
+    timing_disposition: str | None
+
+    def __post_init__(self) -> None:
+        validity = (
+            self.response_type_valid,
+            self.metadata_valid,
+            self.disposition_valid,
+            self.raw_response_valid,
+            self.raw_response_retained,
+            self.exposed_model_identity_valid,
+            self.input_tokens_valid,
+            self.output_tokens_valid,
+            self.turns_valid,
+            self.elapsed_milliseconds_valid,
+            self.timing_disposition_valid,
+        )
+        numeric_values = (
+            self.input_tokens,
+            self.output_tokens,
+            self.turns,
+            self.elapsed_milliseconds,
+        )
+        if (
+            any(type(item) is not bool for item in validity)
+            or (self.disposition is not None and type(self.disposition) is not str)
+            or (
+                self.exposed_model_identity is not None
+                and type(self.exposed_model_identity) is not str
+            )
+            or (self.timing_disposition is not None and type(self.timing_disposition) is not str)
+            or any(
+                item is not None
+                and (type(item) is not int or abs(item) > _MAXIMUM_MODEL_RESOURCE_VALUE)
+                for item in numeric_values
+            )
+            or (self.raw_response is not None and type(self.raw_response) is not bytes)
+            or (self.raw_response_hash is not None and not _is_sha256(self.raw_response_hash))
+            or (
+                not self.raw_response_valid
+                and (
+                    self.raw_response is not None
+                    or self.raw_response_hash is not None
+                    or self.raw_response_retained
+                )
+            )
+            or (self.raw_response_retained and self.raw_response is None)
+            or (
+                self.raw_response is not None
+                and (
+                    self.raw_response_retained
+                    != (len(self.raw_response) <= MAXIMUM_MODEL_OUTPUT_BYTES)
+                    or hashlib.sha256(self.raw_response).hexdigest() != self.raw_response_hash
+                )
+            )
+            or (
+                not self.response_type_valid
+                and (
+                    any(validity[2:])
+                    or self.disposition is not None
+                    or self.raw_response_hash is not None
+                    or self.exposed_model_identity is not None
+                    or any(item is not None for item in numeric_values)
+                    or self.timing_disposition is not None
+                )
+            )
+            or (
+                not self.disposition_valid
+                and self.disposition in {item.value for item in ModelCallDisposition}
+            )
+            or (
+                not self.exposed_model_identity_valid
+                and self.exposed_model_identity is not None
+                and _MODEL_IDENTITY.fullmatch(self.exposed_model_identity) is not None
+            )
+            or (not self.input_tokens_valid and _model_resource_is_valid(self.input_tokens))
+            or (not self.output_tokens_valid and _model_resource_is_valid(self.output_tokens))
+            or (not self.turns_valid and _model_resource_is_valid(self.turns))
+            or (
+                not self.elapsed_milliseconds_valid
+                and self.elapsed_milliseconds is not None
+                and _model_resource_is_valid(self.elapsed_milliseconds)
+            )
+            or (
+                not self.timing_disposition_valid
+                and self.timing_disposition in {item.value for item in ModelTimingDisposition}
+            )
+            or (
+                self.metadata_valid
+                != (
+                    self.response_type_valid
+                    and all(
+                        (
+                            self.disposition_valid,
+                            self.raw_response_valid,
+                            self.exposed_model_identity_valid,
+                            self.input_tokens_valid,
+                            self.output_tokens_valid,
+                            self.turns_valid,
+                            self.elapsed_milliseconds_valid,
+                            self.timing_disposition_valid,
+                        )
+                    )
+                    and _reported_timing_matches(self.disposition, self.timing_disposition)
+                )
+            )
+        ):
+            raise ValueError(_INVALID_INTENT)
+
+    def normalized_response(self) -> ModelCallResponse:
+        """Return validated model facts or a bounded refusal retaining safe raw bytes."""
+        if not self.metadata_valid:
+            return ModelCallResponse(
+                ModelCallDisposition.REFUSED,
+                self.raw_response if self.raw_response_valid else None,
+                None,
+                0,
+                0,
+                0,
+                None,
+                ModelTimingDisposition.UNAVAILABLE,
+            )
+        if (
+            self.disposition is None
+            or self.input_tokens is None
+            or self.output_tokens is None
+            or self.turns is None
+            or self.timing_disposition is None
+        ):  # pragma: no cover - construction proves complete valid metadata.
+            raise ValueError(_INVALID_INTENT)
+        return ModelCallResponse(
+            ModelCallDisposition(self.disposition),
+            self.raw_response,
+            self.exposed_model_identity,
+            self.input_tokens,
+            self.output_tokens,
+            self.turns,
+            self.elapsed_milliseconds,
+            ModelTimingDisposition(self.timing_disposition),
+        )
+
+    @property
+    def persisted_raw_response(self) -> bytes | None:
+        """Return raw bytes only when the production retention bound admits them."""
+        return self.raw_response if self.raw_response_retained else None
+
+    def to_payload(self) -> dict[str, object]:
+        return {
+            "schema_version": 1,
+            "record_kind": "production_model_response_record",
+            "response_type_valid": self.response_type_valid,
+            "metadata_valid": self.metadata_valid,
+            "disposition_valid": self.disposition_valid,
+            "disposition": self.disposition,
+            "raw_response_valid": self.raw_response_valid,
+            "raw_response_hash": self.raw_response_hash,
+            "raw_response_retained": self.raw_response_retained,
+            "exposed_model_identity_valid": self.exposed_model_identity_valid,
+            "exposed_model_identity": self.exposed_model_identity,
+            "input_tokens_valid": self.input_tokens_valid,
+            "input_tokens": self.input_tokens,
+            "output_tokens_valid": self.output_tokens_valid,
+            "output_tokens": self.output_tokens,
+            "turns_valid": self.turns_valid,
+            "turns": self.turns,
+            "elapsed_milliseconds_valid": self.elapsed_milliseconds_valid,
+            "elapsed_milliseconds": self.elapsed_milliseconds,
+            "timing_disposition_valid": self.timing_disposition_valid,
+            "timing_disposition": self.timing_disposition,
+        }
+
+    @classmethod
+    def parse(
+        cls,
+        value: object,
+        raw_response: bytes | None,
+    ) -> ProductionModelResponseRecord | None:
+        """Reconstruct one canonical durable response-provenance record."""
+        required = {
+            "schema_version",
+            "record_kind",
+            "response_type_valid",
+            "metadata_valid",
+            "disposition_valid",
+            "disposition",
+            "raw_response_valid",
+            "raw_response_hash",
+            "raw_response_retained",
+            "exposed_model_identity_valid",
+            "exposed_model_identity",
+            "input_tokens_valid",
+            "input_tokens",
+            "output_tokens_valid",
+            "output_tokens",
+            "turns_valid",
+            "turns",
+            "elapsed_milliseconds_valid",
+            "elapsed_milliseconds",
+            "timing_disposition_valid",
+            "timing_disposition",
+        }
+        if (
+            type(value) is not dict
+            or set(value) != required
+            or value["schema_version"] != 1
+            or value["record_kind"] != "production_model_response_record"
+            or any(
+                type(value[field]) is not bool
+                for field in (
+                    "response_type_valid",
+                    "metadata_valid",
+                    "disposition_valid",
+                    "raw_response_valid",
+                    "raw_response_retained",
+                    "exposed_model_identity_valid",
+                    "input_tokens_valid",
+                    "output_tokens_valid",
+                    "turns_valid",
+                    "elapsed_milliseconds_valid",
+                    "timing_disposition_valid",
+                )
+            )
+            or any(
+                value[field] is not None and type(value[field]) is not str
+                for field in (
+                    "disposition",
+                    "raw_response_hash",
+                    "exposed_model_identity",
+                    "timing_disposition",
+                )
+            )
+            or any(
+                value[field] is not None and type(value[field]) is not int
+                for field in (
+                    "input_tokens",
+                    "output_tokens",
+                    "turns",
+                    "elapsed_milliseconds",
+                )
+            )
+        ):
+            return None
+        try:
+            record = cls(
+                value["response_type_valid"],
+                value["metadata_valid"],
+                value["disposition_valid"],
+                value["disposition"],
+                value["raw_response_valid"],
+                raw_response,
+                value["raw_response_hash"],
+                value["raw_response_retained"],
+                value["exposed_model_identity_valid"],
+                value["exposed_model_identity"],
+                value["input_tokens_valid"],
+                value["input_tokens"],
+                value["output_tokens_valid"],
+                value["output_tokens"],
+                value["turns_valid"],
+                value["turns"],
+                value["elapsed_milliseconds_valid"],
+                value["elapsed_milliseconds"],
+                value["timing_disposition_valid"],
+                value["timing_disposition"],
+            )
+        except (TypeError, ValueError):
+            return None
+        return record if record.to_payload() == value else None
+
+
 class ProductionCallLedger(Protocol):
     """Persist production research intents and observations append-only."""
 
@@ -314,7 +609,7 @@ class ProductionCallLedger(Protocol):
         self,
         intent: ProductionCallIntent,
         observation: LabCallObservation,
-        model_disposition: ModelCallDisposition,
+        response_record: ProductionModelResponseRecord,
         recorded_at: UtcInstant,
     ) -> LabCallObservation: ...
 
@@ -605,11 +900,12 @@ class ProductionResearch:
                 observation = self.ledger.append_observation(
                     intent,
                     observation,
-                    ModelCallDisposition.REFUSED,
+                    _model_response_record(None),
                     recorded_at,
                 )
             return _CallResult(intent, observation)
-        response = _normalized_model_response(self.model.call(intent.model_request()))
+        response_record = _model_response_record(self.model.call(intent.model_request()))
+        response = response_record.normalized_response()
         observation = _observe(
             intent,
             contract.model_configuration,
@@ -623,7 +919,7 @@ class ProductionResearch:
         stored = self.ledger.append_observation(
             intent,
             observation,
-            response.disposition,
+            response_record,
             recorded_at,
         )
         return _CallResult(intent, stored)
@@ -808,7 +1104,7 @@ def _observe(  # noqa: PLR0912, PLR0913 - validate every role predecessor explic
                     disposition = LabObservationDisposition.VALIDATED
                 else:
                     artifact_refusal = parsed_cio
-        except (UnicodeDecodeError, json.JSONDecodeError, RecursionError):
+        except (UnicodeDecodeError, ValueError, RecursionError):
             disposition = LabObservationDisposition.INVALID_JSON
     return LabCallObservation.create(
         call_id=intent.call_id,
@@ -854,11 +1150,11 @@ def _model_response_is_valid(value: object) -> TypeGuard[ModelCallResponse]:
         and type(value.disposition) is ModelCallDisposition
         and (value.raw_response is None or type(value.raw_response) is bytes)
         and type(value.input_tokens) is int
-        and value.input_tokens >= 0
+        and 0 <= value.input_tokens <= _MAXIMUM_MODEL_RESOURCE_VALUE
         and type(value.output_tokens) is int
-        and value.output_tokens >= 0
+        and 0 <= value.output_tokens <= _MAXIMUM_MODEL_RESOURCE_VALUE
         and type(value.turns) is int
-        and value.turns >= 0
+        and 0 <= value.turns <= _MAXIMUM_MODEL_RESOURCE_VALUE
         and (
             value.exposed_model_identity is None
             or (
@@ -868,7 +1164,10 @@ def _model_response_is_valid(value: object) -> TypeGuard[ModelCallResponse]:
         )
         and (
             value.elapsed_milliseconds is None
-            or (type(value.elapsed_milliseconds) is int and value.elapsed_milliseconds >= 0)
+            or (
+                type(value.elapsed_milliseconds) is int
+                and 0 <= value.elapsed_milliseconds <= _MAXIMUM_MODEL_RESOURCE_VALUE
+            )
         )
         and type(value.timing_disposition) is ModelTimingDisposition
         and value.timing_disposition
@@ -881,18 +1180,109 @@ def _model_response_is_valid(value: object) -> TypeGuard[ModelCallResponse]:
     )
 
 
-def _normalized_model_response(value: object) -> ModelCallResponse:
-    if _model_response_is_valid(value):
-        return value
-    return ModelCallResponse(
-        ModelCallDisposition.REFUSED,
-        None,
-        None,
-        0,
-        0,
-        0,
-        None,
-        ModelTimingDisposition.UNAVAILABLE,
+def _model_response_record(value: object) -> ProductionModelResponseRecord:
+    if type(value) is not ModelCallResponse:
+        return ProductionModelResponseRecord(
+            response_type_valid=False,
+            metadata_valid=False,
+            disposition_valid=False,
+            disposition=None,
+            raw_response_valid=False,
+            raw_response=None,
+            raw_response_hash=None,
+            raw_response_retained=False,
+            exposed_model_identity_valid=False,
+            exposed_model_identity=None,
+            input_tokens_valid=False,
+            input_tokens=None,
+            output_tokens_valid=False,
+            output_tokens=None,
+            turns_valid=False,
+            turns=None,
+            elapsed_milliseconds_valid=False,
+            elapsed_milliseconds=None,
+            timing_disposition_valid=False,
+            timing_disposition=None,
+        )
+    disposition_valid = type(value.disposition) is ModelCallDisposition
+    raw_response_valid = value.raw_response is None or type(value.raw_response) is bytes
+    exposed_identity_valid = value.exposed_model_identity is None or (
+        type(value.exposed_model_identity) is str
+        and _MODEL_IDENTITY.fullmatch(value.exposed_model_identity) is not None
+    )
+    input_tokens_valid = _model_resource_is_valid(value.input_tokens)
+    output_tokens_valid = _model_resource_is_valid(value.output_tokens)
+    turns_valid = _model_resource_is_valid(value.turns)
+    elapsed_valid = value.elapsed_milliseconds is None or _model_resource_is_valid(
+        value.elapsed_milliseconds
+    )
+    timing_valid = type(value.timing_disposition) is ModelTimingDisposition
+    raw_response = value.raw_response if type(value.raw_response) is bytes else None
+    retain_raw = raw_response is not None and len(raw_response) <= MAXIMUM_MODEL_OUTPUT_BYTES
+    disposition = _safe_reported_text(
+        value.disposition.value
+        if type(value.disposition) is ModelCallDisposition
+        else value.disposition
+    )
+    timing = _safe_reported_text(
+        value.timing_disposition.value
+        if type(value.timing_disposition) is ModelTimingDisposition
+        else value.timing_disposition
+    )
+    return ProductionModelResponseRecord(
+        response_type_valid=True,
+        metadata_valid=_model_response_is_valid(value),
+        disposition_valid=disposition_valid,
+        disposition=disposition,
+        raw_response_valid=raw_response_valid,
+        raw_response=raw_response,
+        raw_response_hash=(
+            None if raw_response is None else hashlib.sha256(raw_response).hexdigest()
+        ),
+        raw_response_retained=retain_raw,
+        exposed_model_identity_valid=exposed_identity_valid,
+        exposed_model_identity=_safe_reported_text(value.exposed_model_identity),
+        input_tokens_valid=input_tokens_valid,
+        input_tokens=_safe_reported_integer(value.input_tokens),
+        output_tokens_valid=output_tokens_valid,
+        output_tokens=_safe_reported_integer(value.output_tokens),
+        turns_valid=turns_valid,
+        turns=_safe_reported_integer(value.turns),
+        elapsed_milliseconds_valid=elapsed_valid,
+        elapsed_milliseconds=_safe_reported_integer(value.elapsed_milliseconds),
+        timing_disposition_valid=timing_valid,
+        timing_disposition=timing,
+    )
+
+
+def _model_resource_is_valid(value: object) -> TypeGuard[int]:
+    return type(value) is int and 0 <= value <= _MAXIMUM_MODEL_RESOURCE_VALUE
+
+
+def _safe_reported_integer(value: object) -> int | None:
+    return value if type(value) is int and abs(value) <= _MAXIMUM_MODEL_RESOURCE_VALUE else None
+
+
+def _safe_reported_text(value: object) -> str | None:
+    return value if type(value) is str and len(value) <= _MAXIMUM_REPORTED_TEXT_LENGTH else None
+
+
+def _reported_timing_matches(disposition: str | None, timing: str | None) -> bool:
+    if disposition is None or timing is None:
+        return False
+    try:
+        reported_disposition = ModelCallDisposition(disposition)
+        reported_timing = ModelTimingDisposition(timing)
+    except (TypeError, ValueError):
+        return False
+    return (
+        reported_timing
+        is {
+            ModelCallDisposition.RESPONDED: ModelTimingDisposition.WITHIN_BUDGET,
+            ModelCallDisposition.TIMED_OUT: ModelTimingDisposition.TIMED_OUT,
+            ModelCallDisposition.QUOTA_EXHAUSTED: ModelTimingDisposition.UNAVAILABLE,
+            ModelCallDisposition.REFUSED: ModelTimingDisposition.UNAVAILABLE,
+        }[reported_disposition]
     )
 
 
