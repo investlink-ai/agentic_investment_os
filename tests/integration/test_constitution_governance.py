@@ -42,13 +42,17 @@ from agentic_investment_os.entrypoints.configuration import (
 )
 from agentic_investment_os.entrypoints.governance import configure_govern
 from agentic_investment_os.entrypoints.lifecycle import configure_advance, configure_status
-from tests._evidence import recorded_evidence
 from tests._governance import (
     ACTIVATION_SESSION,
     HashApprovalVerifier,
     RecordedSessionEligibility,
     amended_constitution,
     approval_for,
+)
+from tests._production_research import (
+    ValidProductionModel,
+    production_recorded_evidence,
+    production_recorded_official_evidence,
 )
 from tests._universe import recorded_universe, runtime_configuration
 
@@ -157,7 +161,9 @@ def test_govern_advance_and_status_schedule_activate_pin_and_replay_exactly_once
         _sources(state_root),
         repository_root=REPOSITORY_ROOT,
         recorded_universe=recorded_universe(),
-        recorded_evidence=recorded_evidence(),
+        recorded_evidence=production_recorded_evidence(),
+        recorded_official_evidence=production_recorded_official_evidence(),
+        recorded_model=ValidProductionModel(),
         session_eligibility=RecordedSessionEligibility(),
         clock=FixedClock(datetime(2026, 8, 24, 22, 0, tzinfo=UTC)),
         approval_verifier=HashApprovalVerifier(),
@@ -240,7 +246,9 @@ def test_changed_identity_ineligible_session_and_missed_boundary_fail_closed(
         _sources(state_root),
         repository_root=REPOSITORY_ROOT,
         recorded_universe=recorded_universe(),
-        recorded_evidence=recorded_evidence(),
+        recorded_evidence=production_recorded_evidence(),
+        recorded_official_evidence=production_recorded_official_evidence(),
+        recorded_model=ValidProductionModel(),
         session_eligibility=RecordedSessionEligibility(),
         clock=FixedClock(datetime(2026, 8, 25, 22, 0, tzinfo=UTC)),
         approval_verifier=HashApprovalVerifier(),
@@ -451,7 +459,9 @@ def test_interrupted_run_keeps_its_pin_after_a_later_constitution_activates(
         _sources(state_root),
         repository_root=REPOSITORY_ROOT,
         recorded_universe=recorded_universe(),
-        recorded_evidence=recorded_evidence(),
+        recorded_evidence=production_recorded_evidence(),
+        recorded_official_evidence=production_recorded_official_evidence(),
+        recorded_model=ValidProductionModel(),
         session_eligibility=RecordedSessionEligibility(),
         clock=FixedClock(datetime(2026, 8, 22, 20, 5, tzinfo=UTC)),
         approval_verifier=HashApprovalVerifier(),
@@ -470,7 +480,11 @@ def test_interrupted_run_keeps_its_pin_after_a_later_constitution_activates(
         attention_policy=initial.attention_policy,
         attention_inputs=initial.attention_inputs,
         clock=initial.clock,
-        constitution_registry=initial.constitution_registry,
+        constitution_registry=(initial.constitution_registry),
+        production_research=initial.production_research,
+        evidence_vault=initial.evidence_vault,
+        memory=initial.memory,
+        memory_refusal_ledger=initial.memory_refusal_ledger,
     )
     with pytest.raises(SimulatedInterruptionError):
         interrupted(
@@ -490,7 +504,9 @@ def test_interrupted_run_keeps_its_pin_after_a_later_constitution_activates(
         _sources(state_root),
         repository_root=REPOSITORY_ROOT,
         recorded_universe=recorded_universe(),
-        recorded_evidence=recorded_evidence(),
+        recorded_evidence=production_recorded_evidence(),
+        recorded_official_evidence=production_recorded_official_evidence(),
+        recorded_model=ValidProductionModel(),
         session_eligibility=RecordedSessionEligibility(),
         clock=FixedClock(datetime(2026, 8, 24, 20, 5, tzinfo=UTC)),
         approval_verifier=HashApprovalVerifier(),
@@ -539,7 +555,9 @@ def test_overdue_governance_blocks_a_historical_pin_before_downstream_work(
         _sources(state_root),
         repository_root=REPOSITORY_ROOT,
         recorded_universe=recorded_universe(),
-        recorded_evidence=recorded_evidence(),
+        recorded_evidence=production_recorded_evidence(),
+        recorded_official_evidence=production_recorded_official_evidence(),
+        recorded_model=ValidProductionModel(),
         session_eligibility=RecordedSessionEligibility(),
         clock=FixedClock(datetime(2026, 8, 22, 20, 5, tzinfo=UTC)),
         approval_verifier=HashApprovalVerifier(),
@@ -558,7 +576,11 @@ def test_overdue_governance_blocks_a_historical_pin_before_downstream_work(
         attention_policy=initial.attention_policy,
         attention_inputs=initial.attention_inputs,
         clock=initial.clock,
-        constitution_registry=initial.constitution_registry,
+        constitution_registry=(initial.constitution_registry),
+        production_research=initial.production_research,
+        evidence_vault=initial.evidence_vault,
+        memory=initial.memory,
+        memory_refusal_ledger=initial.memory_refusal_ledger,
     )
     with pytest.raises(SimulatedInterruptionError):
         interrupted(
@@ -576,7 +598,9 @@ def test_overdue_governance_blocks_a_historical_pin_before_downstream_work(
         _sources(state_root),
         repository_root=REPOSITORY_ROOT,
         recorded_universe=recorded_universe(),
-        recorded_evidence=recorded_evidence(),
+        recorded_evidence=production_recorded_evidence(),
+        recorded_official_evidence=production_recorded_official_evidence(),
+        recorded_model=ValidProductionModel(),
         session_eligibility=RecordedSessionEligibility(),
         clock=FixedClock(datetime(2026, 8, 25, 20, 5, tzinfo=UTC)),
         approval_verifier=HashApprovalVerifier(),
@@ -594,6 +618,10 @@ def test_overdue_governance_blocks_a_historical_pin_before_downstream_work(
         attention_inputs=configured_retry.attention_inputs,
         clock=configured_retry.clock,
         constitution_registry=configured_retry.constitution_registry,
+        production_research=configured_retry.production_research,
+        evidence_vault=configured_retry.evidence_vault,
+        memory=configured_retry.memory,
+        memory_refusal_ledger=configured_retry.memory_refusal_ledger,
     )
 
     with pytest.raises(GovernanceStateError, match="missed Constitution activation boundary"):
@@ -622,7 +650,9 @@ def test_lifecycle_pins_fail_closed_if_governance_history_is_removed(
         _sources(state_root),
         repository_root=REPOSITORY_ROOT,
         recorded_universe=recorded_universe(),
-        recorded_evidence=recorded_evidence(),
+        recorded_evidence=production_recorded_evidence(),
+        recorded_official_evidence=production_recorded_official_evidence(),
+        recorded_model=ValidProductionModel(),
         session_eligibility=RecordedSessionEligibility(),
         clock=FixedClock(datetime(2026, 8, 24, 20, 5, tzinfo=UTC)),
         approval_verifier=HashApprovalVerifier(),
@@ -659,7 +689,9 @@ def test_lifecycle_pins_fail_closed_if_governance_history_is_removed(
         _sources(state_root),
         repository_root=REPOSITORY_ROOT,
         recorded_universe=recorded_universe(),
-        recorded_evidence=recorded_evidence(),
+        recorded_evidence=production_recorded_evidence(),
+        recorded_official_evidence=production_recorded_official_evidence(),
+        recorded_model=ValidProductionModel(),
         session_eligibility=RecordedSessionEligibility(),
         clock=FixedClock(datetime(2026, 8, 25, 20, 5, tzinfo=UTC)),
         approval_verifier=HashApprovalVerifier(),

@@ -17,6 +17,7 @@ from agentic_investment_os.domain.attention import AttentionPolicy
 from agentic_investment_os.domain.identity import AssetClass
 from agentic_investment_os.domain.universe import EquityUniversePolicy, UniverseRefusal
 from agentic_investment_os.evidence.capture import EvidencePolicy
+from agentic_investment_os.research.policy import ProductionResearchPolicy
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -29,6 +30,7 @@ _FIELDS = frozenset(
         "universe_policy",
         "evidence_policy",
         "attention_policy",
+        "research_policy",
     }
 )
 _IGNORED_RUNTIME_ROOTS = frozenset({"artifacts", "data", "var"})
@@ -38,6 +40,7 @@ _ENABLED_ASSET_CLASS_FIELDS = ("enabled_asset_classes",)
 _UNIVERSE_POLICY_FIELDS = ("universe_policy",)
 _EVIDENCE_POLICY_FIELDS = ("evidence_policy",)
 _ATTENTION_POLICY_FIELDS = ("attention_policy",)
+_RESEARCH_POLICY_FIELDS = ("research_policy",)
 _LIFECYCLE_DATABASE_NAME = "lifecycle.sqlite3"
 
 
@@ -53,6 +56,7 @@ class ConfigurationRefusalCode(StrEnum):
     INVALID_UNIVERSE_POLICY = "invalid_universe_policy"
     INVALID_EVIDENCE_POLICY = "invalid_evidence_policy"
     INVALID_ATTENTION_POLICY = "invalid_attention_policy"
+    INVALID_RESEARCH_POLICY = "invalid_research_policy"
 
 
 @dataclass(frozen=True, slots=True)
@@ -81,6 +85,7 @@ class RuntimeConfiguration:
     universe_policy: EquityUniversePolicy
     evidence_policy: EvidencePolicy
     attention_policy: AttentionPolicy
+    research_policy: ProductionResearchPolicy
     fingerprint: str
 
 
@@ -102,6 +107,9 @@ _INVALID_EVIDENCE_POLICY_REFUSAL = ConfigurationRefusal(
 )
 _INVALID_ATTENTION_POLICY_REFUSAL = ConfigurationRefusal(
     ConfigurationRefusalCode.INVALID_ATTENTION_POLICY, _ATTENTION_POLICY_FIELDS
+)
+_INVALID_RESEARCH_POLICY_REFUSAL = ConfigurationRefusal(
+    ConfigurationRefusalCode.INVALID_RESEARCH_POLICY, _RESEARCH_POLICY_FIELDS
 )
 _UNKNOWN_FIELD_REFUSAL = ConfigurationRefusal(ConfigurationRefusalCode.UNKNOWN_FIELD)
 
@@ -229,6 +237,9 @@ def _validate_configuration(  # noqa: PLR0911 - each invalid configuration layer
     attention_policy = AttentionPolicy.parse(merged["attention_policy"])
     if attention_policy is None:
         return _INVALID_ATTENTION_POLICY_REFUSAL
+    research_policy = ProductionResearchPolicy.parse(merged["research_policy"])
+    if research_policy is None:
+        return _INVALID_RESEARCH_POLICY_REFUSAL
 
     canonical = {
         "state_root": str(state_root),
@@ -237,6 +248,7 @@ def _validate_configuration(  # noqa: PLR0911 - each invalid configuration layer
         "universe_policy": universe_policy.to_payload(),
         "evidence_policy": evidence_policy.to_payload(),
         "attention_policy": attention_policy.to_payload(),
+        "research_policy": research_policy.to_payload(),
     }
     fingerprint = hashlib.sha256(
         json.dumps(canonical, sort_keys=True, separators=(",", ":")).encode()
@@ -248,6 +260,7 @@ def _validate_configuration(  # noqa: PLR0911 - each invalid configuration layer
         universe_policy,
         evidence_policy,
         attention_policy,
+        research_policy,
         fingerprint,
     )
 

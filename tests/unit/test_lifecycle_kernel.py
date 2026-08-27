@@ -31,8 +31,13 @@ from agentic_investment_os.domain.lifecycle import (
     LifecycleLiveness,
     LifecyclePhase,
     LifecycleProgress,
+    NoActionReason,
     PerformAttentionSelection,
+    PerformDossierBuild,
     PerformEvidenceCapture,
+    PerformMemoryUpdate,
+    PerformResearch,
+    ResearchCheckpoint,
     decide_evidence_refusal_replay,
     decide_invalid_history,
     decide_terminal_refusal,
@@ -66,6 +71,9 @@ REFUSED_EVIDENCE_CAPTURE = EvidenceCaptureCheckpoint(
 )
 INVALID_HISTORY_REFUSAL_SEQUENCE = 5
 KERNEL_RECORDED_AT = UtcInstant.from_datetime(datetime(2026, 8, 21, 22, 0, tzinfo=UTC))
+DOSSIER_CHECKPOINT = ResearchCheckpoint(("1" * SHA256_HEX_LENGTH,))
+RESEARCH_CHECKPOINT = ResearchCheckpoint(("2" * SHA256_HEX_LENGTH,))
+MEMORY_CHECKPOINT = ResearchCheckpoint(("3" * SHA256_HEX_LENGTH,))
 
 
 def decide_advance(
@@ -116,9 +124,24 @@ def _append_decision(
             ),
         )
         decision = decide_advance(history, command, attempt)
+    if isinstance(decision, PerformDossierBuild):
+        assert isinstance(command, AdvanceCommand)
+        command = replace(command, dossier_build=DOSSIER_CHECKPOINT)
+        decision = decide_advance(history, command, attempt)
+    if isinstance(decision, PerformResearch):
+        assert isinstance(command, AdvanceCommand)
+        command = replace(command, research_run=RESEARCH_CHECKPOINT)
+        decision = decide_advance(history, command, attempt)
+    if isinstance(decision, PerformMemoryUpdate):
+        assert isinstance(command, AdvanceCommand)
+        command = replace(command, memory_update=MEMORY_CHECKPOINT)
+        decision = decide_advance(history, command, attempt)
     assert not isinstance(decision, AdvanceReceipt)
     assert not isinstance(decision, PerformEvidenceCapture)
     assert not isinstance(decision, PerformAttentionSelection)
+    assert not isinstance(decision, PerformDossierBuild)
+    assert not isinstance(decision, PerformResearch)
+    assert not isinstance(decision, PerformMemoryUpdate)
     next_history = history.append(decision.record)
     if isinstance(decision, AppendTerminalLifecycleRecord):
         return next_history, attempt, decision.receipt
@@ -148,6 +171,15 @@ def _complete(
                     decision.attention_history,
                 ),
             )
+            continue
+        if isinstance(decision, PerformDossierBuild):
+            command = replace(command, dossier_build=DOSSIER_CHECKPOINT)
+            continue
+        if isinstance(decision, PerformResearch):
+            command = replace(command, research_run=RESEARCH_CHECKPOINT)
+            continue
+        if isinstance(decision, PerformMemoryUpdate):
+            command = replace(command, memory_update=MEMORY_CHECKPOINT)
             continue
         history = history.append(decision.record)
         if isinstance(decision, AppendTerminalLifecycleRecord):
@@ -196,6 +228,9 @@ def test_kernel_assigns_universe_events_and_fresh_recovery() -> None:
         (3, LifecycleEventKind.UNIVERSE_SNAPSHOTTED),
         (4, LifecycleEventKind.EVIDENCE_CAPTURED),
         (5, LifecycleEventKind.ATTENTION_SELECTED),
+        (6, LifecycleEventKind.DOSSIERS_BUILT),
+        (7, LifecycleEventKind.RESEARCH_RUN),
+        (8, LifecycleEventKind.MEMORY_UPDATED),
     )
     completed: AppendTerminalLifecycleRecord | None = None
     for sequence, event_kind in expected:
@@ -214,9 +249,21 @@ def test_kernel_assigns_universe_events_and_fresh_recovery() -> None:
                 ),
             )
             decision = decide_advance(history, command, attempt)
+        if isinstance(decision, PerformDossierBuild):
+            command = replace(command, dossier_build=DOSSIER_CHECKPOINT)
+            decision = decide_advance(history, command, attempt)
+        if isinstance(decision, PerformResearch):
+            command = replace(command, research_run=RESEARCH_CHECKPOINT)
+            decision = decide_advance(history, command, attempt)
+        if isinstance(decision, PerformMemoryUpdate):
+            command = replace(command, memory_update=MEMORY_CHECKPOINT)
+            decision = decide_advance(history, command, attempt)
         assert not isinstance(decision, AdvanceReceipt)
         assert not isinstance(decision, PerformEvidenceCapture)
         assert not isinstance(decision, PerformAttentionSelection)
+        assert not isinstance(decision, PerformDossierBuild)
+        assert not isinstance(decision, PerformResearch)
+        assert not isinstance(decision, PerformMemoryUpdate)
         assert isinstance(decision.record, LifecycleEvent)
         assert decision.record.sequence == sequence
         assert decision.record.event_kind is event_kind
@@ -229,6 +276,32 @@ def test_kernel_assigns_universe_events_and_fresh_recovery() -> None:
 
     assert completed is not None
     assert completed.receipt.recovery is AdvanceRecovery.FRESH
+
+
+@pytest.mark.parametrize("invalid_result", ["wrong_type", "missing_no_action_reason"])
+def test_kernel_rejects_invalid_memory_checkpoint_results(invalid_result: str) -> None:
+    command = _command()
+    history = LifecycleHistory()
+    attempt = AdvanceAttempt()
+    for _ in range(8):
+        history, attempt, receipt = _append_decision(history, command, attempt)
+        assert receipt is None
+    decision = decide_advance(history, command, attempt)
+    assert isinstance(decision, PerformMemoryUpdate)
+    if invalid_result == "wrong_type":
+        invalid_command = replace(
+            command,
+            memory_update=cast("ResearchCheckpoint", "invalid"),
+        )
+    else:
+        assert invalid_result == "missing_no_action_reason"
+        invalid_command = replace(command, memory_update=ResearchCheckpoint())
+
+    with pytest.raises(
+        InvalidLifecycleStateError,
+        match="lifecycle stream checkpoint order is invalid",
+    ):
+        decide_advance(history, invalid_command, attempt)
 
 
 def test_partial_progress_refuses_attention_access_before_its_checkpoint() -> None:
@@ -247,6 +320,16 @@ def test_partial_progress_refuses_attention_access_before_its_checkpoint() -> No
         match="lifecycle stream checkpoint order is invalid",
     ):
         progress.require_attention_artifact()
+    for require_checkpoint in (
+        progress.require_dossier_checkpoint,
+        progress.require_research_checkpoint,
+        progress.require_memory_checkpoint,
+    ):
+        with pytest.raises(
+            InvalidLifecycleStateError,
+            match="lifecycle stream checkpoint order is invalid",
+        ):
+            require_checkpoint()
 
 
 @pytest.mark.parametrize(
@@ -320,6 +403,10 @@ def test_kernel_resumes_partial_history_and_replays_completion() -> None:
             command.universe_snapshot,
             EVIDENCE_CAPTURE,
         ),
+        DOSSIER_CHECKPOINT,
+        RESEARCH_CHECKPOINT,
+        MEMORY_CHECKPOINT,
+        None,
     )
     assert replay == AdvanceReceipt.advanced(
         command.pinned_run_identity,
@@ -332,6 +419,10 @@ def test_kernel_resumes_partial_history_and_replays_completion() -> None:
             command.universe_snapshot,
             EVIDENCE_CAPTURE,
         ),
+        DOSSIER_CHECKPOINT,
+        RESEARCH_CHECKPOINT,
+        MEMORY_CHECKPOINT,
+        None,
     )
 
 
@@ -339,12 +430,15 @@ def test_kernel_resumes_partial_history_and_replays_completion() -> None:
 def test_reconstruction_requires_attention_only_at_its_checkpoint(corruption: str) -> None:
     command = _command()
     history, _ = _complete(LifecycleHistory(), command)
-    artifact = history.events[-1].attention_artifact
+    attention_index = next(
+        index for index, event in enumerate(history.events) if event.attention_artifact
+    )
+    artifact = history.events[attention_index].attention_artifact
     assert artifact is not None
     if corruption == "artifact_before_phase":
-        object.__setattr__(history.events[-2], "attention_artifact", artifact)
+        object.__setattr__(history.events[attention_index - 1], "attention_artifact", artifact)
     else:
-        object.__setattr__(history.events[-1], "attention_artifact", None)
+        object.__setattr__(history.events[attention_index], "attention_artifact", None)
 
     with pytest.raises(
         InvalidLifecycleStateError,
@@ -356,13 +450,37 @@ def test_reconstruction_requires_attention_only_at_its_checkpoint(corruption: st
 def test_reconstruction_rejects_attention_that_changes_pinned_facts() -> None:
     command = _command()
     history, _ = _complete(LifecycleHistory(), command)
-    artifact = history.events[-1].attention_artifact
+    artifact = next(
+        event.attention_artifact for event in history.events if event.attention_artifact
+    )
     assert artifact is not None
     object.__setattr__(artifact, "run_id", "f" * SHA256_HEX_LENGTH)
 
     with pytest.raises(
         InvalidLifecycleStateError,
         match="lifecycle stream changed pinned request facts",
+    ):
+        reconstruct_lifecycle(history)
+
+
+@pytest.mark.parametrize("corruption", ["checkpoint_on_wrong_phase", "no_action_with_belief"])
+def test_reconstruction_rejects_invalid_research_checkpoint_associations(
+    corruption: str,
+) -> None:
+    history, _ = _complete(LifecycleHistory(), _command())
+    if corruption == "checkpoint_on_wrong_phase":
+        object.__setattr__(history.events[0], "research_checkpoint", DOSSIER_CHECKPOINT)
+    else:
+        assert corruption == "no_action_with_belief"
+        object.__setattr__(
+            history.events[-1],
+            "no_action_reason",
+            NoActionReason.CIO_ABSTAINED,
+        )
+
+    with pytest.raises(
+        InvalidLifecycleStateError,
+        match="lifecycle stream checkpoint order is invalid",
     ):
         reconstruct_lifecycle(history)
 
@@ -590,6 +708,7 @@ def test_kernel_replays_evidence_refusal_only_for_unchanged_pinned_inputs() -> N
         1,
         command.request.idempotency_key,
         AdvanceFailureReason.EVIDENCE_CAPTURE_FAILED,
+        KERNEL_RECORDED_AT,
         command.request.session,
         REFUSED_EVIDENCE_CAPTURE,
     )
@@ -607,6 +726,16 @@ def test_kernel_replays_evidence_refusal_only_for_unchanged_pinned_inputs() -> N
     )
 
 
+def test_durable_refusal_requires_a_canonical_observation_time() -> None:
+    with pytest.raises(ValueError, match="lifecycle absolute instant must be canonical"):
+        DurableAdvanceRefusal(
+            1,
+            None,
+            AdvanceFailureReason.INVALID_IDEMPOTENCY_KEY,
+            cast("UtcInstant", object()),
+        )
+
+
 def test_scoped_evidence_refusal_replay_fails_closed_on_missing_or_invalid_state() -> None:
     command = _command()
     history, _ = _through_snapshot(command)
@@ -614,6 +743,7 @@ def test_scoped_evidence_refusal_replay_fails_closed_on_missing_or_invalid_state
         1,
         command.request.idempotency_key,
         AdvanceFailureReason.EVIDENCE_CAPTURE_FAILED,
+        KERNEL_RECORDED_AT,
         command.request.session,
         REFUSED_EVIDENCE_CAPTURE,
     )
@@ -627,6 +757,7 @@ def test_scoped_evidence_refusal_replay_fails_closed_on_missing_or_invalid_state
         1,
         command.request.idempotency_key,
         AdvanceFailureReason.INVALID_DURABLE_STATE,
+        KERNEL_RECORDED_AT,
         command.request.session,
     )
     assert decide_evidence_refusal_replay(
@@ -679,6 +810,7 @@ def test_kernel_rejects_each_invalid_required_evidence_refusal_association(
         1,
         command.request.idempotency_key,
         AdvanceFailureReason.EVIDENCE_CAPTURE_FAILED,
+        KERNEL_RECORDED_AT,
         command.request.session,
         evidence_capture,
     )
@@ -694,6 +826,7 @@ def test_kernel_rejects_evidence_references_on_unassociated_refusals() -> None:
             1,
             None,
             AdvanceFailureReason.INVALID_IDEMPOTENCY_KEY,
+            KERNEL_RECORDED_AT,
             command.request.session,
             REFUSED_EVIDENCE_CAPTURE,
         ),
@@ -701,6 +834,7 @@ def test_kernel_rejects_evidence_references_on_unassociated_refusals() -> None:
             1,
             command.request.idempotency_key,
             AdvanceFailureReason.INVALID_MODE,
+            KERNEL_RECORDED_AT,
             command.request.session,
             REFUSED_EVIDENCE_CAPTURE,
         ),
@@ -950,17 +1084,20 @@ def test_terminal_refusal_selection_distinguishes_keyed_and_unkeyed_history() ->
             1,
             None,
             AdvanceFailureReason.INVALID_MODE,
+            KERNEL_RECORDED_AT,
         ),
         DurableAdvanceRefusal(
             2,
             keyed_command.idempotency_key,
             AdvanceFailureReason.INVALID_SESSION,
+            KERNEL_RECORDED_AT,
             valid_cycle,
         ),
         DurableAdvanceRefusal(
             3,
             None,
             AdvanceFailureReason.INVALID_IDEMPOTENCY_KEY,
+            KERNEL_RECORDED_AT,
             valid_cycle,
         ),
     )
@@ -1032,6 +1169,7 @@ def test_kernel_rejects_duplicate_idempotency_keys_across_valid_streams() -> Non
     ("case", "message"),
     [
         ("unsupported_configuration_version", "unsupported configuration_version"),
+        ("invalid_research_policy_hash", "derived identity is invalid"),
         ("invalid_stream_identity", "derived identity is invalid"),
         ("unsupported_later_phase", "unsupported later phases"),
         ("invalid_checkpoint", "checkpoint order is invalid"),
@@ -1046,6 +1184,15 @@ def test_kernel_rejects_invalid_typed_stream_contracts(case: str, message: str) 
         first = replace(
             events[0],
             pinned_run_identity=replace(events[0].pinned_run_identity, configuration_version=2),
+        )
+        changed = (first,)
+    elif case == "invalid_research_policy_hash":
+        first = replace(
+            events[0],
+            pinned_run_identity=replace(
+                events[0].pinned_run_identity,
+                research_policy_hash="invalid",
+            ),
         )
         changed = (first,)
     elif case == "invalid_stream_identity":
@@ -1072,10 +1219,11 @@ def test_kernel_replays_a_terminal_refusal_when_boundary_history_is_invalid() ->
         1,
         command.request.idempotency_key,
         AdvanceFailureReason.INVALID_DURABLE_STATE,
+        KERNEL_RECORDED_AT,
         command.request.session,
     )
 
-    decision = decide_invalid_history((refusal,), command)
+    decision = decide_invalid_history((refusal,), command, KERNEL_RECORDED_AT)
 
     assert decision == AdvanceReceipt.failed_closed(
         AdvanceFailureReason.INVALID_DURABLE_STATE,
@@ -1087,13 +1235,19 @@ def test_invalid_history_preserves_keyless_input_refusal_semantics() -> None:
     cycle = MarketSession(date(2026, 8, 21))
     command = InputRefusal(InputRefusalCode.INVALID_IDEMPOTENCY_KEY, None, cycle)
 
-    decision = decide_invalid_history((), command, next_refusal_sequence=4)
+    decision = decide_invalid_history(
+        (),
+        command,
+        KERNEL_RECORDED_AT,
+        next_refusal_sequence=4,
+    )
 
     assert isinstance(decision, AppendTerminalLifecycleRecord)
     assert decision.record == DurableAdvanceRefusal(
         4,
         None,
         AdvanceFailureReason.INVALID_IDEMPOTENCY_KEY,
+        KERNEL_RECORDED_AT,
         cycle,
     )
     assert decision.receipt == AdvanceReceipt.failed_closed(
@@ -1144,6 +1298,9 @@ def test_status_uses_the_kernel_transition_sequence() -> None:
         LifecyclePhase.SNAPSHOT_UNIVERSE,
         LifecyclePhase.CAPTURE_EVIDENCE,
         LifecyclePhase.SELECT_ATTENTION,
+        LifecyclePhase.BUILD_DOSSIERS,
+        LifecyclePhase.RUN_RESEARCH,
+        LifecyclePhase.UPDATE_MEMORY,
         None,
     )
 
@@ -1170,6 +1327,7 @@ def test_status_preserves_the_latest_universe_cycle_after_a_newer_stream_refusal
         1,
         active_command.request.idempotency_key,
         AdvanceFailureReason.IDEMPOTENCY_KEY_CONFLICT,
+        KERNEL_RECORDED_AT,
     )
 
     status = derive_lifecycle_status(

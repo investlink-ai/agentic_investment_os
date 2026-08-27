@@ -5,7 +5,7 @@ from copy import deepcopy
 from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import pytest
 
@@ -28,12 +28,23 @@ from agentic_investment_os.domain.lifecycle import (
     LifecycleCommand,
     LifecycleDecision,
     LifecycleLedger,
+    NoActionReason,
     PerformAttentionSelection,
+    ResearchCheckpoint,
 )
 from agentic_investment_os.entrypoints.configuration import ConfigurationSource
 from agentic_investment_os.entrypoints.lifecycle import configure_advance
+from agentic_investment_os.research.production import (
+    ProductionResearchBuild,
+    ProductionResearchRun,
+)
 from tests._evidence import recorded_evidence
 from tests._governance import RecordedSessionEligibility
+from tests._production_research import (
+    ValidProductionModel,
+    production_recorded_evidence,
+    production_recorded_official_evidence,
+)
 from tests._universe import recorded_universe, runtime_configuration
 
 if TYPE_CHECKING:
@@ -41,9 +52,14 @@ if TYPE_CHECKING:
     from agentic_investment_os.domain.governance import ConstitutionUse
     from agentic_investment_os.domain.temporal import UtcInstant
     from agentic_investment_os.domain.universe import UniverseSnapshot
+    from agentic_investment_os.research.policy import ProductionResearchPolicy
+    from agentic_investment_os.research.production import (
+        ProductionResearch,
+        ProductionResearchContext,
+    )
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
-EXPECTED_EVENT_COUNT = 6
+EXPECTED_EVENT_COUNT = 9
 EXPECTED_SELECTED_SUBJECT_COUNT = 2
 
 
@@ -109,6 +125,33 @@ class _CorruptEvidenceBeforeAttention:
         return decision
 
 
+@dataclass(frozen=True, slots=True)
+class _AttentionOnlyResearch:
+    policy: ProductionResearchPolicy
+
+    def build_dossiers(
+        self,
+        context: ProductionResearchContext,
+        recorded_at: UtcInstant,
+    ) -> ProductionResearchBuild:
+        _ = (context, recorded_at)
+        return ProductionResearchBuild(ResearchCheckpoint(), (), None)
+
+    def run_research(
+        self,
+        context: ProductionResearchContext,
+        build: ProductionResearchBuild,
+        recorded_at: UtcInstant,
+    ) -> ProductionResearchRun:
+        _ = (context, build, recorded_at)
+        return ProductionResearchRun(
+            ResearchCheckpoint(),
+            (),
+            NoActionReason.NO_ATTENTION,
+            None,
+        )
+
+
 def _configure(
     state_root: Path,
     *,
@@ -124,12 +167,20 @@ def _configure(
         ),
         repository_root=REPOSITORY_ROOT,
         recorded_universe=recorded_universe(),
-        recorded_evidence=recorded_evidence() if evidence is None else evidence,
+        recorded_evidence=production_recorded_evidence() if evidence is None else evidence,
+        recorded_official_evidence=production_recorded_official_evidence(),
+        recorded_model=ValidProductionModel(cio_stance="abstain"),
         session_eligibility=RecordedSessionEligibility(),
         clock=_FixedClock(),
     )
     assert isinstance(configured, Advance)
-    return configured
+    return replace(
+        configured,
+        production_research=cast(
+            "ProductionResearch",
+            _AttentionOnlyResearch(configured.production_research.policy),
+        ),
+    )
 
 
 def _advance(capability: Advance, cycle: date, key: str) -> AdvanceReceipt:
@@ -187,7 +238,7 @@ def test_attention_selection_publishes_progression_refresh_and_exploration_idemp
         if card.identity.catalog_id == "equity-aapl"
     )
     assert AttentionFeature.NEWS_ARRIVAL not in aapl.missing_features
-    assert AttentionFeature.FILING_ARRIVAL in aapl.missing_features
+    assert AttentionFeature.FILING_ARRIVAL not in aapl.missing_features
     assert aapl.evidence_artifact_ids
     with sqlite3.connect(state_root / "lifecycle.sqlite3") as connection:
         assert connection.execute(

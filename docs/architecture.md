@@ -186,8 +186,8 @@ Entrypoints expose complete capabilities, never individual research stages:
 
 | Capability | Architectural contract |
 | --- | --- |
-| `Advance` | Resolve or resume one supported cycle; validate governance and pinned inputs before downstream work; return an explicit fresh, resumed, replayed, no-action, conflict, or failed-closed disposition. V0 accepts only `MarketSession`. |
-| `Status` | Validate authoritative history, rebuild disposable projections, and report the durable checkpoint, liveness, terminal reason, pins, and cycle-qualified references. Only `Complete` advances the completed cycle. |
+| `Advance` | Resolve or resume one supported cycle; validate governance and pinned inputs; build bounded Dossiers; run the fixed stateless production research roles; admit validated CIO resolutions to memory; and return an explicit fresh, resumed, replayed, no-action, conflict, or failed-closed disposition. V0 accepts only `MarketSession`. |
+| `Status` | Validate authoritative lifecycle, evidence, Constitution, and production model-call history; rebuild disposable projections; and report the durable checkpoint, liveness, terminal reason, pins, and cycle-qualified references. Only `Complete` advances the completed cycle. |
 | `Record` | Atomically append or replay evidence-bound belief and outcome facts; rebuild bounded as-of views without changing ex-ante decisions. |
 | `Govern` | Schedule an immutable, signed, operator-approved Constitution for one exact eligible future session. Exact retry replays; changed material conflicts. |
 | `Apply` | Independently validate one published packet, manage only its authorized paper orders, and return an execution receipt. |
@@ -247,8 +247,14 @@ stateDiagram-v2
   or unresolved lifecycle-to-Constitution references fail closed.
 - `SnapshotUniverse` publishes canonical inputs once. Later phases reuse those exact pins and
   identities rather than ambient state.
+- `BuildDossiers` consumes only requests named by the exact Attention Artifact, including every due
+  holding refresh. `RunResearch` constructs a fresh context for each fixed role from validated
+  predecessor artifacts; no role inherits conversation state. `UpdateMemory` invokes `Record` only
+  for validated non-abstaining CIO resolutions and advances only after every required append or replay
+  is observed.
 - `NoAction` is an expected durable outcome; `FailedClosed` records why progress is unsafe. Neither
-  publishes a discretionary order. Missing reconciliation obligations require `FailedClosed`.
+  publishes a discretionary order. No admitted attention, Skeptic rejection, and CIO abstention are
+  durable no-action reasons. Missing reconciliation obligations require `FailedClosed`.
 - Option exercise, assignment, and expiration enter as reconciliation obligations, not lifecycle
   phases. Status comes only from validated ledgers; scheduler heartbeat is not lifecycle liveness.
 
@@ -258,6 +264,7 @@ stateDiagram-v2
 | --- | --- |
 | Evidence | Content-addressed Vault; immutable content and appended observations, mappings, availability, and refusals |
 | Production ledgers | Belief, decision, outcome, governance, lifecycle, and attention facts appended under their owner contracts |
+| Production research calls | Effect-local intent before each model call, followed by one raw-response identity and validated role artifact or bounded refusal |
 | Published packets | Atomic store; complete, validated, immutable packets only |
 | Execution | Executor ledger; intent first, then independent broker observations and receipts |
 | Research Lab | Namespace-local ledger; role intent first, then observation or bounded refusal |
@@ -276,10 +283,30 @@ stateDiagram-v2
 - Governance time is monotonic. Scheduling or activation validates candidate governance history
   against every lifecycle Constitution use in the same append transaction, so a new regime cannot
   invalidate an earlier or interrupted run.
-- Effects preserve intent and observation independently; ambiguous effects remain indeterminate until
-  reconciliation. SQLite initializes or validates one exact current physical schema; other non-empty
-  shapes fail before writes. [ADR 0004](adr/0004-require-current-sqlite-schema.md) owns that decision.
-  Runtime stores use explicit ignored roots; source directories never hold runtime state.
+- Effects preserve intent and observation independently. A production model intent pins the run,
+  request, exact role input, Constitution, cutoff, Data Regime, research-policy fingerprint, prompt,
+  model, reasoning, inert tools, material hashes, and resource bounds before the effect. An intent
+  without an observation is indeterminate; reopen appends a typed terminal indeterminate observation
+  and never calls the model again automatically. The observation preserves the bounded raw-response
+  identity, safely representable reported metadata, per-field validation results, and the separately
+  derived research disposition. Lifecycle research checkpoints retain call IDs, artifact IDs, tokens,
+  and turns; `Status` revalidates the exact Attention-owned evidence set and the model ledger by
+  re-parsing every retained response, binds each failed observation to its lifecycle refusal, proves
+  exact phase ownership and resource totals, and re-derives each allowed terminal role path. Completed
+  memory checkpoints retain zero model-call resources and bind their exact no-action outcome or
+  run-owned Belief Event material to the validated CIO resolutions; global event existence is not
+  sufficient. Before lifecycle publication, an append-only memory observation records each refusal's
+  exact typed cause, observation instant, failed run-owned event, and preceding accepted events. An
+  identity conflict additionally binds the attempted event's canonical content hash. `Status` binds
+  the lifecycle refusal to that independent observation and the refusal row's own append instant,
+  re-derives its identity and exact zero-call checkpoint, and proves that failed and later expected
+  events are absent. The refusal instant may follow the prior research checkpoint after a process
+  interruption and retry. For an identity conflict, `Status` instead proves that the failed identity
+  exists with different canonical material while later expected events remain absent. Belief
+  transaction time remains bounded by the lifecycle checkpoint. SQLite
+  initializes or validates one exact current physical schema; other non-empty shapes fail before writes.
+  [ADR 0004](adr/0004-require-current-sqlite-schema.md) owns that decision. Runtime stores use explicit
+  ignored roots; source directories never hold runtime state.
 
 ## Temporal semantics
 

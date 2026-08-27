@@ -21,6 +21,7 @@ from agentic_investment_os.domain.universe import (
     UniverseSnapshot,
     build_universe_snapshot,
 )
+from agentic_investment_os.research.policy import ProductionResearchPolicy
 from tests._evidence import evidence_policy
 
 if TYPE_CHECKING:
@@ -152,6 +153,60 @@ def attention_policy() -> dict[str, object]:
     }
 
 
+def research_policy() -> dict[str, object]:
+    """Return the complete scripted production-research policy used by tests."""
+
+    def role_contract(role: str) -> dict[str, object]:
+        prompt_content = f"Return only the exact production {role} schema from declared inputs."
+        prompt = {
+            "schema_version": 1,
+            "prompt_id": f"production-{role}-v1",
+            "content": prompt_content,
+            "content_hash": hashlib.sha256(prompt_content.encode()).hexdigest(),
+        }
+        model_material: dict[str, object] = {
+            "schema_version": 1,
+            "model_identity": "codex-subscription/test-model",
+            "reasoning": {
+                "effort": "medium",
+                "maximum_output_tokens": 4_000,
+                "maximum_turns": 1,
+            },
+        }
+        return {
+            "role": role,
+            "prompt": prompt,
+            "model_configuration": {
+                **model_material,
+                "content_hash": hashlib.sha256(
+                    json.dumps(
+                        model_material,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ).encode()
+                ).hexdigest(),
+            },
+            "tools": [],
+        }
+
+    return {
+        "schema_version": 1,
+        "policy_type": "v0_production_research",
+        "maximum_belief_events": 20,
+        "maximum_evidence_artifacts": 50,
+        "role_contracts": [
+            role_contract(role)
+            for role in (
+                "evidence_collector",
+                "thesis_builder",
+                "independent_skeptic",
+                "scenario_forecaster",
+                "cio",
+            )
+        ],
+    }
+
+
 def runtime_configuration(state_root: Path) -> dict[str, object]:
     return {
         "schema_version": 1,
@@ -160,6 +215,7 @@ def runtime_configuration(state_root: Path) -> dict[str, object]:
         "universe_policy": universe_policy(),
         "evidence_policy": evidence_policy(),
         "attention_policy": attention_policy(),
+        "research_policy": research_policy(),
     }
 
 
@@ -259,6 +315,12 @@ def typed_universe_policy() -> EquityUniversePolicy:
     return parsed
 
 
+def typed_research_policy() -> ProductionResearchPolicy:
+    parsed = ProductionResearchPolicy.parse(research_policy())
+    assert isinstance(parsed, ProductionResearchPolicy)
+    return parsed
+
+
 def typed_universe_inputs(payload: object | None = None) -> UniverseInputs:
     parsed = RecordedUniverseSource(recorded_universe() if payload is None else payload).load()
     assert isinstance(parsed, UniverseInputs)
@@ -276,10 +338,12 @@ def pinned_run_identity(
     policy = typed_universe_policy()
     input_identity = UniverseInputIdentity.from_inputs(inputs, policy)
     assert isinstance(input_identity, UniverseInputIdentity)
+    typed_policy = typed_research_policy()
     return PinnedRunIdentity.create(
         request,
         configuration_version=configuration_version,
         configuration_hash=configuration_hash,
+        research_policy_hash=typed_policy.fingerprint,
         universe_inputs=input_identity,
         constitution=ACTIVE_CONSTITUTION.reference,
     )

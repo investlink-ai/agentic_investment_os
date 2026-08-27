@@ -13,12 +13,15 @@ from agentic_investment_os.domain.identity import (
     canonical_instrument_bytes,
     parse_instrument_identity,
 )
-from agentic_investment_os.domain.lifecycle import is_sha256
+from agentic_investment_os.domain.lifecycle import MemoryUpdateRefusal, is_sha256
 from agentic_investment_os.domain.temporal import UtcInstant
 from agentic_investment_os.memory.admission import (
+    BeliefClaimKind,
     BeliefEvent,
     BeliefEvidenceArtifact,
     BeliefEvidenceReference,
+    BeliefEvidenceRelationship,
+    BeliefStatus,
     RecordRefusalCode,
     validate_belief_evidence,
 )
@@ -35,8 +38,11 @@ __all__ = (
     "BeliefGraphRefusal",
     "BeliefGraphRefusalCode",
     "BeliefHistory",
+    "BeliefHistoryValidator",
+    "BeliefIdentityConflictReference",
     "BeliefLedger",
     "BeliefLedgerEntry",
+    "BeliefLifecycleReference",
     "BeliefPersistenceError",
     "RecordDisposition",
     "RecordReceipt",
@@ -101,11 +107,111 @@ class BeliefLedger(Protocol):
         evidence_resolver: BeliefEvidenceResolver,
     ) -> BeliefGraph | BeliefGraphRefusal: ...
 
+    def load_memory_update_refusal(
+        self,
+        run_id: str,
+        failed_event_id: str,
+    ) -> MemoryUpdateRefusal | None: ...
+
+    def record_memory_update_refusal(
+        self,
+        refusal: MemoryUpdateRefusal,
+    ) -> MemoryUpdateRefusal: ...
+
+    def validate_history(
+        self,
+        event_ids: tuple[str, ...],
+        evidence_resolver: BeliefEvidenceResolver,
+    ) -> None: ...
+
+    def validate_lifecycle_references(
+        self,
+        references: tuple[BeliefLifecycleReference, ...],
+        evidence_resolver: BeliefEvidenceResolver,
+        *,
+        absent_event_ids: tuple[str, ...] = (),
+        identity_conflicts: tuple[BeliefIdentityConflictReference, ...] = (),
+        memory_refusals: tuple[MemoryUpdateRefusal, ...] = (),
+    ) -> None: ...
+
+
+class BeliefHistoryValidator(Protocol):
+    """Validate authoritative Belief history and lifecycle event references."""
+
+    def validate_history(self, event_ids: tuple[str, ...]) -> None: ...
+
+
+@dataclass(frozen=True, slots=True)
+class BeliefLifecycleReference:
+    """Bind expected belief material to the run and CIO result that produced it."""
+
+    run_id: str
+    cio_resolution_id: str
+    event_id: str
+    belief_id: str
+    subject: EquityInstrumentIdentity
+    claim: str
+    valid_at: UtcInstant
+    evidence_cutoff: UtcInstant
+    confidence: str
+    evidence: tuple[BeliefEvidenceReference, ...]
+    falsifiers: tuple[str, ...]
+    lifecycle_recorded_at: UtcInstant
+
+    def __post_init__(self) -> None:
+        expected_event_id = _hash_payload(
+            {
+                "cio_resolution_id": self.cio_resolution_id,
+                "belief_id": self.belief_id,
+            }
+        )
+        try:
+            probe = BeliefEvent.create(
+                event_id=self.event_id,
+                belief_id=self.belief_id,
+                subject=self.subject,
+                claim_kind=BeliefClaimKind.EXPECTATION,
+                claim=self.claim,
+                valid_at=self.valid_at,
+                transaction_at=self.valid_at,
+                evidence_cutoff=self.evidence_cutoff,
+                confidence=self.confidence,
+                evidence=self.evidence,
+                falsifiers=self.falsifiers,
+                status=BeliefStatus.ACTIVE,
+                transition_from_event_id=None,
+                supersedes_event_id=None,
+            )
+        except (AttributeError, TypeError, ValueError) as error:
+            raise ValueError(_INVALID_HISTORY) from error
+        if (
+            not is_sha256(self.run_id)
+            or not is_sha256(self.cio_resolution_id)
+            or self.event_id != expected_event_id
+            or type(self.lifecycle_recorded_at) is not UtcInstant
+            or self.valid_at.value > self.lifecycle_recorded_at.value
+            or probe.event_id != self.event_id
+        ):
+            raise ValueError(_INVALID_HISTORY)
+
+
+@dataclass(frozen=True, slots=True)
+class BeliefIdentityConflictReference:
+    """Bind a refused proposed event to different material stored under its identity."""
+
+    event_id: str
+    attempted_event_content_hash: str
+
+    def __post_init__(self) -> None:
+        if not is_sha256(self.event_id) or not is_sha256(self.attempted_event_content_hash):
+            raise ValueError(_INVALID_HISTORY)
+
 
 class BeliefGraphEdgeKind(StrEnum):
     """Name one provenance or belief-history relationship in a projection."""
 
     SUPPORTS = "supports"
+    CONTRADICTS = "contradicts"
     TRANSITION_FROM = "transition_from"
     SUPERSEDES = "supersedes"
 
@@ -538,7 +644,15 @@ def _graph_edges(
     for entry in entries:
         event = entry.event
         edges.extend(
-            BeliefGraphEdge(BeliefGraphEdgeKind.SUPPORTS, reference.artifact_id, event.event_id)
+            BeliefGraphEdge(
+                (
+                    BeliefGraphEdgeKind.SUPPORTS
+                    if reference.relationship is BeliefEvidenceRelationship.SUPPORTING
+                    else BeliefGraphEdgeKind.CONTRADICTS
+                ),
+                reference.artifact_id,
+                event.event_id,
+            )
             for reference in event.evidence
             if reference.artifact_id in evidence_ids
         )
@@ -583,6 +697,10 @@ def _graph_material(graph: BeliefGraph) -> dict[str, object]:
 
 def _graph_content_hash(graph: BeliefGraph) -> str:
     return hashlib.sha256(_canonical_json(_graph_material(graph))).hexdigest()
+
+
+def _hash_payload(value: object) -> str:
+    return hashlib.sha256(_canonical_json(value)).hexdigest()
 
 
 def _canonical_json(value: object) -> bytes:

@@ -13,6 +13,10 @@ from agentic_investment_os.domain.identity import (
     parse_instrument_identity,
 )
 from agentic_investment_os.domain.temporal import InvalidUtcInstantError, UtcInstant
+from agentic_investment_os.research.authority import (
+    ResearchAuthority,
+    research_authority_is_valid,
+)
 
 __all__ = (
     "ContradictingEvidence",
@@ -26,9 +30,10 @@ __all__ = (
     "StatementUncertainty",
     "contains_prohibited_research_directive",
     "parse_dossier",
+    "parse_stored_dossier",
 )
 
-_AUTHORITY_SCOPE = "research_lab_non_production"
+_AUTHORITY_SCOPE = ResearchAuthority.LAB.value
 _DOSSIER_FIELDS = frozenset(
     {
         "schema_version",
@@ -363,8 +368,7 @@ class Dossier:
             or len({item.artifact_id for item in self.contradicting_evidence})
             != len(self.contradicting_evidence)
             or not _dossier_components_are_valid(self)
-            or self.authority_scope != _AUTHORITY_SCOPE
-            or self.non_production is not True
+            or not research_authority_is_valid(self.authority_scope, self.non_production)
             or self.content_hash != _content_hash(self.material_payload())
         ):
             raise ValueError(_INVALID_DOSSIER)
@@ -380,6 +384,7 @@ class Dossier:
         missing_evidence: tuple[str, ...],
         lenses: tuple[ResearchLensRecord, ...],
         evidence_manifest_hash: str | None = None,
+        authority: ResearchAuthority = ResearchAuthority.LAB,
     ) -> Dossier:
         material = _dossier_material_payload(
             subject=subject,
@@ -389,6 +394,7 @@ class Dossier:
             missing_evidence=missing_evidence,
             lenses=lenses,
             evidence_manifest_hash=evidence_manifest_hash,
+            authority=authority,
         )
         return cls(
             subject,
@@ -399,6 +405,8 @@ class Dossier:
             lenses,
             evidence_manifest_hash,
             _content_hash(material),
+            authority.value,
+            authority.non_production,
         )
 
     def material_payload(self) -> dict[str, object]:
@@ -410,6 +418,7 @@ class Dossier:
             missing_evidence=self.missing_evidence,
             lenses=self.lenses,
             evidence_manifest_hash=self.evidence_manifest_hash,
+            authority=ResearchAuthority(self.authority_scope),
         )
 
     def model_output_payload(self) -> dict[str, object]:
@@ -421,19 +430,21 @@ class Dossier:
             contradicting_evidence=self.contradicting_evidence,
             missing_evidence=self.missing_evidence,
             lenses=self.lenses,
+            authority=ResearchAuthority(self.authority_scope),
         )
 
     def to_payload(self) -> dict[str, object]:
         return {**self.material_payload(), "content_hash": self.content_hash}
 
 
-def parse_dossier(  # noqa: PLR0911 - retain distinct hostile-output refusal reasons.
+def parse_dossier(  # noqa: PLR0911, PLR0913 - retain explicit authority and evidence bounds.
     value: object,
     *,
     expected_subject: EquityInstrumentIdentity,
     available_artifact_ids: tuple[str, ...],
     available_artifact_bindings: tuple[tuple[str, str], ...] | None = None,
     cutoff: UtcInstant,
+    authority: ResearchAuthority = ResearchAuthority.LAB,
 ) -> Dossier | DossierRefusalReason:
     """Validate hostile Evidence Collector output against pinned replay inputs."""
     if _contains_prohibited_field(value) or contains_prohibited_research_directive(value):
@@ -444,8 +455,8 @@ def parse_dossier(  # noqa: PLR0911 - retain distinct hostile-output refusal rea
     if (
         root["schema_version"] != 1
         or root["record_kind"] != "evidence_collector_dossier"
-        or root["authority_scope"] != _AUTHORITY_SCOPE
-        or root["non_production"] is not True
+        or root["authority_scope"] != authority.value
+        or root["non_production"] is not authority.non_production
         or type(expected_subject) is not EquityInstrumentIdentity
         or type(cutoff) is not UtcInstant
         or type(available_artifact_ids) is not tuple
@@ -507,6 +518,39 @@ def parse_dossier(  # noqa: PLR0911 - retain distinct hostile-output refusal rea
                 ]
             )
         ),
+        authority=authority,
+    )
+
+
+def parse_stored_dossier(
+    value: object,
+    *,
+    expected_subject: EquityInstrumentIdentity,
+    available_artifact_bindings: tuple[tuple[str, str], ...],
+    cutoff: UtcInstant,
+    authority: ResearchAuthority,
+) -> Dossier | None:
+    """Revalidate one authoritative Dossier representation against its pinned evidence."""
+    if type(value) is not dict or any(type(key) is not str for key in value):
+        return None
+    stored = dict(value)
+    content_hash = stored.pop("content_hash", None)
+    evidence_manifest_hash = stored.pop("evidence_manifest_hash", None)
+    parsed = parse_dossier(
+        stored,
+        expected_subject=expected_subject,
+        available_artifact_ids=tuple(item[0] for item in available_artifact_bindings),
+        available_artifact_bindings=available_artifact_bindings,
+        cutoff=cutoff,
+        authority=authority,
+    )
+    if not isinstance(parsed, Dossier):
+        return None
+    return (
+        parsed
+        if parsed.content_hash == content_hash
+        and parsed.evidence_manifest_hash == evidence_manifest_hash
+        else None
     )
 
 
@@ -713,6 +757,7 @@ def _dossier_material_payload(  # noqa: PLR0913 - canonical identity binds every
     missing_evidence: tuple[str, ...],
     lenses: tuple[ResearchLensRecord, ...],
     evidence_manifest_hash: str | None,
+    authority: ResearchAuthority,
 ) -> dict[str, object]:
     payload = _dossier_model_output_payload(
         subject=subject,
@@ -721,6 +766,7 @@ def _dossier_material_payload(  # noqa: PLR0913 - canonical identity binds every
         contradicting_evidence=contradicting_evidence,
         missing_evidence=missing_evidence,
         lenses=lenses,
+        authority=authority,
     )
     if evidence_manifest_hash is not None:
         payload["evidence_manifest_hash"] = evidence_manifest_hash
@@ -735,12 +781,13 @@ def _dossier_model_output_payload(  # noqa: PLR0913
     contradicting_evidence: tuple[ContradictingEvidence, ...],
     missing_evidence: tuple[str, ...],
     lenses: tuple[ResearchLensRecord, ...],
+    authority: ResearchAuthority,
 ) -> dict[str, object]:
     return {
         "schema_version": 1,
         "record_kind": "evidence_collector_dossier",
-        "authority_scope": _AUTHORITY_SCOPE,
-        "non_production": True,
+        "authority_scope": authority.value,
+        "non_production": authority.non_production,
         "subject": subject.to_payload(),
         "facts": [item.to_payload() for item in facts],
         "interpretations": [item.to_payload() for item in interpretations],

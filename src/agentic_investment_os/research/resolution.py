@@ -12,6 +12,10 @@ from agentic_investment_os.domain.identity import (
     EquityInstrumentIdentity,
     parse_instrument_identity,
 )
+from agentic_investment_os.research.authority import (
+    ResearchAuthority,
+    research_authority_is_valid,
+)
 from agentic_investment_os.research.dossier import Dossier, contains_prohibited_research_directive
 
 __all__ = (
@@ -41,10 +45,14 @@ __all__ = (
     "parse_cio_resolution",
     "parse_scenario_forecast",
     "parse_skeptic_result",
+    "parse_stored_cio_resolution",
+    "parse_stored_scenario_forecast",
+    "parse_stored_skeptic_result",
+    "parse_stored_thesis",
     "parse_thesis",
 )
 
-_AUTHORITY_SCOPE = "research_lab_non_production"
+_AUTHORITY_SCOPE = ResearchAuthority.LAB.value
 _IDENTIFIER = re.compile(r"[a-z0-9][a-z0-9._:-]{0,127}\Z")
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 _MAXIMUM_TEXT = 4_000
@@ -357,8 +365,7 @@ class Thesis:
             or self.supporting_assertion_ids != expected_supporting
             or self.contradicting_artifact_ids != expected_contradicting
             or not self.supporting_assertion_ids
-            or self.authority_scope != _AUTHORITY_SCOPE
-            or self.non_production is not True
+            or not research_authority_is_valid(self.authority_scope, self.non_production)
             or self.content_hash != _content_hash(self.material_payload())
         ):
             raise ValueError(_INVALID_THESIS)
@@ -453,8 +460,7 @@ class SkepticResult:
             or len(self.base_rates) > _MAXIMUM_ITEMS
             or not _valid_text_tuple(self.requested_evidence, require_nonempty=False)
             or (self.decision is SkepticDecision.REQUEST_EVIDENCE) != bool(self.requested_evidence)
-            or self.authority_scope != _AUTHORITY_SCOPE
-            or self.non_production is not True
+            or not research_authority_is_valid(self.authority_scope, self.non_production)
             or self.content_hash != _content_hash(self.material_payload())
         ):
             raise ValueError(_INVALID_SKEPTIC)
@@ -600,8 +606,7 @@ class ScenarioForecast:
             or not 1 <= self.horizon_trading_days <= _MAXIMUM_HORIZON_TRADING_DAYS
             or not _scenario_rules_form_partition(self.scenarios)
             or not _valid_scenario_probabilities(self.scenarios)
-            or self.authority_scope != _AUTHORITY_SCOPE
-            or self.non_production is not True
+            or not research_authority_is_valid(self.authority_scope, self.non_production)
             or self.content_hash != _content_hash(self.material_payload())
         ):
             raise ValueError(_INVALID_FORECAST)
@@ -673,8 +678,7 @@ class CioResolution:
             )
             or type(self.stance) is not CioStance
             or self.uncertainty not in ("low", "medium", "high")
-            or self.authority_scope != _AUTHORITY_SCOPE
-            or self.non_production is not True
+            or not research_authority_is_valid(self.authority_scope, self.non_production)
             or self.content_hash != _content_hash(self.material_payload())
         ):
             raise ValueError(_INVALID_CIO)
@@ -711,7 +715,7 @@ def parse_thesis(  # noqa: PLR0911
     if _contains_prohibited_authority(value):
         return ThesisRefusalReason.PROHIBITED_AUTHORITY
     fields = _exact_mapping(value, _THESIS_FIELDS)
-    if fields is None or not _valid_envelope(fields, "thesis"):
+    if fields is None or not _valid_envelope(fields, "thesis", dossier):
         return ThesisRefusalReason.INVALID_SCHEMA
     subject = parse_instrument_identity(fields["subject"])
     if type(subject) is not EquityInstrumentIdentity or subject != dossier.subject:
@@ -774,6 +778,8 @@ def parse_thesis(  # noqa: PLR0911
             contradicting,
             uninvestable,
             _content_hash(dict(fields)),
+            dossier.authority_scope,
+            dossier.non_production,
         )
     except (TypeError, ValueError):
         return ThesisRefusalReason.INVALID_SCHEMA
@@ -785,13 +791,15 @@ def parse_skeptic_result(  # noqa: PLR0911
     if _contains_prohibited_authority(value):
         return SkepticRefusalReason.PROHIBITED_AUTHORITY
     fields = _exact_mapping(value, _SKEPTIC_FIELDS)
-    if fields is None or not _valid_envelope(fields, "independent_skeptic_result"):
+    if fields is None or not _valid_envelope(fields, "independent_skeptic_result", dossier):
         return SkepticRefusalReason.INVALID_SCHEMA
     subject = parse_instrument_identity(fields["subject"])
     if (
         type(subject) is not EquityInstrumentIdentity
         or subject != dossier.subject
         or thesis.subject != dossier.subject
+        or thesis.authority_scope != dossier.authority_scope
+        or thesis.non_production is not dossier.non_production
         or fields["dossier_id"] != dossier.content_hash
         or fields["thesis_id"] != thesis.content_hash
     ):
@@ -835,6 +843,8 @@ def parse_skeptic_result(  # noqa: PLR0911
             base_rates,
             requested,
             _content_hash(dict(fields)),
+            dossier.authority_scope,
+            dossier.non_production,
         )
     except (TypeError, ValueError):
         return SkepticRefusalReason.INVALID_SCHEMA
@@ -846,7 +856,7 @@ def parse_scenario_forecast(  # noqa: PLR0911
     if _contains_prohibited_authority(value):
         return ForecastRefusalReason.PROHIBITED_AUTHORITY
     fields = _exact_mapping(value, _FORECAST_FIELDS)
-    if fields is None or not _valid_envelope(fields, "scenario_forecast"):
+    if fields is None or not _valid_envelope(fields, "scenario_forecast", dossier):
         return ForecastRefusalReason.INVALID_SCHEMA
     subject = parse_instrument_identity(fields["subject"])
     if (
@@ -855,6 +865,10 @@ def parse_scenario_forecast(  # noqa: PLR0911
         or fields["dossier_id"] != dossier.content_hash
         or fields["thesis_id"] != thesis.content_hash
         or fields["skeptic_id"] != skeptic.content_hash
+        or thesis.authority_scope != dossier.authority_scope
+        or skeptic.authority_scope != dossier.authority_scope
+        or thesis.non_production is not dossier.non_production
+        or skeptic.non_production is not dossier.non_production
     ):
         return ForecastRefusalReason.IDENTITY_MISMATCH
     horizon = fields["horizon_trading_days"]
@@ -872,6 +886,8 @@ def parse_scenario_forecast(  # noqa: PLR0911
             horizon,
             scenarios,
             _content_hash(dict(fields)),
+            dossier.authority_scope,
+            dossier.non_production,
         )
     except (TypeError, ValueError):
         return ForecastRefusalReason.INVALID_SCHEMA
@@ -888,7 +904,7 @@ def parse_cio_resolution(  # noqa: PLR0911, PLR0912
     if _contains_prohibited_authority(value):
         return CioRefusalReason.PROHIBITED_AUTHORITY
     fields = _exact_mapping(value, _CIO_FIELDS)
-    if fields is None or not _valid_envelope(fields, "cio_resolution"):
+    if fields is None or not _valid_envelope(fields, "cio_resolution", dossier):
         return CioRefusalReason.INVALID_SCHEMA
     subject = parse_instrument_identity(fields["subject"])
     if (
@@ -898,6 +914,12 @@ def parse_cio_resolution(  # noqa: PLR0911, PLR0912
         or fields["thesis_id"] != thesis.content_hash
         or fields["skeptic_id"] != skeptic.content_hash
         or fields["forecast_id"] != forecast.content_hash
+        or thesis.authority_scope != dossier.authority_scope
+        or skeptic.authority_scope != dossier.authority_scope
+        or forecast.authority_scope != dossier.authority_scope
+        or thesis.non_production is not dossier.non_production
+        or skeptic.non_production is not dossier.non_production
+        or forecast.non_production is not dossier.non_production
     ):
         return CioRefusalReason.IDENTITY_MISMATCH
     stance_value = fields["stance"]
@@ -954,9 +976,92 @@ def parse_cio_resolution(  # noqa: PLR0911, PLR0912
             uncertainty,
             rationale,
             _content_hash(dict(fields)),
+            dossier.authority_scope,
+            dossier.non_production,
         )
     except (TypeError, ValueError):
         return CioRefusalReason.INVALID_SCHEMA
+
+
+def parse_stored_thesis(value: object, *, dossier: Dossier) -> Thesis | None:
+    """Revalidate one stored Thesis against its exact production or Lab Dossier."""
+    raw, content_hash = _split_stored_artifact(value)
+    parsed = None if raw is None else parse_thesis(raw, dossier=dossier)
+    return parsed if isinstance(parsed, Thesis) and parsed.content_hash == content_hash else None
+
+
+def parse_stored_skeptic_result(
+    value: object, *, dossier: Dossier, thesis: Thesis
+) -> SkepticResult | None:
+    """Revalidate one stored Skeptic result against its exact predecessors."""
+    raw, content_hash = _split_stored_artifact(value)
+    parsed = None if raw is None else parse_skeptic_result(raw, dossier=dossier, thesis=thesis)
+    return (
+        parsed
+        if isinstance(parsed, SkepticResult) and parsed.content_hash == content_hash
+        else None
+    )
+
+
+def parse_stored_scenario_forecast(
+    value: object,
+    *,
+    dossier: Dossier,
+    thesis: Thesis,
+    skeptic: SkepticResult,
+) -> ScenarioForecast | None:
+    """Revalidate one stored forecast against its exact predecessors."""
+    raw, content_hash = _split_stored_artifact(value)
+    parsed = (
+        None
+        if raw is None
+        else parse_scenario_forecast(
+            raw,
+            dossier=dossier,
+            thesis=thesis,
+            skeptic=skeptic,
+        )
+    )
+    return (
+        parsed
+        if isinstance(parsed, ScenarioForecast) and parsed.content_hash == content_hash
+        else None
+    )
+
+
+def parse_stored_cio_resolution(
+    value: object,
+    *,
+    dossier: Dossier,
+    thesis: Thesis,
+    skeptic: SkepticResult,
+    forecast: ScenarioForecast,
+) -> CioResolution | None:
+    """Revalidate one stored CIO resolution against its exact predecessors."""
+    raw, content_hash = _split_stored_artifact(value)
+    parsed = (
+        None
+        if raw is None
+        else parse_cio_resolution(
+            raw,
+            dossier=dossier,
+            thesis=thesis,
+            skeptic=skeptic,
+            forecast=forecast,
+        )
+    )
+    return (
+        parsed
+        if isinstance(parsed, CioResolution) and parsed.content_hash == content_hash
+        else None
+    )
+
+
+def _split_stored_artifact(value: object) -> tuple[dict[str, object] | None, object]:
+    if type(value) is not dict or any(type(key) is not str for key in value):
+        return None, None
+    raw = dict(value)
+    return raw, raw.pop("content_hash", None)
 
 
 def _parse_claim(value: object, dossier: Dossier) -> EvidenceBoundClaim | None:
@@ -1198,12 +1303,12 @@ def _parse_cio_rationale(
         return None
 
 
-def _valid_envelope(fields: dict[str, object], record_kind: str) -> bool:
+def _valid_envelope(fields: dict[str, object], record_kind: str, dossier: Dossier) -> bool:
     return (
         fields["schema_version"] == 1
         and fields["record_kind"] == record_kind
-        and fields["authority_scope"] == _AUTHORITY_SCOPE
-        and fields["non_production"] is True
+        and fields["authority_scope"] == dossier.authority_scope
+        and fields["non_production"] is dossier.non_production
     )
 
 

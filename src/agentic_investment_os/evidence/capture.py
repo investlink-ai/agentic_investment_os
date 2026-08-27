@@ -53,6 +53,7 @@ __all__ = (
     "is_normalized_evidence_content",
     "parse_capture_intent",
     "parse_capture_outcome",
+    "parse_evidence_artifact",
     "select_evidence_as_of",
     "source_identity_is_consistent",
     "validate_capture_outcome_association",
@@ -1402,6 +1403,11 @@ def _parse_artifact(value: object) -> EvidenceArtifact | None:  # noqa: PLR0911,
     if relevant_at is None or relevant_at.isoformat() != relevant_at_text:
         return None
     return artifact if _artifact_is_valid(artifact) and artifact.to_payload() == root else None
+
+
+def parse_evidence_artifact(value: object) -> EvidenceArtifact | None:
+    """Reconstruct one hostile immutable Evidence Artifact envelope."""
+    return _parse_artifact(value)
 
 
 def _artifact_is_valid(  # noqa: PLR0911 - validate provenance contracts independently.

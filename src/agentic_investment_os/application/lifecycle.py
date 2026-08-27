@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Protocol, assert_never
 
@@ -10,12 +12,14 @@ from agentic_investment_os.domain.attention import (
     AttentionInputs,
     AttentionPolicy,
     AttentionRefusalReason,
+    HoldingRefreshDisposition,
     InvalidAttentionError,
     select_attention,
 )
 from agentic_investment_os.domain.identity import (
     AssetClass,
     CryptoDecisionWindow,
+    EquityInstrumentIdentity,
     MarketSession,
     parse_decision_cycle_identity,
 )
@@ -36,9 +40,16 @@ from agentic_investment_os.domain.lifecycle import (
     LifecyclePersistenceError,
     LifecycleStatus,
     LifecycleStatusProjection,
+    MemoryUpdateRefusal,
+    MemoryUpdateRefusalReason,
     PerformAttentionSelection,
+    PerformDossierBuild,
     PerformEvidenceCapture,
+    PerformMemoryUpdate,
+    PerformResearch,
     PinnedRunIdentity,
+    ResearchCheckpoint,
+    ResearchRefusal,
 )
 from agentic_investment_os.domain.temporal import InvalidUtcInstantError, UtcInstant
 from agentic_investment_os.domain.universe import (
@@ -52,14 +63,37 @@ from agentic_investment_os.domain.universe import (
     build_universe_snapshot,
 )
 from agentic_investment_os.evidence.capture import (
+    EvidenceFeed,
     EvidencePersistenceError,
     InvalidEvidenceError,
 )
+from agentic_investment_os.memory.admission import (
+    BeliefClaimKind,
+    BeliefEvent,
+    BeliefEvidenceReference,
+    BeliefEvidenceRelationship,
+    BeliefStatus,
+)
+from agentic_investment_os.memory.beliefs import (
+    BeliefGraphRefusal,
+    BeliefPersistenceError,
+    RecordDisposition,
+)
+from agentic_investment_os.research.production import (
+    ProductionBeliefGraph,
+    ProductionResearch,
+    ProductionResearchContext,
+    ProductionResearchEvidence,
+    ProductionResearchRun,
+    ProductionResearchSubject,
+)
+from agentic_investment_os.research.resolution import CioStance
 
 if TYPE_CHECKING:
     from datetime import datetime
 
     from agentic_investment_os.application.governance import ConstitutionStatus
+    from agentic_investment_os.application.memory import Record
     from agentic_investment_os.domain.governance import (
         ConstitutionArtifact,
         ConstitutionUse,
@@ -67,6 +101,11 @@ if TYPE_CHECKING:
     from agentic_investment_os.evidence.capture import (
         EvidenceCaptureCapability,
         EvidenceReferenceValidator,
+        EvidenceVault,
+    )
+    from agentic_investment_os.memory.beliefs import BeliefHistoryValidator, BeliefLedger
+    from agentic_investment_os.research.production import (
+        ProductionResearchHistoryValidator,
     )
 
 __all__ = ("Advance", "Clock", "ConstitutionResolver", "Status")
@@ -75,6 +114,7 @@ __all__ = ("Advance", "Clock", "ConstitutionResolver", "Status")
 _INCOMPLETE_CHECKPOINT_RESULT = "lifecycle ledger returned an incomplete checkpoint result"
 _CLOCK_INVALID = "lifecycle clock must return a timezone-aware instant representable in UTC"
 _UNIVERSE_SOURCE_INVALID = "universe source returned a noncanonical absolute instant"
+_MEMORY_REFUSAL_CONFLICT = "memory refusal observation conflicts with the accepted event prefix"
 
 
 class Clock(Protocol):
@@ -129,8 +169,12 @@ class Advance:
     attention_inputs: AttentionInputsCapability
     clock: Clock
     constitution_registry: ConstitutionResolver
+    production_research: ProductionResearch
+    evidence_vault: EvidenceVault
+    memory: Record
+    memory_refusal_ledger: BeliefLedger
 
-    def __call__(  # noqa: PLR0912 - exhaust each typed lifecycle decision.
+    def __call__(  # noqa: PLR0912, PLR0915 - exhaust each typed lifecycle decision.
         self,
         *,
         cycle: object,
@@ -227,8 +271,349 @@ class Advance:
                     attention_selection = attention_inputs
                 command = replace(command, attention_selection=attention_selection)
                 continue
+            if isinstance(decision, PerformDossierBuild):
+                if not isinstance(command, AdvanceCommand):
+                    raise InvalidLifecycleStateError(_INCOMPLETE_CHECKPOINT_RESULT)
+                command = replace(
+                    command,
+                    evidence_capture=decision.evidence_capture,
+                    attention_selection=decision.attention_artifact,
+                )
+                context = self._research_context(command)
+                build = self.production_research.build_dossiers(context, recorded_at)
+                command = replace(
+                    command,
+                    dossier_build=(
+                        build.refusal if build.refusal is not None else build.checkpoint
+                    ),
+                )
+                continue
+            if isinstance(decision, PerformResearch):
+                if not isinstance(command, AdvanceCommand):
+                    raise InvalidLifecycleStateError(_INCOMPLETE_CHECKPOINT_RESULT)
+                command = replace(command, attention_selection=decision.attention_artifact)
+                context = self._research_context(command)
+                build = self.production_research.build_dossiers(context, recorded_at)
+                if build.checkpoint != decision.dossier_checkpoint:
+                    raise InvalidLifecycleStateError(_INCOMPLETE_CHECKPOINT_RESULT)
+                run = self.production_research.run_research(context, build, recorded_at)
+                command = replace(
+                    command,
+                    research_run=(run.refusal if run.refusal is not None else run.checkpoint),
+                    no_action_reason=run.no_action_reason,
+                )
+                continue
+            if isinstance(decision, PerformMemoryUpdate):
+                if not isinstance(command, AdvanceCommand):
+                    raise InvalidLifecycleStateError(_INCOMPLETE_CHECKPOINT_RESULT)
+                command = replace(command, attention_selection=decision.attention_artifact)
+                context = self._research_context(command)
+                build = self.production_research.build_dossiers(context, recorded_at)
+                run = self.production_research.run_research(context, build, recorded_at)
+                if run.checkpoint != decision.research_checkpoint:
+                    raise InvalidLifecycleStateError(_INCOMPLETE_CHECKPOINT_RESULT)
+                memory_result = self._update_memory(context, run, recorded_at)
+                command = replace(
+                    command,
+                    memory_update=memory_result,
+                    no_action_reason=run.no_action_reason,
+                )
+                continue
             # Strict mypy proves this line unreachable; removing it is runtime-equivalent.
             assert_never(decision)  # pragma: no cover
+
+    def _research_context(self, command: AdvanceCommand) -> ProductionResearchContext:
+        attention = command.attention_selection
+        constitution = command.constitution
+        if not isinstance(attention, AttentionArtifact) or constitution is None:
+            raise InvalidLifecycleStateError(_INCOMPLETE_CHECKPOINT_RESULT)
+        try:
+            records = self.evidence_vault.stored_records_for_artifacts(
+                attention.evidence_artifact_ids
+            )
+        except (EvidencePersistenceError, InvalidEvidenceError) as error:
+            raise InvalidLifecycleStateError(_INCOMPLETE_CHECKPOINT_RESULT) from error
+        records_by_id = {record.artifact.artifact_id: record for record in records}
+        cards = {card.card_id: card for card in attention.candidate_cards}
+        requested: list[tuple[str, EquityInstrumentIdentity, tuple[str, ...]]] = []
+        for request in attention.dossier_requests:
+            card = cards.get(request.candidate_card_id)
+            if card is None or type(request.identity) is not EquityInstrumentIdentity:
+                raise InvalidLifecycleStateError(_INCOMPLETE_CHECKPOINT_RESULT)
+            requested.append((request.request_id, request.identity, card.evidence_artifact_ids))
+        for refresh in attention.holding_refreshes:
+            if refresh.disposition is not HoldingRefreshDisposition.REQUIRED:
+                continue
+            if type(refresh.identity) is not EquityInstrumentIdentity:
+                raise InvalidLifecycleStateError(_INCOMPLETE_CHECKPOINT_RESULT)
+            requested.append((refresh.refresh_id, refresh.identity, refresh.evidence_artifact_ids))
+        subjects: list[ProductionResearchSubject] = []
+        graphs: list[tuple[str, ProductionBeliefGraph]] = []
+        for request_id, identity, evidence_ids in sorted(requested):
+            try:
+                subject_records = tuple(records_by_id[artifact_id] for artifact_id in evidence_ids)
+            except KeyError as error:
+                raise InvalidLifecycleStateError(_INCOMPLETE_CHECKPOINT_RESULT) from error
+            subject = ProductionResearchSubject(
+                request_id,
+                identity,
+                tuple(
+                    ProductionResearchEvidence(
+                        record.artifact.artifact_id,
+                        record.artifact.content_hash,
+                        record.artifact.available_at,
+                        json.dumps(
+                            record.artifact.to_payload(),
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        ),
+                        record.content,
+                        record.artifact.feed
+                        in (
+                            EvidenceFeed.SEC_EDGAR,
+                            EvidenceFeed.ISSUER_INVESTOR_RELATIONS,
+                            EvidenceFeed.FEDERAL_RESERVE,
+                            EvidenceFeed.BLS,
+                            EvidenceFeed.BEA,
+                        ),
+                    )
+                    for record in subject_records
+                ),
+            )
+            graph = self.memory.graph(
+                {
+                    "schema_version": 1,
+                    "record_kind": "belief_graph_query",
+                    "cutoff": command.pinned_run_identity.evidence_cutoff.isoformat(),
+                    "subjects": [identity.to_payload()],
+                    "maximum_belief_events": (
+                        self.production_research.policy.maximum_belief_events
+                    ),
+                    "maximum_evidence_artifacts": (
+                        self.production_research.policy.maximum_evidence_artifacts
+                    ),
+                }
+            )
+            if isinstance(graph, BeliefGraphRefusal):
+                raise InvalidLifecycleStateError(_INCOMPLETE_CHECKPOINT_RESULT)
+            subjects.append(subject)
+            graphs.append(
+                (
+                    request_id,
+                    ProductionBeliefGraph(
+                        json.dumps(
+                            graph.to_payload(),
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        ),
+                        graph.content_hash,
+                        tuple(
+                            (node.event.belief_id, node.event.event_id)
+                            for node in graph.belief_nodes
+                        ),
+                    ),
+                )
+            )
+        return ProductionResearchContext(
+            command.pinned_run_identity.run_id,
+            command.pinned_run_identity.evidence_cutoff,
+            command.pinned_run_identity.data_regime,
+            constitution,
+            command.universe_snapshot.inputs.position_snapshot,
+            attention,
+            tuple(subjects),
+            tuple(graphs),
+        )
+
+    def _update_memory(
+        self,
+        context: ProductionResearchContext,
+        run: ProductionResearchRun,
+        recorded_at: UtcInstant,
+    ) -> ResearchCheckpoint | ResearchRefusal:
+        # PerformMemoryUpdate carries a completed ResearchCheckpoint, so the equality gate above
+        # rejects a refused rerun before memory admission.
+        if run.refusal is not None:  # pragma: no cover - checkpoint contract proves unreachable.
+            return run.refusal
+        active = tuple(
+            resolution
+            for resolution in run.resolutions
+            if resolution.cio is not None and resolution.cio.stance is not CioStance.ABSTAIN
+        )
+        if not active:
+            return ResearchCheckpoint()
+        event_ids: list[str] = []
+        for resolution in active:
+            cio = resolution.cio
+            if cio is None:  # pragma: no cover - active narrows this condition.
+                raise InvalidLifecycleStateError(_INCOMPLETE_CHECKPOINT_RESULT)
+            belief_id = _content_hash(
+                {
+                    "subject": cio.subject.to_payload(),
+                    "claim_kind": BeliefClaimKind.EXPECTATION.value,
+                }
+            )
+            assertions = {
+                assertion.assertion_id: assertion
+                for assertion in (
+                    *resolution.dossier.facts,
+                    *resolution.dossier.interpretations,
+                )
+            }
+            supporting_ids = tuple(
+                sorted(
+                    {
+                        citation
+                        for assertion_id in resolution.thesis.variant_view.supporting_assertion_ids
+                        for citation in assertions[assertion_id].citation_artifact_ids
+                    }
+                )
+            )
+            contradicting_ids = resolution.thesis.variant_view.contradicting_artifact_ids
+            records = {
+                item.artifact_id: item
+                for item in next(
+                    subject.evidence
+                    for subject in context.subjects
+                    if subject.request_id == resolution.request_id
+                )
+            }
+            evidence = tuple(
+                sorted(
+                    (
+                        *(
+                            BeliefEvidenceReference(
+                                artifact_id,
+                                records[artifact_id].content_hash,
+                                BeliefEvidenceRelationship.SUPPORTING,
+                            )
+                            for artifact_id in supporting_ids
+                        ),
+                        *(
+                            BeliefEvidenceReference(
+                                artifact_id,
+                                records[artifact_id].content_hash,
+                                BeliefEvidenceRelationship.CONTRADICTING,
+                            )
+                            for artifact_id in contradicting_ids
+                        ),
+                    ),
+                    key=lambda reference: (
+                        reference.artifact_id,
+                        reference.relationship.value,
+                    ),
+                )
+            )
+            event_id = _content_hash(
+                {
+                    "cio_resolution_id": cio.content_hash,
+                    "belief_id": belief_id,
+                }
+            )
+            prior_refusal = self.memory_refusal_ledger.load_memory_update_refusal(
+                context.run_id,
+                event_id,
+            )
+            if prior_refusal is not None:
+                if prior_refusal.accepted_event_ids != tuple(sorted(event_ids)):
+                    raise BeliefPersistenceError(_MEMORY_REFUSAL_CONFLICT)
+                return _research_refusal(prior_refusal)
+            current_graph = self.memory.graph(
+                {
+                    "schema_version": 1,
+                    "record_kind": "belief_graph_query",
+                    "cutoff": recorded_at.isoformat(),
+                    "subjects": [cio.subject.to_payload()],
+                    "maximum_belief_events": (
+                        self.production_research.policy.maximum_belief_events
+                    ),
+                    "maximum_evidence_artifacts": (
+                        self.production_research.policy.maximum_evidence_artifacts
+                    ),
+                }
+            )
+            if (
+                isinstance(current_graph, BeliefGraphRefusal)
+                or current_graph.omitted_belief_events > 0
+            ):
+                return self._record_memory_refusal(
+                    MemoryUpdateRefusal(
+                        context.run_id,
+                        event_id,
+                        MemoryUpdateRefusalReason.CURRENT_BELIEF_HISTORY_UNAVAILABLE,
+                        recorded_at,
+                        tuple(sorted(event_ids)),
+                    )
+                )
+            current_events = tuple(
+                node for node in current_graph.belief_nodes if node.event.belief_id == belief_id
+            )
+            redelivered_event = next(
+                (node.event for node in current_events if node.event.event_id == event_id),
+                None,
+            )
+            transition_from = (
+                redelivered_event.transition_from_event_id
+                if redelivered_event is not None
+                else (
+                    None
+                    if not current_events
+                    else max(
+                        current_events,
+                        key=lambda node: node.ledger_position,
+                    ).event.event_id
+                )
+            )
+            event = BeliefEvent.create(
+                event_id=event_id,
+                belief_id=belief_id,
+                subject=cio.subject,
+                claim_kind=BeliefClaimKind.EXPECTATION,
+                claim=resolution.thesis.variant_view.text,
+                valid_at=context.cutoff,
+                transaction_at=(
+                    recorded_at if redelivered_event is None else redelivered_event.transaction_at
+                ),
+                evidence_cutoff=context.cutoff,
+                confidence={"low": "0.75", "medium": "0.5", "high": "0.25"}[cio.uncertainty],
+                evidence=evidence,
+                falsifiers=tuple(sorted(claim.text for claim in resolution.thesis.invalidators)),
+                status=BeliefStatus.ACTIVE,
+                transition_from_event_id=transition_from,
+                supersedes_event_id=None,
+            )
+            receipt = self.memory(event.to_payload())
+            if receipt.disposition not in (
+                RecordDisposition.APPENDED,
+                RecordDisposition.REPLAYED,
+            ):
+                reason = (
+                    "unknown_record_refusal" if receipt.refusal is None else receipt.refusal.value
+                )
+                refusal_reason = MemoryUpdateRefusalReason(reason)
+                return self._record_memory_refusal(
+                    MemoryUpdateRefusal(
+                        context.run_id,
+                        event_id,
+                        refusal_reason,
+                        recorded_at,
+                        tuple(sorted(event_ids)),
+                        (
+                            event.content_hash
+                            if refusal_reason is MemoryUpdateRefusalReason.EVENT_IDENTITY_CONFLICT
+                            else None
+                        ),
+                    )
+                )
+            event_ids.append(event_id)
+        return ResearchCheckpoint(tuple(sorted(event_ids)))
+
+    def _record_memory_refusal(
+        self,
+        refusal: MemoryUpdateRefusal,
+    ) -> ResearchRefusal:
+        stored = self.memory_refusal_ledger.record_memory_update_refusal(refusal)
+        return _research_refusal(stored)
 
     def _validate_evidence_receipt(
         self,
@@ -331,6 +716,7 @@ class Advance:
                     parsed,
                     configuration_version=self.configuration_version,
                     configuration_hash=self.configuration_hash,
+                    research_policy_hash=self.production_research.policy.fingerprint,
                     universe_inputs=universe_identity,
                     constitution=constitution.reference,
                 )
@@ -349,13 +735,31 @@ class Advance:
                         parsed.session,
                     )
                 if isinstance(snapshot, UniverseSnapshot):
-                    return AdvanceCommand(parsed, identity, snapshot)
+                    return AdvanceCommand(
+                        parsed,
+                        identity,
+                        snapshot,
+                        constitution=constitution,
+                    )
                 # Strict mypy proves this line unreachable; removing it is runtime-equivalent.
                 assert_never(snapshot)  # pragma: no cover
             # Strict mypy proves this line unreachable; removing it is runtime-equivalent.
             assert_never(loaded)  # pragma: no cover
         # Strict mypy proves this line unreachable; removing it is runtime-equivalent.
         assert_never(parsed)  # pragma: no cover
+
+
+def _research_refusal(memory_refusal: MemoryUpdateRefusal) -> ResearchRefusal:
+    return ResearchRefusal(
+        memory_refusal.refusal_id,
+        ResearchCheckpoint(memory_refusal.accepted_event_ids),
+        memory_update_refusal=memory_refusal,
+    )
+
+
+def _content_hash(value: object) -> str:
+    encoded = json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def _input_refusal_code(code: UniverseRefusalCode) -> InputRefusalCode:
@@ -378,9 +782,15 @@ class Status:
     projection: LifecycleStatusProjection
     evidence_validator: EvidenceReferenceValidator
     constitution_status: ConstitutionStatus
+    research_history_validator: ProductionResearchHistoryValidator
+    memory_history_validator: BeliefHistoryValidator
 
     def __call__(self) -> LifecycleStatus:
         status = self.projection.rebuild_status()
         self.evidence_validator.validate_references(self.projection.rebuild_evidence_checkpoints())
+        self.research_history_validator.validate_history(
+            self.projection.rebuild_production_research_checkpoints()
+        )
+        self.memory_history_validator.validate_history(self.projection.rebuild_memory_event_ids())
         uses = self.projection.rebuild_constitution_uses()
         return replace(status, constitution_governance=self.constitution_status(uses))

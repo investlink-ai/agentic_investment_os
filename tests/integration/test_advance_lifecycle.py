@@ -6,13 +6,14 @@ import sqlite3
 import stat
 import subprocess
 import sys
+from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 from shutil import copytree
 from tempfile import TemporaryDirectory
-from typing import Literal, override
+from typing import TYPE_CHECKING, Literal, Never, cast, override
 
 import pytest
 from hypothesis import strategies as st
@@ -24,7 +25,13 @@ from agentic_investment_os.adapters.sqlite_lifecycle import (
     prepare_runtime_database,
 )
 from agentic_investment_os.application.lifecycle import Advance
-from agentic_investment_os.domain.attention import AttentionRefusalReason
+from agentic_investment_os.domain.attention import (
+    AttentionArtifact,
+    AttentionRefusalReason,
+    DossierRequest,
+    DossierSelectionKind,
+    HoldingRefreshDisposition,
+)
 from agentic_investment_os.domain.governance import (
     ACTIVE_CONSTITUTION,
     ConstitutionUse,
@@ -46,6 +53,7 @@ from agentic_investment_os.domain.lifecycle import (
     AppendTerminalLifecycleRecord,
     DurableAdvanceConflict,
     DurableAdvanceRefusal,
+    EvidenceCaptureCheckpoint,
     IdempotencyKey,
     InputRefusal,
     InputRefusalCode,
@@ -57,9 +65,15 @@ from agentic_investment_os.domain.lifecycle import (
     LifecyclePersistenceError,
     LifecyclePhase,
     LifecycleStatus,
+    NoActionReason,
     PerformAttentionSelection,
+    PerformDossierBuild,
     PerformEvidenceCapture,
+    PerformMemoryUpdate,
+    PerformResearch,
     PinnedRunIdentity,
+    ResearchCheckpoint,
+    ResearchRefusal,
 )
 from agentic_investment_os.domain.temporal import UtcInstant
 from agentic_investment_os.domain.universe import UniverseInputs
@@ -69,32 +83,50 @@ from agentic_investment_os.entrypoints.configuration import (
     ConfigurationSource,
 )
 from agentic_investment_os.entrypoints.lifecycle import SystemClock, configure_advance
+from agentic_investment_os.evidence.capture import EvidencePersistenceError
+from agentic_investment_os.memory.beliefs import (
+    BeliefGraphRefusal,
+    BeliefGraphRefusalCode,
+)
 from tests._attention import attention_artifact
 from tests._evidence import (
     evidence_capture_checkpoint,
     materialized_evidence_capture_checkpoint,
-    recorded_evidence,
-    recorded_official_evidence,
 )
 from tests._governance import RecordedSessionEligibility
+from tests._production_research import (
+    ValidProductionModel,
+    production_recorded_evidence,
+    production_recorded_official_evidence,
+)
 from tests._universe import (
     advance_command,
     pinned_run_identity,
     recorded_universe,
     runtime_configuration,
+    typed_research_policy,
     universe_policy,
     universe_snapshot,
 )
+
+if TYPE_CHECKING:
+    from agentic_investment_os.application.memory import Record
+    from agentic_investment_os.evidence.capture import EvidenceVault
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 SHA256_HEX_LENGTH = 64
 PRIVATE_DIRECTORY_MODE = 0o700
 PRIVATE_FILE_MODE = 0o600
-PINNED_EVENT_COUNT = 6
+PINNED_EVENT_COUNT = 9
+ATTENTION_REFUSAL_EVENT_COUNT = 5
+ATTENTION_PUBLISHED_EVENT_COUNT = 6
 RECEIPT_FIELD_COUNT = 4
 BASE_EVIDENCE_ARTIFACT_COUNT = 2
 COMPLETE_EVIDENCE_ARTIFACT_COUNT = 7
 RECORDED_AT = datetime(2026, 8, 21, 22, 0, tzinfo=UTC)
+DOSSIER_CHECKPOINT = ResearchCheckpoint(("1" * SHA256_HEX_LENGTH,))
+RESEARCH_CHECKPOINT = ResearchCheckpoint(("2" * SHA256_HEX_LENGTH,))
+MEMORY_CHECKPOINT = ResearchCheckpoint(("3" * SHA256_HEX_LENGTH,))
 SQLiteValue = str | bytes | int | float | None
 NONCANONICAL_CHECKPOINT_SQL = (
     "UPDATE lifecycle_events SET completed_phase = ' ' || completed_phase WHERE sequence = 1"
@@ -147,6 +179,20 @@ NONCANONICAL_EVIDENCE_IDENTIFIERS_SQL = (
     f"UPDATE lifecycle_events SET evidence_artifact_ids = '[ \"{'a' * SHA256_HEX_LENGTH}\"]' "  # noqa: S608
     "WHERE event_kind = 'evidence_captured'"
 )
+MALFORMED_RESEARCH_CHECKPOINT_SQL = (
+    "UPDATE lifecycle_events SET research_checkpoint = '{' WHERE event_kind = 'dossiers_built'"
+)
+INVALID_RESEARCH_CHECKPOINT_SQL = (
+    "UPDATE lifecycle_events SET research_checkpoint = '{}' WHERE event_kind = 'dossiers_built'"
+)
+NO_ACTION_ON_WRONG_RESEARCH_EVENT_SQL = (
+    "UPDATE lifecycle_events SET no_action_reason = 'cio_abstained' "
+    "WHERE event_kind = 'dossiers_built'"
+)
+UNKNOWN_NO_ACTION_REASON_SQL = (
+    "UPDATE lifecycle_events SET no_action_reason = 'unknown' WHERE event_kind = 'memory_updated'"
+)
+SIMULATED_INVALID_PRODUCTION_EVIDENCE = "simulated invalid production evidence"
 
 
 def _cycle_payload(value: str) -> object:
@@ -192,6 +238,7 @@ CORRUPTIONS = {
             INSERT INTO lifecycle_events
             SELECT stream_id, 3, idempotency_key, cycle_identity, mode,
                    configuration_version, configuration_hash,
+                   research_policy_hash,
                    constitution_version, constitution_hash, run_id,
                    data_regime, evidence_cutoff, instrument_snapshot_hash,
                    position_snapshot_hash, eligibility_policy_hash,
@@ -199,6 +246,7 @@ CORRUPTIONS = {
                    universe_snapshot, evidence_policy_id,
                    evidence_artifact_ids, evidence_refusal_ids,
                    attention_artifact_id, attention_artifact,
+                   research_checkpoint, no_action_reason,
                    event_envelope, recorded_at
             FROM lifecycle_events WHERE sequence = 2
             """,
@@ -225,6 +273,26 @@ CORRUPTIONS = {
     ),
     "wrong_checkpoint": (
         ("UPDATE lifecycle_events SET event_kind = 'advance_requested' WHERE sequence = 1",),
+        "lifecycle stream checkpoint order is invalid",
+    ),
+    "research_checkpoint_on_wrong_event": (
+        ("UPDATE lifecycle_events SET research_checkpoint = '{}' WHERE sequence = 0",),
+        "lifecycle stream checkpoint order is invalid",
+    ),
+    "malformed_research_checkpoint": (
+        (MALFORMED_RESEARCH_CHECKPOINT_SQL,),
+        "lifecycle stream checkpoint order is invalid",
+    ),
+    "invalid_research_checkpoint": (
+        (INVALID_RESEARCH_CHECKPOINT_SQL,),
+        "lifecycle stream checkpoint order is invalid",
+    ),
+    "no_action_on_wrong_research_event": (
+        (NO_ACTION_ON_WRONG_RESEARCH_EVENT_SQL,),
+        "lifecycle stream checkpoint order is invalid",
+    ),
+    "unknown_no_action_reason": (
+        (UNKNOWN_NO_ACTION_REASON_SQL,),
         "lifecycle stream checkpoint order is invalid",
     ),
     "changed_event_envelope": (
@@ -254,6 +322,10 @@ CORRUPTIONS = {
     "non_text_hash": (
         ("UPDATE lifecycle_events SET configuration_hash = 3",),
         "invalid configuration_hash in lifecycle ledger",
+    ),
+    "non_text_research_policy_hash": (
+        ("UPDATE lifecycle_events SET research_policy_hash = 3",),
+        "invalid research_policy_hash in lifecycle ledger",
     ),
     "non_text_instrument_snapshot_hash": (
         ("UPDATE lifecycle_events SET instrument_snapshot_hash = 3",),
@@ -616,6 +688,24 @@ ROLLBACK_TRIGGERS = {
         WHEN NEW.event_kind = 'attention_selected'
         BEGIN SELECT RAISE(ABORT, 'injected attention selection failure'); END
     """,
+    "dossiers_built": """
+        CREATE TRIGGER fail_dossiers_built_before_insert
+        BEFORE INSERT ON lifecycle_events
+        WHEN NEW.event_kind = 'dossiers_built'
+        BEGIN SELECT RAISE(ABORT, 'injected Dossier checkpoint failure'); END
+    """,
+    "research_run": """
+        CREATE TRIGGER fail_research_run_before_insert
+        BEFORE INSERT ON lifecycle_events
+        WHEN NEW.event_kind = 'research_run'
+        BEGIN SELECT RAISE(ABORT, 'injected research checkpoint failure'); END
+    """,
+    "memory_updated": """
+        CREATE TRIGGER fail_memory_updated_before_insert
+        BEFORE INSERT ON lifecycle_events
+        WHEN NEW.event_kind = 'memory_updated'
+        BEGIN SELECT RAISE(ABORT, 'injected memory checkpoint failure'); END
+    """,
     "advance_refusal": """
         CREATE TRIGGER fail_advance_refusal_before_insert
         BEFORE INSERT ON advance_refusals
@@ -780,6 +870,47 @@ class InterruptingLedger:
 
 
 @dataclass
+class OneDecisionLedger:
+    """Return one injected decision, then stop the public orchestration loop."""
+
+    decision: LifecycleDecision
+    calls: int = 0
+
+    def pinned_constitution_use(
+        self,
+        _idempotency_key: IdempotencyKey,
+    ) -> ConstitutionUse | None:
+        return None
+
+    def constitution_uses(self) -> tuple[ConstitutionUse, ...]:
+        return ()
+
+    def advance_step(
+        self,
+        command: LifecycleCommand,
+        attempt: AdvanceAttempt,
+        recorded_at: UtcInstant,
+    ) -> LifecycleDecision:
+        _ = (command, attempt, recorded_at)
+        self.calls += 1
+        if self.calls == 1:
+            return self.decision
+        return AdvanceReceipt.failed_closed(AdvanceFailureReason.INVALID_DURABLE_STATE)
+
+
+@dataclass(frozen=True, slots=True)
+class _FailingProductionEvidenceVault:
+    def stored_records_for_artifacts(self, _artifact_ids: tuple[str, ...]) -> Never:
+        raise EvidencePersistenceError(SIMULATED_INVALID_PRODUCTION_EVIDENCE)
+
+
+@dataclass(frozen=True, slots=True)
+class _RefusingProductionMemory:
+    def graph(self, _query: object) -> BeliefGraphRefusal:
+        return BeliefGraphRefusal(BeliefGraphRefusalCode.INVALID_AUTHORITATIVE_HISTORY)
+
+
+@dataclass
 class RacingStartLedger:
     delegate: SQLiteLifecycleLedger
     winner_phase: LifecyclePhase | None
@@ -819,29 +950,43 @@ def _attempt_operation(command: LifecycleCommand, attempt: AdvanceAttempt) -> st
         2: "snapshot",
         3: "evidence",
         4: "attention",
-    }.get(attempt.last_sequence, "attention")
+        5: "dossier",
+        6: "research",
+        7: "memory",
+    }.get(attempt.last_sequence, "memory")
 
 
 def _decision_operation(decision: LifecycleDecision, fallback: str) -> str:
     if isinstance(decision, PerformEvidenceCapture):
-        return "capture_effect"
-    if isinstance(decision, PerformAttentionSelection):
-        return "attention_effect"
-    if not isinstance(decision, AppendLifecycleRecord):
-        return fallback
-    if isinstance(decision.record, DurableAdvanceRefusal):
-        return "refuse"
-    if isinstance(decision.record, DurableAdvanceConflict):
-        return "start"
-    assert isinstance(decision.record, LifecycleEvent)
-    return {
-        0: "start",
-        1: "reconcile",
-        2: "pin",
-        3: "snapshot",
-        4: "evidence",
-        5: "attention",
-    }[decision.record.sequence]
+        operation = "capture_effect"
+    elif isinstance(decision, PerformAttentionSelection):
+        operation = "attention_effect"
+    elif isinstance(decision, PerformDossierBuild):
+        operation = "dossier_effect"
+    elif isinstance(decision, PerformResearch):
+        operation = "research_effect"
+    elif isinstance(decision, PerformMemoryUpdate):
+        operation = "memory_effect"
+    elif not isinstance(decision, (AppendLifecycleRecord, AppendTerminalLifecycleRecord)):
+        operation = fallback
+    elif isinstance(decision.record, DurableAdvanceRefusal):
+        operation = "refuse"
+    elif isinstance(decision.record, DurableAdvanceConflict):
+        operation = "start"
+    else:
+        assert isinstance(decision.record, LifecycleEvent)
+        operation = {
+            0: "start",
+            1: "reconcile",
+            2: "pin",
+            3: "snapshot",
+            4: "evidence",
+            5: "attention",
+            6: "dossier",
+            7: "research",
+            8: "memory",
+        }[decision.record.sequence]
+    return operation
 
 
 def _reference_mapping(value: object) -> dict[str, object]:
@@ -1031,6 +1176,7 @@ class _LifecycleReferenceModel:
     streams: dict[str, _ReferenceStream] = field(default_factory=dict)
     sessions: dict[str, str] = field(default_factory=dict)
     refusals: dict[str, tuple[AdvanceFailureReason, MarketSession]] = field(default_factory=dict)
+    research_refusal_ids: dict[str, str] = field(default_factory=dict)
     conflicts: set[str] = field(default_factory=set)
     unkeyed_refusal_cycles: set[MarketSession] = field(default_factory=set)
 
@@ -1077,6 +1223,15 @@ class _LifecycleReferenceModel:
             if stream is None:  # pragma: no cover - reference-model invariant.
                 raise AssertionError
             return self._attention_failed(stream)
+        if reason is AdvanceFailureReason.RESEARCH_FAILED:
+            refusal_id = self.research_refusal_ids.get(key)
+            if refusal_id is None:  # pragma: no cover - reference-model invariant.
+                raise AssertionError
+            return AdvanceReceipt.failed_closed(
+                reason,
+                cycle=cycle,
+                research_refusal=ResearchRefusal(refusal_id),
+            )
         return self._failed(reason, cycle)
 
     def _advance_valid(
@@ -1088,12 +1243,12 @@ class _LifecycleReferenceModel:
         if stream is not None:
             if stream.session != session:
                 return self._record_idempotency_conflict(key, stream, session)
-            if stream.events < PINNED_EVENT_COUNT and any(
-                candidate.events == PINNED_EVENT_COUNT and candidate.session > session
+            if stream.events < ATTENTION_PUBLISHED_EVENT_COUNT and any(
+                candidate.events >= ATTENTION_PUBLISHED_EVENT_COUNT and candidate.session > session
                 for candidate in self.streams.values()
             ):
                 cycle = MarketSession(date.fromisoformat(session))
-                stream.events = PINNED_EVENT_COUNT - 1
+                stream.events = ATTENTION_REFUSAL_EVENT_COUNT
                 self.refusals[key] = AdvanceFailureReason.ATTENTION_SELECTION_FAILED, cycle
                 return self._attention_failed(stream)
             recovery = (
@@ -1190,6 +1345,10 @@ class _LifecycleReferenceModel:
             UtcInstant.from_datetime(RECORDED_AT),
             checkpoint,
             attention_artifact(identity, snapshot, checkpoint),
+            DOSSIER_CHECKPOINT,
+            RESEARCH_CHECKPOINT,
+            MEMORY_CHECKPOINT,
+            None,
         )
 
     def _stream(self, session: str, events: int) -> _ReferenceStream:
@@ -1215,12 +1374,14 @@ class _LifecycleReferenceModel:
         if type(instrument_snapshot_hash) is not str or type(position_snapshot_hash) is not str:
             raise AssertionError
         eligibility_policy_hash = _reference_fingerprint(policy)
+        research_policy_hash = typed_research_policy().fingerprint
         cycle = MarketSession(date.fromisoformat(session))
         cycle_text = json.dumps(cycle.to_payload(), sort_keys=True, separators=(",", ":"))
         encoded = json.dumps(
             (
                 self.configuration_hash,
                 self.configuration_version,
+                research_policy_hash,
                 ACTIVE_CONSTITUTION.content_hash,
                 ACTIVE_CONSTITUTION.version,
                 "champion",
@@ -1237,6 +1398,7 @@ class _LifecycleReferenceModel:
             cycle=cycle,
             configuration_version=self.configuration_version,
             configuration_hash=self.configuration_hash,
+            research_policy_hash=research_policy_hash,
             constitution_version=ACTIVE_CONSTITUTION.version,
             constitution_hash=ACTIVE_CONSTITUTION.content_hash,
             data_regime=data_regime,
@@ -1269,7 +1431,12 @@ class _LifecycleReferenceModel:
         return _reference_fingerprint(material)
 
 
-def _configure(state_root: Path) -> Advance:
+def _configure(
+    state_root: Path,
+    *,
+    clock: FixedClock | None = None,
+    cio_stance: Literal["hold", "abstain"] = "hold",
+) -> Advance:
     configured = configure_advance(
         (
             ConfigurationSource(
@@ -1279,12 +1446,151 @@ def _configure(state_root: Path) -> Advance:
         ),
         repository_root=REPOSITORY_ROOT,
         recorded_universe=recorded_universe(),
-        recorded_evidence=recorded_evidence(),
+        recorded_evidence=production_recorded_evidence(),
+        recorded_official_evidence=production_recorded_official_evidence(),
+        recorded_model=ValidProductionModel(cio_stance=cio_stance),
         session_eligibility=RecordedSessionEligibility(),
-        clock=FixedClock(datetime(2026, 8, 21, 22, 0, tzinfo=UTC)),
+        clock=(FixedClock(datetime(2026, 8, 21, 22, 0, tzinfo=UTC)) if clock is None else clock),
     )
     assert isinstance(configured, Advance)
     return configured
+
+
+def _receipt_evidence_checkpoint(receipt: AdvanceReceipt) -> EvidenceCaptureCheckpoint:
+    assert receipt.evidence_policy_id is not None
+    return EvidenceCaptureCheckpoint(
+        receipt.evidence_policy_id,
+        receipt.evidence_artifact_ids,
+        receipt.evidence_refusal_ids,
+    )
+
+
+@pytest.mark.parametrize("phase", ["research", "memory"])
+def test_advance_rejects_a_rebuilt_production_checkpoint_mismatch(
+    tmp_path: Path,
+    phase: str,
+) -> None:
+    capability = _configure(tmp_path / "runtime")
+    receipt = capability(
+        cycle=_cycle_payload("2026-08-21"),
+        mode="champion",
+        idempotency_key="checkpoint-mismatch",
+    )
+    identity = receipt.pinned_run_identity
+    artifact = receipt.attention_artifact
+    assert identity is not None
+    assert artifact is not None
+    mismatched = ResearchCheckpoint(("f" * SHA256_HEX_LENGTH,))
+    if phase == "research":
+        decision: LifecycleDecision = PerformResearch(identity, mismatched, artifact)
+    else:
+        assert phase == "memory"
+        decision = PerformMemoryUpdate(identity, mismatched, artifact)
+    invalid = replace(capability, ledger=OneDecisionLedger(decision))
+
+    with pytest.raises(
+        InvalidLifecycleStateError,
+        match="lifecycle ledger returned an incomplete checkpoint result",
+    ):
+        invalid(
+            cycle=_cycle_payload("2026-08-21"),
+            mode="champion",
+            idempotency_key="checkpoint-mismatch",
+        )
+
+
+@pytest.mark.parametrize(
+    "corruption",
+    [
+        "attention_type",
+        "vault",
+        "dossier_card",
+        "holding_identity",
+        "holding_mismatch",
+        "belief_graph",
+    ],
+)
+def test_advance_rejects_invalid_production_context_material(
+    tmp_path: Path,
+    corruption: str,
+) -> None:
+    capability = _configure(tmp_path / "runtime")
+    receipt = capability(
+        cycle=_cycle_payload("2026-08-21"),
+        mode="champion",
+        idempotency_key="invalid-production-context",
+    )
+    identity = receipt.pinned_run_identity
+    artifact = deepcopy(receipt.attention_artifact)
+    assert identity is not None
+    assert artifact is not None
+    evidence = _receipt_evidence_checkpoint(receipt)
+    selected: AttentionArtifact = artifact
+    if corruption == "attention_type":
+        selected = cast("AttentionArtifact", "invalid")
+    elif corruption == "dossier_card":
+        assert artifact.holding_refreshes
+        object.__setattr__(
+            artifact,
+            "dossier_requests",
+            (
+                DossierRequest(
+                    "e" * SHA256_HEX_LENGTH,
+                    "f" * SHA256_HEX_LENGTH,
+                    artifact.holding_refreshes[0].identity,
+                    DossierSelectionKind.PRIORITY,
+                ),
+            ),
+        )
+    elif corruption == "holding_identity":
+        assert artifact.holding_refreshes
+        object.__setattr__(
+            artifact.holding_refreshes[0],
+            "identity",
+            cast("EquityInstrumentIdentity", "invalid"),
+        )
+    elif corruption == "holding_mismatch":
+        assert artifact.holding_refreshes
+        object.__setattr__(
+            artifact.holding_refreshes[0],
+            "disposition",
+            HoldingRefreshDisposition.PORTFOLIO_MISMATCH,
+        )
+    decision = PerformDossierBuild(
+        identity,
+        universe_snapshot(identity),
+        evidence,
+        selected,
+    )
+    invalid = replace(capability, ledger=OneDecisionLedger(decision))
+    if corruption == "vault":
+        invalid = replace(
+            invalid,
+            evidence_vault=cast("EvidenceVault", _FailingProductionEvidenceVault()),
+        )
+    elif corruption == "belief_graph":
+        invalid = replace(
+            invalid,
+            memory=cast("Record", _RefusingProductionMemory()),
+        )
+
+    if corruption == "holding_mismatch":
+        observed = invalid(
+            cycle=_cycle_payload("2026-08-21"),
+            mode="champion",
+            idempotency_key="invalid-production-context",
+        )
+        assert observed.failure_reason is AdvanceFailureReason.INVALID_DURABLE_STATE
+    else:
+        with pytest.raises(
+            InvalidLifecycleStateError,
+            match="lifecycle ledger returned an incomplete checkpoint result",
+        ):
+            invalid(
+                cycle=_cycle_payload("2026-08-21"),
+                mode="champion",
+                idempotency_key="invalid-production-context",
+            )
 
 
 def _events(database: Path) -> list[tuple[str, str | None]]:
@@ -1364,7 +1670,7 @@ def test_advance_pins_one_stream_and_reconstructs_its_receipt_after_reopen(
     assert first.pinned_run_identity == replay.pinned_run_identity
     assert first.disposition is AdvanceDisposition.ADVANCED
     assert first.completed_phase is not None
-    assert first.completed_phase.phase is LifecyclePhase.SELECT_ATTENTION
+    assert first.completed_phase.phase is LifecyclePhase.UPDATE_MEMORY
     assert first.pinned_run_identity is not None
     assert len(first.pinned_run_identity.run_id) == SHA256_HEX_LENGTH
     assert len(first.pinned_run_identity.configuration_hash) == SHA256_HEX_LENGTH
@@ -1376,6 +1682,9 @@ def test_advance_pins_one_stream_and_reconstructs_its_receipt_after_reopen(
         ("universe_snapshotted", "SnapshotUniverse"),
         ("evidence_captured", "CaptureEvidence"),
         ("attention_selected", "SelectAttention"),
+        ("dossiers_built", "BuildDossiers"),
+        ("research_run", "RunResearch"),
+        ("memory_updated", "UpdateMemory"),
     ]
     assert stat.S_IMODE(state_root.stat().st_mode) == PRIVATE_DIRECTORY_MODE
     assert stat.S_IMODE((state_root / "lifecycle.sqlite3").stat().st_mode) == PRIVATE_FILE_MODE
@@ -1389,9 +1698,10 @@ def test_advance_captures_all_recorded_official_sources_without_network_access(
         (ConfigurationSource("test", runtime_configuration(state_root)),),
         repository_root=REPOSITORY_ROOT,
         recorded_universe=recorded_universe(),
-        recorded_evidence=recorded_evidence(),
+        recorded_evidence=production_recorded_evidence(),
+        recorded_model=ValidProductionModel(),
         session_eligibility=RecordedSessionEligibility(),
-        recorded_official_evidence=recorded_official_evidence(),
+        recorded_official_evidence=production_recorded_official_evidence(),
         clock=FixedClock(datetime(2026, 8, 21, 22, 0, tzinfo=UTC)),
     )
     assert isinstance(configured, Advance)
@@ -1415,7 +1725,7 @@ def test_optional_official_artifact_after_cutoff_is_not_published_as_admitted_ev
     tmp_path: Path,
 ) -> None:
     state_root = tmp_path / "runtime"
-    official = recorded_official_evidence()
+    official = production_recorded_official_evidence()
     items = official["items"]
     assert isinstance(items, list)
     sec = items[0]
@@ -1426,7 +1736,8 @@ def test_optional_official_artifact_after_cutoff_is_not_published_as_admitted_ev
         (ConfigurationSource("test", runtime_configuration(state_root)),),
         repository_root=REPOSITORY_ROOT,
         recorded_universe=recorded_universe(),
-        recorded_evidence=recorded_evidence(),
+        recorded_evidence=production_recorded_evidence(),
+        recorded_model=ValidProductionModel(),
         session_eligibility=RecordedSessionEligibility(),
         recorded_official_evidence=official,
         clock=FixedClock(datetime(2026, 8, 21, 22, 0, tzinfo=UTC)),
@@ -1467,7 +1778,8 @@ def test_advance_fails_closed_when_a_required_official_source_is_absent(
         (ConfigurationSource("test", configuration),),
         repository_root=REPOSITORY_ROOT,
         recorded_universe=recorded_universe(),
-        recorded_evidence=recorded_evidence(),
+        recorded_evidence=production_recorded_evidence(),
+        recorded_model=ValidProductionModel(),
         session_eligibility=RecordedSessionEligibility(),
         clock=FixedClock(datetime(2026, 8, 21, 22, 0, tzinfo=UTC)),
     )
@@ -1527,7 +1839,13 @@ def test_disabled_crypto_cycle_is_refused_before_authoritative_state_changes(
         ("evidence", "before", 4, AdvanceRecovery.RESUMED),
         ("evidence", "after", 5, AdvanceRecovery.RESUMED),
         ("attention", "before", 5, AdvanceRecovery.RESUMED),
-        ("attention", "after", 6, AdvanceRecovery.PREVIOUSLY_COMPLETED),
+        ("attention", "after", 6, AdvanceRecovery.RESUMED),
+        ("dossier", "before", 6, AdvanceRecovery.RESUMED),
+        ("dossier", "after", 7, AdvanceRecovery.RESUMED),
+        ("research", "before", 7, AdvanceRecovery.RESUMED),
+        ("research", "after", 8, AdvanceRecovery.RESUMED),
+        ("memory", "before", 8, AdvanceRecovery.RESUMED),
+        ("memory", "after", 9, AdvanceRecovery.PREVIOUSLY_COMPLETED),
     ],
 )
 def test_fresh_process_resumes_at_every_universe_snapshot_write_boundary(
@@ -1552,7 +1870,11 @@ def test_fresh_process_resumes_at_every_universe_snapshot_write_boundary(
         attention_policy=capability.attention_policy,
         attention_inputs=capability.attention_inputs,
         clock=capability.clock,
-        constitution_registry=capability.constitution_registry,
+        constitution_registry=(capability.constitution_registry),
+        production_research=capability.production_research,
+        evidence_vault=capability.evidence_vault,
+        memory=capability.memory,
+        memory_refusal_ledger=capability.memory_refusal_ledger,
     )
 
     with pytest.raises(SimulatedInterruptionError):
@@ -1569,7 +1891,7 @@ def test_fresh_process_resumes_at_every_universe_snapshot_write_boundary(
     )
 
     assert disposition == AdvanceDisposition.ADVANCED.value
-    assert phase == LifecyclePhase.SELECT_ATTENTION.value
+    assert phase == LifecyclePhase.UPDATE_MEMORY.value
     assert recovery == expected_recovery.value
     assert len(run_id) == SHA256_HEX_LENGTH
     assert len(_events(database)) == PINNED_EVENT_COUNT
@@ -1579,7 +1901,7 @@ def test_attention_retry_keeps_selection_identity_when_publication_time_changes(
     tmp_path: Path,
 ) -> None:
     state_root = tmp_path / "partial"
-    capability = _configure(state_root)
+    capability = _configure(state_root, cio_stance="abstain")
     ledger = capability.ledger
     assert isinstance(ledger, SQLiteLifecycleLedger)
     interrupted = replace(
@@ -1600,14 +1922,22 @@ def test_attention_retry_keeps_selection_identity_when_publication_time_changes(
     first_time = RECORDED_AT
     later_time = RECORDED_AT + timedelta(seconds=1)
     first_capability = replace(
-        capability,
-        ledger=SQLiteLifecycleLedger(first_root / "lifecycle.sqlite3"),
-        clock=FixedClock(first_time),
+        _configure(
+            first_root,
+            clock=FixedClock(first_time),
+            cio_stance="abstain",
+        ),
+        configuration_version=capability.configuration_version,
+        configuration_hash=capability.configuration_hash,
     )
     later_capability = replace(
-        capability,
-        ledger=SQLiteLifecycleLedger(later_root / "lifecycle.sqlite3"),
-        clock=FixedClock(later_time),
+        _configure(
+            later_root,
+            clock=FixedClock(later_time),
+            cio_stance="abstain",
+        ),
+        configuration_version=capability.configuration_version,
+        configuration_hash=capability.configuration_hash,
     )
     first = first_capability(
         cycle=cycle,
@@ -1694,7 +2024,11 @@ def test_fresh_process_recovers_at_each_refusal_write_boundary(
         attention_policy=capability.attention_policy,
         attention_inputs=capability.attention_inputs,
         clock=capability.clock,
-        constitution_registry=capability.constitution_registry,
+        constitution_registry=(capability.constitution_registry),
+        production_research=capability.production_research,
+        evidence_vault=capability.evidence_vault,
+        memory=capability.memory,
+        memory_refusal_ledger=capability.memory_refusal_ledger,
     )
 
     with pytest.raises(SimulatedInterruptionError):
@@ -1753,7 +2087,11 @@ def test_fresh_process_recovers_at_each_completed_conflict_write_boundary(
         attention_policy=capability.attention_policy,
         attention_inputs=capability.attention_inputs,
         clock=capability.clock,
-        constitution_registry=capability.constitution_registry,
+        constitution_registry=(capability.constitution_registry),
+        production_research=capability.production_research,
+        evidence_vault=capability.evidence_vault,
+        memory=capability.memory,
+        memory_refusal_ledger=capability.memory_refusal_ledger,
     )
 
     with pytest.raises(SimulatedInterruptionError):
@@ -1808,7 +2146,11 @@ def test_duplicate_delivery_reports_progress_committed_by_the_winner_as_resumed(
         attention_policy=capability.attention_policy,
         attention_inputs=capability.attention_inputs,
         clock=capability.clock,
-        constitution_registry=capability.constitution_registry,
+        constitution_registry=(capability.constitution_registry),
+        production_research=capability.production_research,
+        evidence_vault=capability.evidence_vault,
+        memory=capability.memory,
+        memory_refusal_ledger=capability.memory_refusal_ledger,
     )
 
     receipt = raced(
@@ -1822,6 +2164,33 @@ def test_duplicate_delivery_reports_progress_committed_by_the_winner_as_resumed(
     assert len(_events(state_root / "lifecycle.sqlite3")) == PINNED_EVENT_COUNT
 
 
+def test_replay_validates_research_refusal_with_preceding_attention_history(
+    tmp_path: Path,
+) -> None:
+    capability = _configure(tmp_path / "runtime", cio_stance="abstain")
+    for day in (2, 3):
+        receipt = capability(
+            cycle=_cycle_payload(f"2026-09-0{day}"),
+            mode="champion",
+            idempotency_key=f"attention-history-{day}",
+        )
+        assert receipt.disposition is AdvanceDisposition.NO_ACTION
+
+    failed = capability(
+        cycle=_cycle_payload("2026-09-04"),
+        mode="champion",
+        idempotency_key="attention-history-refusal",
+    )
+    replayed = capability(
+        cycle=_cycle_payload("2026-09-04"),
+        mode="champion",
+        idempotency_key="attention-history-refusal",
+    )
+
+    assert failed.failure_reason is AdvanceFailureReason.RESEARCH_FAILED
+    assert replayed == failed
+
+
 class LifecycleStateMachine(RuleBasedStateMachine):
     def __init__(self) -> None:
         super().__init__()
@@ -1829,7 +2198,7 @@ class LifecycleStateMachine(RuleBasedStateMachine):
             prefix="agentic-investment-os-lifecycle-state-machine-"
         )
         self.state_root = Path(self._temporary_directory.name).resolve() / "runtime"
-        self.capability = _configure(self.state_root)
+        self.capability = _configure(self.state_root, cio_stance="abstain")
         self.reference = _LifecycleReferenceModel(
             self.capability.configuration_version,
             self.capability.configuration_hash,
@@ -1845,12 +2214,65 @@ class LifecycleStateMachine(RuleBasedStateMachine):
         session = date(2026, 9, 1) + timedelta(days=self.next_identity)
         return session.isoformat(), f"generated-{self.next_identity}"
 
+    def _record_research_refusal(
+        self,
+        *,
+        session: str,
+        key: str,
+        observed: AdvanceReceipt,
+    ) -> AdvanceReceipt:
+        assert observed.failure_reason is AdvanceFailureReason.RESEARCH_FAILED
+        assert observed.research_refusal_id is not None
+        cycle = MarketSession(date.fromisoformat(session))
+        if key not in self.reference.streams:
+            self.reference.interrupt(
+                session=session,
+                key=key,
+                committed_events=ATTENTION_PUBLISHED_EVENT_COUNT,
+            )
+        self.reference.streams[key].events = ATTENTION_PUBLISHED_EVENT_COUNT
+        self.reference.refusals[key] = AdvanceFailureReason.RESEARCH_FAILED, cycle
+        self.reference.research_refusal_ids[key] = observed.research_refusal_id
+        return AdvanceReceipt.failed_closed(
+            AdvanceFailureReason.RESEARCH_FAILED,
+            cycle=cycle,
+            research_refusal=ResearchRefusal(observed.research_refusal_id),
+        )
+
     def _advance(self, *, session: str, mode: str, key: str) -> None:
         expected = self.reference.advance(session=session, mode=mode, key=key)
         observed = self.capability(cycle=_cycle_payload(session), mode=mode, idempotency_key=key)
-        if observed.disposition is AdvanceDisposition.ADVANCED:
+        if observed.disposition in (
+            AdvanceDisposition.ADVANCED,
+            AdvanceDisposition.NO_ACTION,
+        ):
             assert observed.attention_artifact is not None
-            expected = replace(expected, attention_artifact=observed.attention_artifact)
+            expected = replace(
+                expected,
+                evidence_policy_id=observed.evidence_policy_id,
+                evidence_artifact_ids=observed.evidence_artifact_ids,
+                evidence_refusal_ids=observed.evidence_refusal_ids,
+                attention_artifact=observed.attention_artifact,
+                dossier_checkpoint=observed.dossier_checkpoint,
+                research_checkpoint=observed.research_checkpoint,
+                memory_checkpoint=observed.memory_checkpoint,
+                disposition=observed.disposition,
+                no_action_reason=observed.no_action_reason,
+            )
+        elif observed.failure_reason is AdvanceFailureReason.ATTENTION_SELECTION_FAILED:
+            expected = replace(
+                expected,
+                evidence_policy_id=observed.evidence_policy_id,
+                evidence_artifact_ids=observed.evidence_artifact_ids,
+                evidence_refusal_ids=observed.evidence_refusal_ids,
+                attention_refusal_reason=observed.attention_refusal_reason,
+            )
+        elif observed.failure_reason is AdvanceFailureReason.RESEARCH_FAILED:
+            expected = self._record_research_refusal(
+                session=session,
+                key=key,
+                observed=observed,
+            )
         assert observed == expected
 
     def _stream_key(self, selection: int) -> str:
@@ -1916,7 +2338,10 @@ class LifecycleStateMachine(RuleBasedStateMachine):
                 ("pin", 3),
                 ("snapshot", 4),
                 ("evidence", 5),
-                ("attention", PINNED_EVENT_COUNT),
+                ("attention", 6),
+                ("dossier", 7),
+                ("research", 8),
+                ("memory", PINNED_EVENT_COUNT),
             )
         )
     )
@@ -1937,18 +2362,34 @@ class LifecycleStateMachine(RuleBasedStateMachine):
             attention_inputs=self.capability.attention_inputs,
             clock=self.capability.clock,
             constitution_registry=self.capability.constitution_registry,
+            production_research=self.capability.production_research,
+            evidence_vault=self.capability.evidence_vault,
+            memory=self.capability.memory,
+            memory_refusal_ledger=self.capability.memory_refusal_ledger,
         )
-        with pytest.raises(SimulatedInterruptionError):
-            interrupted(cycle=_cycle_payload(session), mode="champion", idempotency_key=key)
-        self.reference.interrupt(
-            session=session,
-            key=key,
-            committed_events=committed_events,
-        )
+        try:
+            observed = interrupted(
+                cycle=_cycle_payload(session),
+                mode="champion",
+                idempotency_key=key,
+            )
+        except SimulatedInterruptionError:
+            self.reference.interrupt(
+                session=session,
+                key=key,
+                committed_events=committed_events,
+            )
+        else:
+            assert operation in ("dossier", "research", "memory")
+            assert observed == self._record_research_refusal(
+                session=session,
+                key=key,
+                observed=observed,
+            )
 
     @rule()
     def reopen_database(self) -> None:
-        self.capability = _configure(self.state_root)
+        self.capability = _configure(self.state_root, cio_stance="abstain")
 
     @invariant()
     def authoritative_counts_match_reference_model(self) -> None:
@@ -1958,6 +2399,57 @@ class LifecycleStateMachine(RuleBasedStateMachine):
 
 
 TestLifecycleStateMachine = LifecycleStateMachine.TestCase
+
+
+def test_state_machine_models_interrupted_future_attention_as_published() -> None:
+    state = LifecycleStateMachine()
+    try:
+        state.interrupt_fresh_advance(("start", 1))
+        state.interrupt_fresh_advance(("attention", ATTENTION_PUBLISHED_EVENT_COUNT))
+        state.replay(0)
+        state.authoritative_counts_match_reference_model()
+    finally:
+        state.teardown()
+
+
+def test_state_machine_models_research_refusal_before_requested_interruption() -> None:
+    state = LifecycleStateMachine()
+    try:
+        state.interrupt_fresh_advance(("attention", ATTENTION_PUBLISHED_EVENT_COUNT))
+        state.interrupt_fresh_advance(("attention", ATTENTION_PUBLISHED_EVENT_COUNT))
+        state.interrupt_fresh_advance(("dossier", 7))
+        state.authoritative_counts_match_reference_model()
+    finally:
+        state.teardown()
+
+
+def test_cio_abstention_resumes_after_research_checkpoint(tmp_path: Path) -> None:
+    state_root = tmp_path / "runtime"
+    capability = _configure(state_root, cio_stance="abstain")
+    ledger = capability.ledger
+    assert isinstance(ledger, SQLiteLifecycleLedger)
+    interrupted = replace(
+        capability,
+        ledger=InterruptingLedger(ledger, "research", "after"),
+    )
+
+    with pytest.raises(SimulatedInterruptionError):
+        interrupted(
+            cycle=_cycle_payload("2026-08-21"),
+            mode="champion",
+            idempotency_key="abstain-after-research",
+        )
+
+    receipt = capability(
+        cycle=_cycle_payload("2026-08-21"),
+        mode="champion",
+        idempotency_key="abstain-after-research",
+    )
+
+    assert receipt.disposition is AdvanceDisposition.NO_ACTION
+    assert receipt.recovery is AdvanceRecovery.RESUMED
+    assert receipt.no_action_reason is NoActionReason.CIO_ABSTAINED
+    assert len(_events(state_root / "lifecycle.sqlite3")) == PINNED_EVENT_COUNT
 
 
 def test_resuming_an_older_partial_cycle_after_a_later_selection_fails_closed(
@@ -1978,7 +2470,11 @@ def test_resuming_an_older_partial_cycle_after_a_later_selection_fails_closed(
         attention_policy=capability.attention_policy,
         attention_inputs=capability.attention_inputs,
         clock=capability.clock,
-        constitution_registry=capability.constitution_registry,
+        constitution_registry=(capability.constitution_registry),
+        production_research=capability.production_research,
+        evidence_vault=capability.evidence_vault,
+        memory=capability.memory,
+        memory_refusal_ledger=capability.memory_refusal_ledger,
     )
 
     with pytest.raises(SimulatedInterruptionError):
@@ -2023,6 +2519,49 @@ def test_resuming_an_older_partial_cycle_after_a_later_selection_fails_closed(
             "SELECT COUNT(*) FROM advance_refusals WHERE idempotency_key = ?",
             ("older-partial",),
         ).fetchone() == (1,)
+
+
+def test_resuming_after_published_attention_preserves_that_older_selection(
+    tmp_path: Path,
+) -> None:
+    state_root = tmp_path / "runtime"
+    capability = _configure(state_root)
+    ledger = capability.ledger
+    assert isinstance(ledger, SQLiteLifecycleLedger)
+    interrupted = replace(
+        capability,
+        ledger=InterruptingLedger(ledger, "attention", "after"),
+    )
+
+    with pytest.raises(SimulatedInterruptionError):
+        interrupted(
+            cycle=_cycle_payload("2026-09-02"),
+            mode="champion",
+            idempotency_key="older-attention-published",
+        )
+    later = capability(
+        cycle=_cycle_payload("2026-09-03"),
+        mode="champion",
+        idempotency_key="later-after-older-attention",
+    )
+    resumed = _configure(state_root)(
+        cycle=_cycle_payload("2026-09-02"),
+        mode="champion",
+        idempotency_key="older-attention-published",
+    )
+
+    assert later.disposition is AdvanceDisposition.ADVANCED
+    assert resumed.disposition is AdvanceDisposition.ADVANCED
+    assert resumed.recovery is AdvanceRecovery.RESUMED
+    with sqlite3.connect(state_root / "lifecycle.sqlite3") as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM lifecycle_events WHERE idempotency_key = ?",
+            ("older-attention-published",),
+        ).fetchone() == (PINNED_EVENT_COUNT,)
+        assert connection.execute(
+            "SELECT COUNT(*) FROM advance_refusals WHERE idempotency_key = ?",
+            ("older-attention-published",),
+        ).fetchone() == (0,)
 
 
 def test_conflicting_valid_idempotency_reuse_fails_without_shadowing_completed_work(
@@ -2292,7 +2831,11 @@ def test_conflicting_pinned_identity_fails_without_rewriting_completed_work(
         attention_policy=capability.attention_policy,
         attention_inputs=capability.attention_inputs,
         clock=capability.clock,
-        constitution_registry=capability.constitution_registry,
+        constitution_registry=(capability.constitution_registry),
+        production_research=capability.production_research,
+        evidence_vault=capability.evidence_vault,
+        memory=capability.memory,
+        memory_refusal_ledger=capability.memory_refusal_ledger,
     )
 
     conflict = conflicting_capability(
@@ -2332,7 +2875,11 @@ def test_terminal_conflict_refusal_prevents_partial_stream_resumption(tmp_path: 
         attention_policy=capability.attention_policy,
         attention_inputs=capability.attention_inputs,
         clock=capability.clock,
-        constitution_registry=capability.constitution_registry,
+        constitution_registry=(capability.constitution_registry),
+        production_research=capability.production_research,
+        evidence_vault=capability.evidence_vault,
+        memory=capability.memory,
+        memory_refusal_ledger=capability.memory_refusal_ledger,
     )
     with pytest.raises(SimulatedInterruptionError):
         interrupted(
@@ -2372,6 +2919,9 @@ def test_terminal_conflict_refusal_prevents_partial_stream_resumption(tmp_path: 
         ("universe_snapshotted", 3, AdvanceRecovery.RESUMED),
         ("evidence_captured", 4, AdvanceRecovery.RESUMED),
         ("attention_selected", 5, AdvanceRecovery.RESUMED),
+        ("dossiers_built", 6, AdvanceRecovery.RESUMED),
+        ("research_run", 7, AdvanceRecovery.RESUMED),
+        ("memory_updated", 8, AdvanceRecovery.RESUMED),
     ],
 )
 def test_advance_resumes_after_each_checkpoint_transaction_rolls_back(
@@ -2416,13 +2966,16 @@ def test_advance_resumes_after_each_checkpoint_transaction_rolls_back(
             "fail_attention_selected_before_insert": (
                 "DROP TRIGGER fail_attention_selected_before_insert"
             ),
+            "fail_dossiers_built_before_insert": ("DROP TRIGGER fail_dossiers_built_before_insert"),
+            "fail_research_run_before_insert": "DROP TRIGGER fail_research_run_before_insert",
+            "fail_memory_updated_before_insert": ("DROP TRIGGER fail_memory_updated_before_insert"),
         }
         connection.execute(known_drop_statements[str(trigger_name[0])])
 
     disposition, phase, recovery, run_id = _advance_in_fresh_process(state_root, "rollback-key")
 
     assert disposition == AdvanceDisposition.ADVANCED.value
-    assert phase == LifecyclePhase.SELECT_ATTENTION.value
+    assert phase == LifecyclePhase.UPDATE_MEMORY.value
     assert recovery == expected_recovery.value
     assert len(run_id) == SHA256_HEX_LENGTH
     assert len(_events(database)) == PINNED_EVENT_COUNT
@@ -2535,7 +3088,8 @@ def test_runtime_state_root_cannot_point_into_source_directories(tmp_path: Path)
         ),
         repository_root=repository,
         recorded_universe=recorded_universe(),
-        recorded_evidence=recorded_evidence(),
+        recorded_evidence=production_recorded_evidence(),
+        recorded_model=ValidProductionModel(),
         session_eligibility=RecordedSessionEligibility(),
         clock=FixedClock(datetime(2026, 8, 21, 22, 0, tzinfo=UTC)),
     )
@@ -2580,7 +3134,8 @@ def test_malformed_universe_policy_is_refused_before_state_creation(
         (ConfigurationSource("test", configuration),),
         repository_root=REPOSITORY_ROOT,
         recorded_universe=recorded_universe(),
-        recorded_evidence=recorded_evidence(),
+        recorded_evidence=production_recorded_evidence(),
+        recorded_model=ValidProductionModel(),
         session_eligibility=RecordedSessionEligibility(),
         clock=FixedClock(datetime(2026, 8, 21, 22, 0, tzinfo=UTC)),
     )
@@ -2601,7 +3156,8 @@ def test_hostile_asset_activation_is_refused_before_state_creation(tmp_path: Pat
         (ConfigurationSource("test", configuration),),
         repository_root=REPOSITORY_ROOT,
         recorded_universe=recorded_universe(),
-        recorded_evidence=recorded_evidence(),
+        recorded_evidence=production_recorded_evidence(),
+        recorded_model=ValidProductionModel(),
         session_eligibility=RecordedSessionEligibility(),
         clock=FixedClock(datetime(2026, 8, 21, 22, 0, tzinfo=UTC)),
     )
@@ -2625,7 +3181,8 @@ def test_hostile_top_level_configuration_key_is_refused_before_state_creation(
         (ConfigurationSource("test", configuration),),
         repository_root=REPOSITORY_ROOT,
         recorded_universe=recorded_universe(),
-        recorded_evidence=recorded_evidence(),
+        recorded_evidence=production_recorded_evidence(),
+        recorded_model=ValidProductionModel(),
         session_eligibility=RecordedSessionEligibility(),
         clock=FixedClock(datetime(2026, 8, 21, 22, 0, tzinfo=UTC)),
     )
@@ -2684,7 +3241,8 @@ def test_runtime_state_storage_refuses_links_public_modes_and_unsafe_shapes(
             ),
             repository_root=REPOSITORY_ROOT,
             recorded_universe=recorded_universe(),
-            recorded_evidence=recorded_evidence(),
+            recorded_evidence=production_recorded_evidence(),
+            recorded_model=ValidProductionModel(),
             session_eligibility=RecordedSessionEligibility(),
             clock=FixedClock(datetime(2026, 8, 21, 22, 0, tzinfo=UTC)),
         )
@@ -2717,7 +3275,8 @@ def test_equivalent_clock_offsets_persist_identically_after_reopen(
         (ConfigurationSource("test", runtime_configuration(state_root)),),
         repository_root=REPOSITORY_ROOT,
         recorded_universe=recorded_universe(),
-        recorded_evidence=recorded_evidence(),
+        recorded_evidence=production_recorded_evidence(),
+        recorded_model=ValidProductionModel(),
         session_eligibility=RecordedSessionEligibility(),
         clock=FixedClock(instant),
     )
@@ -2812,6 +3371,48 @@ def test_lifecycle_ledger_rejects_a_kernel_record_with_a_different_write_time(
     decision = AppendLifecycleRecord(
         record,
         AdvanceAttempt(AdvanceRecovery.FRESH, record.sequence),
+    )
+    monkeypatch.setattr(
+        "agentic_investment_os.adapters.sqlite_lifecycle.decide_advance",
+        lambda _history, _candidate, _attempt, _recorded_at: decision,
+    )
+
+    with pytest.raises(
+        InvalidLifecycleStateError,
+        match="lifecycle stream checkpoint order is invalid",
+    ):
+        ledger.advance_step(command, AdvanceAttempt(), write_time)
+
+
+def test_lifecycle_ledger_rejects_a_refusal_with_a_different_write_time(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    capability = _configure(tmp_path / "runtime")
+    ledger = capability.ledger
+    assert isinstance(ledger, SQLiteLifecycleLedger)
+    request = AdvanceRequest.parse(
+        session="2026-08-24",
+        mode="champion",
+        idempotency_key="mismatched-refusal-record-time",
+    )
+    assert isinstance(request, AdvanceRequest)
+    command = advance_command(request)
+    write_time = UtcInstant.from_datetime(datetime(2026, 8, 22, 22, 0, tzinfo=UTC))
+    mismatched_time = UtcInstant.from_datetime(datetime(2026, 8, 22, 22, 1, tzinfo=UTC))
+    record = DurableAdvanceRefusal(
+        1,
+        request.idempotency_key,
+        AdvanceFailureReason.INVALID_DURABLE_STATE,
+        mismatched_time,
+        request.session,
+    )
+    decision = AppendTerminalLifecycleRecord(
+        record,
+        AdvanceReceipt.failed_closed(
+            AdvanceFailureReason.INVALID_DURABLE_STATE,
+            cycle=request.session,
+        ),
     )
     monkeypatch.setattr(
         "agentic_investment_os.adapters.sqlite_lifecycle.decide_advance",
@@ -2931,9 +3532,21 @@ def test_lifecycle_ledger_appends_generic_checkpoint_records(tmp_path: Path) -> 
                 ),
             )
             decision = ledger.advance_step(command, attempt, now)
+        if isinstance(decision, PerformDossierBuild):
+            command = replace(command, dossier_build=DOSSIER_CHECKPOINT)
+            decision = ledger.advance_step(command, attempt, now)
+        if isinstance(decision, PerformResearch):
+            command = replace(command, research_run=RESEARCH_CHECKPOINT)
+            decision = ledger.advance_step(command, attempt, now)
+        if isinstance(decision, PerformMemoryUpdate):
+            command = replace(command, memory_update=MEMORY_CHECKPOINT)
+            decision = ledger.advance_step(command, attempt, now)
         assert not isinstance(decision, AdvanceReceipt)
         assert not isinstance(decision, PerformEvidenceCapture)
         assert not isinstance(decision, PerformAttentionSelection)
+        assert not isinstance(decision, PerformDossierBuild)
+        assert not isinstance(decision, PerformResearch)
+        assert not isinstance(decision, PerformMemoryUpdate)
         assert isinstance(decision.record, LifecycleEvent)
         assert decision.record.sequence == expected_sequence
         if isinstance(decision, AppendTerminalLifecycleRecord):
@@ -2948,6 +3561,10 @@ def test_lifecycle_ledger_appends_generic_checkpoint_records(tmp_path: Path) -> 
         now,
         capture,
         attention_artifact(identity, snapshot, capture, available_at=now),
+        DOSSIER_CHECKPOINT,
+        RESEARCH_CHECKPOINT,
+        MEMORY_CHECKPOINT,
+        None,
     )
     assert ledger.advance_step(command, AdvanceAttempt(), now) == AdvanceReceipt.advanced(
         identity,
@@ -2956,6 +3573,10 @@ def test_lifecycle_ledger_appends_generic_checkpoint_records(tmp_path: Path) -> 
         now,
         capture,
         attention_artifact(identity, snapshot, capture, available_at=now),
+        DOSSIER_CHECKPOINT,
+        RESEARCH_CHECKPOINT,
+        MEMORY_CHECKPOINT,
+        None,
     )
 
     conflicting_identity = pinned_run_identity(
@@ -3046,7 +3667,11 @@ def test_universe_source_rejects_a_forged_utc_instant_before_append(tmp_path: Pa
         attention_policy=capability.attention_policy,
         attention_inputs=capability.attention_inputs,
         clock=capability.clock,
-        constitution_registry=capability.constitution_registry,
+        constitution_registry=(capability.constitution_registry),
+        production_research=capability.production_research,
+        evidence_vault=capability.evidence_vault,
+        memory=capability.memory,
+        memory_refusal_ledger=capability.memory_refusal_ledger,
     )
 
     with pytest.raises(
@@ -3068,7 +3693,8 @@ def test_naive_clock_cannot_create_a_checkpoint(tmp_path: Path) -> None:
         (ConfigurationSource("test", runtime_configuration(state_root)),),
         repository_root=REPOSITORY_ROOT,
         recorded_universe=recorded_universe(),
-        recorded_evidence=recorded_evidence(),
+        recorded_evidence=production_recorded_evidence(),
+        recorded_model=ValidProductionModel(),
         session_eligibility=RecordedSessionEligibility(),
         # Intentionally hostile clock value proves the boundary refuses naive time.
         clock=FixedClock(datetime(2026, 8, 21, 22, 0)),  # noqa: DTZ001
@@ -3094,7 +3720,8 @@ def test_out_of_range_aware_clock_cannot_create_a_checkpoint(tmp_path: Path) -> 
         (ConfigurationSource("test", runtime_configuration(state_root)),),
         repository_root=REPOSITORY_ROOT,
         recorded_universe=recorded_universe(),
-        recorded_evidence=recorded_evidence(),
+        recorded_evidence=production_recorded_evidence(),
+        recorded_model=ValidProductionModel(),
         session_eligibility=RecordedSessionEligibility(),
         clock=FixedClock(datetime(1, 1, 1, tzinfo=timezone(timedelta(hours=14)))),
     )
@@ -3194,7 +3821,11 @@ def test_missing_refusal_sequence_row_fails_closed(tmp_path: Path) -> None:
         attention_policy=capability.attention_policy,
         attention_inputs=capability.attention_inputs,
         clock=capability.clock,
-        constitution_registry=capability.constitution_registry,
+        constitution_registry=(capability.constitution_registry),
+        production_research=capability.production_research,
+        evidence_vault=capability.evidence_vault,
+        memory=capability.memory,
+        memory_refusal_ledger=capability.memory_refusal_ledger,
     )
 
     with pytest.raises(
@@ -3222,7 +3853,11 @@ def test_invalid_refusal_sequence_row_has_a_bounded_diagnostic(tmp_path: Path) -
         attention_policy=capability.attention_policy,
         attention_inputs=capability.attention_inputs,
         clock=capability.clock,
-        constitution_registry=capability.constitution_registry,
+        constitution_registry=(capability.constitution_registry),
+        production_research=capability.production_research,
+        evidence_vault=capability.evidence_vault,
+        memory=capability.memory,
+        memory_refusal_ledger=capability.memory_refusal_ledger,
     )
 
     with pytest.raises(
@@ -3308,7 +3943,7 @@ def test_corrupt_refusal_rows_fail_closed_with_a_bounded_diagnostic(
         row = connection.execute(
             "SELECT refusal_id, idempotency_key, cycle_identity, reason_code, "
             "evidence_policy_id, evidence_artifact_ids, evidence_refusal_ids, "
-            "attention_refusal_reason, recorded_at "
+            "attention_refusal_reason, research_refusal_id, research_refusal, recorded_at "
             "FROM advance_refusals"
         ).fetchone()
         connection.execute("DROP TABLE advance_refusals")
@@ -3316,11 +3951,11 @@ def test_corrupt_refusal_rows_fail_closed_with_a_bounded_diagnostic(
             "CREATE TABLE advance_refusals "
             "(refusal_id, idempotency_key, cycle_identity, reason_code, "
             "evidence_policy_id, evidence_artifact_ids, evidence_refusal_ids, "
-            "attention_refusal_reason, recorded_at)"
+            "attention_refusal_reason, research_refusal_id, research_refusal, recorded_at)"
         )
         assert row is not None
         connection.execute(
-            "INSERT INTO advance_refusals VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO advance_refusals VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 row[0],
                 row[1],
@@ -3330,6 +3965,8 @@ def test_corrupt_refusal_rows_fail_closed_with_a_bounded_diagnostic(
                 row[5],
                 row[6],
                 row[7],
+                row[8],
+                row[9],
                 recorded_at,
             ),
         )
@@ -3367,6 +4004,8 @@ def test_corrupt_attention_refusal_reason_fails_closed(
             None,
             None,
             AttentionRefusalReason.MISSING_EVIDENCE.value,
+            None,
+            None,
             UtcInstant.from_datetime(RECORDED_AT).isoformat(),
         )
     else:
@@ -3379,6 +4018,8 @@ def test_corrupt_attention_refusal_reason_fails_closed(
             json.dumps(list(capture.artifact_ids), separators=(",", ":")),
             "[]",
             "unknown",
+            None,
+            None,
             UtcInstant.from_datetime(RECORDED_AT).isoformat(),
         )
     with sqlite3.connect(database) as connection:
@@ -3387,10 +4028,10 @@ def test_corrupt_attention_refusal_reason_fails_closed(
             "CREATE TABLE advance_refusals "
             "(refusal_id, idempotency_key, cycle_identity, reason_code, "
             "evidence_policy_id, evidence_artifact_ids, evidence_refusal_ids, "
-            "attention_refusal_reason, recorded_at)"
+            "attention_refusal_reason, research_refusal_id, research_refusal, recorded_at)"
         )
         connection.execute(
-            "INSERT INTO advance_refusals VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO advance_refusals VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             row,
         )
 
@@ -3402,6 +4043,53 @@ def test_corrupt_attention_refusal_reason_fails_closed(
             cycle=_cycle_payload("2026-08-21"),
             mode="champion",
             idempotency_key="corrupt-attention-refusal",
+        )
+
+
+def test_research_refusal_identity_on_an_unrelated_refusal_fails_closed(
+    tmp_path: Path,
+) -> None:
+    state_root = tmp_path / "runtime"
+    capability = _configure(state_root)
+    database = state_root / "lifecycle.sqlite3"
+    cycle = json.dumps(
+        MarketSession(date(2026, 8, 21)).to_payload(),
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    with sqlite3.connect(database) as connection:
+        connection.execute("DROP TABLE advance_refusals")
+        connection.execute(
+            "CREATE TABLE advance_refusals "
+            "(refusal_id, idempotency_key, cycle_identity, reason_code, "
+            "evidence_policy_id, evidence_artifact_ids, evidence_refusal_ids, "
+            "attention_refusal_reason, research_refusal_id, research_refusal, recorded_at)"
+        )
+        connection.execute(
+            "INSERT INTO advance_refusals VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                1,
+                "corrupt-research-refusal",
+                cycle,
+                AdvanceFailureReason.INVALID_MODE.value,
+                None,
+                None,
+                None,
+                None,
+                "f" * SHA256_HEX_LENGTH,
+                None,
+                UtcInstant.from_datetime(RECORDED_AT).isoformat(),
+            ),
+        )
+
+    with pytest.raises(
+        LifecyclePersistenceError,
+        match="invalid idempotency_key in lifecycle refusal ledger",
+    ):
+        capability(
+            cycle=_cycle_payload("2026-08-21"),
+            mode="champion",
+            idempotency_key="corrupt-research-refusal",
         )
 
 
@@ -3566,7 +4254,11 @@ def test_corrupt_checkpoint_history_uses_the_call_timestamp_for_its_refusal(
         attention_policy=capability.attention_policy,
         attention_inputs=capability.attention_inputs,
         clock=FixedClock(refused_at),
-        constitution_registry=capability.constitution_registry,
+        constitution_registry=(capability.constitution_registry),
+        production_research=capability.production_research,
+        evidence_vault=capability.evidence_vault,
+        memory=capability.memory,
+        memory_refusal_ledger=capability.memory_refusal_ledger,
     )
     receipt = refused(
         cycle=_cycle_payload(request.session.isoformat()),
@@ -3692,7 +4384,7 @@ def test_corrupt_attention_history_fails_a_fresh_selection_closed(tmp_path: Path
         row = connection.execute(
             "SELECT refusal_id, idempotency_key, cycle_identity, reason_code, "
             "evidence_policy_id, evidence_artifact_ids, evidence_refusal_ids, "
-            "attention_refusal_reason, recorded_at "
+            "attention_refusal_reason, research_refusal_id, research_refusal, recorded_at "
             "FROM advance_refusals"
         ).fetchone()
         connection.execute("DROP TABLE advance_refusals")
@@ -3700,12 +4392,24 @@ def test_corrupt_attention_history_fails_a_fresh_selection_closed(tmp_path: Path
             "CREATE TABLE advance_refusals "
             "(refusal_id, idempotency_key, cycle_identity, reason_code, "
             "evidence_policy_id, evidence_artifact_ids, evidence_refusal_ids, "
-            "attention_refusal_reason, recorded_at)"
+            "attention_refusal_reason, research_refusal_id, research_refusal, recorded_at)"
         )
         assert row is not None
         connection.execute(
-            "INSERT INTO advance_refusals VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (row[0], row[1], row[2], "unknown", row[4], row[5], row[6], row[7], row[8]),
+            "INSERT INTO advance_refusals VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                row[0],
+                row[1],
+                row[2],
+                "unknown",
+                row[4],
+                row[5],
+                row[6],
+                row[7],
+                row[8],
+                row[9],
+                row[10],
+            ),
         )
 
     receipt = capability(
@@ -3854,6 +4558,7 @@ def _replace_with_corrupt_events(
             """
             SELECT stream_id, sequence, idempotency_key, cycle_identity, mode,
                    configuration_version, configuration_hash,
+                   research_policy_hash,
                    constitution_version, constitution_hash, run_id,
                    data_regime, evidence_cutoff, instrument_snapshot_hash,
                    position_snapshot_hash, eligibility_policy_hash,
@@ -3861,6 +4566,7 @@ def _replace_with_corrupt_events(
                    universe_snapshot, evidence_policy_id,
                    evidence_artifact_ids, evidence_refusal_ids,
                    attention_artifact_id, attention_artifact,
+                   research_checkpoint, no_action_reason,
                    event_envelope, recorded_at
             FROM lifecycle_events ORDER BY sequence
             """
@@ -3871,6 +4577,7 @@ def _replace_with_corrupt_events(
             CREATE TABLE lifecycle_events (
                 stream_id, sequence, idempotency_key, cycle_identity, mode,
                 configuration_version, configuration_hash,
+                research_policy_hash,
                 constitution_version, constitution_hash, run_id,
                 data_regime, evidence_cutoff, instrument_snapshot_hash,
                 position_snapshot_hash, eligibility_policy_hash,
@@ -3878,13 +4585,15 @@ def _replace_with_corrupt_events(
                 universe_snapshot, evidence_policy_id,
                 evidence_artifact_ids, evidence_refusal_ids,
                 attention_artifact_id, attention_artifact,
+                research_checkpoint, no_action_reason,
                 event_envelope, recorded_at
             )
             """
         )
         connection.executemany(
             "INSERT INTO lifecycle_events VALUES "
-            "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
+            "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             rows,
         )
         for statement in statements:
