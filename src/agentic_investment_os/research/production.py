@@ -393,25 +393,49 @@ class ProductionModelResponseRecord:
                 )
             )
             or (
-                not self.disposition_valid
-                and self.disposition in {item.value for item in ModelCallDisposition}
+                self.disposition_valid
+                and self.disposition not in {item.value for item in ModelCallDisposition}
+            )
+            or (
+                self.raw_response_valid
+                and (
+                    (self.raw_response_hash is None) != (self.raw_response is None)
+                    and not (
+                        self.raw_response is None
+                        and self.raw_response_hash is not None
+                        and not self.raw_response_retained
+                    )
+                )
+            )
+            or (
+                self.exposed_model_identity_valid
+                and self.exposed_model_identity is not None
+                and _MODEL_IDENTITY.fullmatch(self.exposed_model_identity) is None
             )
             or (
                 not self.exposed_model_identity_valid
                 and self.exposed_model_identity is not None
                 and _MODEL_IDENTITY.fullmatch(self.exposed_model_identity) is not None
             )
+            or (self.input_tokens_valid and not _model_resource_is_valid(self.input_tokens))
             or (not self.input_tokens_valid and _model_resource_is_valid(self.input_tokens))
+            or (self.output_tokens_valid and not _model_resource_is_valid(self.output_tokens))
             or (not self.output_tokens_valid and _model_resource_is_valid(self.output_tokens))
+            or (self.turns_valid and not _model_resource_is_valid(self.turns))
             or (not self.turns_valid and _model_resource_is_valid(self.turns))
+            or (
+                self.elapsed_milliseconds_valid
+                and self.elapsed_milliseconds is not None
+                and not _model_resource_is_valid(self.elapsed_milliseconds)
+            )
             or (
                 not self.elapsed_milliseconds_valid
                 and self.elapsed_milliseconds is not None
                 and _model_resource_is_valid(self.elapsed_milliseconds)
             )
             or (
-                not self.timing_disposition_valid
-                and self.timing_disposition in {item.value for item in ModelTimingDisposition}
+                self.timing_disposition_valid
+                and self.timing_disposition not in {item.value for item in ModelTimingDisposition}
             )
             or (
                 self.metadata_valid
@@ -441,11 +465,17 @@ class ProductionModelResponseRecord:
             return ModelCallResponse(
                 ModelCallDisposition.REFUSED,
                 self.raw_response if self.raw_response_valid else None,
-                None,
-                0,
-                0,
-                0,
-                None,
+                (self.exposed_model_identity if self.exposed_model_identity_valid else None),
+                self.input_tokens
+                if self.input_tokens_valid and self.input_tokens is not None
+                else 0,
+                (
+                    self.output_tokens
+                    if self.output_tokens_valid and self.output_tokens is not None
+                    else 0
+                ),
+                self.turns if self.turns_valid and self.turns is not None else 0,
+                self.elapsed_milliseconds if self.elapsed_milliseconds_valid else None,
                 ModelTimingDisposition.UNAVAILABLE,
             )
         if (

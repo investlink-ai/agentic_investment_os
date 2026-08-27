@@ -800,6 +800,101 @@ def test_production_research_bounds_unpersistable_model_resource_metadata(
     assert status.liveness is LifecycleLiveness.FAILED_CLOSED
 
 
+def test_production_research_preserves_valid_resources_when_identity_is_invalid(
+    tmp_path: Path,
+) -> None:
+    expected_input_tokens = 17
+    expected_output_tokens = 3
+    expected_elapsed_milliseconds = 9
+    state_root = tmp_path / "runtime"
+    model = RecordedResearchModel(
+        (
+            RecordedModelFixture(
+                ModelCallDisposition.RESPONDED,
+                b"{}",
+                "",
+                input_tokens=expected_input_tokens,
+                output_tokens=expected_output_tokens,
+                turns=1,
+                elapsed_milliseconds=expected_elapsed_milliseconds,
+            ),
+        )
+    )
+    capability = _configure(state_root, universe=recorded_universe(), model=model)
+
+    receipt = _advance(capability, "stage-three-independent-resource-provenance")
+
+    assert receipt.failure_reason is AdvanceFailureReason.RESEARCH_FAILED
+    with sqlite3.connect(state_root / "lifecycle.sqlite3") as connection:
+        observation_row = connection.execute(
+            "SELECT observation_json FROM production_research_call_observations"
+        ).fetchone()
+        refusal_row = connection.execute("SELECT research_refusal FROM advance_refusals").fetchone()
+    assert observation_row is not None
+    assert refusal_row is not None
+    observation = json.loads(observation_row[0])
+    refusal = json.loads(refusal_row[0])
+    assert observation["disposition"] == LabObservationDisposition.ADAPTER_REFUSED.value
+    assert observation["input_tokens"] == expected_input_tokens
+    assert observation["output_tokens"] == expected_output_tokens
+    assert observation["turns"] == 1
+    assert observation["elapsed_milliseconds"] == expected_elapsed_milliseconds
+    assert refusal["checkpoint"]["input_tokens"] == expected_input_tokens
+    assert refusal["checkpoint"]["output_tokens"] == expected_output_tokens
+    assert refusal["checkpoint"]["turns"] == 1
+    status = _configured_status(state_root)()
+    assert status.liveness is LifecycleLiveness.FAILED_CLOSED
+
+
+@pytest.mark.parametrize("invalid_field", ["disposition", "timing_disposition"])
+def test_production_research_durably_refuses_enum_looking_string_metadata(
+    tmp_path: Path,
+    invalid_field: str,
+) -> None:
+    state_root = tmp_path / "runtime"
+    # The cast deliberately crosses the static port contract to exercise hostile runtime metadata.
+    disposition = (
+        cast("ModelCallDisposition", "responded")
+        if invalid_field == "disposition"
+        else ModelCallDisposition.RESPONDED
+    )
+    timing = (
+        cast("ModelTimingDisposition", "within_budget")
+        if invalid_field == "timing_disposition"
+        else ModelTimingDisposition.WITHIN_BUDGET
+    )
+    model = RecordedResearchModel(
+        (
+            RecordedModelFixture(
+                disposition,
+                b"{}",
+                MODEL_IDENTITY,
+                timing_disposition=timing,
+            ),
+        )
+    )
+    capability = _configure(state_root, universe=recorded_universe(), model=model)
+
+    receipt = _advance(capability, f"stage-three-invalid-{invalid_field}")
+
+    assert receipt.failure_reason is AdvanceFailureReason.RESEARCH_FAILED
+    with sqlite3.connect(state_root / "lifecycle.sqlite3") as connection:
+        row = connection.execute(
+            "SELECT observation_json, raw_response FROM production_research_call_observations"
+        ).fetchone()
+    assert row is not None
+    observation = json.loads(row[0])
+    reported = observation["reported_response"]
+    assert observation["disposition"] == LabObservationDisposition.ADAPTER_REFUSED.value
+    assert observation["model_disposition"] == ModelCallDisposition.REFUSED.value
+    assert row[1] == b"{}"
+    assert reported["metadata_valid"] is False
+    assert reported[invalid_field] in ("responded", "within_budget")
+    assert reported[f"{invalid_field}_valid"] is False
+    status = _configured_status(state_root)()
+    assert status.liveness is LifecycleLiveness.FAILED_CLOSED
+
+
 @pytest.mark.parametrize("role", tuple(ResearchRole))
 def test_production_research_interruption_after_intent_never_repeats_the_effect(
     tmp_path: Path,
@@ -1357,6 +1452,84 @@ def test_status_translates_unparseable_durable_integer_to_history_corruption(
             (
                 corrupted_json,
                 hashlib.sha256(corrupted_json.encode()).hexdigest(),
+                row[0],
+            ),
+        )
+
+    with pytest.raises(
+        LifecyclePersistenceError,
+        match="invalid production research call history",
+    ):
+        status()
+
+
+@pytest.mark.parametrize(
+    "corruption",
+    [
+        "disposition_missing",
+        "raw_hash_missing",
+        "identity_invalid",
+        "input_tokens_missing",
+        "output_tokens_negative",
+        "turns_missing",
+        "elapsed_negative",
+        "timing_missing",
+    ],
+)
+def test_status_rejects_inconsistent_reported_response_validity(
+    tmp_path: Path,
+    corruption: str,
+) -> None:
+    state_root = tmp_path / "runtime"
+    model = RecordedResearchModel(
+        (
+            RecordedModelFixture(
+                ModelCallDisposition.RESPONDED,
+                b"{}",
+                "",
+            ),
+        )
+    )
+    capability = _configure(state_root, universe=recorded_universe(), model=model)
+    receipt = _advance(capability, "stage-three-reported-response-corruption")
+    assert receipt.failure_reason is AdvanceFailureReason.RESEARCH_FAILED
+    status = _configured_status(state_root)
+    status()
+
+    with sqlite3.connect(state_root / "lifecycle.sqlite3") as connection:
+        row = connection.execute(
+            "SELECT call_id, observation_json FROM production_research_call_observations"
+        ).fetchone()
+        assert row is not None
+        observation = json.loads(row[1])
+        reported = observation["reported_response"]
+        assert isinstance(reported, dict)
+        if corruption == "disposition_missing":
+            reported["disposition"] = None
+        elif corruption == "raw_hash_missing":
+            reported["raw_response_hash"] = None
+        elif corruption == "identity_invalid":
+            reported["exposed_model_identity_valid"] = True
+        elif corruption == "input_tokens_missing":
+            reported["input_tokens"] = None
+        elif corruption == "output_tokens_negative":
+            reported["output_tokens"] = -1
+        elif corruption == "turns_missing":
+            reported["turns"] = None
+        elif corruption == "elapsed_negative":
+            reported["elapsed_milliseconds"] = -1
+        else:
+            reported["timing_disposition"] = None
+        observation_json = json.dumps(observation, sort_keys=True, separators=(",", ":"))
+        connection.execute(
+            "DROP TRIGGER production_research_call_observations_are_append_only_update"
+        )
+        connection.execute(
+            "UPDATE production_research_call_observations "
+            "SET observation_json = ?, observation_hash = ? WHERE call_id = ?",
+            (
+                observation_json,
+                hashlib.sha256(observation_json.encode()).hexdigest(),
                 row[0],
             ),
         )
