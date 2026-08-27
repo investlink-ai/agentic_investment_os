@@ -484,6 +484,7 @@ def test_interrupted_run_keeps_its_pin_after_a_later_constitution_activates(
         production_research=initial.production_research,
         evidence_vault=initial.evidence_vault,
         memory=initial.memory,
+        memory_refusal_ledger=initial.memory_refusal_ledger,
     )
     with pytest.raises(SimulatedInterruptionError):
         interrupted(
@@ -579,6 +580,7 @@ def test_overdue_governance_blocks_a_historical_pin_before_downstream_work(
         production_research=initial.production_research,
         evidence_vault=initial.evidence_vault,
         memory=initial.memory,
+        memory_refusal_ledger=initial.memory_refusal_ledger,
     )
     with pytest.raises(SimulatedInterruptionError):
         interrupted(
@@ -619,6 +621,7 @@ def test_overdue_governance_blocks_a_historical_pin_before_downstream_work(
         production_research=configured_retry.production_research,
         evidence_vault=configured_retry.evidence_vault,
         memory=configured_retry.memory,
+        memory_refusal_ledger=configured_retry.memory_refusal_ledger,
     )
 
     with pytest.raises(GovernanceStateError, match="missed Constitution activation boundary"):

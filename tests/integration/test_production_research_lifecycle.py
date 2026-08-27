@@ -1082,15 +1082,114 @@ def test_memory_refusal_is_durable_after_model_observations(tmp_path: Path) -> N
             "SELECT COUNT(*) FROM production_research_call_observations"
         ).fetchone() == (effects_after_first,)
         assert connection.execute("SELECT COUNT(*) FROM belief_events").fetchone() == (0,)
+        assert connection.execute("SELECT COUNT(*) FROM memory_update_refusals").fetchone() == (1,)
+    for statement in (
+        "UPDATE memory_update_refusals SET refusal_json = '{}'",
+        "DELETE FROM memory_update_refusals",
+    ):
+        with (
+            sqlite3.connect(state_root / "lifecycle.sqlite3") as connection,
+            pytest.raises(sqlite3.IntegrityError, match="append-only memory refusal"),
+        ):
+            connection.execute(statement)
+
+
+@pytest.mark.parametrize("changed_prefix", [False, True])
+def test_memory_refusal_journal_replays_only_its_exact_accepted_prefix(
+    tmp_path: Path,
+    *,
+    changed_prefix: bool,
+) -> None:
+    state_root = tmp_path / "runtime"
+    model = _ValidProductionModel()
+    capability = _configure(state_root, universe=recorded_universe(), model=model)
+    refusing = replace(
+        capability,
+        memory=cast("Record", _RefusingMemory(capability.memory)),
+    )
+    database = state_root / "lifecycle.sqlite3"
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            """
+            CREATE TRIGGER stop_memory_refusal_lifecycle
+            BEFORE INSERT ON advance_refusals
+            WHEN NEW.reason_code = 'memory_update_failed'
+            BEGIN SELECT RAISE(ABORT, 'injected memory refusal interruption'); END
+            """
+        )
+
+    with pytest.raises(LifecyclePersistenceError, match="SQLite lifecycle checkpoint failed"):
+        _advance(refusing, "stage-three-memory-refusal-journal-replay")
+
+    with sqlite3.connect(database) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM memory_update_refusals").fetchone() == (1,)
+        assert connection.execute("SELECT COUNT(*) FROM advance_refusals").fetchone() == (0,)
+        connection.execute("DROP TRIGGER stop_memory_refusal_lifecycle")
+        if changed_prefix:
+            row = connection.execute(
+                "SELECT refusal_id, refusal_json FROM memory_update_refusals"
+            ).fetchone()
+            assert row is not None
+            original_refusal_id, encoded = row
+            memory_refusal = json.loads(encoded)
+            assert isinstance(memory_refusal, dict)
+            memory_refusal["accepted_event_ids"] = ["a" * 64]
+            changed_refusal_id = _content_hash(
+                {
+                    "run_id": memory_refusal["run_id"],
+                    "event_id": memory_refusal["failed_event_id"],
+                    "reason": memory_refusal["reason"],
+                    "accepted_event_ids": memory_refusal["accepted_event_ids"],
+                }
+            )
+            connection.execute("DROP TRIGGER memory_update_refusals_are_append_only_update")
+            connection.execute(
+                "UPDATE memory_update_refusals SET refusal_id = ?, refusal_json = ? "
+                "WHERE refusal_id = ?",
+                (
+                    changed_refusal_id,
+                    json.dumps(memory_refusal, sort_keys=True, separators=(",", ":")),
+                    original_refusal_id,
+                ),
+            )
+
+    retry = capability
+    if changed_prefix:
+        with pytest.raises(
+            BeliefPersistenceError,
+            match="memory refusal observation conflicts with the accepted event prefix",
+        ):
+            _advance(retry, "stage-three-memory-refusal-journal-replay")
+    else:
+        receipt = _advance(retry, "stage-three-memory-refusal-journal-replay")
+        assert receipt.failure_reason is AdvanceFailureReason.MEMORY_UPDATE_FAILED
 
 
 @pytest.mark.parametrize(
-    "corruption",
-    ["alternate_reason_identity", "checkpoint", "terminal_call"],
+    ("corruption", "error_type", "message"),
+    [
+        (
+            "alternate_reason_identity",
+            LifecyclePersistenceError,
+            "invalid production research call history",
+        ),
+        (
+            "checkpoint",
+            InvalidLifecycleStateError,
+            "invalid idempotency_key in lifecycle refusal ledger",
+        ),
+        (
+            "terminal_call",
+            InvalidLifecycleStateError,
+            "invalid idempotency_key in lifecycle refusal ledger",
+        ),
+    ],
 )
 def test_status_rejects_coherently_resealed_memory_refusal_material(
     tmp_path: Path,
     corruption: str,
+    error_type: type[Exception],
+    message: str,
 ) -> None:
     state_root = tmp_path / "runtime"
     capability = _configure(
@@ -1117,11 +1216,13 @@ def test_status_rejects_coherently_resealed_memory_refusal_material(
         assert isinstance(checkpoint, dict)
         assert isinstance(memory_refusal, dict)
         if corruption == "alternate_reason_identity":
+            memory_refusal["reason"] = RecordRefusalCode.INVALID_EVENT.value
             refusal["refusal_id"] = _content_hash(
                 {
                     "run_id": memory_refusal["run_id"],
                     "event_id": memory_refusal["failed_event_id"],
-                    "reason": RecordRefusalCode.INVALID_EVENT.value,
+                    "reason": memory_refusal["reason"],
+                    "accepted_event_ids": memory_refusal["accepted_event_ids"],
                 }
             )
         elif corruption == "checkpoint":
@@ -1138,10 +1239,7 @@ def test_status_rejects_coherently_resealed_memory_refusal_material(
             ),
         )
 
-    with pytest.raises(
-        InvalidLifecycleStateError,
-        match="invalid idempotency_key in lifecycle refusal ledger",
-    ):
+    with pytest.raises(error_type, match=message):
         status()
 
 
@@ -1183,12 +1281,66 @@ def test_memory_refusal_reconstructs_prior_events_before_the_failed_subject(
     )
 
     receipt = _advance(refusing, "stage-three-second-memory-refusal")
-    status = _configured_status(state_root)()
+    status = _configured_status(state_root)
+    rebuilt = status()
 
     assert receipt.failure_reason is AdvanceFailureReason.MEMORY_UPDATE_FAILED
-    assert status.liveness is LifecycleLiveness.FAILED_CLOSED
-    with sqlite3.connect(state_root / "lifecycle.sqlite3") as connection:
+    assert rebuilt.liveness is LifecycleLiveness.FAILED_CLOSED
+    database = state_root / "lifecycle.sqlite3"
+    with sqlite3.connect(database) as connection:
         assert connection.execute("SELECT COUNT(*) FROM belief_events").fetchone() == (1,)
+        row = connection.execute("SELECT research_refusal FROM advance_refusals").fetchone()
+        assert row is not None
+        refusal = json.loads(row[0])
+        assert isinstance(refusal, dict)
+        checkpoint = refusal["checkpoint"]
+        memory_refusal = refusal["memory_update_refusal"]
+        assert isinstance(checkpoint, dict)
+        assert isinstance(memory_refusal, dict)
+        accepted_event_ids = memory_refusal["accepted_event_ids"]
+        assert isinstance(accepted_event_ids, list)
+        assert len(accepted_event_ids) == 1
+        original_refusal_id = refusal["refusal_id"]
+        memory_refusal["failed_event_id"] = accepted_event_ids[0]
+        memory_refusal["accepted_event_ids"] = []
+        checkpoint["artifact_ids"] = []
+        refusal["refusal_id"] = _content_hash(
+            {
+                "run_id": memory_refusal["run_id"],
+                "event_id": memory_refusal["failed_event_id"],
+                "reason": memory_refusal["reason"],
+                "accepted_event_ids": memory_refusal["accepted_event_ids"],
+            }
+        )
+        encoded_refusal = json.dumps(refusal, sort_keys=True, separators=(",", ":"))
+        encoded_memory_refusal = json.dumps(
+            memory_refusal,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        connection.execute("DROP TRIGGER advance_refusals_are_append_only_update")
+        connection.execute("DROP TRIGGER memory_update_refusals_are_append_only_update")
+        connection.execute(
+            "UPDATE advance_refusals SET research_refusal_id = ?, research_refusal = ?",
+            (refusal["refusal_id"], encoded_refusal),
+        )
+        connection.execute(
+            "UPDATE memory_update_refusals "
+            "SET refusal_id = ?, failed_event_id = ?, refusal_json = ? "
+            "WHERE refusal_id = ?",
+            (
+                refusal["refusal_id"],
+                memory_refusal["failed_event_id"],
+                encoded_memory_refusal,
+                original_refusal_id,
+            ),
+        )
+
+    with pytest.raises(
+        LifecyclePersistenceError,
+        match="invalid production research call history",
+    ):
+        status()
 
 
 def test_unavailable_current_belief_head_refuses_memory_without_appending(

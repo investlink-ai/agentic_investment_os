@@ -89,6 +89,7 @@ __all__ = (
     "is_sha256",
     "parse_advance_receipt",
     "parse_lifecycle_checkpoint",
+    "parse_memory_update_refusal",
     "parse_research_checkpoint",
     "parse_research_refusal",
     "reconstruct_constitution_uses",
@@ -599,6 +600,7 @@ class MemoryUpdateRefusal:
                 "run_id": self.run_id,
                 "event_id": self.failed_event_id,
                 "reason": self.reason.value,
+                "accepted_event_ids": list(self.accepted_event_ids),
             }
         )
 
@@ -2907,7 +2909,7 @@ def parse_research_refusal(value: object) -> ResearchRefusal | None:
     checkpoint = parse_research_checkpoint(fields["checkpoint"])
     terminal_call_id = fields["terminal_call_id"]
     memory_value = fields["memory_update_refusal"]
-    memory_refusal = _parse_memory_update_refusal(memory_value)
+    memory_refusal = parse_memory_update_refusal(memory_value)
     if (
         checkpoint is None
         or (terminal_call_id is not None and not is_sha256(terminal_call_id))
@@ -2925,7 +2927,8 @@ def parse_research_refusal(value: object) -> ResearchRefusal | None:
         return None
 
 
-def _parse_memory_update_refusal(value: object) -> MemoryUpdateRefusal | None:
+def parse_memory_update_refusal(value: object) -> MemoryUpdateRefusal | None:
+    """Parse one exact memory-refusal observation without trusting durable JSON."""
     if value is None:
         return None
     fields = _exact_mapping(

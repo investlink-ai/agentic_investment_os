@@ -967,7 +967,7 @@ def _decision_operation(decision: LifecycleDecision, fallback: str) -> str:
         operation = "research_effect"
     elif isinstance(decision, PerformMemoryUpdate):
         operation = "memory_effect"
-    elif not isinstance(decision, AppendLifecycleRecord):
+    elif not isinstance(decision, (AppendLifecycleRecord, AppendTerminalLifecycleRecord)):
         operation = fallback
     elif isinstance(decision.record, DurableAdvanceRefusal):
         operation = "refuse"
@@ -1244,7 +1244,7 @@ class _LifecycleReferenceModel:
             if stream.session != session:
                 return self._record_idempotency_conflict(key, stream, session)
             if stream.events < ATTENTION_PUBLISHED_EVENT_COUNT and any(
-                candidate.events == PINNED_EVENT_COUNT and candidate.session > session
+                candidate.events >= ATTENTION_PUBLISHED_EVENT_COUNT and candidate.session > session
                 for candidate in self.streams.values()
             ):
                 cycle = MarketSession(date.fromisoformat(session))
@@ -1874,6 +1874,7 @@ def test_fresh_process_resumes_at_every_universe_snapshot_write_boundary(
         production_research=capability.production_research,
         evidence_vault=capability.evidence_vault,
         memory=capability.memory,
+        memory_refusal_ledger=capability.memory_refusal_ledger,
     )
 
     with pytest.raises(SimulatedInterruptionError):
@@ -2027,6 +2028,7 @@ def test_fresh_process_recovers_at_each_refusal_write_boundary(
         production_research=capability.production_research,
         evidence_vault=capability.evidence_vault,
         memory=capability.memory,
+        memory_refusal_ledger=capability.memory_refusal_ledger,
     )
 
     with pytest.raises(SimulatedInterruptionError):
@@ -2089,6 +2091,7 @@ def test_fresh_process_recovers_at_each_completed_conflict_write_boundary(
         production_research=capability.production_research,
         evidence_vault=capability.evidence_vault,
         memory=capability.memory,
+        memory_refusal_ledger=capability.memory_refusal_ledger,
     )
 
     with pytest.raises(SimulatedInterruptionError):
@@ -2147,6 +2150,7 @@ def test_duplicate_delivery_reports_progress_committed_by_the_winner_as_resumed(
         production_research=capability.production_research,
         evidence_vault=capability.evidence_vault,
         memory=capability.memory,
+        memory_refusal_ledger=capability.memory_refusal_ledger,
     )
 
     receipt = raced(
@@ -2361,6 +2365,7 @@ class LifecycleStateMachine(RuleBasedStateMachine):
             production_research=self.capability.production_research,
             evidence_vault=self.capability.evidence_vault,
             memory=self.capability.memory,
+            memory_refusal_ledger=self.capability.memory_refusal_ledger,
         )
         try:
             observed = interrupted(
@@ -2394,6 +2399,28 @@ class LifecycleStateMachine(RuleBasedStateMachine):
 
 
 TestLifecycleStateMachine = LifecycleStateMachine.TestCase
+
+
+def test_state_machine_models_interrupted_future_attention_as_published() -> None:
+    state = LifecycleStateMachine()
+    try:
+        state.interrupt_fresh_advance(("start", 1))
+        state.interrupt_fresh_advance(("attention", ATTENTION_PUBLISHED_EVENT_COUNT))
+        state.replay(0)
+        state.authoritative_counts_match_reference_model()
+    finally:
+        state.teardown()
+
+
+def test_state_machine_models_research_refusal_before_requested_interruption() -> None:
+    state = LifecycleStateMachine()
+    try:
+        state.interrupt_fresh_advance(("attention", ATTENTION_PUBLISHED_EVENT_COUNT))
+        state.interrupt_fresh_advance(("attention", ATTENTION_PUBLISHED_EVENT_COUNT))
+        state.interrupt_fresh_advance(("dossier", 7))
+        state.authoritative_counts_match_reference_model()
+    finally:
+        state.teardown()
 
 
 def test_cio_abstention_resumes_after_research_checkpoint(tmp_path: Path) -> None:
@@ -2447,6 +2474,7 @@ def test_resuming_an_older_partial_cycle_after_a_later_selection_fails_closed(
         production_research=capability.production_research,
         evidence_vault=capability.evidence_vault,
         memory=capability.memory,
+        memory_refusal_ledger=capability.memory_refusal_ledger,
     )
 
     with pytest.raises(SimulatedInterruptionError):
@@ -2807,6 +2835,7 @@ def test_conflicting_pinned_identity_fails_without_rewriting_completed_work(
         production_research=capability.production_research,
         evidence_vault=capability.evidence_vault,
         memory=capability.memory,
+        memory_refusal_ledger=capability.memory_refusal_ledger,
     )
 
     conflict = conflicting_capability(
@@ -2850,6 +2879,7 @@ def test_terminal_conflict_refusal_prevents_partial_stream_resumption(tmp_path: 
         production_research=capability.production_research,
         evidence_vault=capability.evidence_vault,
         memory=capability.memory,
+        memory_refusal_ledger=capability.memory_refusal_ledger,
     )
     with pytest.raises(SimulatedInterruptionError):
         interrupted(
@@ -3599,6 +3629,7 @@ def test_universe_source_rejects_a_forged_utc_instant_before_append(tmp_path: Pa
         production_research=capability.production_research,
         evidence_vault=capability.evidence_vault,
         memory=capability.memory,
+        memory_refusal_ledger=capability.memory_refusal_ledger,
     )
 
     with pytest.raises(
@@ -3752,6 +3783,7 @@ def test_missing_refusal_sequence_row_fails_closed(tmp_path: Path) -> None:
         production_research=capability.production_research,
         evidence_vault=capability.evidence_vault,
         memory=capability.memory,
+        memory_refusal_ledger=capability.memory_refusal_ledger,
     )
 
     with pytest.raises(
@@ -3783,6 +3815,7 @@ def test_invalid_refusal_sequence_row_has_a_bounded_diagnostic(tmp_path: Path) -
         production_research=capability.production_research,
         evidence_vault=capability.evidence_vault,
         memory=capability.memory,
+        memory_refusal_ledger=capability.memory_refusal_ledger,
     )
 
     with pytest.raises(
@@ -4183,6 +4216,7 @@ def test_corrupt_checkpoint_history_uses_the_call_timestamp_for_its_refusal(
         production_research=capability.production_research,
         evidence_vault=capability.evidence_vault,
         memory=capability.memory,
+        memory_refusal_ledger=capability.memory_refusal_ledger,
     )
     receipt = refused(
         cycle=_cycle_payload(request.session.isoformat()),

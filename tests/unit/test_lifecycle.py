@@ -107,6 +107,7 @@ if TYPE_CHECKING:
         EvidenceStoredRecord,
         EvidenceVault,
     )
+    from agentic_investment_os.memory.beliefs import BeliefLedger
     from agentic_investment_os.research.production import ProductionResearch
 
 
@@ -173,6 +174,7 @@ def _advance(ledger: LifecycleLedger) -> Advance:
         ),
         evidence_vault=cast("EvidenceVault", None),
         memory=cast("Record", None),
+        memory_refusal_ledger=cast("BeliefLedger", None),
     )
 
 

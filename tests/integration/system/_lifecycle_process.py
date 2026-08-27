@@ -196,6 +196,7 @@ def _interrupt_after_reconcile(state_root: Path) -> None:
         production_research=configured.production_research,
         evidence_vault=configured.evidence_vault,
         memory=configured.memory,
+        memory_refusal_ledger=configured.memory_refusal_ledger,
     )
     interrupted(
         cycle=MarketSession(date.fromisoformat(SESSION)).to_payload(),

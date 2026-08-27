@@ -32,7 +32,7 @@ from tests._attention import attention_artifact
 from tests._evidence import evidence_capture_checkpoint
 from tests._universe import advance_command
 
-CURRENT_DATABASE_VERSION = 11
+CURRENT_DATABASE_VERSION = 12
 CONFIGURATION_HASH = "a" * 64
 RECORDED_AT = "2026-08-21T22:00:00.000000+00:00"
 MAX_DIAGNOSTIC_LENGTH = 100
@@ -213,6 +213,9 @@ def test_fresh_database_records_its_physical_schema_version(tmp_path: Path) -> N
         "lifecycle_events",
         "lifecycle_events_are_append_only_delete",
         "lifecycle_events_are_append_only_update",
+        "memory_update_refusals",
+        "memory_update_refusals_are_append_only_delete",
+        "memory_update_refusals_are_append_only_update",
         "one_initial_event_per_stream",
         "one_constitution_governance_fact_per_kind_request_and_material",
         "one_unkeyed_refusal_per_reason_and_cycle",

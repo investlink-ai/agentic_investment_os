@@ -128,6 +128,7 @@ def configure_advance(  # noqa: PLR0913 - composition names each untrusted bound
                 evidence_vault,
                 trusted_clock,
             ),
+            memory_refusal_ledger=belief_ledger,
         )
     # Strict mypy proves this line unreachable; removing it is runtime-equivalent.
     assert_never(database)  # pragma: no cover

@@ -386,6 +386,26 @@ CREATE TRIGGER advance_conflicts_are_append_only_delete
 BEFORE DELETE ON advance_conflicts BEGIN SELECT RAISE(ABORT, 'append-only conflict ledger'); END
 """,
     """
+CREATE TABLE memory_update_refusals (
+    refusal_id TEXT PRIMARY KEY CHECK (length(refusal_id) = 64),
+    run_id TEXT NOT NULL CHECK (length(run_id) = 64),
+    failed_event_id TEXT NOT NULL CHECK (length(failed_event_id) = 64),
+    refusal_json TEXT NOT NULL,
+    recorded_at TEXT NOT NULL,
+    UNIQUE (run_id, failed_event_id)
+) STRICT
+""",
+    """
+CREATE TRIGGER memory_update_refusals_are_append_only_update
+BEFORE UPDATE ON memory_update_refusals
+BEGIN SELECT RAISE(ABORT, 'append-only memory refusal'); END
+""",
+    """
+CREATE TRIGGER memory_update_refusals_are_append_only_delete
+BEFORE DELETE ON memory_update_refusals
+BEGIN SELECT RAISE(ABORT, 'append-only memory refusal'); END
+""",
+    """
 CREATE TABLE belief_events (
     ledger_position INTEGER PRIMARY KEY CHECK (ledger_position > 0),
     event_id TEXT NOT NULL UNIQUE,
@@ -546,7 +566,7 @@ class _DatabaseOpenMode(StrEnum):
     EXISTING_ONLY = "rw"
 
 
-_CURRENT_DATABASE_VERSION = 11
+_CURRENT_DATABASE_VERSION = 12
 _CURRENT_SCHEMA_SIGNATURE = frozenset(" ".join(statement.split()) for statement in _CURRENT_SCHEMA)
 
 _PROJECTION_SCHEMA = """

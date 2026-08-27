@@ -13,7 +13,7 @@ from agentic_investment_os.domain.identity import (
     canonical_instrument_bytes,
     parse_instrument_identity,
 )
-from agentic_investment_os.domain.lifecycle import is_sha256
+from agentic_investment_os.domain.lifecycle import MemoryUpdateRefusal, is_sha256
 from agentic_investment_os.domain.temporal import UtcInstant
 from agentic_investment_os.memory.admission import (
     BeliefClaimKind,
@@ -106,6 +106,18 @@ class BeliefLedger(Protocol):
         evidence_resolver: BeliefEvidenceResolver,
     ) -> BeliefGraph | BeliefGraphRefusal: ...
 
+    def load_memory_update_refusal(
+        self,
+        run_id: str,
+        failed_event_id: str,
+    ) -> MemoryUpdateRefusal | None: ...
+
+    def record_memory_update_refusal(
+        self,
+        refusal: MemoryUpdateRefusal,
+        recorded_at: UtcInstant,
+    ) -> MemoryUpdateRefusal: ...
+
     def validate_history(
         self,
         event_ids: tuple[str, ...],
@@ -116,6 +128,9 @@ class BeliefLedger(Protocol):
         self,
         references: tuple[BeliefLifecycleReference, ...],
         evidence_resolver: BeliefEvidenceResolver,
+        *,
+        absent_event_ids: tuple[str, ...] = (),
+        memory_refusals: tuple[MemoryUpdateRefusal, ...] = (),
     ) -> None: ...
 
 

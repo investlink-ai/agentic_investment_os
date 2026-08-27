@@ -76,6 +76,7 @@ from agentic_investment_os.memory.admission import (
 )
 from agentic_investment_os.memory.beliefs import (
     BeliefGraphRefusal,
+    BeliefPersistenceError,
     RecordDisposition,
 )
 from agentic_investment_os.research.production import (
@@ -102,7 +103,7 @@ if TYPE_CHECKING:
         EvidenceReferenceValidator,
         EvidenceVault,
     )
-    from agentic_investment_os.memory.beliefs import BeliefHistoryValidator
+    from agentic_investment_os.memory.beliefs import BeliefHistoryValidator, BeliefLedger
     from agentic_investment_os.research.production import (
         ProductionResearchHistoryValidator,
     )
@@ -113,6 +114,7 @@ __all__ = ("Advance", "Clock", "ConstitutionResolver", "Status")
 _INCOMPLETE_CHECKPOINT_RESULT = "lifecycle ledger returned an incomplete checkpoint result"
 _CLOCK_INVALID = "lifecycle clock must return a timezone-aware instant representable in UTC"
 _UNIVERSE_SOURCE_INVALID = "universe source returned a noncanonical absolute instant"
+_MEMORY_REFUSAL_CONFLICT = "memory refusal observation conflicts with the accepted event prefix"
 
 
 class Clock(Protocol):
@@ -170,6 +172,7 @@ class Advance:
     production_research: ProductionResearch
     evidence_vault: EvidenceVault
     memory: Record
+    memory_refusal_ledger: BeliefLedger
 
     def __call__(  # noqa: PLR0912, PLR0915 - exhaust each typed lifecycle decision.
         self,
@@ -507,6 +510,14 @@ class Advance:
                     "belief_id": belief_id,
                 }
             )
+            prior_refusal = self.memory_refusal_ledger.load_memory_update_refusal(
+                context.run_id,
+                event_id,
+            )
+            if prior_refusal is not None:
+                if prior_refusal.accepted_event_ids != tuple(sorted(event_ids)):
+                    raise BeliefPersistenceError(_MEMORY_REFUSAL_CONFLICT)
+                return _research_refusal(prior_refusal)
             current_graph = self.memory.graph(
                 {
                     "schema_version": 1,
@@ -525,11 +536,12 @@ class Advance:
                 isinstance(current_graph, BeliefGraphRefusal)
                 or current_graph.omitted_belief_events > 0
             ):
-                return _memory_refusal(
+                return self._record_memory_refusal(
                     context.run_id,
                     event_id,
                     "current_belief_history_unavailable",
                     tuple(event_ids),
+                    recorded_at,
                 )
             current_events = tuple(
                 node for node in current_graph.belief_nodes if node.event.belief_id == belief_id
@@ -576,9 +588,32 @@ class Advance:
                 reason = (
                     "unknown_record_refusal" if receipt.refusal is None else receipt.refusal.value
                 )
-                return _memory_refusal(context.run_id, event_id, reason, tuple(event_ids))
+                return self._record_memory_refusal(
+                    context.run_id,
+                    event_id,
+                    reason,
+                    tuple(event_ids),
+                    recorded_at,
+                )
             event_ids.append(event_id)
         return ResearchCheckpoint(tuple(sorted(event_ids)))
+
+    def _record_memory_refusal(
+        self,
+        run_id: str,
+        event_id: str,
+        reason: str,
+        accepted_event_ids: tuple[str, ...],
+        recorded_at: UtcInstant,
+    ) -> ResearchRefusal:
+        refusal = MemoryUpdateRefusal(
+            run_id,
+            event_id,
+            MemoryUpdateRefusalReason(reason),
+            tuple(sorted(accepted_event_ids)),
+        )
+        stored = self.memory_refusal_ledger.record_memory_update_refusal(refusal, recorded_at)
+        return _research_refusal(stored)
 
     def _validate_evidence_receipt(
         self,
@@ -714,18 +749,7 @@ class Advance:
         assert_never(parsed)  # pragma: no cover
 
 
-def _memory_refusal(
-    run_id: str,
-    event_id: str,
-    reason: str,
-    accepted_event_ids: tuple[str, ...],
-) -> ResearchRefusal:
-    memory_refusal = MemoryUpdateRefusal(
-        run_id,
-        event_id,
-        MemoryUpdateRefusalReason(reason),
-        tuple(sorted(accepted_event_ids)),
-    )
+def _research_refusal(memory_refusal: MemoryUpdateRefusal) -> ResearchRefusal:
     return ResearchRefusal(
         memory_refusal.refusal_id,
         ResearchCheckpoint(memory_refusal.accepted_event_ids),

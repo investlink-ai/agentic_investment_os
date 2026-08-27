@@ -295,11 +295,12 @@ stateDiagram-v2
   exact phase ownership and resource totals, and re-derives each allowed terminal role path. Completed
   memory checkpoints retain zero model-call resources and bind their exact no-action outcome or
   run-owned Belief Event material to the validated CIO resolutions; global event existence is not
-  sufficient. Memory refusals retain their exact typed cause, failed run-owned event, and preceding
-  accepted events; `Status` re-derives their identity and exact zero-call checkpoint from that material.
-  Belief transaction time remains bounded by the lifecycle checkpoint; the memory ledger's independent
-  append timestamp may follow it. SQLite initializes or validates one exact current physical schema;
-  other non-empty shapes fail before writes.
+  sufficient. Before lifecycle publication, an append-only memory observation records each refusal's
+  exact typed cause, failed run-owned event, and preceding accepted events. `Status` binds the lifecycle
+  refusal to that independent observation, re-derives its identity and exact zero-call checkpoint, and
+  proves that the failed and later expected events are absent. Belief transaction time remains bounded
+  by the lifecycle checkpoint; the memory ledger's independent append timestamp may follow it. SQLite
+  initializes or validates one exact current physical schema; other non-empty shapes fail before writes.
   [ADR 0004](adr/0004-require-current-sqlite-schema.md) owns that decision. Runtime stores use explicit
   ignored roots; source directories never hold runtime state.
 
