@@ -16,7 +16,7 @@ from agentic_investment_os.entrypoints.configuration import (
     resolve_runtime_configuration,
 )
 from tests._evidence import evidence_policy
-from tests._universe import attention_policy, universe_policy
+from tests._universe import attention_policy, research_policy, universe_policy
 
 SHA256_HEX_LENGTH = 64
 
@@ -54,6 +54,7 @@ def _with_policy(values: dict[str, object]) -> dict[str, object]:
         "universe_policy": universe_policy(),
         "evidence_policy": evidence_policy(),
         "attention_policy": attention_policy(),
+        "research_policy": research_policy(),
     }
 
 
@@ -92,6 +93,7 @@ def test_runtime_configuration_is_complete_immutable_and_deterministically_hashe
                     "universe_policy": universe_policy(),
                     "evidence_policy": evidence_policy(),
                     "attention_policy": attention_policy(),
+                    "research_policy": research_policy(),
                 },
             ),
             ConfigurationSource(
@@ -103,6 +105,7 @@ def test_runtime_configuration_is_complete_immutable_and_deterministically_hashe
                     "universe_policy": universe_policy(),
                     "evidence_policy": evidence_policy(),
                     "attention_policy": attention_policy(),
+                    "research_policy": research_policy(),
                 },
             ),
         ),
@@ -118,6 +121,7 @@ def test_runtime_configuration_is_complete_immutable_and_deterministically_hashe
                     "universe_policy": universe_policy(),
                     "evidence_policy": evidence_policy(),
                     "attention_policy": attention_policy(),
+                    "research_policy": research_policy(),
                 },
             ),
             ConfigurationSource(
@@ -128,6 +132,7 @@ def test_runtime_configuration_is_complete_immutable_and_deterministically_hashe
                     "universe_policy": universe_policy(),
                     "evidence_policy": evidence_policy(),
                     "attention_policy": attention_policy(),
+                    "research_policy": research_policy(),
                 },
             ),
         ),
@@ -152,7 +157,7 @@ def test_runtime_configuration_is_complete_immutable_and_deterministically_hashe
         repository_root=Path(__file__).resolve().parents[2],
     )
     assert isinstance(fixed, RuntimeConfiguration)
-    assert fixed.fingerprint == "661600eebf544131eecb1bb389eb625b61543c042fbffe3c3d7864acc30a1f0e"
+    assert fixed.fingerprint == "4635ad64ef7e4b92d8f7a295fb62640c674d112711b3ec0b1cf588783b1c5ccc"
 
     unicode_path = resolve_runtime_configuration(
         (
@@ -165,7 +170,7 @@ def test_runtime_configuration_is_complete_immutable_and_deterministically_hashe
     assert isinstance(unicode_path, RuntimeConfiguration)
     assert (
         unicode_path.fingerprint
-        == "38ec7a8bce9fcb288536f233b3bfd436257be5cc0e775391e21d8e03e989ca56"
+        == "c0cae35dcb81e6ae9d948cf580707ca30a928189b9c1cf47f2939037058a136b"
     )
 
 
@@ -182,6 +187,7 @@ def test_runtime_configuration_is_complete_immutable_and_deterministically_hashe
                         "universe_policy": universe_policy(),
                         "evidence_policy": evidence_policy(),
                         "attention_policy": attention_policy(),
+                        "research_policy": research_policy(),
                     },
                 ),
             ),
@@ -197,6 +203,7 @@ def test_runtime_configuration_is_complete_immutable_and_deterministically_hashe
                         "enabled_asset_classes": ["us_equity"],
                         "evidence_policy": evidence_policy(),
                         "attention_policy": attention_policy(),
+                        "research_policy": research_policy(),
                     },
                 ),
             ),
@@ -275,6 +282,7 @@ def test_runtime_configuration_is_complete_immutable_and_deterministically_hashe
                         },
                         "evidence_policy": evidence_policy(),
                         "attention_policy": attention_policy(),
+                        "research_policy": research_policy(),
                     },
                 ),
             ),
@@ -295,6 +303,21 @@ def test_runtime_configuration_rejects_invalid_sources(
     )
 
     assert resolution == expected_refusal
+
+
+def test_runtime_configuration_refuses_an_invalid_production_research_policy() -> None:
+    configuration = _with_policy({"schema_version": 1, "state_root": "/runtime/state"})
+    configuration["research_policy"] = {}
+
+    resolution = resolve_runtime_configuration(
+        (ConfigurationSource("invalid-research", configuration),),
+        repository_root=Path(__file__).resolve().parents[2],
+    )
+
+    assert resolution == ConfigurationRefusal(
+        ConfigurationRefusalCode.INVALID_RESEARCH_POLICY,
+        ("research_policy",),
+    )
 
 
 def test_rejected_configuration_does_not_disclose_unknown_values(tmp_path: Path) -> None:
@@ -529,6 +552,7 @@ def test_runtime_configuration_validates_duplicate_supported_invalid_scalars() -
                     "universe_policy": invalid_policy,
                     "evidence_policy": evidence_policy(),
                     "attention_policy": attention_policy(),
+                    "research_policy": research_policy(),
                 },
             ),
         ),

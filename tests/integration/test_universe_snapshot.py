@@ -22,8 +22,8 @@ from agentic_investment_os.domain.lifecycle import (
 from agentic_investment_os.domain.temporal import UtcInstant
 from agentic_investment_os.entrypoints.configuration import ConfigurationSource
 from agentic_investment_os.entrypoints.lifecycle import configure_advance, configure_status
-from tests._evidence import recorded_evidence
 from tests._governance import BASELINE_GOVERNANCE_STATUS, RecordedSessionEligibility
+from tests._production_research import ValidProductionModel, production_recorded_evidence
 from tests._universe import (
     mutable_mapping,
     mutable_mapping_list,
@@ -57,7 +57,8 @@ def _configure(
         (ConfigurationSource("test", runtime_configuration(state_root)),),
         repository_root=Path.cwd(),
         recorded_universe=payload,
-        recorded_evidence=recorded_evidence(),
+        recorded_evidence=production_recorded_evidence(),
+        recorded_model=ValidProductionModel(),
         session_eligibility=RecordedSessionEligibility(),
         clock=FixedClock() if clock is None else clock,
     )
@@ -85,7 +86,7 @@ def test_advance_durably_publishes_a_reconstructable_universe_snapshot(tmp_path:
 
     assert first.disposition is AdvanceDisposition.ADVANCED
     assert first.completed_phase is not None
-    assert first.completed_phase.phase is LifecyclePhase.SELECT_ATTENTION
+    assert first.completed_phase.phase is LifecyclePhase.UPDATE_MEMORY
     assert first.recovery is AdvanceRecovery.FRESH
     assert first.universe_snapshot_id is not None
     assert first.pinned_run_identity is not None
@@ -93,19 +94,7 @@ def test_advance_durably_publishes_a_reconstructable_universe_snapshot(tmp_path:
     assert len(first.pinned_run_identity.instrument_snapshot_hash) == SHA256_HEX_LENGTH
     assert len(first.pinned_run_identity.position_snapshot_hash) == SHA256_HEX_LENGTH
     assert len(first.pinned_run_identity.eligibility_policy_hash) == SHA256_HEX_LENGTH
-    assert replay == first.__class__(
-        disposition=first.disposition,
-        completed_phase=first.completed_phase,
-        pinned_run_identity=first.pinned_run_identity,
-        universe_snapshot_id=first.universe_snapshot_id,
-        failure_reason=None,
-        recovery=AdvanceRecovery.PREVIOUSLY_COMPLETED,
-        recorded_at=UtcInstant.from_datetime(FixedClock().instant),
-        evidence_policy_id=first.evidence_policy_id,
-        evidence_artifact_ids=first.evidence_artifact_ids,
-        evidence_refusal_ids=(),
-        attention_artifact=first.attention_artifact,
-    )
+    assert replay == replace(first, recovery=AdvanceRecovery.PREVIOUSLY_COMPLETED)
 
     database = state_root / "lifecycle.sqlite3"
     with sqlite3.connect(database) as connection:
@@ -123,6 +112,9 @@ def test_advance_durably_publishes_a_reconstructable_universe_snapshot(tmp_path:
         ("universe_snapshotted", "SnapshotUniverse"),
         ("evidence_captured", "CaptureEvidence"),
         ("attention_selected", "SelectAttention"),
+        ("dossiers_built", "BuildDossiers"),
+        ("research_run", "RunResearch"),
+        ("memory_updated", "UpdateMemory"),
     ]
     assert all(row[2] is None and row[3] is None for row in events[:2])
     assert events[2][2] == first.universe_snapshot_id
@@ -390,5 +382,5 @@ def test_retry_with_changed_recorded_snapshot_fails_without_changing_first_snaps
     assert replay.universe_snapshot_id == first.universe_snapshot_id
     assert replay.recovery is AdvanceRecovery.PREVIOUSLY_COMPLETED
     with sqlite3.connect(state_root / "lifecycle.sqlite3") as connection:
-        assert connection.execute("SELECT COUNT(*) FROM lifecycle_events").fetchone() == (6,)
+        assert connection.execute("SELECT COUNT(*) FROM lifecycle_events").fetchone() == (9,)
         assert connection.execute("SELECT COUNT(*) FROM advance_conflicts").fetchone() == (1,)

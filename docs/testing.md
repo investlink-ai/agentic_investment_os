@@ -194,8 +194,9 @@ The implemented candidate inventory is:
 | `adapters/sqlite_lab.py` | Safety-supporting namespace isolation, intent-before-effect durability, append-only reconstruction, and private-root validation; integration, interruption, corruption, and coverage evidence |
 | `adapters/sqlite_lifecycle.py` | Non-critical SQL mechanics and non-authorizing lifecycle and Constitution-governance durability; integration, corruption, architecture, and critical-coverage evidence |
 | `adapters/sqlite_memory.py` | Non-critical belief SQL mechanics and authoritative-history validation; integration, concurrency, corruption, and coverage evidence |
+| `adapters/sqlite_production_research.py` | Safety-supporting production intent-before-effect durability, append-only observation reconstruction, and lifecycle-reference validation; integration, interruption, corruption, and coverage evidence |
 | `application/governance.py` | Non-critical Constitution scheduling and resolution orchestration with no packet or broker authority; unit, integration, and critical-coverage evidence |
-| `application/lifecycle.py` | Non-critical orchestration through Constitution pinning, evidence capture, and bounded attention; unit, integration, system-journey, and critical-coverage evidence |
+| `application/lifecycle.py` | Non-critical orchestration through Constitution pinning, evidence capture, bounded attention, production research, and Belief Event admission with no sizing or broker authority; unit, integration, system-journey, and critical-coverage evidence |
 | `application/memory.py` | Non-critical Record orchestration; integration, system-journey, and coverage evidence |
 | `application/replay.py` | Safety-supporting hostile-input admission and Lab replay orchestration with no production or execution authority; unit, contract, integration, interruption, and coverage evidence |
 | `domain/attention.py` | Safety-supporting, non-authorizing admission to bounded research capacity with no stance, sizing, packet, order, or execution effect; unit, property, integration, hostile-input, and coverage evidence |
@@ -214,8 +215,11 @@ The implemented candidate inventory is:
 | `memory/admission.py` | Critical canonical Belief Event types, hostile-input parsing, serialization, and evidence admission; unit, contract, refusal, and mutation evidence |
 | `memory/beliefs.py` | Non-critical typed belief history, receipt, and bounded as-of graph projection; unit, property, contract, integration, corruption, and coverage evidence |
 | `memory/reducer.py` | Critical append-only belief-transition reducer, projection identity, and ledger commitment; unit, property, refusal, and mutation evidence |
+| `research/authority.py` | Safety-supporting closed production-versus-Lab authority labels with no effect implementation; unit and coverage evidence |
 | `research/dossier.py` | Safety-supporting exact-schema, citation, cutoff, lens, and prohibited-authority validation; unit, hostile-input, and coverage evidence |
 | `research/model.py` | Safety-supporting owner-defined model and Lab-ledger contracts with no direct effect implementation; contract, integration, and coverage evidence |
+| `research/policy.py` | Safety-supporting exact production role order, prompt, model, reasoning, tool, and graph-bound configuration; unit, integration, hostile-input, and coverage evidence |
+| `research/production.py` | Safety-supporting fixed stateless role orchestration, exact-context intent construction, hostile-output admission, bounded resources, and no-action/refusal behavior with no portfolio or broker effect; unit, integration, interruption, and coverage evidence |
 | `research/resolution.py` | Safety-supporting Thesis, Skeptic, scenario, CIO, horizon, evidence, and prohibited-authority validation with no sizing, packet, or broker effect; unit, hostile-input, integration, and coverage evidence |
 | `domain/__init__.py` | Non-critical package scaffold with no callable |
 | `execution/__init__.py`, `portfolio/__init__.py` | Critical-authority package scaffolds with no callable; explicit mutation scaffold exemption |
@@ -392,6 +396,25 @@ evidence. A scenario becomes mandatory when its owning behavior is implemented.
 - Model output containing a weight, order, unsupported citation, prompt injection, invalid enum,
   inconsistent horizon, missing Skeptic, timeout, quota exhaustion, or oversized result is rejected or
   safely normalized only as its schema explicitly permits.
+- Production `Advance` consumes only subjects selected by the exact pinned Attention Artifact,
+  including due holding refreshes, and executes Evidence Collector, Thesis Builder, Independent
+  Skeptic, Scenario Forecaster, and CIO in fixed order with a fresh exact context for every role. The
+  complete research policy and its prompt, model, reasoning, inert tool, graph-bound, Constitution,
+  cutoff, Data Regime, portfolio-context, and material fingerprints remain pinned across retry and
+  reopen. Missing or reordered roles, changed retry material, undeclared context, or any ambient model
+  fallback fails before another effect.
+- Every production role records intent before the model effect and one validated observation or
+  bounded refusal afterward. Interruption after the intent of each of the five roles leaves an
+  indeterminate call that retry never repeats. Completed calls replay independently; token and turn
+  totals and call and artifact IDs enter lifecycle checkpoints. `Status` revalidates exact stored
+  inputs, raw-response identity, observation hashes, role artifacts, and every checkpoint reference;
+  mutation or removal of referenced production rows fails closed.
+- Production malformed JSON, oversized output, timeout, quota exhaustion, output-token overflow,
+  turn overflow, citation failure, evidence failure, and memory refusal are durable failures with no
+  model-service substitution and no invalid Belief Event. Skeptic rejection skips later roles for that
+  subject; an all-rejected run and an all-abstaining CIO run are durable no-action outcomes. A mixed
+  run admits only validated non-abstaining CIO resolutions through `Record`, and retry never duplicates
+  a model observation or Belief Event.
 - `Replay` accepts only copied or synthetic evidence available by its exact cutoff, canonical subject
   mapping, pinned Constitution and bounded Belief Graph, explicit prompt, model, reasoning, tool, Data
   Regime, portfolio-context, namespace, and material hashes. Belief-node bitemporal state and graph

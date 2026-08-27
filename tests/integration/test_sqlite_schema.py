@@ -20,20 +20,27 @@ from agentic_investment_os.domain.lifecycle import (
     LifecycleEvent,
     LifecyclePersistenceError,
     PerformAttentionSelection,
+    PerformDossierBuild,
     PerformEvidenceCapture,
+    PerformMemoryUpdate,
+    PerformResearch,
     PinnedRunIdentity,
+    ResearchCheckpoint,
 )
 from agentic_investment_os.domain.temporal import UtcInstant
 from tests._attention import attention_artifact
 from tests._evidence import evidence_capture_checkpoint
 from tests._universe import advance_command
 
-CURRENT_DATABASE_VERSION = 9
+CURRENT_DATABASE_VERSION = 10
 CONFIGURATION_HASH = "a" * 64
 RECORDED_AT = "2026-08-21T22:00:00.000000+00:00"
 MAX_DIAGNOSTIC_LENGTH = 100
 SQLiteValue = str | bytes | int | float | None
-ATTENTION_EVENT_SEQUENCE = 5
+MEMORY_EVENT_SEQUENCE = 8
+DOSSIER_CHECKPOINT = ResearchCheckpoint(("1" * 64,))
+RESEARCH_CHECKPOINT = ResearchCheckpoint(("2" * 64,))
+MEMORY_CHECKPOINT = ResearchCheckpoint(("3" * 64,))
 
 
 class InvalidDatabaseVersionCursor(sqlite3.Cursor):
@@ -96,7 +103,7 @@ def _populate_current_history(database: Path) -> tuple[AdvanceRequest, PinnedRun
     attempt = AdvanceAttempt()
     recorded_at = UtcInstant.parse(RECORDED_AT)
     capture = evidence_capture_checkpoint()
-    for expected_sequence in range(6):
+    for expected_sequence in range(MEMORY_EVENT_SEQUENCE + 1):
         decision = ledger.advance_step(command, attempt, recorded_at)
         if isinstance(decision, PerformEvidenceCapture):
             command = replace(command, evidence_capture=capture)
@@ -112,7 +119,16 @@ def _populate_current_history(database: Path) -> tuple[AdvanceRequest, PinnedRun
                 ),
             )
             decision = ledger.advance_step(command, attempt, recorded_at)
-        if expected_sequence < ATTENTION_EVENT_SEQUENCE:
+        if isinstance(decision, PerformDossierBuild):
+            command = replace(command, dossier_build=DOSSIER_CHECKPOINT)
+            decision = ledger.advance_step(command, attempt, recorded_at)
+        if isinstance(decision, PerformResearch):
+            command = replace(command, research_run=RESEARCH_CHECKPOINT)
+            decision = ledger.advance_step(command, attempt, recorded_at)
+        if isinstance(decision, PerformMemoryUpdate):
+            command = replace(command, memory_update=MEMORY_CHECKPOINT)
+            decision = ledger.advance_step(command, attempt, recorded_at)
+        if expected_sequence < MEMORY_EVENT_SEQUENCE:
             assert isinstance(decision, AppendLifecycleRecord)
             attempt = decision.attempt
         else:
@@ -200,6 +216,12 @@ def test_fresh_database_records_its_physical_schema_version(tmp_path: Path) -> N
         "one_initial_event_per_stream",
         "one_constitution_governance_fact_per_kind_request_and_material",
         "one_unkeyed_refusal_per_reason_and_cycle",
+        "production_research_call_intents",
+        "production_research_call_intents_are_append_only_delete",
+        "production_research_call_intents_are_append_only_update",
+        "production_research_call_observations",
+        "production_research_call_observations_are_append_only_delete",
+        "production_research_call_observations_are_append_only_update",
     }
 
 

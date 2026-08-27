@@ -19,6 +19,7 @@ from agentic_investment_os.domain.attention import (
     validate_attention_history,
 )
 from agentic_investment_os.domain.governance import (
+    ConstitutionArtifact,
     ConstitutionGovernanceStatus,
     ConstitutionReference,
     ConstitutionUse,
@@ -64,9 +65,15 @@ __all__ = (
     "LifecycleRecord",
     "LifecycleStatus",
     "LifecycleStatusProjection",
+    "NoActionReason",
     "PerformAttentionSelection",
+    "PerformDossierBuild",
     "PerformEvidenceCapture",
+    "PerformMemoryUpdate",
+    "PerformResearch",
     "PinnedRunIdentity",
+    "ResearchCheckpoint",
+    "ResearchRefusal",
     "decide_advance",
     "decide_evidence_refusal_replay",
     "decide_invalid_history",
@@ -75,8 +82,10 @@ __all__ = (
     "is_sha256",
     "parse_advance_receipt",
     "parse_lifecycle_checkpoint",
+    "parse_research_checkpoint",
     "reconstruct_constitution_uses",
     "reconstruct_evidence_checkpoints",
+    "reconstruct_production_research_checkpoints",
 )
 
 _IDEMPOTENCY_KEY = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\Z")
@@ -141,6 +150,11 @@ _RECEIPT_PAYLOAD_FIELDS = frozenset(
         "evidence_refusal_ids",
         "attention_artifact",
         "attention_refusal_reason",
+        "dossier_checkpoint",
+        "research_checkpoint",
+        "memory_checkpoint",
+        "research_refusal_id",
+        "no_action_reason",
     }
 )
 _PINNED_IDENTITY_FIELDS = frozenset(
@@ -149,6 +163,7 @@ _PINNED_IDENTITY_FIELDS = frozenset(
         "cycle",
         "configuration_version",
         "configuration_hash",
+        "research_policy_hash",
         "constitution_version",
         "constitution_hash",
         "data_regime",
@@ -161,6 +176,7 @@ _PINNED_IDENTITY_FIELDS = frozenset(
 _MATERIAL_FINGERPRINT_FIELDS = frozenset(
     {
         "configuration",
+        "research_policy",
         "constitution",
         "instrument_snapshot",
         "position_snapshot",
@@ -184,13 +200,16 @@ class SessionMode(StrEnum):
 
 
 class LifecyclePhase(StrEnum):
-    """Name lifecycle checkpoints implemented through bounded attention selection."""
+    """Name the implemented production lifecycle checkpoints."""
 
     RECONCILE_PRIOR_STATE = "ReconcilePriorState"
     PIN_RUN_INPUTS = "PinRunInputs"
     SNAPSHOT_UNIVERSE = "SnapshotUniverse"
     CAPTURE_EVIDENCE = "CaptureEvidence"
     SELECT_ATTENTION = "SelectAttention"
+    BUILD_DOSSIERS = "BuildDossiers"
+    RUN_RESEARCH = "RunResearch"
+    UPDATE_MEMORY = "UpdateMemory"
 
 
 @dataclass(frozen=True, slots=True)
@@ -265,6 +284,9 @@ class LifecycleEventKind(StrEnum):
     UNIVERSE_SNAPSHOTTED = "universe_snapshotted"
     EVIDENCE_CAPTURED = "evidence_captured"
     ATTENTION_SELECTED = "attention_selected"
+    DOSSIERS_BUILT = "dossiers_built"
+    RESEARCH_RUN = "research_run"
+    MEMORY_UPDATED = "memory_updated"
 
 
 class LifecycleLiveness(StrEnum):
@@ -279,6 +301,7 @@ class AdvanceDisposition(StrEnum):
     """Describe an operator-visible Advance outcome."""
 
     ADVANCED = "advanced"
+    NO_ACTION = "no_action"
     FAILED_CLOSED = "failed_closed"
 
 
@@ -288,6 +311,14 @@ class AdvanceRecovery(StrEnum):
     FRESH = "fresh"
     RESUMED = "resumed"
     PREVIOUSLY_COMPLETED = "previously_completed"
+
+
+class NoActionReason(StrEnum):
+    """Bound the production paths that intentionally produce no belief update."""
+
+    NO_ATTENTION = "no_attention"
+    SKEPTIC_REJECTED = "skeptic_rejected"
+    CIO_ABSTAINED = "cio_abstained"
 
 
 class InputRefusalCode(StrEnum):
@@ -320,6 +351,8 @@ class AdvanceFailureReason(StrEnum):
     INVALID_DURABLE_STATE = "invalid_durable_state"
     EVIDENCE_CAPTURE_FAILED = "evidence_capture_failed"
     ATTENTION_SELECTION_FAILED = "attention_selection_failed"
+    RESEARCH_FAILED = "research_failed"
+    MEMORY_UPDATE_FAILED = "memory_update_failed"
 
 
 @dataclass(frozen=True, slots=True)
@@ -384,6 +417,7 @@ class PinnedRunIdentity:
     cycle: DecisionCycleIdentity
     configuration_version: int
     configuration_hash: str
+    research_policy_hash: str
     constitution_version: int
     constitution_hash: str
     data_regime: str
@@ -393,12 +427,13 @@ class PinnedRunIdentity:
     eligibility_policy_hash: str
 
     @classmethod
-    def create(
+    def create(  # noqa: PLR0913 - every material run pin remains explicit at creation.
         cls,
         request: AdvanceRequest,
         *,
         configuration_version: int,
         configuration_hash: str,
+        research_policy_hash: str,
         universe_inputs: UniverseInputIdentity,
         constitution: ConstitutionReference,
     ) -> PinnedRunIdentity:
@@ -407,6 +442,7 @@ class PinnedRunIdentity:
                 (
                     configuration_hash,
                     configuration_version,
+                    research_policy_hash,
                     constitution.content_hash,
                     constitution.version,
                     request.mode.value,
@@ -421,6 +457,7 @@ class PinnedRunIdentity:
             cycle=request.session,
             configuration_version=configuration_version,
             configuration_hash=configuration_hash,
+            research_policy_hash=research_policy_hash,
             constitution_version=constitution.version,
             constitution_hash=constitution.content_hash,
             data_regime=universe_inputs.data_regime,
@@ -477,6 +514,51 @@ class EvidenceCaptureReference:
 
 
 @dataclass(frozen=True, slots=True)
+class ResearchCheckpoint:
+    """Carry bounded references and aggregate resources from one research checkpoint."""
+
+    artifact_ids: tuple[str, ...] = ()
+    call_ids: tuple[str, ...] = ()
+    input_tokens: int = 0
+    output_tokens: int = 0
+    turns: int = 0
+
+    def __post_init__(self) -> None:
+        if (
+            not _valid_optional_hash_references(self.artifact_ids)
+            or not _valid_optional_hash_references(self.call_ids)
+            or type(self.input_tokens) is not int
+            or self.input_tokens < 0
+            or type(self.output_tokens) is not int
+            or self.output_tokens < 0
+            or type(self.turns) is not int
+            or self.turns < 0
+        ):
+            raise ValueError(_INVALID_CHECKPOINT_ORDER)
+
+    def to_payload(self) -> dict[str, object]:
+        return {
+            "schema_version": 1,
+            "artifact_ids": list(self.artifact_ids),
+            "call_ids": list(self.call_ids),
+            "input_tokens": self.input_tokens,
+            "output_tokens": self.output_tokens,
+            "turns": self.turns,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class ResearchRefusal:
+    """Identify one bounded fail-closed research or memory outcome."""
+
+    refusal_id: str
+
+    def __post_init__(self) -> None:
+        if not is_sha256(self.refusal_id):
+            raise ValueError(_INVALID_CHECKPOINT_ORDER)
+
+
+@dataclass(frozen=True, slots=True)
 class AdvanceReceipt:
     """Report durable lifecycle facts and how this call observed their completion."""
 
@@ -493,6 +575,33 @@ class AdvanceReceipt:
     evidence_refusal_ids: tuple[str, ...] = ()
     attention_artifact: AttentionArtifact | None = None
     attention_refusal_reason: AttentionRefusalReason | None = None
+    dossier_checkpoint: ResearchCheckpoint | None = None
+    research_checkpoint: ResearchCheckpoint | None = None
+    memory_checkpoint: ResearchCheckpoint | None = None
+    research_refusal_id: str | None = None
+    no_action_reason: NoActionReason | None = None
+
+    @property
+    def dossier_ids(self) -> tuple[str, ...]:
+        """Return the bounded Dossier references from BuildDossiers."""
+        return () if self.dossier_checkpoint is None else self.dossier_checkpoint.artifact_ids
+
+    @property
+    def research_call_ids(self) -> tuple[str, ...]:
+        """Return every durable model-call identity in checkpoint order."""
+        build = () if self.dossier_checkpoint is None else self.dossier_checkpoint.call_ids
+        run = () if self.research_checkpoint is None else self.research_checkpoint.call_ids
+        return (*build, *run)
+
+    @property
+    def research_resolution_ids(self) -> tuple[str, ...]:
+        """Return the bounded terminal research-resolution references."""
+        return () if self.research_checkpoint is None else self.research_checkpoint.artifact_ids
+
+    @property
+    def belief_event_ids(self) -> tuple[str, ...]:
+        """Return the accepted Belief Event identities from UpdateMemory."""
+        return () if self.memory_checkpoint is None else self.memory_checkpoint.artifact_ids
 
     @property
     def cycle(self) -> DecisionCycleIdentity | None:
@@ -563,12 +672,19 @@ class AdvanceReceipt:
                     if self.attention_refusal_reason is None
                     else self.attention_refusal_reason.value
                 ),
+                "dossier_checkpoint": _research_checkpoint_payload(self.dossier_checkpoint),
+                "research_checkpoint": _research_checkpoint_payload(self.research_checkpoint),
+                "memory_checkpoint": _research_checkpoint_payload(self.memory_checkpoint),
+                "research_refusal_id": self.research_refusal_id,
+                "no_action_reason": (
+                    None if self.no_action_reason is None else self.no_action_reason.value
+                ),
             },
         }
         return {**material, "content_hash": _content_hash(material)}
 
     def __post_init__(self) -> None:
-        if self.disposition is AdvanceDisposition.ADVANCED:
+        if self.disposition in (AdvanceDisposition.ADVANCED, AdvanceDisposition.NO_ACTION):
             recorded_at = self.recorded_at
             identity = self.pinned_run_identity
             try:
@@ -579,7 +695,7 @@ class AdvanceReceipt:
             except InvalidUtcInstantError as error:
                 raise ValueError(_INVALID_ADVANCED_RECEIPT) from error
             if (
-                self.completed_phase != LifecycleCheckpoint.equity(LifecyclePhase.SELECT_ATTENTION)
+                self.completed_phase != LifecycleCheckpoint.equity(LifecyclePhase.UPDATE_MEMORY)
                 or self.failure_reason is not None
                 or self.recovery is None
                 or self.universe_snapshot_id is None
@@ -602,6 +718,20 @@ class AdvanceReceipt:
                 or self.attention_artifact.evidence_artifact_ids != self.evidence_artifact_ids
                 or parse_attention_artifact(self.attention_artifact.to_payload())
                 != self.attention_artifact
+                or type(self.dossier_checkpoint) is not ResearchCheckpoint
+                or type(self.research_checkpoint) is not ResearchCheckpoint
+                or type(self.memory_checkpoint) is not ResearchCheckpoint
+                or self.research_refusal_id is not None
+                or (
+                    self.disposition is AdvanceDisposition.ADVANCED
+                    and (
+                        not self.memory_checkpoint.artifact_ids or self.no_action_reason is not None
+                    )
+                )
+                or (
+                    self.disposition is AdvanceDisposition.NO_ACTION
+                    and (self.memory_checkpoint.artifact_ids or self.no_action_reason is None)
+                )
             ):
                 raise ValueError(_INVALID_ADVANCED_RECEIPT)
             return
@@ -613,6 +743,18 @@ class AdvanceReceipt:
                 or self.recovery is not None
                 or self.universe_snapshot_id is not None
                 or self.recorded_at is not None
+                or self.dossier_checkpoint is not None
+                or self.research_checkpoint is not None
+                or self.memory_checkpoint is not None
+                or self.no_action_reason is not None
+                or (
+                    self.failure_reason
+                    in (
+                        AdvanceFailureReason.RESEARCH_FAILED,
+                        AdvanceFailureReason.MEMORY_UPDATE_FAILED,
+                    )
+                )
+                != is_sha256(self.research_refusal_id)
                 or (
                     self.failure_reason is AdvanceFailureReason.EVIDENCE_CAPTURE_FAILED
                     and (
@@ -673,10 +815,18 @@ class AdvanceReceipt:
         recorded_at: UtcInstant,
         evidence_capture: EvidenceCaptureCheckpoint,
         attention_artifact: AttentionArtifact,
+        dossier_checkpoint: ResearchCheckpoint,
+        research_checkpoint: ResearchCheckpoint,
+        memory_checkpoint: ResearchCheckpoint,
+        no_action_reason: NoActionReason | None,
     ) -> AdvanceReceipt:
         return cls(
-            AdvanceDisposition.ADVANCED,
-            LifecycleCheckpoint.equity(LifecyclePhase.SELECT_ATTENTION),
+            (
+                AdvanceDisposition.ADVANCED
+                if no_action_reason is None
+                else AdvanceDisposition.NO_ACTION
+            ),
+            LifecycleCheckpoint.equity(LifecyclePhase.UPDATE_MEMORY),
             identity,
             None,
             recovery,
@@ -686,6 +836,10 @@ class AdvanceReceipt:
             evidence_artifact_ids=evidence_capture.artifact_ids,
             evidence_refusal_ids=evidence_capture.refusal_ids,
             attention_artifact=attention_artifact,
+            dossier_checkpoint=dossier_checkpoint,
+            research_checkpoint=research_checkpoint,
+            memory_checkpoint=memory_checkpoint,
+            no_action_reason=no_action_reason,
         )
 
     @classmethod
@@ -696,6 +850,7 @@ class AdvanceReceipt:
         cycle: DecisionCycleIdentity | None = None,
         evidence_capture: EvidenceCaptureCheckpoint | None = None,
         attention_refusal_reason: AttentionRefusalReason | None = None,
+        research_refusal: ResearchRefusal | None = None,
     ) -> AdvanceReceipt:
         return cls(
             AdvanceDisposition.FAILED_CLOSED,
@@ -709,6 +864,7 @@ class AdvanceReceipt:
             ),
             evidence_refusal_ids=(() if evidence_capture is None else evidence_capture.refusal_ids),
             attention_refusal_reason=attention_refusal_reason,
+            research_refusal_id=(None if research_refusal is None else research_refusal.refusal_id),
         )
 
 
@@ -786,11 +942,31 @@ def parse_advance_receipt(  # noqa: PLR0911, PLR0912 - reject hostile fields dir
         AttentionRefusalReason,
         payload["attention_refusal_reason"],
     )
+    dossier_checkpoint = parse_research_checkpoint(payload["dossier_checkpoint"])
+    research_checkpoint = parse_research_checkpoint(payload["research_checkpoint"])
+    memory_checkpoint = parse_research_checkpoint(payload["memory_checkpoint"])
+    if any(
+        value is not None and parsed is None
+        for value, parsed in (
+            (payload["dossier_checkpoint"], dossier_checkpoint),
+            (payload["research_checkpoint"], research_checkpoint),
+            (payload["memory_checkpoint"], memory_checkpoint),
+        )
+    ):
+        return None
+    research_refusal_id = payload["research_refusal_id"]
+    if research_refusal_id is not None and not is_sha256(research_refusal_id):
+        return None
+    valid_no_action, no_action_reason = _optional_enum(
+        NoActionReason,
+        payload["no_action_reason"],
+    )
     if (
         disposition is None
         or not valid_failure_reason
         or not valid_recovery
         or not valid_attention_refusal
+        or not valid_no_action
     ):
         return None
     try:
@@ -808,6 +984,11 @@ def parse_advance_receipt(  # noqa: PLR0911, PLR0912 - reject hostile fields dir
             evidence_refusal_ids=evidence_refusal_ids,
             attention_artifact=attention_artifact,
             attention_refusal_reason=attention_refusal_reason,
+            dossier_checkpoint=dossier_checkpoint,
+            research_checkpoint=research_checkpoint,
+            memory_checkpoint=memory_checkpoint,
+            research_refusal_id=research_refusal_id,
+            no_action_reason=no_action_reason,
         )
     except ValueError:
         return None
@@ -825,24 +1006,14 @@ class LifecycleProgress:
     universe_snapshot: UniverseSnapshot | None = None
     evidence_capture: EvidenceCaptureCheckpoint | None = None
     attention_artifact: AttentionArtifact | None = None
+    dossier_checkpoint: ResearchCheckpoint | None = None
+    research_checkpoint: ResearchCheckpoint | None = None
+    memory_checkpoint: ResearchCheckpoint | None = None
+    no_action_reason: NoActionReason | None = None
 
     @property
     def is_complete(self) -> bool:
-        phase = self.completed_phase
-        if phase is None:
-            return False
-        if phase is LifecyclePhase.RECONCILE_PRIOR_STATE:
-            return False
-        if phase is LifecyclePhase.PIN_RUN_INPUTS:
-            return False
-        if phase is LifecyclePhase.SNAPSHOT_UNIVERSE:
-            return False
-        if phase is LifecyclePhase.CAPTURE_EVIDENCE:
-            return False
-        if phase is LifecyclePhase.SELECT_ATTENTION:
-            return True
-        # Strict mypy proves this line unreachable; removing it is runtime-equivalent.
-        assert_never(phase)  # pragma: no cover
+        return self.completed_phase is LifecyclePhase.UPDATE_MEMORY
 
     def require_prepared_universe_snapshot(self) -> UniverseSnapshot:
         """Return the pinned snapshot or reject access before its durable checkpoint."""
@@ -865,6 +1036,24 @@ class LifecycleProgress:
             raise InvalidLifecycleStateError(_INVALID_CHECKPOINT_ORDER)
         return artifact
 
+    def require_dossier_checkpoint(self) -> ResearchCheckpoint:
+        checkpoint = self.dossier_checkpoint
+        if checkpoint is None:
+            raise InvalidLifecycleStateError(_INVALID_CHECKPOINT_ORDER)
+        return checkpoint
+
+    def require_research_checkpoint(self) -> ResearchCheckpoint:
+        checkpoint = self.research_checkpoint
+        if checkpoint is None:
+            raise InvalidLifecycleStateError(_INVALID_CHECKPOINT_ORDER)
+        return checkpoint
+
+    def require_memory_checkpoint(self) -> ResearchCheckpoint:
+        checkpoint = self.memory_checkpoint
+        if checkpoint is None:
+            raise InvalidLifecycleStateError(_INVALID_CHECKPOINT_ORDER)
+        return checkpoint
+
 
 @dataclass(frozen=True, slots=True)
 class LifecycleEvent:
@@ -881,6 +1070,8 @@ class LifecycleEvent:
     published_universe_snapshot_id: str | None = None
     evidence_capture: EvidenceCaptureCheckpoint | None = None
     attention_artifact: AttentionArtifact | None = None
+    research_checkpoint: ResearchCheckpoint | None = None
+    no_action_reason: NoActionReason | None = None
 
     @property
     def universe_snapshot_id(self) -> str | None:
@@ -908,6 +1099,7 @@ class LifecycleEvent:
             "authority_scope": _LIFECYCLE_AUTHORITY_SCOPE,
             "material_fingerprints": {
                 "configuration": identity.configuration_hash,
+                "research_policy": identity.research_policy_hash,
                 "constitution": identity.constitution_hash,
                 "instrument_snapshot": identity.instrument_snapshot_hash,
                 "position_snapshot": identity.position_snapshot_hash,
@@ -942,6 +1134,10 @@ class LifecycleEvent:
                     if self.attention_artifact is None
                     else self.attention_artifact.to_payload()
                 ),
+                "research_checkpoint": _research_checkpoint_payload(self.research_checkpoint),
+                "no_action_reason": (
+                    None if self.no_action_reason is None else self.no_action_reason.value
+                ),
             },
         }
         return {**material, "content_hash": _content_hash(material)}
@@ -954,8 +1150,13 @@ class AdvanceCommand:
     request: AdvanceRequest
     pinned_run_identity: PinnedRunIdentity
     universe_snapshot: UniverseSnapshot
+    constitution: ConstitutionArtifact | None = None
     evidence_capture: EvidenceCaptureCheckpoint | None = None
     attention_selection: AttentionArtifact | AttentionRefusalReason | None = None
+    dossier_build: ResearchCheckpoint | ResearchRefusal | None = None
+    research_run: ResearchCheckpoint | ResearchRefusal | None = None
+    memory_update: ResearchCheckpoint | ResearchRefusal | None = None
+    no_action_reason: NoActionReason | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -974,6 +1175,34 @@ class PerformAttentionSelection:
     universe_snapshot: UniverseSnapshot
     evidence_capture: EvidenceCaptureCheckpoint
     attention_history: tuple[AttentionArtifact, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class PerformDossierBuild:
+    """Return control to the production research capability for BuildDossiers."""
+
+    pinned_run_identity: PinnedRunIdentity
+    universe_snapshot: UniverseSnapshot
+    evidence_capture: EvidenceCaptureCheckpoint
+    attention_artifact: AttentionArtifact
+
+
+@dataclass(frozen=True, slots=True)
+class PerformResearch:
+    """Return control for the remaining fresh-context research roles."""
+
+    pinned_run_identity: PinnedRunIdentity
+    dossier_checkpoint: ResearchCheckpoint
+    attention_artifact: AttentionArtifact
+
+
+@dataclass(frozen=True, slots=True)
+class PerformMemoryUpdate:
+    """Return control for deterministic admission of validated research outcomes."""
+
+    pinned_run_identity: PinnedRunIdentity
+    research_checkpoint: ResearchCheckpoint
+    attention_artifact: AttentionArtifact
 
 
 @dataclass(frozen=True, slots=True)
@@ -1014,6 +1243,7 @@ class DurableAdvanceRefusal:
     cycle: MarketSession | None = None
     evidence_capture: EvidenceCaptureCheckpoint | None = None
     attention_refusal_reason: AttentionRefusalReason | None = None
+    research_refusal: ResearchRefusal | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1089,6 +1319,9 @@ LifecycleDecision = (
     | AppendTerminalLifecycleRecord
     | PerformEvidenceCapture
     | PerformAttentionSelection
+    | PerformDossierBuild
+    | PerformResearch
+    | PerformMemoryUpdate
     | AdvanceReceipt
 )
 
@@ -1100,6 +1333,9 @@ _EVENT_SEQUENCE = (
     (LifecycleEventKind.UNIVERSE_SNAPSHOTTED, LifecyclePhase.SNAPSHOT_UNIVERSE, False, True),
     (LifecycleEventKind.EVIDENCE_CAPTURED, LifecyclePhase.CAPTURE_EVIDENCE, False, False),
     (LifecycleEventKind.ATTENTION_SELECTED, LifecyclePhase.SELECT_ATTENTION, False, False),
+    (LifecycleEventKind.DOSSIERS_BUILT, LifecyclePhase.BUILD_DOSSIERS, False, False),
+    (LifecycleEventKind.RESEARCH_RUN, LifecyclePhase.RUN_RESEARCH, False, False),
+    (LifecycleEventKind.MEMORY_UPDATED, LifecyclePhase.UPDATE_MEMORY, False, False),
 )
 
 
@@ -1112,7 +1348,9 @@ def decide_advance(
     """Reconstruct authoritative history and choose one durable transition or receipt."""
     terminal = decide_terminal_refusal(history.refusals, command)
     if terminal is not None and not (
-        terminal.evidence_artifact_ids or terminal.evidence_refusal_ids
+        terminal.evidence_artifact_ids
+        or terminal.evidence_refusal_ids
+        or terminal.research_refusal_id
     ):
         return terminal
     try:
@@ -1172,7 +1410,11 @@ def decide_evidence_refusal_replay(
             AdvanceFailureReason.INVALID_DURABLE_STATE,
             cycle=command.request.session,
         )
-    if not (terminal.evidence_artifact_ids or terminal.evidence_refusal_ids):
+    if not (
+        terminal.evidence_artifact_ids
+        or terminal.evidence_refusal_ids
+        or terminal.research_refusal_id
+    ):
         return terminal
     try:
         progresses = reconstruct_lifecycle(history)
@@ -1206,11 +1448,26 @@ def decide_evidence_refusal_replay(
         and progress.completed_phase is LifecyclePhase.CAPTURE_EVIDENCE
         and refusal.evidence_capture == progress.evidence_capture
     )
+    research_failure = (
+        refusal is not None
+        and refusal.reason is AdvanceFailureReason.RESEARCH_FAILED
+        and refusal.research_refusal is not None
+        and progress is not None
+        and progress.completed_phase
+        in (LifecyclePhase.SELECT_ATTENTION, LifecyclePhase.BUILD_DOSSIERS)
+    )
+    memory_failure = (
+        refusal is not None
+        and refusal.reason is AdvanceFailureReason.MEMORY_UPDATE_FAILED
+        and refusal.research_refusal is not None
+        and progress is not None
+        and progress.completed_phase is LifecyclePhase.RUN_RESEARCH
+    )
     if (
         progress is None
         or refusal is None
         or refusal.cycle != command.request.session
-        or not (evidence_failure or attention_failure)
+        or not (evidence_failure or attention_failure or research_failure or memory_failure)
     ):
         return AdvanceReceipt.failed_closed(
             AdvanceFailureReason.INVALID_DURABLE_STATE,
@@ -1246,6 +1503,7 @@ def _terminal_advance_refusal(
         cycle=current_cycle,
         evidence_capture=refusal.evidence_capture,
         attention_refusal_reason=refusal.attention_refusal_reason,
+        research_refusal=refusal.research_refusal,
     )
 
 
@@ -1375,6 +1633,19 @@ def reconstruct_evidence_checkpoints(
     return (*completed, *refused)
 
 
+def reconstruct_production_research_checkpoints(
+    history: LifecycleHistory,
+) -> tuple[ResearchCheckpoint, ...]:
+    """Return every completed production model checkpoint from validated history."""
+    progresses = reconstruct_lifecycle(history)
+    return tuple(
+        checkpoint
+        for progress in progresses
+        for checkpoint in (progress.dossier_checkpoint, progress.research_checkpoint)
+        if checkpoint is not None
+    )
+
+
 def reconstruct_constitution_uses(
     history: LifecycleHistory,
 ) -> tuple[ConstitutionUse, ...]:
@@ -1425,7 +1696,9 @@ def _validate_refusals(
         if (key is None) != (refusal.reason is AdvanceFailureReason.INVALID_IDEMPOTENCY_KEY):
             raise InvalidLifecycleStateError(_INVALID_UNKEYED_REASON)
         if key is None and (
-            refusal.evidence_capture is not None or refusal.attention_refusal_reason is not None
+            refusal.evidence_capture is not None
+            or refusal.attention_refusal_reason is not None
+            or refusal.research_refusal is not None
         ):
             raise InvalidLifecycleStateError(_INVALID_REFUSAL_ASSOCIATION)
         if key is None:
@@ -1443,6 +1716,8 @@ def _validate_refusals(
             AdvanceFailureReason.INVALID_DURABLE_STATE,
             AdvanceFailureReason.EVIDENCE_CAPTURE_FAILED,
             AdvanceFailureReason.ATTENTION_SELECTION_FAILED,
+            AdvanceFailureReason.RESEARCH_FAILED,
+            AdvanceFailureReason.MEMORY_UPDATE_FAILED,
         ):
             raise InvalidLifecycleStateError(_INVALID_REFUSAL_ASSOCIATION)
         if associated_progress is not None:
@@ -1464,10 +1739,38 @@ def _validate_refusals(
                 and not associated_progress.is_complete
                 and refusal.evidence_capture is None
                 and refusal.attention_refusal_reason is None
+                and refusal.research_refusal is None
             )
-            if not evidence_failure and not attention_failure and not idempotency_conflict:
+            research_failure = (
+                refusal.reason is AdvanceFailureReason.RESEARCH_FAILED
+                and associated_progress.completed_phase
+                in (LifecyclePhase.SELECT_ATTENTION, LifecyclePhase.BUILD_DOSSIERS)
+                and refusal.research_refusal is not None
+                and refusal.evidence_capture is None
+                and refusal.attention_refusal_reason is None
+            )
+            memory_failure = (
+                refusal.reason is AdvanceFailureReason.MEMORY_UPDATE_FAILED
+                and associated_progress.completed_phase is LifecyclePhase.RUN_RESEARCH
+                and refusal.research_refusal is not None
+                and refusal.evidence_capture is None
+                and refusal.attention_refusal_reason is None
+            )
+            if not any(
+                (
+                    evidence_failure,
+                    attention_failure,
+                    research_failure,
+                    memory_failure,
+                    idempotency_conflict,
+                )
+            ):
                 raise InvalidLifecycleStateError(_INVALID_REFUSAL_ASSOCIATION)
-        elif refusal.evidence_capture is not None or refusal.attention_refusal_reason is not None:
+        elif (
+            refusal.evidence_capture is not None
+            or refusal.attention_refusal_reason is not None
+            or refusal.research_refusal is not None
+        ):
             raise InvalidLifecycleStateError(_INVALID_REFUSAL_ASSOCIATION)
 
 
@@ -1490,7 +1793,7 @@ def _validate_conflicts(
         conflict_keys.add(key)
 
 
-def _reconstruct_stream(  # noqa: PLR0912 - validate each durable checkpoint invariant independently.
+def _reconstruct_stream(  # noqa: PLR0912, PLR0915 - validate each checkpoint invariant.
     events: tuple[LifecycleEvent, ...],
 ) -> LifecycleProgress:
     first = events[0]
@@ -1500,6 +1803,7 @@ def _reconstruct_stream(  # noqa: PLR0912 - validate each durable checkpoint inv
         (
             identity.configuration_hash,
             identity.configuration_version,
+            identity.research_policy_hash,
             identity.constitution_hash,
             identity.constitution_version,
             request.mode.value,
@@ -1513,6 +1817,8 @@ def _reconstruct_stream(  # noqa: PLR0912 - validate each durable checkpoint inv
     )
     if identity.configuration_version != 1:
         raise InvalidLifecycleStateError(_UNSUPPORTED_CONFIGURATION_VERSION)
+    if not is_sha256(identity.research_policy_hash):
+        raise InvalidLifecycleStateError(_INVALID_DERIVED_IDENTITY)
     if identity.constitution_version < 1 or not is_sha256(identity.constitution_hash):
         raise InvalidLifecycleStateError(_INVALID_DERIVED_IDENTITY)
     if identity.cycle != request.session:
@@ -1524,6 +1830,10 @@ def _reconstruct_stream(  # noqa: PLR0912 - validate each durable checkpoint inv
     prepared_snapshot: UniverseSnapshot | None = None
     evidence_capture: EvidenceCaptureCheckpoint | None = None
     attention_artifact: AttentionArtifact | None = None
+    dossier_checkpoint: ResearchCheckpoint | None = None
+    research_checkpoint: ResearchCheckpoint | None = None
+    memory_checkpoint: ResearchCheckpoint | None = None
+    no_action_reason: NoActionReason | None = None
     for sequence, event in enumerate(events):
         if event.sequence != sequence:
             raise InvalidLifecycleStateError(_NONCONTIGUOUS_SEQUENCE)
@@ -1590,6 +1900,29 @@ def _reconstruct_stream(  # noqa: PLR0912 - validate each durable checkpoint inv
             ):
                 raise InvalidLifecycleStateError(_CHANGED_PINNED_FACTS)
             attention_artifact = artifact
+        research_phase = expected_phase in (
+            LifecyclePhase.BUILD_DOSSIERS,
+            LifecyclePhase.RUN_RESEARCH,
+            LifecyclePhase.UPDATE_MEMORY,
+        )
+        if (event.research_checkpoint is not None) is not research_phase:
+            raise InvalidLifecycleStateError(_INVALID_CHECKPOINT_ORDER)
+        if event.research_checkpoint is not None:
+            if expected_phase is LifecyclePhase.BUILD_DOSSIERS:
+                dossier_checkpoint = event.research_checkpoint
+            elif expected_phase is LifecyclePhase.RUN_RESEARCH:
+                research_checkpoint = event.research_checkpoint
+            else:
+                # The research-phase association above leaves UpdateMemory as the only case.
+                memory_checkpoint = event.research_checkpoint
+                no_action_reason = event.no_action_reason
+        if (event.no_action_reason is not None) is not (
+            expected_phase is LifecyclePhase.UPDATE_MEMORY
+            and not event.research_checkpoint.artifact_ids
+            if event.research_checkpoint is not None
+            else False
+        ):
+            raise InvalidLifecycleStateError(_INVALID_CHECKPOINT_ORDER)
     return LifecycleProgress(
         request,
         identity,
@@ -1598,6 +1931,10 @@ def _reconstruct_stream(  # noqa: PLR0912 - validate each durable checkpoint inv
         prepared_snapshot,
         evidence_capture,
         attention_artifact,
+        dossier_checkpoint,
+        research_checkpoint,
+        memory_checkpoint,
+        no_action_reason,
     )
 
 
@@ -1632,6 +1969,10 @@ def _decide_valid_advance(
             recorded_at,
             progress.require_evidence_capture(),
             progress.require_attention_artifact(),
+            progress.require_dossier_checkpoint(),
+            progress.require_research_checkpoint(),
+            progress.require_memory_checkpoint(),
+            progress.no_action_reason,
         )
     return _append_next_event(history, progress, command, recovery, recorded_at)
 
@@ -1758,7 +2099,7 @@ def _decide_idempotency_conflict(
     )
 
 
-def _append_next_event(  # noqa: PLR0911 - exhaust each lifecycle phase explicitly.
+def _append_next_event(  # noqa: PLR0911, PLR0912 - exhaust each lifecycle phase explicitly.
     history: LifecycleHistory,
     progress: LifecycleProgress,
     command: AdvanceCommand,
@@ -1769,6 +2110,9 @@ def _append_next_event(  # noqa: PLR0911 - exhaust each lifecycle phase explicit
     | AppendTerminalLifecycleRecord
     | PerformEvidenceCapture
     | PerformAttentionSelection
+    | PerformDossierBuild
+    | PerformResearch
+    | PerformMemoryUpdate
 ):
     sequence = progress.sequence + 1
     event_kind, phase, prepares_snapshot, publishes_snapshot = _EVENT_SEQUENCE[sequence]
@@ -1811,6 +2155,51 @@ def _append_next_event(  # noqa: PLR0911 - exhaust each lifecycle phase explicit
             evidence_capture=progress.require_evidence_capture(),
             attention_refusal_reason=command.attention_selection,
         )
+    if phase is LifecyclePhase.BUILD_DOSSIERS and command.dossier_build is None:
+        return PerformDossierBuild(
+            progress.pinned_run_identity,
+            progress.require_prepared_universe_snapshot(),
+            progress.require_evidence_capture(),
+            progress.require_attention_artifact(),
+        )
+    if phase is LifecyclePhase.BUILD_DOSSIERS and isinstance(
+        command.dossier_build, ResearchRefusal
+    ):
+        return _append_refusal(
+            history,
+            command.request.idempotency_key,
+            AdvanceFailureReason.RESEARCH_FAILED,
+            command.request.session,
+            research_refusal=command.dossier_build,
+        )
+    if phase is LifecyclePhase.RUN_RESEARCH and command.research_run is None:
+        return PerformResearch(
+            progress.pinned_run_identity,
+            progress.require_dossier_checkpoint(),
+            progress.require_attention_artifact(),
+        )
+    if phase is LifecyclePhase.RUN_RESEARCH and isinstance(command.research_run, ResearchRefusal):
+        return _append_refusal(
+            history,
+            command.request.idempotency_key,
+            AdvanceFailureReason.RESEARCH_FAILED,
+            command.request.session,
+            research_refusal=command.research_run,
+        )
+    if phase is LifecyclePhase.UPDATE_MEMORY and command.memory_update is None:
+        return PerformMemoryUpdate(
+            progress.pinned_run_identity,
+            progress.require_research_checkpoint(),
+            progress.require_attention_artifact(),
+        )
+    if phase is LifecyclePhase.UPDATE_MEMORY and isinstance(command.memory_update, ResearchRefusal):
+        return _append_refusal(
+            history,
+            command.request.idempotency_key,
+            AdvanceFailureReason.MEMORY_UPDATE_FAILED,
+            command.request.session,
+            research_refusal=command.memory_update,
+        )
     prepared_snapshot = command.universe_snapshot if prepares_snapshot else None
     published_snapshot = (
         progress.require_prepared_universe_snapshot() if publishes_snapshot else None
@@ -1834,6 +2223,21 @@ def _append_next_event(  # noqa: PLR0911 - exhaust each lifecycle phase explicit
             if phase is LifecyclePhase.SELECT_ATTENTION
             and isinstance(command.attention_selection, AttentionArtifact)
             else None
+        ),
+        research_checkpoint=(
+            command.dossier_build
+            if phase is LifecyclePhase.BUILD_DOSSIERS
+            and isinstance(command.dossier_build, ResearchCheckpoint)
+            else command.research_run
+            if phase is LifecyclePhase.RUN_RESEARCH
+            and isinstance(command.research_run, ResearchCheckpoint)
+            else command.memory_update
+            if phase is LifecyclePhase.UPDATE_MEMORY
+            and isinstance(command.memory_update, ResearchCheckpoint)
+            else None
+        ),
+        no_action_reason=(
+            command.no_action_reason if phase is LifecyclePhase.UPDATE_MEMORY else None
         ),
     )
     next_attempt = AdvanceAttempt(recovery, sequence)
@@ -1882,6 +2286,19 @@ def _append_next_event(  # noqa: PLR0911 - exhaust each lifecycle phase explicit
             or parse_attention_artifact(attention_artifact.to_payload()) != attention_artifact
         ):
             raise InvalidLifecycleStateError(_INVALID_CHECKPOINT_ORDER)
+        return AppendLifecycleRecord(event, next_attempt)
+    if phase is LifecyclePhase.BUILD_DOSSIERS:
+        return AppendLifecycleRecord(event, next_attempt)
+    if phase is LifecyclePhase.RUN_RESEARCH:
+        return AppendLifecycleRecord(event, next_attempt)
+    if phase is LifecyclePhase.UPDATE_MEMORY:
+        dossier_checkpoint = progress.require_dossier_checkpoint()
+        research_checkpoint = progress.require_research_checkpoint()
+        memory_checkpoint = command.memory_update
+        if not isinstance(memory_checkpoint, ResearchCheckpoint):
+            raise InvalidLifecycleStateError(_INVALID_CHECKPOINT_ORDER)
+        if (not memory_checkpoint.artifact_ids) != (command.no_action_reason is not None):
+            raise InvalidLifecycleStateError(_INVALID_CHECKPOINT_ORDER)
         return AppendTerminalLifecycleRecord(
             event,
             AdvanceReceipt.advanced(
@@ -1889,8 +2306,12 @@ def _append_next_event(  # noqa: PLR0911 - exhaust each lifecycle phase explicit
                 progress.require_prepared_universe_snapshot(),
                 recovery,
                 recorded_at,
-                evidence_capture,
-                attention_artifact,
+                progress.require_evidence_capture(),
+                progress.require_attention_artifact(),
+                dossier_checkpoint,
+                research_checkpoint,
+                memory_checkpoint,
+                command.no_action_reason,
             ),
         )
     # Strict mypy proves this line unreachable; removing it is runtime-equivalent.
@@ -1905,12 +2326,14 @@ def _append_refusal(  # noqa: PLR0913 - refusal evidence remains explicit.
     *,
     evidence_capture: EvidenceCaptureCheckpoint | None = None,
     attention_refusal_reason: AttentionRefusalReason | None = None,
+    research_refusal: ResearchRefusal | None = None,
 ) -> AppendTerminalLifecycleRecord:
     receipt = AdvanceReceipt.failed_closed(
         reason,
         cycle=cycle,
         evidence_capture=evidence_capture,
         attention_refusal_reason=attention_refusal_reason,
+        research_refusal=research_refusal,
     )
     sequence = (
         len(history.refusals) + 1
@@ -1925,6 +2348,7 @@ def _append_refusal(  # noqa: PLR0913 - refusal evidence remains explicit.
             cycle,
             evidence_capture,
             attention_refusal_reason,
+            research_refusal,
         ),
         receipt,
     )
@@ -2000,7 +2424,7 @@ def derive_lifecycle_status(history: LifecycleHistory) -> LifecycleStatus:
     active_phase = None if next_phase is None else LifecycleCheckpoint.equity(next_phase)
     return LifecycleStatus(
         active_phase=active_phase,
-        last_completed_cycle=None,
+        last_completed_cycle=(current.pinned_run_identity.cycle if current.is_complete else None),
         universe_snapshot_cycle=_latest_universe_cycle(progresses),
         pinned_run_identity=current.pinned_run_identity,
         liveness=LifecycleLiveness.ACTIVE,
@@ -2025,6 +2449,9 @@ def _latest_universe_progress(
             LifecyclePhase.SNAPSHOT_UNIVERSE,
             LifecyclePhase.CAPTURE_EVIDENCE,
             LifecyclePhase.SELECT_ATTENTION,
+            LifecyclePhase.BUILD_DOSSIERS,
+            LifecyclePhase.RUN_RESEARCH,
+            LifecyclePhase.UPDATE_MEMORY,
         )
     )
     if not published:
@@ -2092,6 +2519,8 @@ class LifecycleStatusProjection(Protocol):
 
     def rebuild_evidence_checkpoints(self) -> tuple[EvidenceCaptureReference, ...]: ...
 
+    def rebuild_production_research_checkpoints(self) -> tuple[ResearchCheckpoint, ...]: ...
+
     def rebuild_constitution_uses(self) -> tuple[ConstitutionUse, ...]: ...
 
 
@@ -2103,6 +2532,64 @@ def _valid_evidence_references(values: tuple[str, ...]) -> bool:
     if tuple(sorted(set(values))) != values:
         return False
     return all(is_sha256(value) for value in values)
+
+
+def _valid_optional_hash_references(values: object) -> TypeGuard[tuple[str, ...]]:
+    return (
+        type(values) is tuple
+        and tuple(sorted(set(values))) == values
+        and all(is_sha256(value) for value in values)
+    )
+
+
+def _research_checkpoint_payload(
+    checkpoint: ResearchCheckpoint | None,
+) -> dict[str, object] | None:
+    return None if checkpoint is None else checkpoint.to_payload()
+
+
+def parse_research_checkpoint(value: object) -> ResearchCheckpoint | None:
+    """Validate one hostile bounded research checkpoint payload."""
+    if value is None:
+        return None
+    fields = _exact_mapping(
+        value,
+        frozenset(
+            {
+                "schema_version",
+                "artifact_ids",
+                "call_ids",
+                "input_tokens",
+                "output_tokens",
+                "turns",
+            }
+        ),
+    )
+    if fields is None or fields["schema_version"] != 1:
+        return None
+    artifact_ids = _parse_hash_tuple(fields["artifact_ids"])
+    call_ids = _parse_hash_tuple(fields["call_ids"])
+    input_tokens = fields["input_tokens"]
+    output_tokens = fields["output_tokens"]
+    turns = fields["turns"]
+    if (
+        artifact_ids is None
+        or call_ids is None
+        or type(input_tokens) is not int
+        or type(output_tokens) is not int
+        or type(turns) is not int
+    ):
+        return None
+    try:
+        return ResearchCheckpoint(
+            artifact_ids,
+            call_ids,
+            input_tokens,
+            output_tokens,
+            turns,
+        )
+    except (TypeError, ValueError):
+        return None
 
 
 def _parse_hash_tuple(value: object) -> tuple[str, ...] | None:
@@ -2166,6 +2653,7 @@ def _pinned_identity_payload(identity: PinnedRunIdentity) -> dict[str, object]:
         "cycle": identity.cycle.to_payload(),
         "configuration_version": identity.configuration_version,
         "configuration_hash": identity.configuration_hash,
+        "research_policy_hash": identity.research_policy_hash,
         "constitution_version": identity.constitution_version,
         "constitution_hash": identity.constitution_hash,
         "data_regime": identity.data_regime,
@@ -2179,6 +2667,7 @@ def _pinned_identity_payload(identity: PinnedRunIdentity) -> dict[str, object]:
 def _material_fingerprints(identity: PinnedRunIdentity) -> dict[str, object]:
     return {
         "configuration": identity.configuration_hash,
+        "research_policy": identity.research_policy_hash,
         "constitution": identity.constitution_hash,
         "instrument_snapshot": identity.instrument_snapshot_hash,
         "position_snapshot": identity.position_snapshot_hash,
@@ -2203,6 +2692,7 @@ def _parse_pinned_identity(value: object) -> PinnedRunIdentity | None:
         or not is_data_regime(data_regime)
         or not is_sha256(fields["run_id"])
         or not is_sha256(fields["configuration_hash"])
+        or not is_sha256(fields["research_policy_hash"])
         or not is_sha256(fields["constitution_hash"])
         or not is_sha256(fields["instrument_snapshot_hash"])
         or not is_sha256(fields["position_snapshot_hash"])
@@ -2214,6 +2704,7 @@ def _parse_pinned_identity(value: object) -> PinnedRunIdentity | None:
         cycle=cycle,
         configuration_version=fields["configuration_version"],
         configuration_hash=fields["configuration_hash"],
+        research_policy_hash=fields["research_policy_hash"],
         constitution_version=fields["constitution_version"],
         constitution_hash=fields["constitution_hash"],
         data_regime=data_regime,
@@ -2226,6 +2717,7 @@ def _parse_pinned_identity(value: object) -> PinnedRunIdentity | None:
         (
             identity.configuration_hash,
             identity.configuration_version,
+            identity.research_policy_hash,
             identity.constitution_hash,
             identity.constitution_version,
             SessionMode.CHAMPION.value,

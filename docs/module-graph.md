@@ -73,6 +73,10 @@ the dependency. Prefer passing typed values and ports over adding an edge.
   but it never imports or writes Champion execution state. Application orchestration constructs each
   stateless role context from validated artifacts and the role's declared contract; adapters receive
   only the research-owned model-call request.
+- Production `Advance` follows the same ownership direction: `application` coordinates lifecycle,
+  evidence, research, and memory through their public contracts; `research` owns production role
+  policy and model-call ports; and the SQLite and recorded-model adapters implement those ports without
+  gaining lifecycle, belief-admission, portfolio, packet, or execution authority.
 - A cycle, a reverse edge into adapters, or a new cross-capability edge requires an architecture
   review. Record a durable exception in an ADR.
 

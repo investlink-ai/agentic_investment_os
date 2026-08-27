@@ -66,9 +66,15 @@ from agentic_investment_os.domain.lifecycle import (
     LifecyclePersistenceError,
     LifecycleRecord,
     LifecycleStatus,
+    NoActionReason,
     PerformAttentionSelection,
+    PerformDossierBuild,
     PerformEvidenceCapture,
+    PerformMemoryUpdate,
+    PerformResearch,
     PinnedRunIdentity,
+    ResearchCheckpoint,
+    ResearchRefusal,
     decide_advance,
     decide_evidence_refusal_replay,
     decide_invalid_history,
@@ -76,8 +82,10 @@ from agentic_investment_os.domain.lifecycle import (
     derive_lifecycle_status,
     is_sha256,
     parse_lifecycle_checkpoint,
+    parse_research_checkpoint,
     reconstruct_constitution_uses,
     reconstruct_evidence_checkpoints,
+    reconstruct_production_research_checkpoints,
 )
 from agentic_investment_os.domain.temporal import InvalidUtcInstantError, UtcInstant
 from agentic_investment_os.domain.universe import (
@@ -149,6 +157,7 @@ CREATE TABLE lifecycle_events (
     mode TEXT NOT NULL CHECK (mode = 'champion'),
     configuration_version INTEGER NOT NULL CHECK (configuration_version = 1),
     configuration_hash TEXT NOT NULL CHECK (length(configuration_hash) = 64),
+    research_policy_hash TEXT NOT NULL CHECK (length(research_policy_hash) = 64),
     constitution_version INTEGER NOT NULL CHECK (constitution_version >= 1),
     constitution_hash TEXT NOT NULL CHECK (length(constitution_hash) = 64),
     run_id TEXT NOT NULL CHECK (length(run_id) = 64),
@@ -160,7 +169,8 @@ CREATE TABLE lifecycle_events (
     event_kind TEXT NOT NULL CHECK (
         event_kind IN (
             'advance_requested', 'phase_completed', 'run_inputs_pinned',
-            'universe_snapshotted', 'evidence_captured', 'attention_selected'
+            'universe_snapshotted', 'evidence_captured', 'attention_selected',
+            'dossiers_built', 'research_run', 'memory_updated'
         )
     ),
     completed_phase TEXT,
@@ -177,6 +187,12 @@ CREATE TABLE lifecycle_events (
         attention_artifact_id IS NULL OR length(attention_artifact_id) = 64
     ),
     attention_artifact TEXT,
+    research_checkpoint TEXT,
+    no_action_reason TEXT CHECK (
+        no_action_reason IS NULL OR no_action_reason IN (
+            'no_attention', 'skeptic_rejected', 'cio_abstained'
+        )
+    ),
     event_envelope TEXT NOT NULL,
     recorded_at TEXT NOT NULL,
     CHECK (
@@ -187,7 +203,9 @@ CREATE TABLE lifecycle_events (
             AND evidence_artifact_ids IS NULL
             AND evidence_refusal_ids IS NULL
             AND attention_artifact_id IS NULL
-            AND attention_artifact IS NULL)
+            AND attention_artifact IS NULL
+            AND research_checkpoint IS NULL
+            AND no_action_reason IS NULL)
         OR (event_kind = 'universe_snapshotted'
             AND universe_snapshot_id IS NOT NULL
             AND universe_snapshot IS NULL
@@ -195,7 +213,9 @@ CREATE TABLE lifecycle_events (
             AND evidence_artifact_ids IS NULL
             AND evidence_refusal_ids IS NULL
             AND attention_artifact_id IS NULL
-            AND attention_artifact IS NULL)
+            AND attention_artifact IS NULL
+            AND research_checkpoint IS NULL
+            AND no_action_reason IS NULL)
         OR (event_kind = 'evidence_captured'
             AND universe_snapshot_id IS NULL
             AND universe_snapshot IS NULL
@@ -203,7 +223,9 @@ CREATE TABLE lifecycle_events (
             AND evidence_artifact_ids IS NOT NULL
             AND evidence_refusal_ids = '[]'
             AND attention_artifact_id IS NULL
-            AND attention_artifact IS NULL)
+            AND attention_artifact IS NULL
+            AND research_checkpoint IS NULL
+            AND no_action_reason IS NULL)
         OR (event_kind = 'attention_selected'
             AND universe_snapshot_id IS NULL
             AND universe_snapshot IS NULL
@@ -211,10 +233,31 @@ CREATE TABLE lifecycle_events (
             AND evidence_artifact_ids IS NULL
             AND evidence_refusal_ids IS NULL
             AND attention_artifact_id IS NOT NULL
-            AND attention_artifact IS NOT NULL)
+            AND attention_artifact IS NOT NULL
+            AND research_checkpoint IS NULL
+            AND no_action_reason IS NULL)
+        OR (event_kind IN ('dossiers_built', 'research_run')
+            AND universe_snapshot_id IS NULL
+            AND universe_snapshot IS NULL
+            AND evidence_policy_id IS NULL
+            AND evidence_artifact_ids IS NULL
+            AND evidence_refusal_ids IS NULL
+            AND attention_artifact_id IS NULL
+            AND attention_artifact IS NULL
+            AND research_checkpoint IS NOT NULL
+            AND no_action_reason IS NULL)
+        OR (event_kind = 'memory_updated'
+            AND universe_snapshot_id IS NULL
+            AND universe_snapshot IS NULL
+            AND evidence_policy_id IS NULL
+            AND evidence_artifact_ids IS NULL
+            AND evidence_refusal_ids IS NULL
+            AND attention_artifact_id IS NULL
+            AND attention_artifact IS NULL
+            AND research_checkpoint IS NOT NULL)
         OR (event_kind NOT IN (
                 'run_inputs_pinned', 'universe_snapshotted', 'evidence_captured',
-                'attention_selected'
+                'attention_selected', 'dossiers_built', 'research_run', 'memory_updated'
             )
             AND universe_snapshot_id IS NULL
             AND universe_snapshot IS NULL
@@ -222,7 +265,9 @@ CREATE TABLE lifecycle_events (
             AND evidence_artifact_ids IS NULL
             AND evidence_refusal_ids IS NULL
             AND attention_artifact_id IS NULL
-            AND attention_artifact IS NULL)
+            AND attention_artifact IS NULL
+            AND research_checkpoint IS NULL
+            AND no_action_reason IS NULL)
     ),
     PRIMARY KEY (stream_id, sequence),
     UNIQUE (idempotency_key, sequence)
@@ -245,7 +290,7 @@ CREATE TABLE advance_refusals (
             'stale_universe_input', 'contradictory_universe_input',
             'session_stream_conflict', 'idempotency_key_conflict',
             'invalid_durable_state', 'evidence_capture_failed',
-            'attention_selection_failed'
+            'attention_selection_failed', 'research_failed', 'memory_update_failed'
         )
     ),
     evidence_policy_id TEXT CHECK (
@@ -259,6 +304,9 @@ CREATE TABLE advance_refusals (
             'corrupt_evidence'
         )
     ),
+    research_refusal_id TEXT CHECK (
+        research_refusal_id IS NULL OR length(research_refusal_id) = 64
+    ),
     recorded_at TEXT NOT NULL,
     CHECK (
         (reason_code = 'evidence_capture_failed'
@@ -266,18 +314,30 @@ CREATE TABLE advance_refusals (
             AND evidence_artifact_ids IS NOT NULL
             AND evidence_refusal_ids IS NOT NULL
             AND evidence_refusal_ids != '[]'
-            AND attention_refusal_reason IS NULL)
+            AND attention_refusal_reason IS NULL
+            AND research_refusal_id IS NULL)
         OR (reason_code = 'attention_selection_failed'
             AND evidence_policy_id IS NOT NULL
             AND evidence_artifact_ids IS NOT NULL
             AND evidence_artifact_ids != '[]'
             AND evidence_refusal_ids = '[]'
-            AND attention_refusal_reason IS NOT NULL)
-        OR (reason_code NOT IN ('evidence_capture_failed', 'attention_selection_failed')
+            AND attention_refusal_reason IS NOT NULL
+            AND research_refusal_id IS NULL)
+        OR (reason_code IN ('research_failed', 'memory_update_failed')
             AND evidence_policy_id IS NULL
             AND evidence_artifact_ids IS NULL
             AND evidence_refusal_ids IS NULL
-            AND attention_refusal_reason IS NULL)
+            AND attention_refusal_reason IS NULL
+            AND research_refusal_id IS NOT NULL)
+        OR (reason_code NOT IN (
+                'evidence_capture_failed', 'attention_selection_failed',
+                'research_failed', 'memory_update_failed'
+            )
+            AND evidence_policy_id IS NULL
+            AND evidence_artifact_ids IS NULL
+            AND evidence_refusal_ids IS NULL
+            AND attention_refusal_reason IS NULL
+            AND research_refusal_id IS NULL)
     )
 ) STRICT
 """,
@@ -426,6 +486,50 @@ CREATE TRIGGER constitution_governance_events_are_append_only_delete
 BEFORE DELETE ON constitution_governance_events
 BEGIN SELECT RAISE(ABORT, 'append-only Constitution governance ledger'); END
 """,
+    """
+CREATE TABLE production_research_call_intents (
+    call_id TEXT PRIMARY KEY CHECK (length(call_id) = 64),
+    run_id TEXT NOT NULL CHECK (length(run_id) = 64),
+    request_id TEXT NOT NULL,
+    role TEXT NOT NULL CHECK (role IN (
+        'evidence_collector', 'thesis_builder', 'independent_skeptic',
+        'scenario_forecaster', 'cio'
+    )),
+    intent_json TEXT NOT NULL,
+    intent_hash TEXT NOT NULL CHECK (length(intent_hash) = 64),
+    recorded_at TEXT NOT NULL,
+    UNIQUE (run_id, request_id, role)
+) STRICT
+""",
+    """
+CREATE TABLE production_research_call_observations (
+    call_id TEXT PRIMARY KEY REFERENCES production_research_call_intents(call_id),
+    observation_json TEXT NOT NULL,
+    raw_response BLOB,
+    observation_hash TEXT NOT NULL CHECK (length(observation_hash) = 64),
+    recorded_at TEXT NOT NULL
+) STRICT
+""",
+    """
+CREATE TRIGGER production_research_call_intents_are_append_only_update
+BEFORE UPDATE ON production_research_call_intents
+BEGIN SELECT RAISE(ABORT, 'append-only production research intent'); END
+""",
+    """
+CREATE TRIGGER production_research_call_intents_are_append_only_delete
+BEFORE DELETE ON production_research_call_intents
+BEGIN SELECT RAISE(ABORT, 'append-only production research intent'); END
+""",
+    """
+CREATE TRIGGER production_research_call_observations_are_append_only_update
+BEFORE UPDATE ON production_research_call_observations
+BEGIN SELECT RAISE(ABORT, 'append-only production research observation'); END
+""",
+    """
+CREATE TRIGGER production_research_call_observations_are_append_only_delete
+BEFORE DELETE ON production_research_call_observations
+BEGIN SELECT RAISE(ABORT, 'append-only production research observation'); END
+""",
 )
 
 
@@ -434,7 +538,7 @@ class _DatabaseOpenMode(StrEnum):
     EXISTING_ONLY = "rw"
 
 
-_CURRENT_DATABASE_VERSION = 9
+_CURRENT_DATABASE_VERSION = 10
 _CURRENT_SCHEMA_SIGNATURE = frozenset(" ".join(statement.split()) for statement in _CURRENT_SCHEMA)
 
 _PROJECTION_SCHEMA = """
@@ -445,6 +549,7 @@ CREATE TABLE lifecycle_status_projection (
     run_id TEXT,
     configuration_version INTEGER,
     configuration_hash TEXT,
+    research_policy_hash TEXT,
     constitution_version INTEGER,
     constitution_hash TEXT,
     data_regime TEXT,
@@ -673,14 +778,16 @@ class SQLiteLifecycleLedger:
         """Apply one pure lifecycle decision inside an append transaction."""
         recorded_at_value, timestamp = _canonical_write_timestamp(recorded_at)
 
-        def operation(  # noqa: PLR0911 - preserve one transaction for all decisions.
+        def operation(  # noqa: PLR0911, PLR0912 - preserve one transaction for all decisions.
             connection: sqlite3.Connection,
         ) -> LifecycleDecision:
             key = _command_key(command)
             refusals = _load_refusals(connection, command=command)
             terminal = decide_terminal_refusal(tuple(refusals), command)
             terminal_requires_history = terminal is not None and bool(
-                terminal.evidence_artifact_ids or terminal.evidence_refusal_ids
+                terminal.evidence_artifact_ids
+                or terminal.evidence_refusal_ids
+                or terminal.research_refusal_id
             )
             if terminal is not None and not terminal_requires_history:
                 return terminal
@@ -732,6 +839,12 @@ class SQLiteLifecycleLedger:
             if isinstance(decision, PerformEvidenceCapture):
                 return decision
             if isinstance(decision, PerformAttentionSelection):
+                return decision
+            if isinstance(decision, PerformDossierBuild):
+                return decision
+            if isinstance(decision, PerformResearch):
+                return decision
+            if isinstance(decision, PerformMemoryUpdate):
                 return decision
             # Strict mypy proves this line unreachable; removing it is runtime-equivalent.
             assert_never(decision)  # pragma: no cover
@@ -805,6 +918,19 @@ class SQLiteLifecycleLedger:
                 conflicts=tuple(_load_conflicts(connection)),
             )
             return reconstruct_evidence_checkpoints(history)
+
+        return self._write(operation)
+
+    def rebuild_production_research_checkpoints(self) -> tuple[ResearchCheckpoint, ...]:
+        """Reconstruct completed production-call references for Status validation."""
+
+        def operation(connection: sqlite3.Connection) -> tuple[ResearchCheckpoint, ...]:
+            history = LifecycleHistory(
+                events=tuple(_load_events(connection)),
+                refusals=tuple(_load_refusals(connection)),
+                conflicts=tuple(_load_conflicts(connection)),
+            )
+            return reconstruct_production_research_checkpoints(history)
 
         return self._write(operation)
 
@@ -1056,6 +1182,7 @@ def _load_events(
             """
             SELECT stream_id, sequence, idempotency_key, cycle_identity, mode,
                    configuration_version, configuration_hash,
+                   research_policy_hash,
                    constitution_version, constitution_hash, run_id,
                    data_regime, evidence_cutoff, instrument_snapshot_hash,
                    position_snapshot_hash, eligibility_policy_hash,
@@ -1063,6 +1190,7 @@ def _load_events(
                    universe_snapshot, evidence_policy_id,
                    evidence_artifact_ids, evidence_refusal_ids,
                    attention_artifact_id, attention_artifact,
+                   research_checkpoint, no_action_reason,
                    event_envelope, recorded_at
             FROM lifecycle_events ORDER BY stream_id, sequence
             """
@@ -1072,6 +1200,7 @@ def _load_events(
             """
             SELECT stream_id, sequence, idempotency_key, cycle_identity, mode,
                    configuration_version, configuration_hash,
+                   research_policy_hash,
                    constitution_version, constitution_hash, run_id,
                    data_regime, evidence_cutoff, instrument_snapshot_hash,
                    position_snapshot_hash, eligibility_policy_hash,
@@ -1079,6 +1208,7 @@ def _load_events(
                    universe_snapshot, evidence_policy_id,
                    evidence_artifact_ids, evidence_refusal_ids,
                    attention_artifact_id, attention_artifact,
+                   research_checkpoint, no_action_reason,
                    event_envelope, recorded_at
             FROM lifecycle_events
             WHERE idempotency_key = ? OR stream_id IN (
@@ -1094,6 +1224,7 @@ def _load_events(
             """
             SELECT stream_id, sequence, idempotency_key, cycle_identity, mode,
                    configuration_version, configuration_hash,
+                   research_policy_hash,
                    constitution_version, constitution_hash, run_id,
                    data_regime, evidence_cutoff, instrument_snapshot_hash,
                    position_snapshot_hash, eligibility_policy_hash,
@@ -1101,6 +1232,7 @@ def _load_events(
                    universe_snapshot, evidence_policy_id,
                    evidence_artifact_ids, evidence_refusal_ids,
                    attention_artifact_id, attention_artifact,
+                   research_checkpoint, no_action_reason,
                    event_envelope, recorded_at
             FROM lifecycle_events WHERE idempotency_key = ? ORDER BY sequence
             """,
@@ -1152,35 +1284,41 @@ def _load_event(row: tuple[object, ...]) -> LifecycleEvent:
     sequence = _integer(row[1], "sequence")
     version = _integer(row[5], "configuration_version")
     configuration_hash = _hash(row[6], "configuration_hash")
-    constitution_version = _integer(row[7], "constitution_version")
-    constitution_hash = _hash(row[8], "constitution_hash")
-    run_id = _hash(row[9], "run_id")
-    data_regime = _data_regime(row[10])
-    evidence_cutoff = _canonical_timestamp(row[11], "evidence_cutoff")
-    instrument_snapshot_hash = _hash(row[12], "instrument_snapshot_hash")
-    position_snapshot_hash = _hash(row[13], "position_snapshot_hash")
-    eligibility_policy_hash = _hash(row[14], "eligibility_policy_hash")
-    recorded_at = _canonical_timestamp(row[25], "recorded_at")
+    research_policy_hash = _hash(row[7], "research_policy_hash")
+    constitution_version = _integer(row[8], "constitution_version")
+    constitution_hash = _hash(row[9], "constitution_hash")
+    run_id = _hash(row[10], "run_id")
+    data_regime = _data_regime(row[11])
+    evidence_cutoff = _canonical_timestamp(row[12], "evidence_cutoff")
+    instrument_snapshot_hash = _hash(row[13], "instrument_snapshot_hash")
+    position_snapshot_hash = _hash(row[14], "position_snapshot_hash")
+    eligibility_policy_hash = _hash(row[15], "eligibility_policy_hash")
+    recorded_at = _canonical_timestamp(row[28], "recorded_at")
     if evidence_cutoff.value > recorded_at.value:
         raise InvalidLifecycleStateError(_FUTURE_EVIDENCE_CUTOFF)
     try:
-        event_kind = LifecycleEventKind(_text(row[15], "event_kind"))
+        event_kind = LifecycleEventKind(_text(row[16], "event_kind"))
     except ValueError as error:
         raise InvalidLifecycleStateError(_INVALID_CHECKPOINT_ORDER) from error
-    completed_phase = _optional_checkpoint(row[16])
+    completed_phase = _optional_checkpoint(row[17])
     prepared_snapshot, published_snapshot_id = _load_universe_reference(
-        row[17],
         row[18],
+        row[19],
         event_kind=event_kind,
         run_id=run_id,
         recorded_at=recorded_at,
     )
-    evidence_capture = _load_evidence_capture(row[19], row[20], row[21], event_kind=event_kind)
+    evidence_capture = _load_evidence_capture(row[20], row[21], row[22], event_kind=event_kind)
     attention_artifact = _load_attention_artifact(
-        row[22],
         row[23],
+        row[24],
         event_kind=event_kind,
         recorded_at=recorded_at,
+    )
+    research_checkpoint, no_action_reason = _load_research_checkpoint(
+        row[25],
+        row[26],
+        event_kind=event_kind,
     )
     event = LifecycleEvent(
         stream_id=stream_id,
@@ -1191,6 +1329,7 @@ def _load_event(row: tuple[object, ...]) -> LifecycleEvent:
             cycle,
             version,
             configuration_hash,
+            research_policy_hash,
             constitution_version,
             constitution_hash,
             data_regime,
@@ -1206,8 +1345,10 @@ def _load_event(row: tuple[object, ...]) -> LifecycleEvent:
         published_universe_snapshot_id=published_snapshot_id,
         evidence_capture=evidence_capture,
         attention_artifact=attention_artifact,
+        research_checkpoint=research_checkpoint,
+        no_action_reason=no_action_reason,
     )
-    envelope = _text(row[24], "event_envelope")
+    envelope = _text(row[27], "event_envelope")
     if _canonical_json(event.to_envelope()) != envelope:
         raise InvalidLifecycleStateError(_INVALID_CHECKPOINT_ORDER)
     return event
@@ -1315,6 +1456,39 @@ def _load_attention_artifact(
     return artifact
 
 
+def _load_research_checkpoint(
+    checkpoint_value: object,
+    no_action_value: object,
+    *,
+    event_kind: LifecycleEventKind,
+) -> tuple[ResearchCheckpoint | None, NoActionReason | None]:
+    if event_kind not in (
+        LifecycleEventKind.DOSSIERS_BUILT,
+        LifecycleEventKind.RESEARCH_RUN,
+        LifecycleEventKind.MEMORY_UPDATED,
+    ):
+        if checkpoint_value is not None or no_action_value is not None:
+            raise InvalidLifecycleStateError(_INVALID_CHECKPOINT_ORDER)
+        return None, None
+    encoded = _text(checkpoint_value, "research_checkpoint")
+    try:
+        decoded: object = json.loads(encoded)
+    except (ValueError, RecursionError) as error:
+        raise InvalidLifecycleStateError(_INVALID_CHECKPOINT_ORDER) from error
+    checkpoint = parse_research_checkpoint(decoded)
+    if checkpoint is None or _canonical_json(checkpoint.to_payload()) != encoded:
+        raise InvalidLifecycleStateError(_INVALID_CHECKPOINT_ORDER)
+    if no_action_value is None:
+        return checkpoint, None
+    if event_kind is not LifecycleEventKind.MEMORY_UPDATED:
+        raise InvalidLifecycleStateError(_INVALID_CHECKPOINT_ORDER)
+    try:
+        reason = NoActionReason(_text(no_action_value, "no_action_reason"))
+    except ValueError as error:
+        raise InvalidLifecycleStateError(_INVALID_CHECKPOINT_ORDER) from error
+    return checkpoint, reason
+
+
 def _hash_tuple_json(value: object, field: str) -> tuple[str, ...]:
     encoded = _text(value, field)
     try:
@@ -1341,7 +1515,7 @@ def _load_refusals(
             """
             SELECT refusal_id, idempotency_key, cycle_identity, reason_code,
                    evidence_policy_id, evidence_artifact_ids, evidence_refusal_ids,
-                   attention_refusal_reason, recorded_at
+                   attention_refusal_reason, research_refusal_id, recorded_at
             FROM advance_refusals ORDER BY refusal_id
             """
         ).fetchall()
@@ -1353,7 +1527,7 @@ def _load_refusals(
                 """
                 SELECT refusal_id, idempotency_key, cycle_identity, reason_code,
                        evidence_policy_id, evidence_artifact_ids, evidence_refusal_ids,
-                       attention_refusal_reason, recorded_at
+                       attention_refusal_reason, research_refusal_id, recorded_at
                 FROM advance_refusals
                 WHERE idempotency_key IS NULL AND reason_code = ?
                     AND cycle_identity IS ?
@@ -1369,7 +1543,7 @@ def _load_refusals(
                 """
                 SELECT refusal_id, idempotency_key, cycle_identity, reason_code,
                        evidence_policy_id, evidence_artifact_ids, evidence_refusal_ids,
-                       attention_refusal_reason, recorded_at
+                       attention_refusal_reason, research_refusal_id, recorded_at
                 FROM advance_refusals WHERE idempotency_key = ? ORDER BY refusal_id
                 """,
                 (refusal_key.value,),
@@ -1379,7 +1553,7 @@ def _load_refusals(
             """
             SELECT refusal_id, idempotency_key, cycle_identity, reason_code,
                    evidence_policy_id, evidence_artifact_ids, evidence_refusal_ids,
-                   attention_refusal_reason, recorded_at
+                   attention_refusal_reason, research_refusal_id, recorded_at
             FROM advance_refusals WHERE idempotency_key = ? ORDER BY refusal_id
             """,
             (command.request.idempotency_key.value,),
@@ -1397,7 +1571,8 @@ def _load_refusals(
             reason=reason,
         )
         attention_refusal_reason = _load_attention_refusal_reason(row[7], reason=reason)
-        _canonical_timestamp(row[8], "recorded_at")
+        research_refusal = _load_research_refusal(row[8], reason=reason)
+        _canonical_timestamp(row[9], "recorded_at")
         refusals.append(
             DurableAdvanceRefusal(
                 sequence,
@@ -1406,6 +1581,7 @@ def _load_refusals(
                 cycle,
                 evidence_capture,
                 attention_refusal_reason,
+                research_refusal,
             )
         )
     return refusals
@@ -1455,6 +1631,21 @@ def _load_attention_refusal_reason(
         return AttentionRefusalReason(text)
     except ValueError as error:
         raise InvalidLifecycleStateError(_INVALID_REFUSAL_KEY) from error
+
+
+def _load_research_refusal(
+    value: object,
+    *,
+    reason: AdvanceFailureReason,
+) -> ResearchRefusal | None:
+    if reason not in (
+        AdvanceFailureReason.RESEARCH_FAILED,
+        AdvanceFailureReason.MEMORY_UPDATE_FAILED,
+    ):
+        if value is not None:
+            raise InvalidLifecycleStateError(_INVALID_REFUSAL_KEY)
+        return None
+    return ResearchRefusal(_hash(value, "research_refusal_id"))
 
 
 def _load_conflicts(
@@ -1532,6 +1723,7 @@ def _append_record(
             INSERT INTO lifecycle_events (
                 stream_id, sequence, idempotency_key, cycle_identity, mode,
                 configuration_version, configuration_hash,
+                research_policy_hash,
                 constitution_version, constitution_hash, run_id,
                 data_regime, evidence_cutoff, instrument_snapshot_hash,
                 position_snapshot_hash, eligibility_policy_hash,
@@ -1539,8 +1731,12 @@ def _append_record(
                 universe_snapshot, evidence_policy_id,
                 evidence_artifact_ids, evidence_refusal_ids,
                 attention_artifact_id, attention_artifact,
+                research_checkpoint, no_action_reason,
                 event_envelope, recorded_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+            )
             """,
             (
                 record.stream_id,
@@ -1550,6 +1746,7 @@ def _append_record(
                 request.mode.value,
                 identity.configuration_version,
                 identity.configuration_hash,
+                identity.research_policy_hash,
                 identity.constitution_version,
                 identity.constitution_hash,
                 identity.run_id,
@@ -1591,6 +1788,12 @@ def _append_record(
                     if record.attention_artifact is None
                     else _canonical_json(record.attention_artifact.to_payload())
                 ),
+                (
+                    None
+                    if record.research_checkpoint is None
+                    else _canonical_json(record.research_checkpoint.to_payload())
+                ),
+                (None if record.no_action_reason is None else record.no_action_reason.value),
                 _canonical_json(record.to_envelope()),
                 timestamp,
             ),
@@ -1602,8 +1805,8 @@ def _append_record(
             INSERT INTO advance_refusals (
                 refusal_id, idempotency_key, cycle_identity, reason_code,
                 evidence_policy_id, evidence_artifact_ids, evidence_refusal_ids,
-                attention_refusal_reason, recorded_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                attention_refusal_reason, research_refusal_id, recorded_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 record.sequence,
@@ -1626,6 +1829,7 @@ def _append_record(
                     if record.attention_refusal_reason is None
                     else record.attention_refusal_reason.value
                 ),
+                (None if record.research_refusal is None else record.research_refusal.refusal_id),
                 timestamp,
             ),
         )
@@ -1655,11 +1859,12 @@ def _replace_status_projection(
         INSERT INTO lifecycle_status_projection (
             singleton, active_phase, last_completed_cycle, run_id,
             configuration_version, configuration_hash,
+            research_policy_hash,
             constitution_version, constitution_hash, data_regime, evidence_cutoff,
             instrument_snapshot_hash, position_snapshot_hash, eligibility_policy_hash,
             liveness, durable_reason, universe_snapshot_cycle, universe_snapshot_id,
             attention_artifact_cycle, attention_artifact_id
-        ) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             (
@@ -1675,6 +1880,7 @@ def _replace_status_projection(
             None if identity is None else identity.run_id,
             None if identity is None else identity.configuration_version,
             None if identity is None else identity.configuration_hash,
+            None if identity is None else identity.research_policy_hash,
             None if identity is None else identity.constitution_version,
             None if identity is None else identity.constitution_hash,
             None if identity is None else identity.data_regime,

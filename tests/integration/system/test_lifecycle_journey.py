@@ -174,7 +174,7 @@ def test_lifecycle_journey_resumes_replays_and_rebuilds_status_across_processes(
     resumed = _advance_observation(_run_process("advance", state_root))
 
     assert resumed.disposition == "advanced"
-    assert resumed.completed_phase == "SelectAttention"
+    assert resumed.completed_phase == "UpdateMemory"
     assert resumed.recovery == "resumed"
     assert resumed.configuration_version == 1
     assert len(resumed.run_id) == SHA256_HEX_LENGTH
@@ -188,6 +188,9 @@ def test_lifecycle_journey_resumes_replays_and_rebuilds_status_across_processes(
         (3, "universe_snapshotted", "SnapshotUniverse"),
         (4, "evidence_captured", "CaptureEvidence"),
         (5, "attention_selected", "SelectAttention"),
+        (6, "dossiers_built", "BuildDossiers"),
+        (7, "research_run", "RunResearch"),
+        (8, "memory_updated", "UpdateMemory"),
     ]
     assert {str(row[3]) for row in completed_history} == {resumed.run_id}
     assert {str(row[4]) for row in completed_history} == {resumed.configuration_hash}
@@ -196,7 +199,11 @@ def test_lifecycle_journey_resumes_replays_and_rebuilds_status_across_processes(
 
     assert expected_status == StatusObservation(
         active_phase="",
-        last_completed_cycle="",
+        last_completed_cycle=(
+            '{"asset_class":"us_equity","cycle_type":"market_session",'
+            '"payload":{"trading_date":"2026-08-21"},'
+            '"payload_schema_version":1,"schema_version":1}'
+        ),
         universe_snapshot_cycle=(
             '{"asset_class":"us_equity","cycle_type":"market_session",'
             '"payload":{"trading_date":"2026-08-21"},'

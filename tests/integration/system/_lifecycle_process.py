@@ -23,8 +23,8 @@ from agentic_investment_os.domain.lifecycle import (
 )
 from agentic_investment_os.entrypoints.configuration import ConfigurationSource
 from agentic_investment_os.entrypoints.lifecycle import configure_advance, configure_status
-from tests._evidence import recorded_evidence
 from tests._governance import RecordedSessionEligibility
+from tests._production_research import ValidProductionModel, production_recorded_evidence
 from tests._universe import recorded_universe, runtime_configuration
 
 if TYPE_CHECKING:
@@ -102,7 +102,8 @@ def _advance(state_root: Path) -> Advance:
         _sources(state_root),
         repository_root=REPOSITORY_ROOT,
         recorded_universe=recorded_universe(),
-        recorded_evidence=recorded_evidence(),
+        recorded_evidence=production_recorded_evidence(),
+        recorded_model=ValidProductionModel(),
         session_eligibility=RecordedSessionEligibility(),
         clock=FixedClock(),
     )
@@ -187,6 +188,9 @@ def _interrupt_after_reconcile(state_root: Path) -> None:
         attention_inputs=configured.attention_inputs,
         clock=configured.clock,
         constitution_registry=configured.constitution_registry,
+        production_research=configured.production_research,
+        evidence_vault=configured.evidence_vault,
+        memory=configured.memory,
     )
     interrupted(
         cycle=MarketSession(date.fromisoformat(SESSION)).to_payload(),

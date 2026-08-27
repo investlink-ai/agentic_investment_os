@@ -46,11 +46,17 @@ from agentic_investment_os.domain.lifecycle import (
     LifecycleLedger,
     LifecyclePhase,
     PerformAttentionSelection,
+    PerformDossierBuild,
     PerformEvidenceCapture,
+    PerformMemoryUpdate,
+    PerformResearch,
     PinnedRunIdentity,
+    ResearchCheckpoint,
+    ResearchRefusal,
     derive_lifecycle_status,
     parse_advance_receipt,
     parse_lifecycle_checkpoint,
+    parse_research_checkpoint,
     reconstruct_constitution_uses,
 )
 from agentic_investment_os.domain.temporal import InvalidUtcInstantError, UtcInstant
@@ -72,6 +78,7 @@ from tests._universe import (
     exact_text,
     pinned_run_identity,
     recorded_universe,
+    typed_research_policy,
     typed_universe_policy,
     universe_snapshot,
 )
@@ -84,10 +91,15 @@ EVIDENCE_VAULT_INVALID = "Evidence Vault state is invalid"
 ATTENTION_INPUTS_LOADED_TOO_EARLY = "attention inputs must not load before checkpoint validation"
 INVALID_GOVERNANCE_HISTORY = "invalid Constitution governance history"
 UNEXPECTED_GOVERNANCE_RESOLUTION = "governance validation must fail before resolution"
+DOSSIER_CHECKPOINT = ResearchCheckpoint(("1" * SHA256_HEX_LENGTH,))
+RESEARCH_CHECKPOINT = ResearchCheckpoint(("2" * SHA256_HEX_LENGTH,))
+MEMORY_CHECKPOINT = ResearchCheckpoint(("3" * SHA256_HEX_LENGTH,))
 
 if TYPE_CHECKING:
+    from agentic_investment_os.application.memory import Record
     from agentic_investment_os.domain.attention import AttentionInputs
-    from agentic_investment_os.evidence.capture import EvidenceCaptureSummary
+    from agentic_investment_os.evidence.capture import EvidenceCaptureSummary, EvidenceVault
+    from agentic_investment_os.research.production import ProductionResearch
 
 
 class _StringSubclass(str):
@@ -106,6 +118,11 @@ class _NoneSpoof:
     @override
     def __hash__(self) -> int:
         return hash(None)
+
+
+@dataclass(frozen=True, slots=True)
+class _FixtureProductionResearch:
+    policy: object
 
 
 def _request(key: str = "concurrent-request") -> AdvanceRequest:
@@ -131,6 +148,13 @@ def _advance(ledger: LifecycleLedger) -> Advance:
         attention_inputs=_FixtureAttentionInputs(),
         clock=FixedClock(),
         constitution_registry=BaselineConstitutionRegistry(),
+        # These fake-ledger tests terminate before Stage 3 orchestration.
+        production_research=cast(
+            "ProductionResearch",
+            _FixtureProductionResearch(typed_research_policy()),
+        ),
+        evidence_vault=cast("EvidenceVault", None),
+        memory=cast("Record", None),
     )
 
 
@@ -149,6 +173,10 @@ def _advanced_receipt(
         recorded_at,
         capture,
         attention_artifact(identity, snapshot, capture),
+        DOSSIER_CHECKPOINT,
+        RESEARCH_CHECKPOINT,
+        MEMORY_CHECKPOINT,
+        None,
     )
 
 
@@ -166,6 +194,7 @@ def _reseal_receipt_with_pinned_identity(envelope: dict[str, object]) -> None:
     run_material = (
         pinned["configuration_hash"],
         pinned["configuration_version"],
+        pinned["research_policy_hash"],
         pinned["constitution_hash"],
         pinned["constitution_version"],
         "champion",
@@ -177,6 +206,10 @@ def _reseal_receipt_with_pinned_identity(envelope: dict[str, object]) -> None:
         pinned["eligibility_policy_hash"],
     )
     pinned["run_id"] = hashlib.sha256(json.dumps(run_material).encode()).hexdigest()
+    _reseal_receipt(envelope)
+
+
+def _reseal_receipt(envelope: dict[str, object]) -> None:
     material = {key: item for key, item in envelope.items() if key != "content_hash"}
     encoded = json.dumps(material, sort_keys=True, separators=(",", ":")).encode()
     envelope["content_hash"] = hashlib.sha256(encoded).hexdigest()
@@ -499,7 +532,7 @@ def test_advance_request_validates_the_complete_boundary() -> None:
         request,
         configuration_hash="a" * SHA256_HEX_LENGTH,
     )
-    assert identity.run_id == "7deacf630c9a7b297178f045a3c9d0085d70a9200fbac6fe5dc39ba65038dd5f"
+    assert identity.run_id == "7eb5c160f165d0a304ab13967e3b678b525b021a8be641c4759502a2696a362f"
 
     invalid_cases = (
         (
@@ -690,6 +723,7 @@ def test_pinned_identity_rejects_an_untyped_evidence_cutoff_with_a_bounded_error
             _request(),
             configuration_version=1,
             configuration_hash="a" * 64,
+            research_policy_hash="b" * 64,
             universe_inputs=universe_inputs,
             constitution=ACTIVE_CONSTITUTION.reference,
         )
@@ -780,6 +814,54 @@ def test_evidence_capture_reference_rejects_invalid_pinned_identity() -> None:
         )
 
 
+def test_research_checkpoint_and_refusal_reject_invalid_references_or_resources() -> None:
+    with pytest.raises(ValueError, match="lifecycle stream checkpoint order is invalid"):
+        ResearchCheckpoint(("invalid",))
+    with pytest.raises(ValueError, match="lifecycle stream checkpoint order is invalid"):
+        ResearchRefusal("invalid")
+
+
+def test_research_checkpoint_parser_rejects_hostile_shapes_and_negative_resources() -> None:
+    valid = ResearchCheckpoint(("1" * SHA256_HEX_LENGTH,)).to_payload()
+    invalid_values: tuple[object, ...] = (
+        [],
+        {**valid, "schema_version": 2},
+        {**valid, "input_tokens": "0"},
+        {**valid, "turns": -1},
+    )
+
+    assert all(parse_research_checkpoint(value) is None for value in invalid_values)
+
+
+@pytest.mark.parametrize(
+    "decision_kind",
+    ["dossier", "research", "memory"],
+)
+def test_advance_rejects_stage_three_effects_for_an_input_refusal(decision_kind: str) -> None:
+    identity = pinned_run_identity(_request())
+    snapshot = universe_snapshot(identity)
+    artifact = attention_artifact(identity, snapshot, evidence_capture_checkpoint())
+    if decision_kind == "dossier":
+        decision: LifecycleDecision = PerformDossierBuild(
+            identity,
+            snapshot,
+            evidence_capture_checkpoint(),
+            artifact,
+        )
+    elif decision_kind == "research":
+        decision = PerformResearch(identity, DOSSIER_CHECKPOINT, artifact)
+    else:
+        assert decision_kind == "memory"
+        decision = PerformMemoryUpdate(identity, RESEARCH_CHECKPOINT, artifact)
+    capability = _advance(_DecisionOnRefusalLedger(decision))
+
+    with pytest.raises(
+        InvalidLifecycleStateError,
+        match="lifecycle ledger returned an incomplete checkpoint result",
+    ):
+        capability(cycle=_cycle(), mode="invalid", idempotency_key="invalid-stage-three")
+
+
 def test_advance_receipts_round_trip_through_one_versioned_public_envelope() -> None:
     identity = pinned_run_identity(_request())
     snapshot = universe_snapshot(identity)
@@ -856,6 +938,34 @@ def test_advance_receipt_rejects_a_data_regime_not_bound_into_attention() -> Non
     parsed = parse_advance_receipt(envelope)
 
     assert parsed is None
+
+
+def test_advance_receipt_parser_rejects_resealed_invalid_research_references() -> None:
+    identity = pinned_run_identity(_request())
+    snapshot = universe_snapshot(identity)
+    success = _advanced_receipt(
+        identity,
+        snapshot,
+        AdvanceRecovery.FRESH,
+        RECEIPT_RECORDED_AT,
+    ).to_payload()
+    success_payload = success["payload"]
+    assert isinstance(success_payload, dict)
+    success_payload["dossier_checkpoint"] = {}
+    _reseal_receipt(success)
+
+    refusal = AdvanceReceipt.failed_closed(
+        AdvanceFailureReason.RESEARCH_FAILED,
+        cycle=_request().session,
+        research_refusal=ResearchRefusal("f" * SHA256_HEX_LENGTH),
+    ).to_payload()
+    refusal_payload = refusal["payload"]
+    assert isinstance(refusal_payload, dict)
+    refusal_payload["research_refusal_id"] = "invalid"
+    _reseal_receipt(refusal)
+
+    assert parse_advance_receipt(success) is None
+    assert parse_advance_receipt(refusal) is None
 
 
 def test_advance_receipt_rejects_a_completion_time_before_its_evidence_cutoff() -> None:
@@ -1071,6 +1181,7 @@ def test_advance_receipt_parser_rejects_hostile_shapes(  # noqa: PLR0912, PLR091
     [
         "run_id",
         "configuration_hash",
+        "research_policy_hash",
         "data_regime",
         "evidence_cutoff",
         "instrument_snapshot_hash",

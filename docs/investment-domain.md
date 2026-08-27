@@ -170,6 +170,28 @@ schemas, evidence references, entity mapping, relevant times, allowed transition
 Each call pins its Constitution, bounded Belief Graph, portfolio context, prompt, model, reasoning
 configuration, tools, Evidence Cutoff, and input hashes.
 
+Production `Advance` applies that workflow only to Dossier requests and due holding refreshes named by
+the pinned Attention Artifact. Evidence Collector runs during `BuildDossiers`; the remaining roles run
+in the fixed order during `RunResearch`, with each role receiving only its declared material. A
+Skeptic rejection records the Thesis and rejection but skips Scenario Forecaster and CIO for that
+subject. A request for more evidence fails closed for the current cycle rather than substituting stale
+or undeclared material. CIO output remains research: it contains one of the five approved stances and
+never a weight, target, order, packet, or broker instruction.
+
+When every researched subject is rejected or every CIO abstains, the cycle records a durable no-action
+outcome. Otherwise `UpdateMemory` submits each validated non-abstaining CIO resolution through
+`Record`. The resulting active expectation Belief Event preserves the Thesis claim, cited evidence,
+invalidators, cutoff, and transition predecessor. CIO uncertainty maps deterministically to memory
+confidence: `low` to `0.75`, `medium` to `0.5`, and `high` to `0.25`. This mapping is a memory-admission
+representation only; it cannot size a position or authorize execution. A malformed or refused research
+result creates no Belief Event, and a refused memory append prevents lifecycle advancement without
+deleting prior history.
+
+`UpdateMemory` keeps the research view and append coordination distinct. Research receives only the
+bounded Belief Graph at the pinned evidence cutoff; memory admission separately resolves the current
+authoritative belief head before naming `transition_from_event_id`. An unavailable or truncated
+current history refuses the update instead of treating an existing stream as new.
+
 ## Memory and learning
 
 The Evidence Vault stores immutable captured content. The bitemporal Belief Ledger is authoritative

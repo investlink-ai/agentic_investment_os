@@ -29,6 +29,7 @@ from agentic_investment_os.entrypoints.lifecycle import configure_advance, confi
 from agentic_investment_os.evidence.capture import EvidencePersistenceError, InvalidEvidenceError
 from tests._evidence import evidence_item, recorded_evidence
 from tests._governance import RecordedSessionEligibility
+from tests._production_research import ValidProductionModel, production_recorded_evidence
 from tests._universe import (
     mutable_mapping,
     mutable_mapping_list,
@@ -59,7 +60,8 @@ def test_advance_captures_market_and_news_after_the_pinned_universe(
         (ConfigurationSource("test", runtime_configuration(state_root)),),
         repository_root=REPOSITORY_ROOT,
         recorded_universe=recorded_universe(),
-        recorded_evidence=recorded_evidence(),
+        recorded_evidence=production_recorded_evidence(),
+        recorded_model=ValidProductionModel(),
         session_eligibility=RecordedSessionEligibility(),
         clock=_FixedClock(),
     )
@@ -73,7 +75,7 @@ def test_advance_captures_market_and_news_after_the_pinned_universe(
 
     assert receipt.disposition is AdvanceDisposition.ADVANCED
     assert receipt.completed_phase is not None
-    assert receipt.completed_phase.phase is LifecyclePhase.SELECT_ATTENTION
+    assert receipt.completed_phase.phase is LifecyclePhase.UPDATE_MEMORY
     assert len(receipt.evidence_artifact_ids) == REQUIRED_EVIDENCE_ARTIFACTS
     assert receipt.evidence_refusal_ids == ()
     assert receipt.attention_artifact is not None
@@ -88,7 +90,7 @@ def test_advance_captures_market_and_news_after_the_pinned_universe(
         events = connection.execute(
             "SELECT event_kind FROM lifecycle_events ORDER BY sequence"
         ).fetchall()
-    assert events[-1] == ("attention_selected",)
+    assert events[-1] == ("memory_updated",)
     assert sorted(path.name for path in state_root.iterdir()) == [
         "evidence-vault",
         "lifecycle.sqlite3",
@@ -106,7 +108,8 @@ def test_completed_lifecycle_replay_revalidates_referenced_vault_content(
         sources,
         repository_root=REPOSITORY_ROOT,
         recorded_universe=recorded_universe(),
-        recorded_evidence=recorded_evidence(),
+        recorded_evidence=production_recorded_evidence(),
+        recorded_model=ValidProductionModel(cio_stance="abstain"),
         session_eligibility=RecordedSessionEligibility(),
         clock=_FixedClock(),
     )
@@ -123,7 +126,8 @@ def test_completed_lifecycle_replay_revalidates_referenced_vault_content(
             sources,
             repository_root=REPOSITORY_ROOT,
             recorded_universe=recorded_universe(),
-            recorded_evidence=recorded_evidence(),
+            recorded_evidence=production_recorded_evidence(),
+            recorded_model=ValidProductionModel(),
             session_eligibility=RecordedSessionEligibility(),
             clock=_FixedClock(),
         )
@@ -151,7 +155,8 @@ def test_status_requires_each_artifact_to_resolve_to_its_pinned_capture_intent(
         sources,
         repository_root=REPOSITORY_ROOT,
         recorded_universe=recorded_universe(),
-        recorded_evidence=recorded_evidence(),
+        recorded_evidence=production_recorded_evidence(),
+        recorded_model=ValidProductionModel(),
         session_eligibility=RecordedSessionEligibility(),
         clock=_FixedClock(),
     )
@@ -170,6 +175,7 @@ def test_status_requires_each_artifact_to_resolve_to_its_pinned_capture_intent(
         repository_root=REPOSITORY_ROOT,
         recorded_universe=recorded_universe(),
         recorded_evidence=later_evidence,
+        recorded_model=ValidProductionModel(),
         session_eligibility=RecordedSessionEligibility(),
         clock=_FixedClock(),
     )
@@ -211,7 +217,8 @@ def test_status_reconstructs_each_run_with_its_pinned_historical_evidence_policy
         first_sources,
         repository_root=REPOSITORY_ROOT,
         recorded_universe=recorded_universe(),
-        recorded_evidence=recorded_evidence(),
+        recorded_evidence=production_recorded_evidence(),
+        recorded_model=ValidProductionModel(cio_stance="abstain"),
         session_eligibility=RecordedSessionEligibility(),
         clock=_FixedClock(),
     )
@@ -221,7 +228,7 @@ def test_status_reconstructs_each_run_with_its_pinned_historical_evidence_policy
         mode="champion",
         idempotency_key="historical-policy-first",
     )
-    assert first_receipt.disposition is AdvanceDisposition.ADVANCED
+    assert first_receipt.disposition is AdvanceDisposition.NO_ACTION
 
     changed_configuration = deepcopy(first_configuration)
     policy = mutable_mapping(changed_configuration["evidence_policy"])
@@ -232,7 +239,8 @@ def test_status_reconstructs_each_run_with_its_pinned_historical_evidence_policy
         changed_sources,
         repository_root=REPOSITORY_ROOT,
         recorded_universe=recorded_universe(),
-        recorded_evidence=recorded_evidence(),
+        recorded_evidence=production_recorded_evidence(),
+        recorded_model=ValidProductionModel(cio_stance="abstain"),
         session_eligibility=RecordedSessionEligibility(),
         clock=_FixedClock(),
     )
@@ -242,7 +250,7 @@ def test_status_reconstructs_each_run_with_its_pinned_historical_evidence_policy
         mode="champion",
         idempotency_key="historical-policy-second",
     )
-    assert second_receipt.disposition is AdvanceDisposition.ADVANCED
+    assert second_receipt.disposition is AdvanceDisposition.NO_ACTION
 
     status = configure_status(changed_sources, repository_root=REPOSITORY_ROOT)
     assert isinstance(status, Status)
@@ -277,6 +285,7 @@ def test_required_evidence_refusal_is_durable_and_replays_without_recapture(
         repository_root=REPOSITORY_ROOT,
         recorded_universe=recorded_universe(),
         recorded_evidence=unavailable,
+        recorded_model=ValidProductionModel(),
         session_eligibility=RecordedSessionEligibility(),
         clock=_FixedClock(),
     )
@@ -308,7 +317,8 @@ def test_required_evidence_refusal_is_durable_and_replays_without_recapture(
         (ConfigurationSource("test", runtime_configuration(state_root)),),
         repository_root=REPOSITORY_ROOT,
         recorded_universe=recorded_universe(),
-        recorded_evidence=recorded_evidence(),
+        recorded_evidence=production_recorded_evidence(),
+        recorded_model=ValidProductionModel(),
         session_eligibility=RecordedSessionEligibility(),
         clock=_FixedClock(),
     )
@@ -345,6 +355,7 @@ def test_evidence_refusal_retry_with_changed_pinned_inputs_returns_a_typed_confl
         repository_root=REPOSITORY_ROOT,
         recorded_universe=recorded_universe(),
         recorded_evidence=unavailable,
+        recorded_model=ValidProductionModel(),
         session_eligibility=RecordedSessionEligibility(),
         clock=_FixedClock(),
     )
@@ -362,7 +373,8 @@ def test_evidence_refusal_retry_with_changed_pinned_inputs_returns_a_typed_confl
         sources,
         repository_root=REPOSITORY_ROOT,
         recorded_universe=changed_universe,
-        recorded_evidence=recorded_evidence(),
+        recorded_evidence=production_recorded_evidence(),
+        recorded_model=ValidProductionModel(),
         session_eligibility=RecordedSessionEligibility(),
         clock=_FixedClock(),
     )
@@ -402,6 +414,7 @@ def test_evidence_refusal_retry_rejects_a_changed_durable_policy_reference(
         repository_root=REPOSITORY_ROOT,
         recorded_universe=recorded_universe(),
         recorded_evidence=unavailable,
+        recorded_model=ValidProductionModel(),
         session_eligibility=RecordedSessionEligibility(),
         clock=_FixedClock(),
     )
@@ -417,7 +430,8 @@ def test_evidence_refusal_retry_rejects_a_changed_durable_policy_reference(
         sources,
         repository_root=REPOSITORY_ROOT,
         recorded_universe=recorded_universe(),
-        recorded_evidence=recorded_evidence(),
+        recorded_evidence=production_recorded_evidence(),
+        recorded_model=ValidProductionModel(),
         session_eligibility=RecordedSessionEligibility(),
         clock=_FixedClock(),
     )
@@ -446,7 +460,8 @@ def test_changed_evidence_refusal_retry_ignores_unrelated_corrupt_history(
         sources,
         repository_root=REPOSITORY_ROOT,
         recorded_universe=recorded_universe(),
-        recorded_evidence=recorded_evidence(),
+        recorded_evidence=production_recorded_evidence(),
+        recorded_model=ValidProductionModel(),
         session_eligibility=RecordedSessionEligibility(),
         clock=_FixedClock(),
     )
@@ -474,6 +489,7 @@ def test_changed_evidence_refusal_retry_ignores_unrelated_corrupt_history(
         repository_root=REPOSITORY_ROOT,
         recorded_universe=recorded_universe(),
         recorded_evidence=unavailable,
+        recorded_model=ValidProductionModel(),
         session_eligibility=RecordedSessionEligibility(),
         clock=_FixedClock(),
     )
@@ -489,7 +505,8 @@ def test_changed_evidence_refusal_retry_ignores_unrelated_corrupt_history(
         sources,
         repository_root=REPOSITORY_ROOT,
         recorded_universe=changed_universe,
-        recorded_evidence=recorded_evidence(),
+        recorded_evidence=production_recorded_evidence(),
+        recorded_model=ValidProductionModel(),
         session_eligibility=RecordedSessionEligibility(),
         clock=_FixedClock(),
     )
@@ -532,6 +549,7 @@ def test_evidence_refusal_retry_fails_closed_when_its_own_history_is_corrupt(
         repository_root=REPOSITORY_ROOT,
         recorded_universe=recorded_universe(),
         recorded_evidence=unavailable,
+        recorded_model=ValidProductionModel(),
         session_eligibility=RecordedSessionEligibility(),
         clock=_FixedClock(),
     )
@@ -545,7 +563,8 @@ def test_evidence_refusal_retry_fails_closed_when_its_own_history_is_corrupt(
         sources,
         repository_root=REPOSITORY_ROOT,
         recorded_universe=recorded_universe(),
-        recorded_evidence=recorded_evidence(),
+        recorded_evidence=production_recorded_evidence(),
+        recorded_model=ValidProductionModel(),
         session_eligibility=RecordedSessionEligibility(),
         clock=_FixedClock(),
     )
@@ -612,6 +631,7 @@ def test_evidence_failure_row_cannot_claim_a_complete_capture(tmp_path: Path) ->
         repository_root=REPOSITORY_ROOT,
         recorded_universe=recorded_universe(),
         recorded_evidence=unavailable,
+        recorded_model=ValidProductionModel(),
         session_eligibility=RecordedSessionEligibility(),
         clock=_FixedClock(),
     )
@@ -626,7 +646,7 @@ def test_evidence_failure_row_cannot_claim_a_complete_capture(tmp_path: Path) ->
         row = connection.execute(
             "SELECT refusal_id, idempotency_key, cycle_identity, reason_code, "
             "evidence_policy_id, evidence_artifact_ids, evidence_refusal_ids, "
-            "attention_refusal_reason, recorded_at "
+            "attention_refusal_reason, research_refusal_id, recorded_at "
             "FROM advance_refusals"
         ).fetchone()
         assert row is not None
@@ -635,11 +655,11 @@ def test_evidence_failure_row_cannot_claim_a_complete_capture(tmp_path: Path) ->
             "CREATE TABLE advance_refusals "
             "(refusal_id, idempotency_key, cycle_identity, reason_code, "
             "evidence_policy_id, evidence_artifact_ids, evidence_refusal_ids, "
-            "attention_refusal_reason, recorded_at)"
+            "attention_refusal_reason, research_refusal_id, recorded_at)"
         )
         connection.execute(
-            "INSERT INTO advance_refusals VALUES (?, ?, ?, ?, ?, ?, '[]', ?, ?)",
-            (row[0], row[1], row[2], row[3], row[4], row[5], row[7], row[8]),
+            "INSERT INTO advance_refusals VALUES (?, ?, ?, ?, ?, ?, '[]', ?, ?, ?)",
+            (row[0], row[1], row[2], row[3], row[4], row[5], row[7], row[8], row[9]),
         )
 
     ledger = configured.ledger

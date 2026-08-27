@@ -36,6 +36,7 @@ required and have no default.
 | `universe_policy` | Complete object matching the schema below | Included canonically; its own content hash is also pinned into the run identity | Resolved at process composition; changes activate through a later run identity | Safe to log or expose to a model after validation |
 | `evidence_policy` | Complete object matching the schema below | Included canonically | Resolved at process composition; it authorizes the configured market, news, SEC, issuer, and official-macro captures for the pinned Data Regime | Safe to log or expose to a model after validation |
 | `attention_policy` | Complete object matching the schema below | Included canonically; its own content hash binds every Attention Artifact | Resolved at process composition; it bounds research admission without granting research or execution authority | Safe to log or expose to a model after validation |
+| `research_policy` | Complete object matching the schema below | Included canonically; its own content hash is also pinned into the run identity and every production role input | Resolved at process composition; it authorizes only the bounded production research workflow and grants no portfolio or execution authority | Safe to log or expose to a model after validation |
 
 The resolver hashes canonical JSON containing exactly these validated fields with SHA-256. The state
 root is created with mode `0700`; the fixed `lifecycle.sqlite3` file is created with mode `0600`.
@@ -114,6 +115,30 @@ artifact validation can prove the published counts and allocations obey the pinn
 | `weekly_dossier_budget` | Integer from `new_dossier_limit` through `25` | Caps all new Dossier requests in one ISO week |
 | `weekly_exploration_budget` | Positive integer below `weekly_dossier_budget` and exactly 10–20 percent of it | Reserves weekly capacity for otherwise eligible exploration subjects without bypassing later gates |
 | `exploration_seed` | Lowercase bounded identifier | Pins deterministic weekly exploration selection; it is policy material, not ambient randomness |
+
+### Production research policy
+
+`research_policy` is the complete production model contract used by `Advance`. It has no default and
+cannot be inferred from a model adapter, prior run, or Lab configuration. The policy must contain the
+five role contracts exactly once and in this order: Evidence Collector, Thesis Builder, Independent
+Skeptic, Scenario Forecaster, and CIO. Unknown fields, a missing or reordered role, inconsistent
+nested hashes, or an unsupported schema fails configuration before runtime storage is prepared.
+
+| Field | Type and validation | Effect |
+| --- | --- | --- |
+| `schema_version` | Integer; must equal `1` | Versions the production research policy representation |
+| `policy_type` | String; must equal `v0_production_research` | Discriminates production authority from Research Lab material |
+| `maximum_belief_events` | Integer from `1` through `100` | Bounds the as-of Belief Graph supplied to each role |
+| `maximum_evidence_artifacts` | Integer from `1` through `100` | Bounds evidence supplied for each selected research subject |
+| `role_contracts` | Exact ordered list of the five required roles | Prevents ambient role discovery, omission, or substitution |
+| `role_contracts[].prompt` | Schema version `1`, bounded prompt identifier and content, and the SHA-256 hash of that exact content | Pins the complete prompt artifact; the derived prompt fingerprint enters model intent |
+| `role_contracts[].model_configuration` | Schema version `1`, exposed model identity, bounded reasoning effort, maximum output tokens, maximum turns, and the SHA-256 hash of that exact material | Pins model identity and resource limits before a call |
+| `role_contracts[].tools` | Ordered list of inert tool names with canonical JSON schemas and exact schema hashes; it may be empty | Describes model-visible declarations without granting a callable capability |
+
+`configure_advance` additionally requires an explicit research-owned model port. The keyless recorded
+adapter is the only implemented production adapter. There is no ambient model selection, network
+client, subscription switch, metered fallback, broker capability, or credential path in production
+research composition.
 
 ## Constitution governance composition
 

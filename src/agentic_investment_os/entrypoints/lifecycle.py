@@ -17,8 +17,13 @@ from agentic_investment_os.adapters.sqlite_lifecycle import (
     open_runtime_database,
     prepare_runtime_database,
 )
+from agentic_investment_os.adapters.sqlite_memory import SQLiteBeliefLedger
+from agentic_investment_os.adapters.sqlite_production_research import (
+    SQLiteProductionCallLedger,
+)
 from agentic_investment_os.application.governance import ConstitutionRegistry, ConstitutionStatus
 from agentic_investment_os.application.lifecycle import Advance, Status
+from agentic_investment_os.application.memory import Record
 from agentic_investment_os.entrypoints.configuration import (
     ConfigurationRefusal,
     ConfigurationRefusalCode,
@@ -28,6 +33,7 @@ from agentic_investment_os.entrypoints.configuration import (
 )
 from agentic_investment_os.evidence.attention import BuildAttentionInputs
 from agentic_investment_os.evidence.capture import CaptureEvidence
+from agentic_investment_os.research.production import ProductionResearch
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -38,6 +44,7 @@ if TYPE_CHECKING:
         MarketSessionEligibility,
         OperatorApprovalVerifier,
     )
+    from agentic_investment_os.research.model import ResearchRoleModel
 
 
 @dataclass(frozen=True, slots=True)
@@ -55,6 +62,7 @@ def configure_advance(  # noqa: PLR0913 - composition names each untrusted bound
     recorded_universe: object,
     recorded_evidence: object,
     session_eligibility: MarketSessionEligibility,
+    recorded_model: ResearchRoleModel,
     recorded_official_evidence: object = None,
     clock: Clock | None = None,
     approval_verifier: OperatorApprovalVerifier | None = None,
@@ -78,6 +86,7 @@ def configure_advance(  # noqa: PLR0913 - composition names each untrusted bound
         )
     if isinstance(database, PreparedRuntimeDatabase):
         evidence_vault = FilesystemEvidenceVault(resolution.state_root / "evidence-vault")
+        trusted_clock = clock if clock is not None else SystemClock()
         return Advance(
             ledger=SQLiteLifecycleLedger(database.path),
             configuration_version=resolution.schema_version,
@@ -96,11 +105,22 @@ def configure_advance(  # noqa: PLR0913 - composition names each untrusted bound
             ),
             attention_policy=resolution.attention_policy,
             attention_inputs=BuildAttentionInputs(evidence_vault),
-            clock=clock if clock is not None else SystemClock(),
+            clock=trusted_clock,
             constitution_registry=ConstitutionRegistry(
                 SQLiteConstitutionGovernance(database.path),
                 approval_verifier,
                 session_eligibility,
+            ),
+            production_research=ProductionResearch(
+                resolution.research_policy,
+                SQLiteProductionCallLedger(database.path),
+                recorded_model,
+            ),
+            evidence_vault=evidence_vault,
+            memory=Record(
+                SQLiteBeliefLedger(database.path),
+                evidence_vault,
+                trusted_clock,
             ),
         )
     # Strict mypy proves this line unreachable; removing it is runtime-equivalent.
@@ -141,6 +161,7 @@ def configure_status(
                 SQLiteConstitutionGovernance.open_existing(database.path),
                 approval_verifier,
             ),
+            SQLiteProductionCallLedger(database.path),
         )
     # Strict mypy proves this line unreachable; removing it is runtime-equivalent.
     assert_never(database)  # pragma: no cover

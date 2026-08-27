@@ -31,8 +31,8 @@ from agentic_investment_os.entrypoints.configuration import (
     ConfigurationSource,
 )
 from agentic_investment_os.entrypoints.lifecycle import configure_advance, configure_status
-from tests._evidence import recorded_evidence
 from tests._governance import BASELINE_GOVERNANCE_STATUS, RecordedSessionEligibility
+from tests._production_research import ValidProductionModel, production_recorded_evidence
 from tests._universe import recorded_universe, runtime_configuration
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
@@ -86,7 +86,8 @@ def _advance_at(state_root: Path, instant: datetime) -> Advance:
         _sources(state_root),
         repository_root=REPOSITORY_ROOT,
         recorded_universe=recorded_universe(),
-        recorded_evidence=recorded_evidence(),
+        recorded_evidence=production_recorded_evidence(),
+        recorded_model=ValidProductionModel(cio_stance="abstain"),
         session_eligibility=RecordedSessionEligibility(),
         clock=FixedClock(instant),
     )
@@ -240,7 +241,7 @@ def test_status_reports_empty_incomplete_and_universe_snapshot_history(tmp_path:
     pinned = status()
     assert pinned.liveness is LifecycleLiveness.ACTIVE
     assert pinned.active_phase is None
-    assert pinned.last_completed_cycle is None
+    assert pinned.last_completed_cycle == MarketSession(date(2026, 8, 21))
     assert pinned.universe_snapshot_cycle == MarketSession(date(2026, 8, 21))
     assert pinned.pinned_run_identity == receipt.pinned_run_identity
     assert pinned.durable_reason is None
@@ -253,10 +254,15 @@ def test_status_reports_empty_incomplete_and_universe_snapshot_history(tmp_path:
         (
             1,
             None,
-            None,
+            (
+                '{"asset_class":"us_equity","cycle_type":"market_session",'
+                '"payload":{"trading_date":"2026-08-21"},'
+                '"payload_schema_version":1,"schema_version":1}'
+            ),
             receipt.pinned_run_identity.run_id,
             receipt.pinned_run_identity.configuration_version,
             receipt.pinned_run_identity.configuration_hash,
+            receipt.pinned_run_identity.research_policy_hash,
             receipt.pinned_run_identity.constitution_version,
             receipt.pinned_run_identity.constitution_hash,
             receipt.pinned_run_identity.data_regime,
@@ -538,6 +544,7 @@ def test_status_rejects_corrupt_authoritative_history_instead_of_using_projectio
             """
             SELECT stream_id, sequence, idempotency_key, cycle_identity, mode,
                    configuration_version, configuration_hash,
+                   research_policy_hash,
                    constitution_version, constitution_hash, run_id,
                    data_regime, evidence_cutoff, instrument_snapshot_hash,
                    position_snapshot_hash, eligibility_policy_hash,
@@ -545,6 +552,7 @@ def test_status_rejects_corrupt_authoritative_history_instead_of_using_projectio
                    universe_snapshot, evidence_policy_id,
                    evidence_artifact_ids, evidence_refusal_ids,
                    attention_artifact_id, attention_artifact,
+                   research_checkpoint, no_action_reason,
                    event_envelope, recorded_at
             FROM lifecycle_events ORDER BY sequence
             """
@@ -555,6 +563,7 @@ def test_status_rejects_corrupt_authoritative_history_instead_of_using_projectio
             CREATE TABLE lifecycle_events (
                 stream_id, sequence, idempotency_key, cycle_identity, mode,
                 configuration_version, configuration_hash,
+                research_policy_hash,
                 constitution_version, constitution_hash, run_id,
                 data_regime, evidence_cutoff, instrument_snapshot_hash,
                 position_snapshot_hash, eligibility_policy_hash,
@@ -562,13 +571,15 @@ def test_status_rejects_corrupt_authoritative_history_instead_of_using_projectio
                 universe_snapshot, evidence_policy_id,
                 evidence_artifact_ids, evidence_refusal_ids,
                 attention_artifact_id, attention_artifact,
+                research_checkpoint, no_action_reason,
                 event_envelope, recorded_at
             )
             """
         )
         connection.executemany(
             "INSERT INTO lifecycle_events VALUES "
-            "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
+            "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             rows,
         )
         connection.execute(
@@ -727,7 +738,8 @@ def test_status_rejects_an_invalid_refusal_reason_for_a_partial_stream(tmp_path:
                 INSERT INTO advance_refusals
                 SELECT 2, idempotency_key, cycle_identity, reason_code,
                        evidence_policy_id, evidence_artifact_ids,
-                       evidence_refusal_ids, attention_refusal_reason, recorded_at
+                       evidence_refusal_ids, attention_refusal_reason,
+                       research_refusal_id, recorded_at
                 FROM advance_refusals
                 """,
             "refusal uniqueness is invalid",
@@ -751,7 +763,7 @@ def test_status_rejects_corrupt_refusal_history(
         rows = connection.execute(
             "SELECT refusal_id, idempotency_key, cycle_identity, reason_code, "
             "evidence_policy_id, evidence_artifact_ids, evidence_refusal_ids, "
-            "attention_refusal_reason, recorded_at "
+            "attention_refusal_reason, research_refusal_id, recorded_at "
             "FROM advance_refusals"
         ).fetchall()
         connection.execute("DROP TABLE advance_refusals")
@@ -759,10 +771,10 @@ def test_status_rejects_corrupt_refusal_history(
             "CREATE TABLE advance_refusals "
             "(refusal_id, idempotency_key, cycle_identity, reason_code, "
             "evidence_policy_id, evidence_artifact_ids, evidence_refusal_ids, "
-            "attention_refusal_reason, recorded_at)"
+            "attention_refusal_reason, research_refusal_id, recorded_at)"
         )
         connection.executemany(
-            "INSERT INTO advance_refusals VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO advance_refusals VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             rows,
         )
         connection.execute(corruption)
@@ -784,7 +796,7 @@ def test_status_rejects_duplicate_unkeyed_refusal_authority(tmp_path: Path) -> N
         rows = connection.execute(
             "SELECT refusal_id, idempotency_key, cycle_identity, reason_code, "
             "evidence_policy_id, evidence_artifact_ids, evidence_refusal_ids, "
-            "attention_refusal_reason, recorded_at "
+            "attention_refusal_reason, research_refusal_id, recorded_at "
             "FROM advance_refusals"
         ).fetchall()
         connection.execute("DROP TABLE advance_refusals")
@@ -792,10 +804,10 @@ def test_status_rejects_duplicate_unkeyed_refusal_authority(tmp_path: Path) -> N
             "CREATE TABLE advance_refusals "
             "(refusal_id, idempotency_key, cycle_identity, reason_code, "
             "evidence_policy_id, evidence_artifact_ids, evidence_refusal_ids, "
-            "attention_refusal_reason, recorded_at)"
+            "attention_refusal_reason, research_refusal_id, recorded_at)"
         )
         connection.executemany(
-            "INSERT INTO advance_refusals VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO advance_refusals VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             rows,
         )
         connection.execute(
@@ -803,7 +815,7 @@ def test_status_rejects_duplicate_unkeyed_refusal_authority(tmp_path: Path) -> N
             INSERT INTO advance_refusals
             SELECT 2, idempotency_key, cycle_identity, reason_code,
                    evidence_policy_id, evidence_artifact_ids, evidence_refusal_ids,
-                   attention_refusal_reason, recorded_at
+                   attention_refusal_reason, research_refusal_id, recorded_at
             FROM advance_refusals
             """
         )
@@ -967,6 +979,7 @@ def _replace_event_table(database: Path, statement: str) -> None:
             """
             SELECT stream_id, sequence, idempotency_key, cycle_identity, mode,
                    configuration_version, configuration_hash,
+                   research_policy_hash,
                    constitution_version, constitution_hash, run_id,
                    data_regime, evidence_cutoff, instrument_snapshot_hash,
                    position_snapshot_hash, eligibility_policy_hash,
@@ -974,6 +987,7 @@ def _replace_event_table(database: Path, statement: str) -> None:
                    universe_snapshot, evidence_policy_id,
                    evidence_artifact_ids, evidence_refusal_ids,
                    attention_artifact_id, attention_artifact,
+                   research_checkpoint, no_action_reason,
                    event_envelope, recorded_at
             FROM lifecycle_events ORDER BY stream_id, sequence
             """
@@ -984,6 +998,7 @@ def _replace_event_table(database: Path, statement: str) -> None:
             CREATE TABLE lifecycle_events (
                 stream_id, sequence, idempotency_key, cycle_identity, mode,
                 configuration_version, configuration_hash,
+                research_policy_hash,
                 constitution_version, constitution_hash, run_id,
                 data_regime, evidence_cutoff, instrument_snapshot_hash,
                 position_snapshot_hash, eligibility_policy_hash,
@@ -991,13 +1006,15 @@ def _replace_event_table(database: Path, statement: str) -> None:
                 universe_snapshot, evidence_policy_id,
                 evidence_artifact_ids, evidence_refusal_ids,
                 attention_artifact_id, attention_artifact,
+                research_checkpoint, no_action_reason,
                 event_envelope, recorded_at
             )
             """
         )
         connection.executemany(
             "INSERT INTO lifecycle_events VALUES "
-            "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
+            "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             rows,
         )
         connection.execute(statement)

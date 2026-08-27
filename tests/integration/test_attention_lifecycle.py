@@ -34,6 +34,7 @@ from agentic_investment_os.entrypoints.configuration import ConfigurationSource
 from agentic_investment_os.entrypoints.lifecycle import configure_advance
 from tests._evidence import recorded_evidence
 from tests._governance import RecordedSessionEligibility
+from tests._production_research import ValidProductionModel, production_recorded_evidence
 from tests._universe import recorded_universe, runtime_configuration
 
 if TYPE_CHECKING:
@@ -43,7 +44,7 @@ if TYPE_CHECKING:
     from agentic_investment_os.domain.universe import UniverseSnapshot
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
-EXPECTED_EVENT_COUNT = 6
+EXPECTED_EVENT_COUNT = 9
 EXPECTED_SELECTED_SUBJECT_COUNT = 2
 
 
@@ -124,7 +125,8 @@ def _configure(
         ),
         repository_root=REPOSITORY_ROOT,
         recorded_universe=recorded_universe(),
-        recorded_evidence=recorded_evidence() if evidence is None else evidence,
+        recorded_evidence=production_recorded_evidence() if evidence is None else evidence,
+        recorded_model=ValidProductionModel(cio_stance="abstain"),
         session_eligibility=RecordedSessionEligibility(),
         clock=_FixedClock(),
     )
