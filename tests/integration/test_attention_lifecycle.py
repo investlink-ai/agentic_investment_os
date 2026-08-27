@@ -5,7 +5,7 @@ from copy import deepcopy
 from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import pytest
 
@@ -28,10 +28,16 @@ from agentic_investment_os.domain.lifecycle import (
     LifecycleCommand,
     LifecycleDecision,
     LifecycleLedger,
+    NoActionReason,
     PerformAttentionSelection,
+    ResearchCheckpoint,
 )
 from agentic_investment_os.entrypoints.configuration import ConfigurationSource
 from agentic_investment_os.entrypoints.lifecycle import configure_advance
+from agentic_investment_os.research.production import (
+    ProductionResearchBuild,
+    ProductionResearchRun,
+)
 from tests._evidence import recorded_evidence
 from tests._governance import RecordedSessionEligibility
 from tests._production_research import (
@@ -46,6 +52,11 @@ if TYPE_CHECKING:
     from agentic_investment_os.domain.governance import ConstitutionUse
     from agentic_investment_os.domain.temporal import UtcInstant
     from agentic_investment_os.domain.universe import UniverseSnapshot
+    from agentic_investment_os.research.policy import ProductionResearchPolicy
+    from agentic_investment_os.research.production import (
+        ProductionResearch,
+        ProductionResearchContext,
+    )
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 EXPECTED_EVENT_COUNT = 9
@@ -114,6 +125,33 @@ class _CorruptEvidenceBeforeAttention:
         return decision
 
 
+@dataclass(frozen=True, slots=True)
+class _AttentionOnlyResearch:
+    policy: ProductionResearchPolicy
+
+    def build_dossiers(
+        self,
+        context: ProductionResearchContext,
+        recorded_at: UtcInstant,
+    ) -> ProductionResearchBuild:
+        _ = (context, recorded_at)
+        return ProductionResearchBuild(ResearchCheckpoint(), (), None)
+
+    def run_research(
+        self,
+        context: ProductionResearchContext,
+        build: ProductionResearchBuild,
+        recorded_at: UtcInstant,
+    ) -> ProductionResearchRun:
+        _ = (context, build, recorded_at)
+        return ProductionResearchRun(
+            ResearchCheckpoint(),
+            (),
+            NoActionReason.NO_ATTENTION,
+            None,
+        )
+
+
 def _configure(
     state_root: Path,
     *,
@@ -136,7 +174,13 @@ def _configure(
         clock=_FixedClock(),
     )
     assert isinstance(configured, Advance)
-    return configured
+    return replace(
+        configured,
+        production_research=cast(
+            "ProductionResearch",
+            _AttentionOnlyResearch(configured.production_research.policy),
+        ),
+    )
 
 
 def _advance(capability: Advance, cycle: date, key: str) -> AdvanceReceipt:

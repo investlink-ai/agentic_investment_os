@@ -835,6 +835,18 @@ def test_research_checkpoint_and_refusal_reject_invalid_references_or_resources(
         ResearchCheckpoint(("invalid",))
     with pytest.raises(ValueError, match="lifecycle stream checkpoint order is invalid"):
         ResearchRefusal("invalid")
+    with pytest.raises(ValueError, match="lifecycle stream checkpoint order is invalid"):
+        ResearchRefusal(
+            "f" * SHA256_HEX_LENGTH,
+            ResearchCheckpoint(),
+            "1" * SHA256_HEX_LENGTH,
+        )
+    with pytest.raises(ValueError, match="lifecycle stream checkpoint order is invalid"):
+        ResearchRefusal(
+            "f" * SHA256_HEX_LENGTH,
+            ResearchCheckpoint(call_ids=("1" * SHA256_HEX_LENGTH,)),
+            "invalid",
+        )
 
 
 def test_research_checkpoint_parser_rejects_hostile_shapes_and_negative_resources() -> None:
@@ -854,6 +866,8 @@ def test_research_refusal_parser_rejects_hostile_envelopes_and_checkpoints() -> 
 
     assert parse_research_refusal({**valid, "schema_version": 2}) is None
     assert parse_research_refusal({**valid, "checkpoint": {}}) is None
+    assert parse_research_refusal({**valid, "terminal_call_id": "invalid"}) is None
+    assert parse_research_refusal({**valid, "terminal_call_id": "1" * SHA256_HEX_LENGTH}) is None
 
 
 def test_production_research_reference_rejects_a_non_research_phase() -> None:
@@ -892,6 +906,16 @@ def test_production_research_reference_requires_a_checkpoint_for_refusal_identit
             snapshot.inputs.position_snapshot,
             ResearchCheckpoint(),
             "invalid",
+        )
+    with pytest.raises(ValueError, match="lifecycle stream checkpoint order is invalid"):
+        ProductionResearchReference(
+            identity,
+            LifecyclePhase.BUILD_DOSSIERS,
+            artifact,
+            snapshot.inputs.position_snapshot,
+            ResearchCheckpoint(call_ids=("1" * SHA256_HEX_LENGTH,)),
+            None,
+            "1" * SHA256_HEX_LENGTH,
         )
 
 

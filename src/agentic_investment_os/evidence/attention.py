@@ -147,8 +147,7 @@ def _subject_input(
     relevant = tuple(
         record
         for record in records
-        if record.artifact.kind is EvidenceKind.OFFICIAL_MACRO
-        or any(
+        if any(
             canonical_instrument_bytes(mapping.identity) == identity_key
             for mapping in record.artifact.entity_mappings
         )

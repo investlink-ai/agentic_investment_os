@@ -992,6 +992,7 @@ def _call_refusal(
     return ResearchRefusal(
         production_call_refusal_identity(call.intent.call_id, call.observation),
         _checkpoint(list(calls), artifact_ids),
+        call.intent.call_id,
     )
 
 

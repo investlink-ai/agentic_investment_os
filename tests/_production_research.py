@@ -84,8 +84,25 @@ def production_recorded_evidence() -> dict[str, object]:
 
 
 def production_recorded_official_evidence() -> dict[str, object]:
-    """Return synthetic issuer and globally relevant official macro records."""
-    return recorded_official_evidence()
+    """Assign separate synthetic official records to AAPL and HOLD subjects."""
+    payload = recorded_official_evidence()
+    items = payload["items"]
+    assert isinstance(items, list)
+    issuer_release = items[1]
+    assert isinstance(issuer_release, dict)
+    issuer_release["entity_mappings"] = [
+        {
+            "identity": EquityInstrumentIdentity(
+                "alpaca-paper",
+                "equity-hold",
+                "NYSE",
+            ).to_payload(),
+            "confidence": "exact",
+            "mapping_version": "issuer-map-v1",
+            "available_at": "2026-08-21T17:00:00.000000+00:00",
+        }
+    ]
+    return payload
 
 
 @dataclass(slots=True)

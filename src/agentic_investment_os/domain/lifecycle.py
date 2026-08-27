@@ -561,9 +561,20 @@ class ResearchRefusal:
 
     refusal_id: str
     checkpoint: ResearchCheckpoint = field(default_factory=ResearchCheckpoint)
+    terminal_call_id: str | None = None
 
     def __post_init__(self) -> None:
-        if not is_sha256(self.refusal_id) or type(self.checkpoint) is not ResearchCheckpoint:
+        if (
+            not is_sha256(self.refusal_id)
+            or type(self.checkpoint) is not ResearchCheckpoint
+            or (
+                self.terminal_call_id is not None
+                and (
+                    not is_sha256(self.terminal_call_id)
+                    or self.terminal_call_id not in self.checkpoint.call_ids
+                )
+            )
+        ):
             raise ValueError(_INVALID_CHECKPOINT_ORDER)
 
     def to_payload(self) -> dict[str, object]:
@@ -572,6 +583,7 @@ class ResearchRefusal:
             "record_kind": "research_refusal",
             "refusal_id": self.refusal_id,
             "checkpoint": self.checkpoint.to_payload(),
+            "terminal_call_id": self.terminal_call_id,
         }
 
 
@@ -585,6 +597,7 @@ class ProductionResearchReference:
     position_snapshot: PositionSnapshot
     checkpoint: ResearchCheckpoint | None
     refusal_id: str | None = None
+    terminal_call_id: str | None = None
 
     def __post_init__(self) -> None:
         if (
@@ -597,6 +610,15 @@ class ProductionResearchReference:
             or (
                 self.refusal_id is not None
                 and (self.checkpoint is None or not is_sha256(self.refusal_id))
+            )
+            or (
+                self.terminal_call_id is not None
+                and (
+                    self.refusal_id is None
+                    or self.checkpoint is None
+                    or not is_sha256(self.terminal_call_id)
+                    or self.terminal_call_id not in self.checkpoint.call_ids
+                )
             )
         ):
             raise ValueError(_INVALID_CHECKPOINT_ORDER)
@@ -1697,6 +1719,7 @@ def reconstruct_production_research_checkpoints(
         refusal = refusals.get(progress.request.idempotency_key.value)
         build_checkpoint = progress.dossier_checkpoint
         build_refusal_id = None
+        build_terminal_call_id = None
         if (
             build_checkpoint is None
             and refusal is not None
@@ -1706,6 +1729,7 @@ def reconstruct_production_research_checkpoints(
         ):
             build_checkpoint = refusal.research_refusal.checkpoint
             build_refusal_id = refusal.research_refusal.refusal_id
+            build_terminal_call_id = refusal.research_refusal.terminal_call_id
         references.append(
             ProductionResearchReference(
                 progress.pinned_run_identity,
@@ -1714,12 +1738,14 @@ def reconstruct_production_research_checkpoints(
                 snapshot.inputs.position_snapshot,
                 build_checkpoint,
                 build_refusal_id,
+                build_terminal_call_id,
             )
         )
         if progress.dossier_checkpoint is None:
             continue
         research_checkpoint = progress.research_checkpoint
         research_refusal_id = None
+        research_terminal_call_id = None
         if (
             research_checkpoint is None
             and refusal is not None
@@ -1729,6 +1755,7 @@ def reconstruct_production_research_checkpoints(
         ):
             research_checkpoint = refusal.research_refusal.checkpoint
             research_refusal_id = refusal.research_refusal.refusal_id
+            research_terminal_call_id = refusal.research_refusal.terminal_call_id
         references.append(
             ProductionResearchReference(
                 progress.pinned_run_identity,
@@ -1737,6 +1764,7 @@ def reconstruct_production_research_checkpoints(
                 snapshot.inputs.position_snapshot,
                 research_checkpoint,
                 research_refusal_id,
+                research_terminal_call_id,
             )
         )
     return tuple(references)
@@ -2708,7 +2736,15 @@ def parse_research_refusal(value: object) -> ResearchRefusal | None:
     """Validate one durable structured research refusal and its effect references."""
     fields = _exact_mapping(
         value,
-        frozenset({"schema_version", "record_kind", "refusal_id", "checkpoint"}),
+        frozenset(
+            {
+                "schema_version",
+                "record_kind",
+                "refusal_id",
+                "checkpoint",
+                "terminal_call_id",
+            }
+        ),
     )
     if (
         fields is None
@@ -2718,9 +2754,13 @@ def parse_research_refusal(value: object) -> ResearchRefusal | None:
     ):
         return None
     checkpoint = parse_research_checkpoint(fields["checkpoint"])
-    if checkpoint is None:
+    terminal_call_id = fields["terminal_call_id"]
+    if checkpoint is None or (terminal_call_id is not None and not is_sha256(terminal_call_id)):
         return None
-    return ResearchRefusal(fields["refusal_id"], checkpoint)
+    try:
+        return ResearchRefusal(fields["refusal_id"], checkpoint, terminal_call_id)
+    except ValueError:
+        return None
 
 
 def _parse_hash_tuple(value: object) -> tuple[str, ...] | None:

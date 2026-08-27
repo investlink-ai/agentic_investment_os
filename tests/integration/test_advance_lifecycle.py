@@ -73,6 +73,7 @@ from agentic_investment_os.domain.lifecycle import (
     PerformResearch,
     PinnedRunIdentity,
     ResearchCheckpoint,
+    ResearchRefusal,
 )
 from agentic_investment_os.domain.temporal import UtcInstant
 from agentic_investment_os.domain.universe import UniverseInputs
@@ -91,10 +92,13 @@ from tests._attention import attention_artifact
 from tests._evidence import (
     evidence_capture_checkpoint,
     materialized_evidence_capture_checkpoint,
-    recorded_official_evidence,
 )
 from tests._governance import RecordedSessionEligibility
-from tests._production_research import ValidProductionModel, production_recorded_evidence
+from tests._production_research import (
+    ValidProductionModel,
+    production_recorded_evidence,
+    production_recorded_official_evidence,
+)
 from tests._universe import (
     advance_command,
     pinned_run_identity,
@@ -1172,6 +1176,7 @@ class _LifecycleReferenceModel:
     streams: dict[str, _ReferenceStream] = field(default_factory=dict)
     sessions: dict[str, str] = field(default_factory=dict)
     refusals: dict[str, tuple[AdvanceFailureReason, MarketSession]] = field(default_factory=dict)
+    research_refusal_ids: dict[str, str] = field(default_factory=dict)
     conflicts: set[str] = field(default_factory=set)
     unkeyed_refusal_cycles: set[MarketSession] = field(default_factory=set)
 
@@ -1218,6 +1223,15 @@ class _LifecycleReferenceModel:
             if stream is None:  # pragma: no cover - reference-model invariant.
                 raise AssertionError
             return self._attention_failed(stream)
+        if reason is AdvanceFailureReason.RESEARCH_FAILED:
+            refusal_id = self.research_refusal_ids.get(key)
+            if refusal_id is None:  # pragma: no cover - reference-model invariant.
+                raise AssertionError
+            return AdvanceReceipt.failed_closed(
+                reason,
+                cycle=cycle,
+                research_refusal=ResearchRefusal(refusal_id),
+            )
         return self._failed(reason, cycle)
 
     def _advance_valid(
@@ -1433,7 +1447,7 @@ def _configure(
         repository_root=REPOSITORY_ROOT,
         recorded_universe=recorded_universe(),
         recorded_evidence=production_recorded_evidence(),
-        recorded_official_evidence=recorded_official_evidence(),
+        recorded_official_evidence=production_recorded_official_evidence(),
         recorded_model=ValidProductionModel(cio_stance=cio_stance),
         session_eligibility=RecordedSessionEligibility(),
         clock=(FixedClock(datetime(2026, 8, 21, 22, 0, tzinfo=UTC)) if clock is None else clock),
@@ -1687,7 +1701,7 @@ def test_advance_captures_all_recorded_official_sources_without_network_access(
         recorded_evidence=production_recorded_evidence(),
         recorded_model=ValidProductionModel(),
         session_eligibility=RecordedSessionEligibility(),
-        recorded_official_evidence=recorded_official_evidence(),
+        recorded_official_evidence=production_recorded_official_evidence(),
         clock=FixedClock(datetime(2026, 8, 21, 22, 0, tzinfo=UTC)),
     )
     assert isinstance(configured, Advance)
@@ -1711,7 +1725,7 @@ def test_optional_official_artifact_after_cutoff_is_not_published_as_admitted_ev
     tmp_path: Path,
 ) -> None:
     state_root = tmp_path / "runtime"
-    official = recorded_official_evidence()
+    official = production_recorded_official_evidence()
     items = official["items"]
     assert isinstance(items, list)
     sec = items[0]
@@ -2146,6 +2160,33 @@ def test_duplicate_delivery_reports_progress_committed_by_the_winner_as_resumed(
     assert len(_events(state_root / "lifecycle.sqlite3")) == PINNED_EVENT_COUNT
 
 
+def test_replay_validates_research_refusal_with_preceding_attention_history(
+    tmp_path: Path,
+) -> None:
+    capability = _configure(tmp_path / "runtime", cio_stance="abstain")
+    for day in (2, 3):
+        receipt = capability(
+            cycle=_cycle_payload(f"2026-09-0{day}"),
+            mode="champion",
+            idempotency_key=f"attention-history-{day}",
+        )
+        assert receipt.disposition is AdvanceDisposition.NO_ACTION
+
+    failed = capability(
+        cycle=_cycle_payload("2026-09-04"),
+        mode="champion",
+        idempotency_key="attention-history-refusal",
+    )
+    replayed = capability(
+        cycle=_cycle_payload("2026-09-04"),
+        mode="champion",
+        idempotency_key="attention-history-refusal",
+    )
+
+    assert failed.failure_reason is AdvanceFailureReason.RESEARCH_FAILED
+    assert replayed == failed
+
+
 class LifecycleStateMachine(RuleBasedStateMachine):
     def __init__(self) -> None:
         super().__init__()
@@ -2168,6 +2209,31 @@ class LifecycleStateMachine(RuleBasedStateMachine):
         self.next_identity += 1
         session = date(2026, 9, 1) + timedelta(days=self.next_identity)
         return session.isoformat(), f"generated-{self.next_identity}"
+
+    def _record_research_refusal(
+        self,
+        *,
+        session: str,
+        key: str,
+        observed: AdvanceReceipt,
+    ) -> AdvanceReceipt:
+        assert observed.failure_reason is AdvanceFailureReason.RESEARCH_FAILED
+        assert observed.research_refusal_id is not None
+        cycle = MarketSession(date.fromisoformat(session))
+        if key not in self.reference.streams:
+            self.reference.interrupt(
+                session=session,
+                key=key,
+                committed_events=ATTENTION_PUBLISHED_EVENT_COUNT,
+            )
+        self.reference.streams[key].events = ATTENTION_PUBLISHED_EVENT_COUNT
+        self.reference.refusals[key] = AdvanceFailureReason.RESEARCH_FAILED, cycle
+        self.reference.research_refusal_ids[key] = observed.research_refusal_id
+        return AdvanceReceipt.failed_closed(
+            AdvanceFailureReason.RESEARCH_FAILED,
+            cycle=cycle,
+            research_refusal=ResearchRefusal(observed.research_refusal_id),
+        )
 
     def _advance(self, *, session: str, mode: str, key: str) -> None:
         expected = self.reference.advance(session=session, mode=mode, key=key)
@@ -2196,6 +2262,12 @@ class LifecycleStateMachine(RuleBasedStateMachine):
                 evidence_artifact_ids=observed.evidence_artifact_ids,
                 evidence_refusal_ids=observed.evidence_refusal_ids,
                 attention_refusal_reason=observed.attention_refusal_reason,
+            )
+        elif observed.failure_reason is AdvanceFailureReason.RESEARCH_FAILED:
+            expected = self._record_research_refusal(
+                session=session,
+                key=key,
+                observed=observed,
             )
         assert observed == expected
 
@@ -2290,13 +2362,25 @@ class LifecycleStateMachine(RuleBasedStateMachine):
             evidence_vault=self.capability.evidence_vault,
             memory=self.capability.memory,
         )
-        with pytest.raises(SimulatedInterruptionError):
-            interrupted(cycle=_cycle_payload(session), mode="champion", idempotency_key=key)
-        self.reference.interrupt(
-            session=session,
-            key=key,
-            committed_events=committed_events,
-        )
+        try:
+            observed = interrupted(
+                cycle=_cycle_payload(session),
+                mode="champion",
+                idempotency_key=key,
+            )
+        except SimulatedInterruptionError:
+            self.reference.interrupt(
+                session=session,
+                key=key,
+                committed_events=committed_events,
+            )
+        else:
+            assert operation in ("dossier", "research", "memory")
+            assert observed == self._record_research_refusal(
+                session=session,
+                key=key,
+                observed=observed,
+            )
 
     @rule()
     def reopen_database(self) -> None:

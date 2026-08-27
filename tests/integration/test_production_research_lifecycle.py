@@ -677,6 +677,9 @@ def test_production_research_resource_or_boundary_failure_stops_before_memory(
         assert connection.execute("SELECT COUNT(*) FROM belief_events").fetchone() == (0,)
     if expected_disposition is LabObservationDisposition.OVERSIZED_OUTPUT:
         assert raw_response is None
+    status = _configured_status(state_root)()
+    assert status.liveness is LifecycleLiveness.FAILED_CLOSED
+    assert status.durable_reason is AdvanceFailureReason.RESEARCH_FAILED
 
 
 @pytest.mark.parametrize("role", tuple(ResearchRole))
@@ -1323,9 +1326,7 @@ def test_status_rejects_deletion_of_structurally_referenced_failed_call(
         connection.execute(
             "DROP TRIGGER production_research_call_observations_are_append_only_delete"
         )
-        connection.execute("DROP TRIGGER production_research_call_intents_are_append_only_delete")
         connection.execute("DELETE FROM production_research_call_observations")
-        connection.execute("DELETE FROM production_research_call_intents")
 
     with pytest.raises(
         LifecyclePersistenceError,

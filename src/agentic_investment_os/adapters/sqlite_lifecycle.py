@@ -804,8 +804,20 @@ class SQLiteLifecycleLedger:
                 if not isinstance(command, AdvanceCommand):  # pragma: no cover - advance-only.
                     raise LifecyclePersistenceError(_DATABASE_INTEGRITY_FAILED)
                 try:
+                    target_events = tuple(_load_events(connection, key=key))
+                    events = (
+                        tuple(
+                            _load_events(
+                                connection,
+                                key=key,
+                                include_attention_history=True,
+                            )
+                        )
+                        if any(event.attention_artifact is not None for event in target_events)
+                        else target_events
+                    )
                     history = LifecycleHistory(
-                        events=tuple(_load_events(connection, key=key)),
+                        events=events,
                         conflicts=tuple(_load_conflicts(connection, key=key)),
                     )
                 except InvalidLifecycleStateError:

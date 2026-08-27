@@ -308,23 +308,7 @@ class SQLiteProductionCallLedger:
             )
             if checkpoint != expected:
                 raise LifecyclePersistenceError(_CORRUPT)
-            failed_observations = tuple(
-                observation
-                for observation in owner_observations
-                if observation.disposition is not LabObservationDisposition.VALIDATED
-            )
-            if reference.refusal_id is None:
-                if failed_observations:
-                    raise LifecyclePersistenceError(_CORRUPT)
-            elif failed_observations and (
-                len(failed_observations) != 1
-                or production_call_refusal_identity(
-                    failed_observations[0].call_id,
-                    failed_observations[0],
-                )
-                != reference.refusal_id
-            ):
-                raise LifecyclePersistenceError(_CORRUPT)
+            _validate_reference_refusal(reference, owner_observations)
 
     def _validate_intent_authority(
         self,
@@ -536,6 +520,31 @@ def _expected_subject_evidence(
         )
         for record in (records_by_id[artifact_id] for artifact_id in evidence_ids)
     )
+
+
+def _validate_reference_refusal(
+    reference: ProductionResearchReference,
+    observations: tuple[LabCallObservation, ...],
+) -> None:
+    failed = tuple(
+        observation
+        for observation in observations
+        if observation.disposition is not LabObservationDisposition.VALIDATED
+    )
+    if reference.refusal_id is None:
+        if failed or reference.terminal_call_id is not None:
+            raise LifecyclePersistenceError(_CORRUPT)
+        return
+    if reference.terminal_call_id is None:
+        if failed:
+            raise LifecyclePersistenceError(_CORRUPT)
+        return
+    if (
+        len(failed) != 1
+        or failed[0].call_id != reference.terminal_call_id
+        or production_call_refusal_identity(failed[0].call_id, failed[0]) != reference.refusal_id
+    ):
+        raise LifecyclePersistenceError(_CORRUPT)
 
 
 def _subject_owner(
@@ -825,8 +834,6 @@ def _parse_observation(
         raise LifecyclePersistenceError(_CORRUPT) from error
     if not observation_matches_role(observation, intent.role):
         raise LifecyclePersistenceError(_CORRUPT)
-    if not _observation_timing_is_valid(observation):
-        raise LifecyclePersistenceError(_CORRUPT)
     if raw_response is not None:
         expected_disposition, expected_artifact, expected_refusal = (
             _rederive_response_backed_observation(
@@ -842,13 +849,16 @@ def _parse_observation(
             or observation.artifact_refusal != expected_refusal
         ):
             raise LifecyclePersistenceError(_CORRUPT)
-    elif observation.disposition in (
-        LabObservationDisposition.VALIDATED,
-        LabObservationDisposition.INVALID_JSON,
-        LabObservationDisposition.INVALID_DOSSIER,
-        LabObservationDisposition.INVALID_ARTIFACT,
-    ):
-        raise LifecyclePersistenceError(_CORRUPT)
+    else:
+        if not _observation_timing_is_valid(observation):
+            raise LifecyclePersistenceError(_CORRUPT)
+        if observation.disposition in (
+            LabObservationDisposition.VALIDATED,
+            LabObservationDisposition.INVALID_JSON,
+            LabObservationDisposition.INVALID_DOSSIER,
+            LabObservationDisposition.INVALID_ARTIFACT,
+        ):
+            raise LifecyclePersistenceError(_CORRUPT)
     return observation
 
 
