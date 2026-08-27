@@ -601,6 +601,7 @@ class ProductionResearchReference:
     memory_checkpoint: ResearchCheckpoint | None = None
     no_action_reason: NoActionReason | None = None
     memory_recorded_at: UtcInstant | None = None
+    memory_refusal_id: str | None = None
 
     def __post_init__(self) -> None:
         if (
@@ -623,10 +624,16 @@ class ProductionResearchReference:
                     or self.terminal_call_id not in self.checkpoint.call_ids
                 )
             )
-            or (self.memory_checkpoint is None) != (self.memory_recorded_at is None)
+            or (
+                (self.memory_checkpoint is None and self.memory_refusal_id is None)
+                != (self.memory_recorded_at is None)
+            )
             or (
                 self.memory_checkpoint is not None
-                and type(self.memory_checkpoint) is not ResearchCheckpoint
+                and (
+                    type(self.memory_checkpoint) is not ResearchCheckpoint
+                    or self.memory_refusal_id is not None
+                )
             )
             or (
                 self.no_action_reason is not None
@@ -645,9 +652,16 @@ class ProductionResearchReference:
                     or type(self.memory_recorded_at) is not UtcInstant
                 )
             )
+            or (self.memory_checkpoint is None and self.no_action_reason is not None)
             or (
-                self.memory_checkpoint is None
-                and (self.no_action_reason is not None or self.memory_recorded_at is not None)
+                self.memory_refusal_id is not None
+                and (
+                    self.phase is not LifecyclePhase.RUN_RESEARCH
+                    or self.checkpoint is None
+                    or self.refusal_id is not None
+                    or not is_sha256(self.memory_refusal_id)
+                    or type(self.memory_recorded_at) is not UtcInstant
+                )
             )
         ):
             raise ValueError(_INVALID_CHECKPOINT_ORDER)
@@ -1745,6 +1759,12 @@ def reconstruct_production_research_checkpoints(
         if event.completed_phase is not None
         and event.completed_phase.phase is LifecyclePhase.UPDATE_MEMORY
     }
+    research_times = {
+        event.request.idempotency_key.value: event.recorded_at
+        for event in history.events
+        if event.completed_phase is not None
+        and event.completed_phase.phase is LifecyclePhase.RUN_RESEARCH
+    }
     references: list[ProductionResearchReference] = []
     for progress in progresses:
         attention = progress.attention_artifact
@@ -1781,6 +1801,7 @@ def reconstruct_production_research_checkpoints(
         research_checkpoint = progress.research_checkpoint
         research_refusal_id = None
         research_terminal_call_id = None
+        memory_refusal_id = None
         if (
             research_checkpoint is None
             and refusal is not None
@@ -1791,6 +1812,13 @@ def reconstruct_production_research_checkpoints(
             research_checkpoint = refusal.research_refusal.checkpoint
             research_refusal_id = refusal.research_refusal.refusal_id
             research_terminal_call_id = refusal.research_refusal.terminal_call_id
+        if (
+            refusal is not None
+            and refusal.reason is AdvanceFailureReason.MEMORY_UPDATE_FAILED
+            and progress.completed_phase is LifecyclePhase.RUN_RESEARCH
+            and refusal.research_refusal is not None
+        ):
+            memory_refusal_id = refusal.research_refusal.refusal_id
         references.append(
             ProductionResearchReference(
                 progress.pinned_run_identity,
@@ -1802,7 +1830,14 @@ def reconstruct_production_research_checkpoints(
                 research_terminal_call_id,
                 progress.memory_checkpoint,
                 progress.no_action_reason,
-                memory_times.get(progress.request.idempotency_key.value),
+                (
+                    memory_times.get(progress.request.idempotency_key.value)
+                    if progress.memory_checkpoint is not None
+                    else research_times.get(progress.request.idempotency_key.value)
+                    if memory_refusal_id is not None
+                    else None
+                ),
+                memory_refusal_id,
             )
         )
     return tuple(references)

@@ -307,6 +307,8 @@ def _matches_lifecycle_reference(
     reference: BeliefLifecycleReference,
 ) -> bool:
     event = entry.event
+    # Record samples its adapter clock after Advance derives transaction time, so the independent
+    # ledger timestamp may follow the lifecycle checkpoint even for a correctly ordered append.
     return (
         event.event_id == reference.event_id
         and event.belief_id == reference.belief_id
@@ -315,7 +317,6 @@ def _matches_lifecycle_reference(
         and event.claim == reference.claim
         and event.valid_at == reference.valid_at
         and event.transaction_at.value <= reference.lifecycle_recorded_at.value
-        and entry.recorded_at.value <= reference.lifecycle_recorded_at.value
         and event.evidence_cutoff == reference.evidence_cutoff
         and event.confidence == reference.confidence
         and event.evidence == reference.evidence

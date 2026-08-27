@@ -38,6 +38,7 @@ from agentic_investment_os.memory.admission import (
     BeliefClaimKind,
     BeliefEvidenceReference,
     BeliefEvidenceRelationship,
+    RecordRefusalCode,
 )
 from agentic_investment_os.memory.beliefs import (
     BeliefEvidenceResolver,
@@ -105,6 +106,11 @@ _CORRUPT = "invalid production research call history"
 _WRITE_FAILED = "production research call persistence failed"
 _BEGIN_IMMEDIATE = "BEGIN IMMEDIATE"
 _INTENT_COLUMN_COUNT = 7
+_MEMORY_REFUSAL_REASONS = (
+    "current_belief_history_unavailable",
+    "unknown_record_refusal",
+    *(reason.value for reason in RecordRefusalCode),
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -329,6 +335,16 @@ class SQLiteProductionCallLedger:
                 else self._reconstruct_run(reference, by_request, observations, dossiers)
             )
             _validate_terminal_outcome(reference, outcome)
+            if reference.memory_refusal_id is not None:
+                if outcome is None or outcome.refusal_id is not None:
+                    raise LifecyclePersistenceError(_CORRUPT)
+                failed_index = _memory_refusal_index(reference, outcome.active_resolutions)
+                belief_references.extend(
+                    self._memory_references(
+                        reference,
+                        outcome.active_resolutions[:failed_index],
+                    )
+                )
             if reference.memory_checkpoint is not None:
                 if outcome is None or outcome.refusal_id is not None:
                     raise LifecyclePersistenceError(_CORRUPT)
@@ -589,15 +605,7 @@ class SQLiteProductionCallLedger:
                 )
             except KeyError as error:
                 raise LifecyclePersistenceError(_CORRUPT) from error
-            belief_id = _content_hash(
-                {
-                    "subject": cio.subject.to_payload(),
-                    "claim_kind": BeliefClaimKind.EXPECTATION.value,
-                }
-            )
-            event_id = _content_hash(
-                {"cio_resolution_id": cio.content_hash, "belief_id": belief_id}
-            )
+            belief_id, event_id = _belief_event_identity(cio)
             expected.append(
                 BeliefLifecycleReference(
                     run_id=reference.pinned_run_identity.run_id,
@@ -906,6 +914,41 @@ def _call_failure_outcome(
 
 def _input_refusal_identity(run_id: str, request_id: str, reason: str) -> str:
     return _content_hash({"run_id": run_id, "request_id": request_id, "reason": reason})
+
+
+def _belief_event_identity(cio: CioResolution) -> tuple[str, str]:
+    belief_id = _content_hash(
+        {
+            "subject": cio.subject.to_payload(),
+            "claim_kind": BeliefClaimKind.EXPECTATION.value,
+        }
+    )
+    return belief_id, _content_hash({"cio_resolution_id": cio.content_hash, "belief_id": belief_id})
+
+
+def _memory_refusal_index(
+    reference: ProductionResearchReference,
+    active: tuple[tuple[str, Dossier, Thesis, CioResolution], ...],
+) -> int:
+    refusal_id = reference.memory_refusal_id
+    if refusal_id is None:  # pragma: no cover - caller narrows the reference.
+        raise LifecyclePersistenceError(_CORRUPT)
+    matches = tuple(
+        index
+        for index, (_, _, _, cio) in enumerate(active)
+        for reason in _MEMORY_REFUSAL_REASONS
+        if refusal_id
+        == _content_hash(
+            {
+                "run_id": reference.pinned_run_identity.run_id,
+                "event_id": _belief_event_identity(cio)[1],
+                "reason": reason,
+            }
+        )
+    )
+    if len(matches) != 1:
+        raise LifecyclePersistenceError(_CORRUPT)
+    return matches[0]
 
 
 def _validate_terminal_outcome(

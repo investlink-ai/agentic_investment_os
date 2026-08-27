@@ -919,6 +919,37 @@ def test_production_research_reference_requires_a_checkpoint_for_refusal_identit
         )
 
 
+def test_production_research_reference_binds_memory_refusal_to_completed_research() -> None:
+    identity = pinned_run_identity(_request())
+    snapshot = universe_snapshot(identity)
+    artifact = attention_artifact(identity, snapshot, evidence_capture_checkpoint())
+    reference = ProductionResearchReference(
+        identity,
+        LifecyclePhase.RUN_RESEARCH,
+        artifact,
+        snapshot.inputs.position_snapshot,
+        ResearchCheckpoint(),
+        memory_recorded_at=identity.evidence_cutoff,
+        memory_refusal_id="f" * SHA256_HEX_LENGTH,
+    )
+
+    assert reference.memory_refusal_id == "f" * SHA256_HEX_LENGTH
+    invalid_replacements = (
+        {"phase": LifecyclePhase.BUILD_DOSSIERS},
+        {"checkpoint": None},
+        {"refusal_id": "a" * SHA256_HEX_LENGTH},
+        {"memory_refusal_id": "invalid"},
+        {"memory_recorded_at": None},
+        {
+            "memory_checkpoint": ResearchCheckpoint(("b" * SHA256_HEX_LENGTH,)),
+            "memory_recorded_at": identity.evidence_cutoff,
+        },
+    )
+    for changes in invalid_replacements:
+        with pytest.raises(ValueError, match="lifecycle stream checkpoint order is invalid"):
+            replace(reference, **changes)
+
+
 def test_advance_rejects_missing_attention_owned_subject_evidence() -> None:
     identity = pinned_run_identity(_request())
     snapshot = universe_snapshot(identity)

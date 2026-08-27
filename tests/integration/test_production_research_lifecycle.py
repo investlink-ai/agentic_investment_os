@@ -5,7 +5,7 @@ import json
 import sqlite3
 from copy import deepcopy
 from dataclasses import dataclass, replace
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
@@ -100,6 +100,16 @@ class _ClockAt:
 
     def now(self) -> datetime:
         return self.instant
+
+
+@dataclass(slots=True)
+class _AdvancingClock:
+    instant: datetime
+
+    def now(self) -> datetime:
+        observed = self.instant
+        self.instant += timedelta(seconds=1)
+        return observed
 
 
 @dataclass(slots=True)
@@ -237,6 +247,21 @@ class _RefusingMemory:
 
     def __call__(self, _event: object) -> RecordReceipt:
         return RecordReceipt.refused(RecordRefusalCode.INVALID_AUTHORITATIVE_HISTORY)
+
+    def graph(self, query: object) -> BeliefGraph | BeliefGraphRefusal:
+        return self.delegate.graph(query)
+
+
+@dataclass(slots=True)
+class _RefusingSecondMemory:
+    delegate: Record
+    calls: int = 0
+
+    def __call__(self, event: object) -> RecordReceipt:
+        self.calls += 1
+        if self.calls == EXPECTED_SUBJECTS:
+            return RecordReceipt.refused(RecordRefusalCode.INVALID_AUTHORITATIVE_HISTORY)
+        return self.delegate(event)
 
     def graph(self, query: object) -> BeliefGraph | BeliefGraphRefusal:
         return self.delegate.graph(query)
@@ -421,7 +446,7 @@ def _configure(
     *,
     universe: dict[str, object],
     model: ResearchRoleModel,
-    clock: _FixedClock | _ClockAt | None = None,
+    clock: _FixedClock | _ClockAt | _AdvancingClock | None = None,
 ) -> Advance:
     capability = configure_advance(
         (ConfigurationSource("test", _configuration(state_root)),),
@@ -1059,6 +1084,90 @@ def test_memory_refusal_is_durable_after_model_observations(tmp_path: Path) -> N
         assert connection.execute("SELECT COUNT(*) FROM belief_events").fetchone() == (0,)
 
 
+def test_status_rejects_coherently_resealed_memory_refusal_identity(tmp_path: Path) -> None:
+    state_root = tmp_path / "runtime"
+    capability = _configure(
+        state_root,
+        universe=recorded_universe(),
+        model=_ValidProductionModel(),
+    )
+    refusing = replace(
+        capability,
+        memory=cast("Record", _RefusingMemory(capability.memory)),
+    )
+    receipt = _advance(refusing, "stage-three-memory-refusal-corruption")
+    status = _configured_status(state_root)
+
+    assert receipt.failure_reason is AdvanceFailureReason.MEMORY_UPDATE_FAILED
+    status()
+    with sqlite3.connect(state_root / "lifecycle.sqlite3") as connection:
+        row = connection.execute("SELECT research_refusal FROM advance_refusals").fetchone()
+        assert row is not None
+        refusal = json.loads(row[0])
+        assert isinstance(refusal, dict)
+        refusal["refusal_id"] = "e" * 64
+        connection.execute("DROP TRIGGER advance_refusals_are_append_only_update")
+        connection.execute(
+            "UPDATE advance_refusals SET research_refusal_id = ?, research_refusal = ?",
+            (
+                refusal["refusal_id"],
+                json.dumps(refusal, sort_keys=True, separators=(",", ":")),
+            ),
+        )
+
+    with pytest.raises(
+        LifecyclePersistenceError,
+        match="invalid production research call history",
+    ):
+        status()
+
+
+def test_memory_refusal_reconstructs_prior_events_before_the_failed_subject(
+    tmp_path: Path,
+) -> None:
+    state_root = tmp_path / "runtime"
+    universe = _production_universe_with_active_holding()
+    discovery_universe = deepcopy(universe)
+    discovery_positions = discovery_universe["positions"]
+    assert isinstance(discovery_positions, dict)
+    discovery_payload = discovery_positions["payload"]
+    assert isinstance(discovery_payload, dict)
+    discovery_payload["items"] = []
+    reseal_recorded_snapshot(discovery_universe, "positions")
+    model = _ValidProductionModel()
+    for offset, key in enumerate(("first", "watch"), start=19):
+        discovery = _configure(
+            state_root,
+            universe=discovery_universe,
+            model=model,
+        )
+        assert (
+            _advance_on(
+                discovery,
+                f"stage-three-second-refusal-{key}",
+                date(2026, 8, offset),
+            ).disposition
+            is AdvanceDisposition.NO_ACTION
+        )
+    capability = _configure(
+        state_root,
+        universe=universe,
+        model=model,
+    )
+    refusing = replace(
+        capability,
+        memory=cast("Record", _RefusingSecondMemory(capability.memory)),
+    )
+
+    receipt = _advance(refusing, "stage-three-second-memory-refusal")
+    status = _configured_status(state_root)()
+
+    assert receipt.failure_reason is AdvanceFailureReason.MEMORY_UPDATE_FAILED
+    assert status.liveness is LifecycleLiveness.FAILED_CLOSED
+    with sqlite3.connect(state_root / "lifecycle.sqlite3") as connection:
+        assert connection.execute("SELECT COUNT(*) FROM belief_events").fetchone() == (1,)
+
+
 def test_unavailable_current_belief_head_refuses_memory_without_appending(
     tmp_path: Path,
 ) -> None:
@@ -1071,12 +1180,32 @@ def test_unavailable_current_belief_head_refuses_memory_without_appending(
     )
 
     receipt = _advance(refusing, "stage-three-current-belief-head-refusal")
+    status = _configured_status(state_root)()
 
     assert receipt.disposition is AdvanceDisposition.FAILED_CLOSED
     assert receipt.failure_reason is AdvanceFailureReason.MEMORY_UPDATE_FAILED
+    assert status.liveness is LifecycleLiveness.FAILED_CLOSED
     assert model.unique_effect_count > 0
     with sqlite3.connect(state_root / "lifecycle.sqlite3") as connection:
         assert connection.execute("SELECT COUNT(*) FROM belief_events").fetchone() == (0,)
+
+
+def test_completed_research_status_accepts_independent_advancing_clock_reads(
+    tmp_path: Path,
+) -> None:
+    state_root = tmp_path / "runtime"
+    capability = _configure(
+        state_root,
+        universe=recorded_universe(),
+        model=_ValidProductionModel(),
+        clock=_AdvancingClock(datetime(2026, 8, 21, 22, tzinfo=UTC)),
+    )
+
+    receipt = _advance(capability, "stage-three-advancing-clock")
+    status = _configured_status(state_root)()
+
+    assert receipt.disposition is AdvanceDisposition.ADVANCED
+    assert status.liveness is LifecycleLiveness.ACTIVE
 
 
 def test_production_advance_records_validated_research_and_belief_events_once(
