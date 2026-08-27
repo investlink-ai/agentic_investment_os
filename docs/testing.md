@@ -398,17 +398,20 @@ evidence. A scenario becomes mandatory when its owning behavior is implemented.
   safely normalized only as its schema explicitly permits.
 - Production `Advance` consumes only subjects selected by the exact pinned Attention Artifact,
   including due holding refreshes, and executes Evidence Collector, Thesis Builder, Independent
-  Skeptic, Scenario Forecaster, and CIO in fixed order with a fresh exact context for every role. The
-  complete research policy and its prompt, model, reasoning, inert tool, graph-bound, Constitution,
-  cutoff, Data Regime, portfolio-context, and material fingerprints remain pinned across retry and
-  reopen. Missing or reordered roles, changed retry material, undeclared context, or any ambient model
-  fallback fails before another effect.
+  Skeptic, Scenario Forecaster, and CIO in fixed order with the exact Candidate Card or holding-refresh
+  evidence IDs and a fresh exact context for every role. Tests compare every model input with that
+  Stage 2 set and reject coherent attempts to widen it. The complete research policy and its prompt,
+  model, reasoning, inert tool, graph-bound, Constitution, cutoff, Data Regime, portfolio-context, and
+  material fingerprints remain pinned across retry and reopen. Missing or reordered roles, changed
+  retry material, undeclared context, or any ambient model fallback fails before another effect.
 - Every production role records intent before the model effect and one validated observation or
   bounded refusal afterward. Interruption after the intent of each of the five roles leaves an
-  indeterminate call that retry never repeats. Completed calls replay independently; token and turn
-  totals and call and artifact IDs enter lifecycle checkpoints. `Status` revalidates exact stored
-  inputs, raw-response identity, observation hashes, role artifacts, and every checkpoint reference;
-  mutation or removal of referenced production rows fails closed.
+  indeterminate call that retry resolves with a durable typed observation without repeating the
+  effect. Completed calls replay independently; token and turn totals and call and artifact IDs enter
+  lifecycle checkpoints. `Status` revalidates exact stored inputs, re-derives every response-backed
+  disposition and artifact from the retained response, binds failed observations to lifecycle refusal
+  identities, and validates every checkpoint reference; mutation or removal of referenced production
+  rows fails closed.
 - Production malformed JSON, oversized output, timeout, quota exhaustion, output-token overflow,
   turn overflow, citation failure, missing official evidence, over-bound evidence, evidence failure,
   and memory refusal are durable failures with no model-service substitution and no invalid Belief

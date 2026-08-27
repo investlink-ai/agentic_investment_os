@@ -236,6 +236,7 @@ class LabObservationDisposition(StrEnum):
     MODEL_TIMEOUT = "model_timeout"
     QUOTA_EXHAUSTED = "quota_exhausted"
     ADAPTER_REFUSED = "adapter_refused"
+    INDETERMINATE_EFFECT = "indeterminate_effect"
     OVERSIZED_OUTPUT = "oversized_output"
     INVALID_JSON = "invalid_json"
     INVALID_ARTIFACT = "invalid_artifact"

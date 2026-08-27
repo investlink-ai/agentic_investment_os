@@ -51,6 +51,8 @@ from agentic_investment_os.research.model import (
     LabCallObservation,
     LabCallPreparationDisposition,
     LabObservationDisposition,
+    ModelCallDisposition,
+    ModelCallResponse,
     ModelTimingDisposition,
     ResearchRole,
     observation_matches_role,
@@ -59,6 +61,8 @@ from agentic_investment_os.research.production import (
     ProductionCallIntent,
     ProductionCallPreparation,
     ProductionResearchEvidence,
+    production_call_refusal_identity,
+    production_response_disposition,
 )
 from agentic_investment_os.research.resolution import (
     CioRefusalReason,
@@ -84,7 +88,7 @@ __all__ = ("SQLiteProductionCallLedger",)
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from agentic_investment_os.research.policy import ProductionResearchPolicy
+    from agentic_investment_os.research.policy import ModelConfiguration, ProductionResearchPolicy
 
 _CORRUPT = "invalid production research call history"
 _WRITE_FAILED = "production research call persistence failed"
@@ -304,6 +308,23 @@ class SQLiteProductionCallLedger:
             )
             if checkpoint != expected:
                 raise LifecyclePersistenceError(_CORRUPT)
+            failed_observations = tuple(
+                observation
+                for observation in owner_observations
+                if observation.disposition is not LabObservationDisposition.VALIDATED
+            )
+            if reference.refusal_id is None:
+                if failed_observations:
+                    raise LifecyclePersistenceError(_CORRUPT)
+            elif failed_observations and (
+                len(failed_observations) != 1
+                or production_call_refusal_identity(
+                    failed_observations[0].call_id,
+                    failed_observations[0],
+                )
+                != reference.refusal_id
+            ):
+                raise LifecyclePersistenceError(_CORRUPT)
 
     def _validate_intent_authority(
         self,
@@ -320,7 +341,8 @@ class SQLiteProductionCallLedger:
         attention = parse_attention_artifact(model_input.get("attention_artifact"))
         constitution = ConstitutionArtifact.parse(model_input.get("constitution"))
         subject = parse_instrument_identity(model_input.get("subject"))
-        expected_subject = _subject_owner(reference, intent.request_id)
+        subject_owner = _subject_owner(reference, intent.request_id)
+        expected_subject = None if subject_owner is None else subject_owner[0]
         contract = self._policy.contract_for(intent.role)
         if (
             attention != reference.attention_artifact
@@ -339,23 +361,10 @@ class SQLiteProductionCallLedger:
         ):
             raise LifecyclePersistenceError(_CORRUPT)
         evidence = _parse_intent_evidence(model_input.get("evidence"), subject)
-        records = self._evidence_vault.stored_records_for_artifacts(
-            reference.attention_artifact.evidence_artifact_ids
-        )
-        expected_evidence = tuple(
-            ProductionResearchEvidence(
-                record.artifact.artifact_id,
-                record.artifact.content_hash,
-                record.artifact.available_at,
-                _canonical_json(record.artifact.to_payload()),
-                record.content,
-                _artifact_is_official(record.artifact.feed),
-            )
-            for record in records
-            if any(mapping.identity == subject for mapping in record.artifact.entity_mappings)
-            or record.artifact.feed
-            in (EvidenceFeed.FEDERAL_RESERVE, EvidenceFeed.BLS, EvidenceFeed.BEA)
-        )
+        if subject_owner is None:  # pragma: no cover - expected_subject gate rejects this above.
+            raise LifecyclePersistenceError(_CORRUPT)
+        evidence_ids = subject_owner[1]
+        expected_evidence = _expected_subject_evidence(self._evidence_vault, evidence_ids)
         if (
             evidence is None
             or evidence != expected_evidence
@@ -476,7 +485,12 @@ class SQLiteProductionCallLedger:
         ):
             raise LifecyclePersistenceError(_CORRUPT)
         _canonical_instant(recorded_at)
-        return _parse_observation(observation_json, raw_response, intent)
+        return _parse_observation(
+            observation_json,
+            raw_response,
+            intent,
+            self._policy.contract_for(intent.role).model_configuration,
+        )
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self._database)
@@ -503,21 +517,50 @@ def _artifact_is_official(feed: EvidenceFeed) -> bool:
     )
 
 
+def _expected_subject_evidence(
+    vault: _ProductionEvidenceVault,
+    evidence_ids: tuple[str, ...],
+) -> tuple[ProductionResearchEvidence, ...]:
+    records = vault.stored_records_for_artifacts(evidence_ids)
+    records_by_id = {record.artifact.artifact_id: record for record in records}
+    if set(records_by_id) != set(evidence_ids):
+        raise LifecyclePersistenceError(_CORRUPT)
+    return tuple(
+        ProductionResearchEvidence(
+            record.artifact.artifact_id,
+            record.artifact.content_hash,
+            record.artifact.available_at,
+            _canonical_json(record.artifact.to_payload()),
+            record.content,
+            _artifact_is_official(record.artifact.feed),
+        )
+        for record in (records_by_id[artifact_id] for artifact_id in evidence_ids)
+    )
+
+
 def _subject_owner(
     reference: ProductionResearchReference,
     request_id: str,
-) -> EquityInstrumentIdentity | None:
+) -> tuple[EquityInstrumentIdentity, tuple[str, ...]] | None:
     cards = {card.card_id: card for card in reference.attention_artifact.candidate_cards}
     for request in reference.attention_artifact.dossier_requests:
         card = cards.get(request.candidate_card_id)
         if request.request_id == request_id and card is not None:
-            return request.identity if type(request.identity) is EquityInstrumentIdentity else None
+            return (
+                (request.identity, card.evidence_artifact_ids)
+                if type(request.identity) is EquityInstrumentIdentity
+                else None
+            )
     for refresh in reference.attention_artifact.holding_refreshes:
         if (
             refresh.refresh_id == request_id
             and refresh.disposition is HoldingRefreshDisposition.REQUIRED
         ):
-            return refresh.identity if type(refresh.identity) is EquityInstrumentIdentity else None
+            return (
+                (refresh.identity, refresh.evidence_artifact_ids)
+                if type(refresh.identity) is EquityInstrumentIdentity
+                else None
+            )
     return None
 
 
@@ -696,6 +739,7 @@ def _parse_observation(
     observation_json: str,
     raw_response: bytes | None,
     intent: ProductionCallIntent,
+    configuration: ModelConfiguration,
 ) -> LabCallObservation:
     try:
         fields = json.loads(observation_json)
@@ -783,21 +827,77 @@ def _parse_observation(
         raise LifecyclePersistenceError(_CORRUPT)
     if not _observation_timing_is_valid(observation):
         raise LifecyclePersistenceError(_CORRUPT)
-    if observation.disposition in (
+    if raw_response is not None:
+        expected_disposition, expected_artifact, expected_refusal = (
+            _rederive_response_backed_observation(
+                raw_response,
+                observation,
+                intent,
+                configuration,
+            )
+        )
+        if (
+            observation.disposition is not expected_disposition
+            or observation.artifact != expected_artifact
+            or observation.artifact_refusal != expected_refusal
+        ):
+            raise LifecyclePersistenceError(_CORRUPT)
+    elif observation.disposition in (
         LabObservationDisposition.VALIDATED,
+        LabObservationDisposition.INVALID_JSON,
         LabObservationDisposition.INVALID_DOSSIER,
         LabObservationDisposition.INVALID_ARTIFACT,
     ):
-        if raw_response is None:
-            raise LifecyclePersistenceError(_CORRUPT)
-        try:
-            decoded = json.loads(raw_response.decode())
-        except (UnicodeDecodeError, json.JSONDecodeError) as error:
-            raise LifecyclePersistenceError(_CORRUPT) from error
-        artifact, refusal = _parse_raw_role_output(decoded, intent)
-        if observation.artifact != artifact or observation.artifact_refusal != refusal:
-            raise LifecyclePersistenceError(_CORRUPT)
+        raise LifecyclePersistenceError(_CORRUPT)
     return observation
+
+
+def _rederive_response_backed_observation(
+    raw_response: bytes,
+    observation: LabCallObservation,
+    intent: ProductionCallIntent,
+    configuration: ModelConfiguration,
+) -> tuple[
+    LabObservationDisposition,
+    Dossier | Thesis | SkepticResult | ScenarioForecast | CioResolution | None,
+    DossierRefusalReason
+    | ThesisRefusalReason
+    | SkepticRefusalReason
+    | ForecastRefusalReason
+    | CioRefusalReason
+    | None,
+]:
+    if observation.timing_disposition is not ModelTimingDisposition.WITHIN_BUDGET:
+        raise LifecyclePersistenceError(_CORRUPT)
+    response = ModelCallResponse(
+        ModelCallDisposition.RESPONDED,
+        raw_response,
+        observation.exposed_model_identity,
+        observation.input_tokens,
+        observation.output_tokens,
+        observation.turns,
+        observation.elapsed_milliseconds,
+        observation.timing_disposition,
+    )
+    disposition = production_response_disposition(configuration, response)
+    if disposition is not LabObservationDisposition.INVALID_ARTIFACT:
+        return disposition, None, None
+    try:
+        decoded = json.loads(raw_response.decode())
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return LabObservationDisposition.INVALID_JSON, None, None
+    artifact, refusal = _parse_raw_role_output(decoded, intent)
+    if artifact is not None:
+        return LabObservationDisposition.VALIDATED, artifact, None
+    return (
+        (
+            LabObservationDisposition.INVALID_DOSSIER
+            if intent.role is ResearchRole.EVIDENCE_COLLECTOR
+            else LabObservationDisposition.INVALID_ARTIFACT
+        ),
+        None,
+        refusal,
+    )
 
 
 def _observation_timing_is_valid(observation: LabCallObservation) -> bool:
@@ -806,6 +906,7 @@ def _observation_timing_is_valid(observation: LabCallObservation) -> bool:
     if observation.disposition in (
         LabObservationDisposition.QUOTA_EXHAUSTED,
         LabObservationDisposition.ADAPTER_REFUSED,
+        LabObservationDisposition.INDETERMINATE_EFFECT,
     ):
         return observation.timing_disposition is ModelTimingDisposition.UNAVAILABLE
     return observation.timing_disposition is ModelTimingDisposition.WITHIN_BUDGET

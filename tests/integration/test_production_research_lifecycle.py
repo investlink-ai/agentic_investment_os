@@ -23,6 +23,7 @@ from agentic_investment_os.domain.lifecycle import (
     AdvanceReceipt,
     AdvanceRecovery,
     InvalidLifecycleStateError,
+    LifecycleLiveness,
     LifecyclePersistenceError,
     LifecyclePhase,
     NoActionReason,
@@ -720,7 +721,20 @@ def test_production_research_interruption_after_intent_never_repeats_the_effect(
         ).fetchone() == (intents_before,)
         assert connection.execute(
             "SELECT COUNT(*) FROM production_research_call_observations"
-        ).fetchone() == (observations_before,)
+        ).fetchone() == (observations_before + 1,)
+        terminal_observation = json.loads(
+            connection.execute(
+                "SELECT observation_json FROM production_research_call_observations "
+                "ORDER BY rowid DESC LIMIT 1"
+            ).fetchone()[0]
+        )
+    assert terminal_observation["disposition"] == (
+        LabObservationDisposition.INDETERMINATE_EFFECT.value
+    )
+    assert terminal_observation["timing_disposition"] == (ModelTimingDisposition.UNAVAILABLE.value)
+    status = _configured_status(state_root)()
+    assert status.liveness is LifecycleLiveness.FAILED_CLOSED
+    assert status.durable_reason is AdvanceFailureReason.RESEARCH_FAILED
 
 
 def test_skeptic_rejection_is_durable_no_action_without_memory(tmp_path: Path) -> None:
@@ -907,6 +921,75 @@ def test_production_advance_records_validated_research_and_belief_events_once(
         match="invalid production research call history",
     ):
         status()
+
+
+def test_production_research_uses_each_exact_attention_subject_evidence_set(
+    tmp_path: Path,
+) -> None:
+    state_root = tmp_path / "runtime"
+    universe = _production_universe_with_active_holding()
+    discovery_universe = deepcopy(universe)
+    discovery_positions = discovery_universe["positions"]
+    assert isinstance(discovery_positions, dict)
+    discovery_position_payload = discovery_positions["payload"]
+    assert isinstance(discovery_position_payload, dict)
+    discovery_position_payload["items"] = []
+    reseal_recorded_snapshot(discovery_universe, "positions")
+    model = _ValidProductionModel()
+    for trading_date, key in (
+        (date(2026, 8, 19), "stage-three-exact-evidence-observed"),
+        (date(2026, 8, 20), "stage-three-exact-evidence-watch"),
+    ):
+        discovery = _configure(
+            state_root,
+            universe=discovery_universe,
+            model=model,
+        )
+        discovery_receipt = _advance_on(discovery, key, trading_date)
+        assert discovery_receipt.disposition is AdvanceDisposition.NO_ACTION
+    capability = _configure(state_root, universe=universe, model=model)
+    receipt = _advance(capability, "stage-three-exact-evidence-research")
+    assert receipt.disposition is AdvanceDisposition.ADVANCED
+    status = _configured_status(state_root)
+    status()
+    with sqlite3.connect(state_root / "lifecycle.sqlite3") as connection:
+        row = connection.execute(
+            "SELECT attention_artifact FROM lifecycle_events "
+            "WHERE event_kind = 'attention_selected' ORDER BY rowid DESC LIMIT 1"
+        ).fetchone()
+        assert row is not None
+        attention = json.loads(row[0])
+        attention = attention["payload"]
+        cards = {
+            card["card_id"]: tuple(card["evidence_artifact_ids"])
+            for card in attention["candidate_cards"]
+        }
+        expected_by_request = {
+            request["request_id"]: cards[request["candidate_card_id"]]
+            for request in attention["dossier_requests"]
+        }
+        expected_by_request.update(
+            {
+                refresh["refresh_id"]: tuple(refresh["evidence_artifact_ids"])
+                for refresh in attention["holding_refreshes"]
+                if refresh["disposition"] == "required"
+            }
+        )
+        intent_rows = connection.execute(
+            "SELECT request_id, intent_json FROM production_research_call_intents"
+        ).fetchall()
+
+    assert len(expected_by_request) == EXPECTED_SUBJECTS
+    assert len(set(expected_by_request.values())) == EXPECTED_SUBJECTS
+    assert intent_rows
+    for request_id, intent_json in intent_rows:
+        intent = json.loads(intent_json)
+        model_input = json.loads(intent["model_input_json"])
+        assert (
+            tuple(item["artifact_id"] for item in model_input["evidence"])
+            == (expected_by_request[request_id])
+        )
+    status()
 
 
 def test_production_research_requires_official_evidence_before_any_model_effect(
@@ -1116,6 +1199,63 @@ def test_status_rederives_observation_content_timing_and_discriminator(
                     row[0],
                 ),
             )
+
+    with pytest.raises(
+        LifecyclePersistenceError,
+        match="invalid production research call history",
+    ):
+        status()
+
+
+@pytest.mark.parametrize("corruption", ["stored_disposition", "coherent_failure_identity"])
+def test_status_rederives_failed_response_and_binds_its_refusal_identity(
+    tmp_path: Path,
+    corruption: str,
+) -> None:
+    state_root = tmp_path / "runtime"
+    model = RecordedResearchModel(
+        (
+            RecordedModelFixture(
+                ModelCallDisposition.RESPONDED,
+                b"{}",
+                MODEL_IDENTITY,
+                timing_disposition=ModelTimingDisposition.WITHIN_BUDGET,
+            ),
+        )
+    )
+    capability = _configure(state_root, universe=recorded_universe(), model=model)
+    receipt = _advance(capability, "stage-three-failure-identity")
+    assert receipt.failure_reason is AdvanceFailureReason.RESEARCH_FAILED
+    status = _configured_status(state_root)
+    status()
+
+    with sqlite3.connect(state_root / "lifecycle.sqlite3") as connection:
+        row = connection.execute(
+            "SELECT call_id, observation_json FROM production_research_call_observations"
+        ).fetchone()
+        assert row is not None
+        observation = json.loads(row[1])
+        raw_response = b"{}"
+        observation["disposition"] = LabObservationDisposition.INVALID_JSON.value
+        observation["artifact_refusal"] = None
+        if corruption == "coherent_failure_identity":
+            raw_response = b"not-json"
+            observation["raw_response_hash"] = hashlib.sha256(raw_response).hexdigest()
+        observation_json = json.dumps(observation, sort_keys=True, separators=(",", ":"))
+        connection.execute(
+            "DROP TRIGGER production_research_call_observations_are_append_only_update"
+        )
+        connection.execute(
+            "UPDATE production_research_call_observations "
+            "SET observation_json = ?, raw_response = ?, observation_hash = ? "
+            "WHERE call_id = ?",
+            (
+                observation_json,
+                raw_response,
+                hashlib.sha256(observation_json.encode()).hexdigest(),
+                row[0],
+            ),
+        )
 
     with pytest.raises(
         LifecyclePersistenceError,

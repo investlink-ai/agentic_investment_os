@@ -173,13 +173,15 @@ configuration, tools, Evidence Cutoff, and input hashes.
 Production `Advance` applies that workflow only to Dossier requests and due holding refreshes named by
 the pinned Attention Artifact. Evidence Collector runs during `BuildDossiers`; the remaining roles run
 in the fixed order during `RunResearch`, with each role receiving only its declared material. Each
-subject input is non-empty, stays within the configured evidence-artifact bound, and includes captured
-evidence from at least one admitted official source. A Thesis with an active uninvestable condition is
-a durable no-valid-Thesis outcome and skips later roles for that subject. A Skeptic rejection records
-the Thesis and rejection but skips Scenario Forecaster and CIO. A request for more evidence fails
-closed for the current cycle rather than substituting stale or undeclared material. CIO output remains
-research: it contains one of the five approved stances and never a weight, target, order, packet, or
-broker instruction.
+subject input is the exact evidence-artifact set recorded by its Candidate Card or holding refresh;
+Stage 3 cannot widen that set. Stage 2 admits globally relevant official macro evidence into each
+subject set alongside its identity-linked evidence. The resulting set is non-empty, stays within the
+configured evidence-artifact bound, and includes captured evidence from at least one admitted official
+source. A Thesis with an active uninvestable condition is a durable no-valid-Thesis outcome and skips
+later roles for that subject. A Skeptic rejection records the Thesis and rejection but skips Scenario
+Forecaster and CIO. A request for more evidence fails closed for the current cycle rather than
+substituting stale or undeclared material. CIO output remains research: it contains one of the five
+approved stances and never a weight, target, order, packet, or broker instruction.
 
 When every researched subject is rejected or every CIO abstains, the cycle records a durable no-action
 outcome. Otherwise `UpdateMemory` submits each validated non-abstaining CIO resolution through

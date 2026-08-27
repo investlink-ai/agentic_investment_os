@@ -100,7 +100,11 @@ MEMORY_CHECKPOINT = ResearchCheckpoint(("3" * SHA256_HEX_LENGTH,))
 if TYPE_CHECKING:
     from agentic_investment_os.application.memory import Record
     from agentic_investment_os.domain.attention import AttentionInputs
-    from agentic_investment_os.evidence.capture import EvidenceCaptureSummary, EvidenceVault
+    from agentic_investment_os.evidence.capture import (
+        EvidenceCaptureSummary,
+        EvidenceStoredRecord,
+        EvidenceVault,
+    )
     from agentic_investment_os.research.production import ProductionResearch
 
 
@@ -125,6 +129,16 @@ class _NoneSpoof:
 @dataclass(frozen=True, slots=True)
 class _FixtureProductionResearch:
     policy: object
+
+
+@dataclass(frozen=True, slots=True)
+class _MissingSubjectEvidenceVault:
+    def stored_records_for_artifacts(
+        self,
+        artifact_ids: tuple[str, ...],
+    ) -> tuple[EvidenceStoredRecord, ...]:
+        _ = artifact_ids
+        return ()
 
 
 def _request(key: str = "concurrent-request") -> AdvanceRequest:
@@ -853,6 +867,54 @@ def test_production_research_reference_rejects_a_non_research_phase() -> None:
             attention_artifact(identity, snapshot, evidence_capture_checkpoint()),
             snapshot.inputs.position_snapshot,
             None,
+        )
+
+
+def test_production_research_reference_requires_a_checkpoint_for_refusal_identity() -> None:
+    identity = pinned_run_identity(_request())
+    snapshot = universe_snapshot(identity)
+    artifact = attention_artifact(identity, snapshot, evidence_capture_checkpoint())
+
+    with pytest.raises(ValueError, match="lifecycle stream checkpoint order is invalid"):
+        ProductionResearchReference(
+            identity,
+            LifecyclePhase.BUILD_DOSSIERS,
+            artifact,
+            snapshot.inputs.position_snapshot,
+            None,
+            "f" * SHA256_HEX_LENGTH,
+        )
+    with pytest.raises(ValueError, match="lifecycle stream checkpoint order is invalid"):
+        ProductionResearchReference(
+            identity,
+            LifecyclePhase.BUILD_DOSSIERS,
+            artifact,
+            snapshot.inputs.position_snapshot,
+            ResearchCheckpoint(),
+            "invalid",
+        )
+
+
+def test_advance_rejects_missing_attention_owned_subject_evidence() -> None:
+    identity = pinned_run_identity(_request())
+    snapshot = universe_snapshot(identity)
+    evidence = evidence_capture_checkpoint()
+    artifact = attention_artifact(identity, snapshot, evidence)
+    capability = replace(
+        _advance(
+            _DecisionOnRefusalLedger(PerformDossierBuild(identity, snapshot, evidence, artifact))
+        ),
+        evidence_vault=cast("EvidenceVault", _MissingSubjectEvidenceVault()),
+    )
+
+    with pytest.raises(
+        InvalidLifecycleStateError,
+        match="lifecycle ledger returned an incomplete checkpoint result",
+    ):
+        capability(
+            cycle=_cycle(),
+            mode="champion",
+            idempotency_key="concurrent-request",
         )
 
 

@@ -584,6 +584,7 @@ class ProductionResearchReference:
     attention_artifact: AttentionArtifact
     position_snapshot: PositionSnapshot
     checkpoint: ResearchCheckpoint | None
+    refusal_id: str | None = None
 
     def __post_init__(self) -> None:
         if (
@@ -593,6 +594,10 @@ class ProductionResearchReference:
             or self.attention_artifact.data_regime != self.pinned_run_identity.data_regime
             or self.position_snapshot.fingerprint != self.pinned_run_identity.position_snapshot_hash
             or (self.checkpoint is not None and type(self.checkpoint) is not ResearchCheckpoint)
+            or (
+                self.refusal_id is not None
+                and (self.checkpoint is None or not is_sha256(self.refusal_id))
+            )
         ):
             raise ValueError(_INVALID_CHECKPOINT_ORDER)
 
@@ -1691,6 +1696,7 @@ def reconstruct_production_research_checkpoints(
             continue
         refusal = refusals.get(progress.request.idempotency_key.value)
         build_checkpoint = progress.dossier_checkpoint
+        build_refusal_id = None
         if (
             build_checkpoint is None
             and refusal is not None
@@ -1699,6 +1705,7 @@ def reconstruct_production_research_checkpoints(
             and refusal.research_refusal is not None
         ):
             build_checkpoint = refusal.research_refusal.checkpoint
+            build_refusal_id = refusal.research_refusal.refusal_id
         references.append(
             ProductionResearchReference(
                 progress.pinned_run_identity,
@@ -1706,11 +1713,13 @@ def reconstruct_production_research_checkpoints(
                 attention,
                 snapshot.inputs.position_snapshot,
                 build_checkpoint,
+                build_refusal_id,
             )
         )
         if progress.dossier_checkpoint is None:
             continue
         research_checkpoint = progress.research_checkpoint
+        research_refusal_id = None
         if (
             research_checkpoint is None
             and refusal is not None
@@ -1719,6 +1728,7 @@ def reconstruct_production_research_checkpoints(
             and refusal.research_refusal is not None
         ):
             research_checkpoint = refusal.research_refusal.checkpoint
+            research_refusal_id = refusal.research_refusal.refusal_id
         references.append(
             ProductionResearchReference(
                 progress.pinned_run_identity,
@@ -1726,6 +1736,7 @@ def reconstruct_production_research_checkpoints(
                 attention,
                 snapshot.inputs.position_snapshot,
                 research_checkpoint,
+                research_refusal_id,
             )
         )
     return tuple(references)

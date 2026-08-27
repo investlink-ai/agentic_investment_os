@@ -69,6 +69,8 @@ __all__ = (
     "ProductionResearchResolution",
     "ProductionResearchRun",
     "ProductionResearchSubject",
+    "production_call_refusal_identity",
+    "production_response_disposition",
 )
 
 _INVALID_INTENT = "invalid production research call intent"
@@ -595,7 +597,14 @@ class ProductionResearch:
                 raise ValueError(_MISSING_REPLAY_OBSERVATION)
             return _CallResult(intent, observation)
         if preparation.disposition is not LabCallPreparationDisposition.EFFECT_REQUIRED:
-            return _CallResult(intent, _preparation_refusal(intent, preparation.disposition))
+            observation = _preparation_refusal(intent, preparation.disposition)
+            if preparation.disposition is LabCallPreparationDisposition.INDETERMINATE_EFFECT:
+                observation = self.ledger.append_observation(
+                    intent,
+                    observation,
+                    recorded_at,
+                )
+            return _CallResult(intent, observation)
         response = self.model.call(intent.model_request())
         observation = _observe(
             intent,
@@ -721,7 +730,7 @@ def _observe(  # noqa: PLR0912, PLR0913 - validate every role predecessor explic
             None,
             ModelTimingDisposition.UNAVAILABLE,
         )
-    disposition = _response_disposition(configuration, response)
+    disposition = production_response_disposition(configuration, response)
     artifact: Dossier | Thesis | SkepticResult | ScenarioForecast | CioResolution | None = None
     artifact_refusal: DossierRefusalReason | ResearchArtifactRefusal | None = None
     if disposition is LabObservationDisposition.INVALID_ARTIFACT and response.raw_response:
@@ -811,10 +820,11 @@ def _observe(  # noqa: PLR0912, PLR0913 - validate every role predecessor explic
     )
 
 
-def _response_disposition(  # noqa: PLR0911 - each adapter failure is a distinct receipt.
+def production_response_disposition(  # noqa: PLR0911 - each failure is distinct.
     configuration: ModelConfiguration,
     response: ModelCallResponse,
 ) -> LabObservationDisposition:
+    """Classify one validated adapter response under the pinned role configuration."""
     if (
         response.raw_response is not None
         and len(response.raw_response) > MAXIMUM_MODEL_OUTPUT_BYTES
@@ -952,7 +962,7 @@ def _preparation_refusal(
     refusal_disposition = (
         LabObservationDisposition.ADAPTER_REFUSED
         if disposition is LabCallPreparationDisposition.CONFLICT
-        else LabObservationDisposition.MODEL_TIMEOUT
+        else LabObservationDisposition.INDETERMINATE_EFFECT
     )
     return LabCallObservation.create(
         call_id=intent.call_id,
@@ -980,18 +990,24 @@ def _call_refusal(
 ) -> ResearchRefusal:
     call = calls[-1]
     return ResearchRefusal(
-        _content_hash(
-            {
-                "call_id": call.intent.call_id,
-                "disposition": call.observation.disposition.value,
-                "artifact_refusal": (
-                    None
-                    if call.observation.artifact_refusal is None
-                    else call.observation.artifact_refusal.value
-                ),
-            }
-        ),
+        production_call_refusal_identity(call.intent.call_id, call.observation),
         _checkpoint(list(calls), artifact_ids),
+    )
+
+
+def production_call_refusal_identity(
+    call_id: str,
+    observation: LabCallObservation,
+) -> str:
+    """Derive the lifecycle refusal identity for one terminal failed call."""
+    return _content_hash(
+        {
+            "call_id": call_id,
+            "disposition": observation.disposition.value,
+            "artifact_refusal": (
+                None if observation.artifact_refusal is None else observation.artifact_refusal.value
+            ),
+        }
     )
 
 

@@ -328,29 +328,27 @@ class Advance:
             )
         except (EvidencePersistenceError, InvalidEvidenceError) as error:
             raise InvalidLifecycleStateError(_INCOMPLETE_CHECKPOINT_RESULT) from error
+        records_by_id = {record.artifact.artifact_id: record for record in records}
         cards = {card.card_id: card for card in attention.candidate_cards}
-        requested: list[tuple[str, EquityInstrumentIdentity]] = []
+        requested: list[tuple[str, EquityInstrumentIdentity, tuple[str, ...]]] = []
         for request in attention.dossier_requests:
             card = cards.get(request.candidate_card_id)
             if card is None or type(request.identity) is not EquityInstrumentIdentity:
                 raise InvalidLifecycleStateError(_INCOMPLETE_CHECKPOINT_RESULT)
-            requested.append((request.request_id, request.identity))
+            requested.append((request.request_id, request.identity, card.evidence_artifact_ids))
         for refresh in attention.holding_refreshes:
             if refresh.disposition is not HoldingRefreshDisposition.REQUIRED:
                 continue
             if type(refresh.identity) is not EquityInstrumentIdentity:
                 raise InvalidLifecycleStateError(_INCOMPLETE_CHECKPOINT_RESULT)
-            requested.append((refresh.refresh_id, refresh.identity))
+            requested.append((refresh.refresh_id, refresh.identity, refresh.evidence_artifact_ids))
         subjects: list[ProductionResearchSubject] = []
         graphs: list[tuple[str, ProductionBeliefGraph]] = []
-        for request_id, identity in sorted(requested):
-            subject_records = tuple(
-                record
-                for record in records
-                if any(mapping.identity == identity for mapping in record.artifact.entity_mappings)
-                or record.artifact.feed
-                in (EvidenceFeed.FEDERAL_RESERVE, EvidenceFeed.BLS, EvidenceFeed.BEA)
-            )
+        for request_id, identity, evidence_ids in sorted(requested):
+            try:
+                subject_records = tuple(records_by_id[artifact_id] for artifact_id in evidence_ids)
+            except KeyError as error:
+                raise InvalidLifecycleStateError(_INCOMPLETE_CHECKPOINT_RESULT) from error
             subject = ProductionResearchSubject(
                 request_id,
                 identity,
