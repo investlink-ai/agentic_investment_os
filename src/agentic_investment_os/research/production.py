@@ -349,14 +349,18 @@ class ProductionModelResponseRecord:
             self.turns,
             self.elapsed_milliseconds,
         )
+        reported_text_values = (
+            self.disposition,
+            self.exposed_model_identity,
+            self.timing_disposition,
+        )
         if (
             any(type(item) is not bool for item in validity)
-            or (self.disposition is not None and type(self.disposition) is not str)
-            or (
-                self.exposed_model_identity is not None
-                and type(self.exposed_model_identity) is not str
+            or any(
+                item is not None
+                and (type(item) is not str or len(item) > _MAXIMUM_REPORTED_TEXT_LENGTH)
+                for item in reported_text_values
             )
-            or (self.timing_disposition is not None and type(self.timing_disposition) is not str)
             or any(
                 item is not None
                 and (type(item) is not int or abs(item) > _MAXIMUM_MODEL_RESOURCE_VALUE)

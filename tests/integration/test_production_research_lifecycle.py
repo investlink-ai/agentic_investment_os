@@ -1467,13 +1467,16 @@ def test_status_translates_unparseable_durable_integer_to_history_corruption(
     "corruption",
     [
         "disposition_missing",
+        "disposition_overlong",
         "raw_hash_missing",
         "identity_invalid",
+        "identity_overlong",
         "input_tokens_missing",
         "output_tokens_negative",
         "turns_missing",
         "elapsed_negative",
         "timing_missing",
+        "timing_overlong",
     ],
 )
 def test_status_rejects_inconsistent_reported_response_validity(
@@ -1506,10 +1509,15 @@ def test_status_rejects_inconsistent_reported_response_validity(
         assert isinstance(reported, dict)
         if corruption == "disposition_missing":
             reported["disposition"] = None
+        elif corruption == "disposition_overlong":
+            reported["disposition"] = "x" * 257
+            reported["disposition_valid"] = False
         elif corruption == "raw_hash_missing":
             reported["raw_response_hash"] = None
         elif corruption == "identity_invalid":
             reported["exposed_model_identity_valid"] = True
+        elif corruption == "identity_overlong":
+            reported["exposed_model_identity"] = "x" * 257
         elif corruption == "input_tokens_missing":
             reported["input_tokens"] = None
         elif corruption == "output_tokens_negative":
@@ -1518,6 +1526,9 @@ def test_status_rejects_inconsistent_reported_response_validity(
             reported["turns"] = None
         elif corruption == "elapsed_negative":
             reported["elapsed_milliseconds"] = -1
+        elif corruption == "timing_overlong":
+            reported["timing_disposition"] = "x" * 257
+            reported["timing_disposition_valid"] = False
         else:
             reported["timing_disposition"] = None
         observation_json = json.dumps(observation, sort_keys=True, separators=(",", ":"))
