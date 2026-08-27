@@ -38,7 +38,6 @@ from agentic_investment_os.memory.admission import (
     BeliefClaimKind,
     BeliefEvidenceReference,
     BeliefEvidenceRelationship,
-    RecordRefusalCode,
 )
 from agentic_investment_os.memory.beliefs import (
     BeliefEvidenceResolver,
@@ -106,11 +105,6 @@ _CORRUPT = "invalid production research call history"
 _WRITE_FAILED = "production research call persistence failed"
 _BEGIN_IMMEDIATE = "BEGIN IMMEDIATE"
 _INTENT_COLUMN_COUNT = 7
-_MEMORY_REFUSAL_REASONS = (
-    "current_belief_history_unavailable",
-    "unknown_record_refusal",
-    *(reason.value for reason in RecordRefusalCode),
-)
 
 
 @dataclass(frozen=True, slots=True)
@@ -335,7 +329,7 @@ class SQLiteProductionCallLedger:
                 else self._reconstruct_run(reference, by_request, observations, dossiers)
             )
             _validate_terminal_outcome(reference, outcome)
-            if reference.memory_refusal_id is not None:
+            if reference.memory_refusal is not None:
                 if outcome is None or outcome.refusal_id is not None:
                     raise LifecyclePersistenceError(_CORRUPT)
                 failed_index = _memory_refusal_index(reference, outcome.active_resolutions)
@@ -930,25 +924,22 @@ def _memory_refusal_index(
     reference: ProductionResearchReference,
     active: tuple[tuple[str, Dossier, Thesis, CioResolution], ...],
 ) -> int:
-    refusal_id = reference.memory_refusal_id
-    if refusal_id is None:  # pragma: no cover - caller narrows the reference.
+    refusal = reference.memory_refusal
+    if refusal is None:  # pragma: no cover - caller narrows the reference.
         raise LifecyclePersistenceError(_CORRUPT)
-    matches = tuple(
-        index
-        for index, (_, _, _, cio) in enumerate(active)
-        for reason in _MEMORY_REFUSAL_REASONS
-        if refusal_id
-        == _content_hash(
-            {
-                "run_id": reference.pinned_run_identity.run_id,
-                "event_id": _belief_event_identity(cio)[1],
-                "reason": reason,
-            }
-        )
-    )
-    if len(matches) != 1:
+    detail = refusal.memory_update_refusal
+    if detail is None:  # pragma: no cover - reference invariant requires typed detail.
         raise LifecyclePersistenceError(_CORRUPT)
-    return matches[0]
+    event_ids = tuple(_belief_event_identity(cio)[1] for _, _, _, cio in active)
+    try:
+        failed_index = event_ids.index(detail.failed_event_id)
+    except ValueError as error:
+        raise LifecyclePersistenceError(_CORRUPT) from error
+    if detail.run_id != reference.pinned_run_identity.run_id or detail.accepted_event_ids != tuple(
+        sorted(event_ids[:failed_index])
+    ):
+        raise LifecyclePersistenceError(_CORRUPT)
+    return failed_index
 
 
 def _validate_terminal_outcome(

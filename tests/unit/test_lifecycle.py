@@ -45,6 +45,8 @@ from agentic_investment_os.domain.lifecycle import (
     LifecycleHistory,
     LifecycleLedger,
     LifecyclePhase,
+    MemoryUpdateRefusal,
+    MemoryUpdateRefusalReason,
     PerformAttentionSelection,
     PerformDossierBuild,
     PerformEvidenceCapture,
@@ -870,6 +872,78 @@ def test_research_refusal_parser_rejects_hostile_envelopes_and_checkpoints() -> 
     assert parse_research_refusal({**valid, "terminal_call_id": "1" * SHA256_HEX_LENGTH}) is None
 
 
+def test_research_refusal_parser_binds_exact_typed_memory_failure() -> None:
+    detail = MemoryUpdateRefusal(
+        "a" * SHA256_HEX_LENGTH,
+        "b" * SHA256_HEX_LENGTH,
+        MemoryUpdateRefusalReason.INVALID_AUTHORITATIVE_HISTORY,
+    )
+    refusal = ResearchRefusal(detail.refusal_id, memory_update_refusal=detail)
+    payload = refusal.to_payload()
+
+    assert parse_research_refusal(payload) == refusal
+    memory_payload = payload["memory_update_refusal"]
+    assert isinstance(memory_payload, dict)
+    assert (
+        parse_research_refusal(
+            {
+                **payload,
+                "memory_update_refusal": {
+                    **memory_payload,
+                    "reason": MemoryUpdateRefusalReason.INVALID_EVENT.value,
+                },
+            }
+        )
+        is None
+    )
+    with pytest.raises(ValueError, match="lifecycle stream checkpoint order is invalid"):
+        ResearchRefusal("f" * SHA256_HEX_LENGTH, memory_update_refusal=detail)
+    with pytest.raises(ValueError, match="lifecycle stream checkpoint order is invalid"):
+        ResearchRefusal(
+            detail.refusal_id,
+            ResearchCheckpoint(("c" * SHA256_HEX_LENGTH,)),
+            memory_update_refusal=detail,
+        )
+    with pytest.raises(ValueError, match="lifecycle stream checkpoint order is invalid"):
+        ResearchRefusal(
+            detail.refusal_id,
+            ResearchCheckpoint(call_ids=("c" * SHA256_HEX_LENGTH,)),
+            "c" * SHA256_HEX_LENGTH,
+            detail,
+        )
+
+
+def test_memory_update_refusal_rejects_invalid_identity_and_hostile_payloads() -> None:
+    failed_event_id = "b" * SHA256_HEX_LENGTH
+    detail = MemoryUpdateRefusal(
+        "a" * SHA256_HEX_LENGTH,
+        failed_event_id,
+        MemoryUpdateRefusalReason.INVALID_EVENT,
+    )
+    valid = detail.to_payload()
+
+    with pytest.raises(ValueError, match="lifecycle stream checkpoint order is invalid"):
+        MemoryUpdateRefusal(
+            "invalid",
+            failed_event_id,
+            MemoryUpdateRefusalReason.INVALID_EVENT,
+        )
+
+    invalid_payloads: tuple[dict[str, object], ...] = (
+        {**valid, "schema_version": 2},
+        {**valid, "accepted_event_ids": "not-a-list"},
+        {**valid, "reason": "not-a-memory-refusal-reason"},
+        {**valid, "accepted_event_ids": [failed_event_id]},
+    )
+
+    for memory_payload in invalid_payloads:
+        refusal_payload = {
+            **ResearchRefusal(detail.refusal_id).to_payload(),
+            "memory_update_refusal": memory_payload,
+        }
+        assert parse_research_refusal(refusal_payload) is None
+
+
 def test_production_research_reference_rejects_a_non_research_phase() -> None:
     identity = pinned_run_identity(_request())
     snapshot = universe_snapshot(identity)
@@ -923,6 +997,15 @@ def test_production_research_reference_binds_memory_refusal_to_completed_researc
     identity = pinned_run_identity(_request())
     snapshot = universe_snapshot(identity)
     artifact = attention_artifact(identity, snapshot, evidence_capture_checkpoint())
+    detail = MemoryUpdateRefusal(
+        identity.run_id,
+        "e" * SHA256_HEX_LENGTH,
+        MemoryUpdateRefusalReason.INVALID_EVENT,
+    )
+    memory_refusal = ResearchRefusal(
+        detail.refusal_id,
+        memory_update_refusal=detail,
+    )
     reference = ProductionResearchReference(
         identity,
         LifecyclePhase.RUN_RESEARCH,
@@ -930,15 +1013,15 @@ def test_production_research_reference_binds_memory_refusal_to_completed_researc
         snapshot.inputs.position_snapshot,
         ResearchCheckpoint(),
         memory_recorded_at=identity.evidence_cutoff,
-        memory_refusal_id="f" * SHA256_HEX_LENGTH,
+        memory_refusal=memory_refusal,
     )
 
-    assert reference.memory_refusal_id == "f" * SHA256_HEX_LENGTH
+    assert reference.memory_refusal == memory_refusal
     invalid_replacements = (
         {"phase": LifecyclePhase.BUILD_DOSSIERS},
         {"checkpoint": None},
         {"refusal_id": "a" * SHA256_HEX_LENGTH},
-        {"memory_refusal_id": "invalid"},
+        {"memory_refusal": ResearchRefusal("f" * SHA256_HEX_LENGTH)},
         {"memory_recorded_at": None},
         {
             "memory_checkpoint": ResearchCheckpoint(("b" * SHA256_HEX_LENGTH,)),

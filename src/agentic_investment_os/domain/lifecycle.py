@@ -69,6 +69,8 @@ __all__ = (
     "LifecycleRecord",
     "LifecycleStatus",
     "LifecycleStatusProjection",
+    "MemoryUpdateRefusal",
+    "MemoryUpdateRefusalReason",
     "NoActionReason",
     "PerformAttentionSelection",
     "PerformDossierBuild",
@@ -329,6 +331,21 @@ class NoActionReason(StrEnum):
     CIO_ABSTAINED = "cio_abstained"
 
 
+class MemoryUpdateRefusalReason(StrEnum):
+    """Bound the exact memory-capability outcome that stopped one update."""
+
+    CURRENT_BELIEF_HISTORY_UNAVAILABLE = "current_belief_history_unavailable"
+    UNKNOWN_RECORD_REFUSAL = "unknown_record_refusal"
+    INVALID_EVENT = "invalid_event"
+    EVENT_IDENTITY_CONFLICT = "event_identity_conflict"
+    INVALID_TRANSITION = "invalid_transition"
+    INVALID_AUTHORITATIVE_HISTORY = "invalid_authoritative_history"
+    INVALID_EVIDENCE = "invalid_evidence"
+    EVIDENCE_MISSING = "evidence_missing"
+    EVIDENCE_HASH_MISMATCH = "evidence_hash_mismatch"
+    EVIDENCE_AFTER_CUTOFF = "evidence_after_cutoff"
+
+
 class InputRefusalCode(StrEnum):
     """Classify a bounded refusal detected before lifecycle effects begin."""
 
@@ -556,17 +573,69 @@ class ResearchCheckpoint:
 
 
 @dataclass(frozen=True, slots=True)
+class MemoryUpdateRefusal:
+    """Retain the exact bounded memory failure and any preceding accepted events."""
+
+    run_id: str
+    failed_event_id: str
+    reason: MemoryUpdateRefusalReason
+    accepted_event_ids: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if (
+            not is_sha256(self.run_id)
+            or not is_sha256(self.failed_event_id)
+            or type(self.reason) is not MemoryUpdateRefusalReason
+            or not _valid_optional_hash_references(self.accepted_event_ids)
+            or self.failed_event_id in self.accepted_event_ids
+        ):
+            raise ValueError(_INVALID_CHECKPOINT_ORDER)
+
+    @property
+    def refusal_id(self) -> str:
+        """Derive the public refusal identity from its exact retained cause."""
+        return _content_hash(
+            {
+                "run_id": self.run_id,
+                "event_id": self.failed_event_id,
+                "reason": self.reason.value,
+            }
+        )
+
+    def to_payload(self) -> dict[str, object]:
+        return {
+            "schema_version": 1,
+            "record_kind": "memory_update_refusal",
+            "run_id": self.run_id,
+            "failed_event_id": self.failed_event_id,
+            "reason": self.reason.value,
+            "accepted_event_ids": list(self.accepted_event_ids),
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class ResearchRefusal:
     """Identify one bounded fail-closed research or memory outcome."""
 
     refusal_id: str
     checkpoint: ResearchCheckpoint = field(default_factory=ResearchCheckpoint)
     terminal_call_id: str | None = None
+    memory_update_refusal: MemoryUpdateRefusal | None = None
 
     def __post_init__(self) -> None:
         if (
             not is_sha256(self.refusal_id)
             or type(self.checkpoint) is not ResearchCheckpoint
+            or (
+                self.memory_update_refusal is not None
+                and (
+                    type(self.memory_update_refusal) is not MemoryUpdateRefusal
+                    or self.refusal_id != self.memory_update_refusal.refusal_id
+                    or self.checkpoint
+                    != ResearchCheckpoint(self.memory_update_refusal.accepted_event_ids)
+                    or self.terminal_call_id is not None
+                )
+            )
             or (
                 self.terminal_call_id is not None
                 and (
@@ -584,6 +653,11 @@ class ResearchRefusal:
             "refusal_id": self.refusal_id,
             "checkpoint": self.checkpoint.to_payload(),
             "terminal_call_id": self.terminal_call_id,
+            "memory_update_refusal": (
+                None
+                if self.memory_update_refusal is None
+                else self.memory_update_refusal.to_payload()
+            ),
         }
 
 
@@ -601,7 +675,7 @@ class ProductionResearchReference:
     memory_checkpoint: ResearchCheckpoint | None = None
     no_action_reason: NoActionReason | None = None
     memory_recorded_at: UtcInstant | None = None
-    memory_refusal_id: str | None = None
+    memory_refusal: ResearchRefusal | None = None
 
     def __post_init__(self) -> None:
         if (
@@ -625,14 +699,14 @@ class ProductionResearchReference:
                 )
             )
             or (
-                (self.memory_checkpoint is None and self.memory_refusal_id is None)
+                (self.memory_checkpoint is None and self.memory_refusal is None)
                 != (self.memory_recorded_at is None)
             )
             or (
                 self.memory_checkpoint is not None
                 and (
                     type(self.memory_checkpoint) is not ResearchCheckpoint
-                    or self.memory_refusal_id is not None
+                    or self.memory_refusal is not None
                 )
             )
             or (
@@ -654,12 +728,15 @@ class ProductionResearchReference:
             )
             or (self.memory_checkpoint is None and self.no_action_reason is not None)
             or (
-                self.memory_refusal_id is not None
+                self.memory_refusal is not None and type(self.memory_refusal) is not ResearchRefusal
+            )
+            or (
+                type(self.memory_refusal) is ResearchRefusal
                 and (
                     self.phase is not LifecyclePhase.RUN_RESEARCH
                     or self.checkpoint is None
                     or self.refusal_id is not None
-                    or not is_sha256(self.memory_refusal_id)
+                    or self.memory_refusal.memory_update_refusal is None
                     or type(self.memory_recorded_at) is not UtcInstant
                 )
             )
@@ -1801,7 +1878,7 @@ def reconstruct_production_research_checkpoints(
         research_checkpoint = progress.research_checkpoint
         research_refusal_id = None
         research_terminal_call_id = None
-        memory_refusal_id = None
+        memory_refusal = None
         if (
             research_checkpoint is None
             and refusal is not None
@@ -1818,7 +1895,7 @@ def reconstruct_production_research_checkpoints(
             and progress.completed_phase is LifecyclePhase.RUN_RESEARCH
             and refusal.research_refusal is not None
         ):
-            memory_refusal_id = refusal.research_refusal.refusal_id
+            memory_refusal = refusal.research_refusal
         references.append(
             ProductionResearchReference(
                 progress.pinned_run_identity,
@@ -1834,10 +1911,10 @@ def reconstruct_production_research_checkpoints(
                     memory_times.get(progress.request.idempotency_key.value)
                     if progress.memory_checkpoint is not None
                     else research_times.get(progress.request.idempotency_key.value)
-                    if memory_refusal_id is not None
+                    if memory_refusal is not None
                     else None
                 ),
-                memory_refusal_id,
+                memory_refusal,
             )
         )
     return tuple(references)
@@ -2816,6 +2893,7 @@ def parse_research_refusal(value: object) -> ResearchRefusal | None:
                 "refusal_id",
                 "checkpoint",
                 "terminal_call_id",
+                "memory_update_refusal",
             }
         ),
     )
@@ -2828,12 +2906,67 @@ def parse_research_refusal(value: object) -> ResearchRefusal | None:
         return None
     checkpoint = parse_research_checkpoint(fields["checkpoint"])
     terminal_call_id = fields["terminal_call_id"]
-    if checkpoint is None or (terminal_call_id is not None and not is_sha256(terminal_call_id)):
+    memory_value = fields["memory_update_refusal"]
+    memory_refusal = _parse_memory_update_refusal(memory_value)
+    if (
+        checkpoint is None
+        or (terminal_call_id is not None and not is_sha256(terminal_call_id))
+        or (memory_value is not None and memory_refusal is None)
+    ):
         return None
     try:
-        return ResearchRefusal(fields["refusal_id"], checkpoint, terminal_call_id)
+        return ResearchRefusal(
+            fields["refusal_id"],
+            checkpoint,
+            terminal_call_id,
+            memory_refusal,
+        )
     except ValueError:
         return None
+
+
+def _parse_memory_update_refusal(value: object) -> MemoryUpdateRefusal | None:
+    if value is None:
+        return None
+    fields = _exact_mapping(
+        value,
+        frozenset(
+            {
+                "schema_version",
+                "record_kind",
+                "run_id",
+                "failed_event_id",
+                "reason",
+                "accepted_event_ids",
+            }
+        ),
+    )
+    if (
+        fields is None
+        or fields["schema_version"] != 1
+        or fields["record_kind"] != "memory_update_refusal"
+        or not is_sha256(fields["run_id"])
+        or not is_sha256(fields["failed_event_id"])
+    ):
+        return None
+    accepted_event_ids = _parse_hash_tuple(fields["accepted_event_ids"])
+    reason_value = fields["reason"]
+    if accepted_event_ids is None or type(reason_value) is not str:
+        return None
+    try:
+        reason = MemoryUpdateRefusalReason(reason_value)
+    except (TypeError, ValueError):
+        return None
+    try:
+        refusal = MemoryUpdateRefusal(
+            fields["run_id"],
+            fields["failed_event_id"],
+            reason,
+            accepted_event_ids,
+        )
+    except ValueError:
+        return None
+    return refusal if refusal.to_payload() == value else None
 
 
 def _parse_hash_tuple(value: object) -> tuple[str, ...] | None:

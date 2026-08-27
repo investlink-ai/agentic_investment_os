@@ -1084,7 +1084,14 @@ def test_memory_refusal_is_durable_after_model_observations(tmp_path: Path) -> N
         assert connection.execute("SELECT COUNT(*) FROM belief_events").fetchone() == (0,)
 
 
-def test_status_rejects_coherently_resealed_memory_refusal_identity(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "corruption",
+    ["alternate_reason_identity", "checkpoint", "terminal_call"],
+)
+def test_status_rejects_coherently_resealed_memory_refusal_material(
+    tmp_path: Path,
+    corruption: str,
+) -> None:
     state_root = tmp_path / "runtime"
     capability = _configure(
         state_root,
@@ -1105,7 +1112,23 @@ def test_status_rejects_coherently_resealed_memory_refusal_identity(tmp_path: Pa
         assert row is not None
         refusal = json.loads(row[0])
         assert isinstance(refusal, dict)
-        refusal["refusal_id"] = "e" * 64
+        checkpoint = refusal["checkpoint"]
+        memory_refusal = refusal["memory_update_refusal"]
+        assert isinstance(checkpoint, dict)
+        assert isinstance(memory_refusal, dict)
+        if corruption == "alternate_reason_identity":
+            refusal["refusal_id"] = _content_hash(
+                {
+                    "run_id": memory_refusal["run_id"],
+                    "event_id": memory_refusal["failed_event_id"],
+                    "reason": RecordRefusalCode.INVALID_EVENT.value,
+                }
+            )
+        elif corruption == "checkpoint":
+            checkpoint["artifact_ids"] = ["a" * 64]
+        else:
+            checkpoint["call_ids"] = ["a" * 64]
+            refusal["terminal_call_id"] = "a" * 64
         connection.execute("DROP TRIGGER advance_refusals_are_append_only_update")
         connection.execute(
             "UPDATE advance_refusals SET research_refusal_id = ?, research_refusal = ?",
@@ -1116,8 +1139,8 @@ def test_status_rejects_coherently_resealed_memory_refusal_identity(tmp_path: Pa
         )
 
     with pytest.raises(
-        LifecyclePersistenceError,
-        match="invalid production research call history",
+        InvalidLifecycleStateError,
+        match="invalid idempotency_key in lifecycle refusal ledger",
     ):
         status()
 

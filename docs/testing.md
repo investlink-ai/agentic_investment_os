@@ -415,10 +415,11 @@ evidence. A scenario becomes mandatory when its owning behavior is implemented.
   lifecycle refusal identities, re-derives the allowed terminal role path for every subject, and
   validates every checkpoint reference. Tests coherently reseal a successful role prefix as completed
   research, substitute another run's valid Belief Event into a memory checkpoint, and replace a
-  durable memory-refusal identity; each must fail closed. Memory checkpoints also prove zero model-call
-  resources, the exact no-action outcome, and run-owned Belief Event material. A clock that advances
-  independently between lifecycle and memory persistence must still reconstruct valid completion.
-  Mutation or removal of referenced production rows fails closed.
+  durable memory refusal with a valid alternate-reason identity or changed checkpoint; each must fail
+  closed. Memory checkpoints also prove zero model-call resources, the exact no-action outcome, and
+  run-owned Belief Event material. A clock that advances independently between lifecycle and memory
+  persistence must still reconstruct valid completion. Mutation or removal of referenced production
+  rows fails closed.
 - Production malformed JSON, oversized output, timeout, quota exhaustion, output-token overflow,
   turn overflow, citation failure, missing official evidence, over-bound evidence, evidence failure,
   and memory refusal are durable failures with no model-service substitution and no invalid Belief

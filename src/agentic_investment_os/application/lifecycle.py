@@ -40,6 +40,8 @@ from agentic_investment_os.domain.lifecycle import (
     LifecyclePersistenceError,
     LifecycleStatus,
     LifecycleStatusProjection,
+    MemoryUpdateRefusal,
+    MemoryUpdateRefusalReason,
     PerformAttentionSelection,
     PerformDossierBuild,
     PerformEvidenceCapture,
@@ -527,6 +529,7 @@ class Advance:
                     context.run_id,
                     event_id,
                     "current_belief_history_unavailable",
+                    tuple(event_ids),
                 )
             current_events = tuple(
                 node for node in current_graph.belief_nodes if node.event.belief_id == belief_id
@@ -573,7 +576,7 @@ class Advance:
                 reason = (
                     "unknown_record_refusal" if receipt.refusal is None else receipt.refusal.value
                 )
-                return _memory_refusal(context.run_id, event_id, reason)
+                return _memory_refusal(context.run_id, event_id, reason, tuple(event_ids))
             event_ids.append(event_id)
         return ResearchCheckpoint(tuple(sorted(event_ids)))
 
@@ -711,9 +714,22 @@ class Advance:
         assert_never(parsed)  # pragma: no cover
 
 
-def _memory_refusal(run_id: str, event_id: str, reason: str) -> ResearchRefusal:
+def _memory_refusal(
+    run_id: str,
+    event_id: str,
+    reason: str,
+    accepted_event_ids: tuple[str, ...],
+) -> ResearchRefusal:
+    memory_refusal = MemoryUpdateRefusal(
+        run_id,
+        event_id,
+        MemoryUpdateRefusalReason(reason),
+        tuple(sorted(accepted_event_ids)),
+    )
     return ResearchRefusal(
-        _content_hash({"run_id": run_id, "event_id": event_id, "reason": reason})
+        memory_refusal.refusal_id,
+        ResearchCheckpoint(memory_refusal.accepted_event_ids),
+        memory_update_refusal=memory_refusal,
     )
 
 
