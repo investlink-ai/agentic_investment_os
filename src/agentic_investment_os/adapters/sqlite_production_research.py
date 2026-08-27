@@ -22,6 +22,7 @@ from agentic_investment_os.domain.lifecycle import (
     LifecyclePersistenceError,
     LifecyclePhase,
     MemoryUpdateRefusal,
+    MemoryUpdateRefusalReason,
     NoActionReason,
     ProductionResearchReference,
     ResearchCheckpoint,
@@ -43,6 +44,7 @@ from agentic_investment_os.memory.admission import (
 from agentic_investment_os.memory.beliefs import (
     BeliefEvidenceResolver,
     BeliefGraphRefusal,
+    BeliefIdentityConflictReference,
     BeliefLedger,
     BeliefLifecycleReference,
     BeliefPersistenceError,
@@ -321,6 +323,7 @@ class SQLiteProductionCallLedger:
         }
         belief_references: list[BeliefLifecycleReference] = []
         absent_memory_event_ids: list[str] = []
+        identity_conflicts: list[BeliefIdentityConflictReference] = []
         memory_refusals: list[MemoryUpdateRefusal] = []
         for owner, reference in owners.items():
             owner_intents = tuple(sorted(grouped[owner], key=lambda item: item.call_id))
@@ -335,12 +338,15 @@ class SQLiteProductionCallLedger:
             if reference.memory_refusal is not None:
                 if outcome is None or outcome.refusal_id is not None:
                     raise LifecyclePersistenceError(_CORRUPT)
-                failed_index, detail, absent_event_ids = _memory_refusal_material(
-                    reference,
-                    outcome.active_resolutions,
+                failed_index, detail, absent_event_ids, refusal_conflicts = (
+                    _memory_refusal_material(
+                        reference,
+                        outcome.active_resolutions,
+                    )
                 )
                 memory_refusals.append(detail)
                 absent_memory_event_ids.extend(absent_event_ids)
+                identity_conflicts.extend(refusal_conflicts)
                 belief_references.extend(
                     self._memory_references(
                         reference,
@@ -361,11 +367,14 @@ class SQLiteProductionCallLedger:
                     or reference.no_action_reason != outcome.no_action_reason
                 ):
                     raise LifecyclePersistenceError(_CORRUPT)
-        if belief_references or absent_memory_event_ids or memory_refusals:
+        if belief_references or absent_memory_event_ids or identity_conflicts or memory_refusals:
             self._belief_ledger.validate_lifecycle_references(
                 tuple(belief_references),
                 self._evidence_vault,
                 absent_event_ids=tuple(sorted(set(absent_memory_event_ids))),
+                identity_conflicts=tuple(
+                    sorted(identity_conflicts, key=lambda item: item.event_id)
+                ),
                 memory_refusals=tuple(sorted(memory_refusals, key=lambda item: item.refusal_id)),
             )
 
@@ -933,7 +942,12 @@ def _belief_event_identity(cio: CioResolution) -> tuple[str, str]:
 def _memory_refusal_material(
     reference: ProductionResearchReference,
     active: tuple[tuple[str, Dossier, Thesis, CioResolution], ...],
-) -> tuple[int, MemoryUpdateRefusal, tuple[str, ...]]:
+) -> tuple[
+    int,
+    MemoryUpdateRefusal,
+    tuple[str, ...],
+    tuple[BeliefIdentityConflictReference, ...],
+]:
     refusal = reference.memory_refusal
     if refusal is None:  # pragma: no cover - caller narrows the reference.
         raise LifecyclePersistenceError(_CORRUPT)
@@ -945,11 +959,23 @@ def _memory_refusal_material(
         failed_index = event_ids.index(detail.failed_event_id)
     except ValueError as error:
         raise LifecyclePersistenceError(_CORRUPT) from error
-    if detail.run_id != reference.pinned_run_identity.run_id or detail.accepted_event_ids != tuple(
-        sorted(event_ids[:failed_index])
+    if (
+        detail.run_id != reference.pinned_run_identity.run_id
+        or detail.recorded_at != reference.memory_recorded_at
+        or detail.accepted_event_ids != tuple(sorted(event_ids[:failed_index]))
     ):
         raise LifecyclePersistenceError(_CORRUPT)
-    return failed_index, detail, event_ids[failed_index:]
+    if detail.reason is MemoryUpdateRefusalReason.EVENT_IDENTITY_CONFLICT:
+        attempted_hash = detail.attempted_event_content_hash
+        if attempted_hash is None:  # pragma: no cover - typed refusal requires the hash.
+            raise LifecyclePersistenceError(_CORRUPT)
+        return (
+            failed_index,
+            detail,
+            event_ids[failed_index + 1 :],
+            (BeliefIdentityConflictReference(detail.failed_event_id, attempted_hash),),
+        )
+    return failed_index, detail, event_ids[failed_index:], ()
 
 
 def _validate_terminal_outcome(

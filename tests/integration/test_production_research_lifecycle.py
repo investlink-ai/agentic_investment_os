@@ -30,12 +30,17 @@ from agentic_investment_os.domain.lifecycle import (
 )
 from agentic_investment_os.entrypoints.configuration import ConfigurationSource
 from agentic_investment_os.entrypoints.lifecycle import configure_advance, configure_status
-from agentic_investment_os.memory.admission import RecordRefusalCode
+from agentic_investment_os.memory.admission import (
+    BeliefEvent,
+    RecordRefusalCode,
+    parse_belief_event,
+)
 from agentic_investment_os.memory.beliefs import (
     BeliefGraph,
     BeliefGraphRefusal,
     BeliefGraphRefusalCode,
     BeliefPersistenceError,
+    RecordDisposition,
     RecordReceipt,
 )
 from agentic_investment_os.research.model import (
@@ -247,6 +252,39 @@ class _RefusingMemory:
 
     def __call__(self, _event: object) -> RecordReceipt:
         return RecordReceipt.refused(RecordRefusalCode.INVALID_AUTHORITATIVE_HISTORY)
+
+    def graph(self, query: object) -> BeliefGraph | BeliefGraphRefusal:
+        return self.delegate.graph(query)
+
+
+@dataclass(frozen=True, slots=True)
+class _ConflictingMemory:
+    delegate: Record
+
+    def __call__(self, event: object) -> RecordReceipt:
+        proposed = parse_belief_event(event)
+        assert proposed is not None
+        conflicting = BeliefEvent.create(
+            event_id=proposed.event_id,
+            belief_id=proposed.belief_id,
+            subject=proposed.subject,
+            claim_kind=proposed.claim_kind,
+            claim=f"{proposed.claim} Conflicting concurrent material.",
+            valid_at=proposed.valid_at,
+            transaction_at=proposed.transaction_at,
+            evidence_cutoff=proposed.evidence_cutoff,
+            confidence=proposed.confidence,
+            evidence=proposed.evidence,
+            falsifiers=proposed.falsifiers,
+            status=proposed.status,
+            transition_from_event_id=proposed.transition_from_event_id,
+            supersedes_event_id=proposed.supersedes_event_id,
+        )
+        appended = self.delegate(conflicting.to_payload())
+        assert appended.disposition is RecordDisposition.APPENDED
+        refused = self.delegate(proposed.to_payload())
+        assert refused.refusal is RecordRefusalCode.EVENT_IDENTITY_CONFLICT
+        return refused
 
     def graph(self, query: object) -> BeliefGraph | BeliefGraphRefusal:
         return self.delegate.graph(query)
@@ -1094,6 +1132,149 @@ def test_memory_refusal_is_durable_after_model_observations(tmp_path: Path) -> N
             connection.execute(statement)
 
 
+def test_status_rejects_changed_memory_refusal_observation_time(tmp_path: Path) -> None:
+    state_root = tmp_path / "runtime"
+    capability = _configure(
+        state_root,
+        universe=recorded_universe(),
+        model=_ValidProductionModel(),
+    )
+    refusing = replace(
+        capability,
+        memory=cast("Record", _RefusingMemory(capability.memory)),
+    )
+
+    receipt = _advance(refusing, "stage-three-memory-refusal-time")
+    status = _configured_status(state_root)
+
+    assert receipt.failure_reason is AdvanceFailureReason.MEMORY_UPDATE_FAILED
+    status()
+    with sqlite3.connect(state_root / "lifecycle.sqlite3") as connection:
+        connection.execute("DROP TRIGGER memory_update_refusals_are_append_only_update")
+        connection.execute(
+            "UPDATE memory_update_refusals SET recorded_at = ?",
+            ("2026-08-21T22:00:01.000000+00:00",),
+        )
+
+    with pytest.raises(
+        LifecyclePersistenceError,
+        match="invalid production research call history",
+    ):
+        status()
+
+
+def test_memory_identity_conflict_reconstructs_existing_different_event(
+    tmp_path: Path,
+) -> None:
+    state_root = tmp_path / "runtime"
+    capability = _configure(
+        state_root,
+        universe=recorded_universe(),
+        model=_ValidProductionModel(),
+    )
+    conflicting = replace(
+        capability,
+        memory=cast("Record", _ConflictingMemory(capability.memory)),
+    )
+
+    receipt = _advance(conflicting, "stage-three-memory-identity-conflict")
+    rebuilt = _configured_status(state_root)()
+
+    assert receipt.failure_reason is AdvanceFailureReason.MEMORY_UPDATE_FAILED
+    assert rebuilt.liveness is LifecycleLiveness.FAILED_CLOSED
+    with sqlite3.connect(state_root / "lifecycle.sqlite3") as connection:
+        belief_row = connection.execute("SELECT event_id, event_json FROM belief_events").fetchone()
+        refusal_row = connection.execute(
+            "SELECT refusal_json FROM memory_update_refusals"
+        ).fetchone()
+        assert belief_row is not None
+        assert refusal_row is not None
+        stored_event = json.loads(belief_row[1])
+        memory_refusal = json.loads(refusal_row[0])
+        assert isinstance(stored_event, dict)
+        assert isinstance(memory_refusal, dict)
+        assert memory_refusal["reason"] == RecordRefusalCode.EVENT_IDENTITY_CONFLICT.value
+        assert memory_refusal["failed_event_id"] == belief_row[0]
+        assert memory_refusal["attempted_event_content_hash"] != stored_event["content_hash"]
+
+
+def test_status_rejects_identity_conflict_claiming_stored_material_was_attempted(
+    tmp_path: Path,
+) -> None:
+    state_root = tmp_path / "runtime"
+    capability = _configure(
+        state_root,
+        universe=recorded_universe(),
+        model=_ValidProductionModel(),
+    )
+    conflicting = replace(
+        capability,
+        memory=cast("Record", _ConflictingMemory(capability.memory)),
+    )
+    receipt = _advance(conflicting, "stage-three-memory-identity-conflict-corruption")
+    status = _configured_status(state_root)
+
+    assert receipt.failure_reason is AdvanceFailureReason.MEMORY_UPDATE_FAILED
+    status()
+    with sqlite3.connect(state_root / "lifecycle.sqlite3") as connection:
+        belief_row = connection.execute("SELECT event_json FROM belief_events").fetchone()
+        lifecycle_row = connection.execute(
+            "SELECT research_refusal FROM advance_refusals"
+        ).fetchone()
+        journal_row = connection.execute(
+            "SELECT refusal_id, refusal_json FROM memory_update_refusals"
+        ).fetchone()
+        assert belief_row is not None
+        assert lifecycle_row is not None
+        assert journal_row is not None
+        stored_event = json.loads(belief_row[0])
+        lifecycle_refusal = json.loads(lifecycle_row[0])
+        journal_refusal = json.loads(journal_row[1])
+        assert isinstance(stored_event, dict)
+        assert isinstance(lifecycle_refusal, dict)
+        assert isinstance(journal_refusal, dict)
+        attempted_hash = stored_event["content_hash"]
+        memory_refusal = lifecycle_refusal["memory_update_refusal"]
+        assert isinstance(memory_refusal, dict)
+        memory_refusal["attempted_event_content_hash"] = attempted_hash
+        journal_refusal["attempted_event_content_hash"] = attempted_hash
+        changed_refusal_id = _content_hash(
+            {
+                "run_id": memory_refusal["run_id"],
+                "event_id": memory_refusal["failed_event_id"],
+                "reason": memory_refusal["reason"],
+                "recorded_at": memory_refusal["recorded_at"],
+                "accepted_event_ids": memory_refusal["accepted_event_ids"],
+                "attempted_event_content_hash": attempted_hash,
+            }
+        )
+        lifecycle_refusal["refusal_id"] = changed_refusal_id
+        connection.execute("DROP TRIGGER advance_refusals_are_append_only_update")
+        connection.execute("DROP TRIGGER memory_update_refusals_are_append_only_update")
+        connection.execute(
+            "UPDATE advance_refusals SET research_refusal_id = ?, research_refusal = ?",
+            (
+                changed_refusal_id,
+                json.dumps(lifecycle_refusal, sort_keys=True, separators=(",", ":")),
+            ),
+        )
+        connection.execute(
+            "UPDATE memory_update_refusals SET refusal_id = ?, refusal_json = ? "
+            "WHERE refusal_id = ?",
+            (
+                changed_refusal_id,
+                json.dumps(journal_refusal, sort_keys=True, separators=(",", ":")),
+                journal_row[0],
+            ),
+        )
+
+    with pytest.raises(
+        LifecyclePersistenceError,
+        match="invalid production research call history",
+    ):
+        status()
+
+
 @pytest.mark.parametrize("changed_prefix", [False, True])
 def test_memory_refusal_journal_replays_only_its_exact_accepted_prefix(
     tmp_path: Path,
@@ -1139,7 +1320,9 @@ def test_memory_refusal_journal_replays_only_its_exact_accepted_prefix(
                     "run_id": memory_refusal["run_id"],
                     "event_id": memory_refusal["failed_event_id"],
                     "reason": memory_refusal["reason"],
+                    "recorded_at": memory_refusal["recorded_at"],
                     "accepted_event_ids": memory_refusal["accepted_event_ids"],
+                    "attempted_event_content_hash": memory_refusal["attempted_event_content_hash"],
                 }
             )
             connection.execute("DROP TRIGGER memory_update_refusals_are_append_only_update")
@@ -1222,7 +1405,9 @@ def test_status_rejects_coherently_resealed_memory_refusal_material(
                     "run_id": memory_refusal["run_id"],
                     "event_id": memory_refusal["failed_event_id"],
                     "reason": memory_refusal["reason"],
+                    "recorded_at": memory_refusal["recorded_at"],
                     "accepted_event_ids": memory_refusal["accepted_event_ids"],
+                    "attempted_event_content_hash": memory_refusal["attempted_event_content_hash"],
                 }
             )
         elif corruption == "checkpoint":
@@ -1309,7 +1494,9 @@ def test_memory_refusal_reconstructs_prior_events_before_the_failed_subject(
                 "run_id": memory_refusal["run_id"],
                 "event_id": memory_refusal["failed_event_id"],
                 "reason": memory_refusal["reason"],
+                "recorded_at": memory_refusal["recorded_at"],
                 "accepted_event_ids": memory_refusal["accepted_event_ids"],
+                "attempted_event_content_hash": memory_refusal["attempted_event_content_hash"],
             }
         )
         encoded_refusal = json.dumps(refusal, sort_keys=True, separators=(",", ":"))

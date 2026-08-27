@@ -88,6 +88,7 @@ from tests._universe import (
 )
 
 SHA256_HEX_LENGTH = 64
+REFUSAL_RECORDED_AT = UtcInstant.from_datetime(datetime(2026, 8, 21, 22, tzinfo=UTC))
 PINNED_SEQUENCE = 2
 RECEIPT_RECORDED_AT = UtcInstant.from_datetime(datetime(2026, 8, 21, 22, 0, tzinfo=UTC))
 UNEXPECTED_EVIDENCE_CAPTURE = "test ledger should terminate before evidence capture"
@@ -879,6 +880,7 @@ def test_research_refusal_parser_binds_exact_typed_memory_failure() -> None:
         "a" * SHA256_HEX_LENGTH,
         "b" * SHA256_HEX_LENGTH,
         MemoryUpdateRefusalReason.INVALID_AUTHORITATIVE_HISTORY,
+        REFUSAL_RECORDED_AT,
     )
     refusal = ResearchRefusal(detail.refusal_id, memory_update_refusal=detail)
     payload = refusal.to_payload()
@@ -921,6 +923,7 @@ def test_memory_update_refusal_rejects_invalid_identity_and_hostile_payloads() -
         "a" * SHA256_HEX_LENGTH,
         failed_event_id,
         MemoryUpdateRefusalReason.INVALID_EVENT,
+        REFUSAL_RECORDED_AT,
     )
     valid = detail.to_payload()
 
@@ -929,13 +932,16 @@ def test_memory_update_refusal_rejects_invalid_identity_and_hostile_payloads() -
             "invalid",
             failed_event_id,
             MemoryUpdateRefusalReason.INVALID_EVENT,
+            REFUSAL_RECORDED_AT,
         )
 
     invalid_payloads: tuple[dict[str, object], ...] = (
         {**valid, "schema_version": 2},
         {**valid, "accepted_event_ids": "not-a-list"},
         {**valid, "reason": "not-a-memory-refusal-reason"},
+        {**valid, "recorded_at": "2026-08-21T22:00:00+00:00"},
         {**valid, "accepted_event_ids": [failed_event_id]},
+        {**valid, "attempted_event_content_hash": "c" * SHA256_HEX_LENGTH},
     )
 
     for memory_payload in invalid_payloads:
@@ -1003,6 +1009,7 @@ def test_production_research_reference_binds_memory_refusal_to_completed_researc
         identity.run_id,
         "e" * SHA256_HEX_LENGTH,
         MemoryUpdateRefusalReason.INVALID_EVENT,
+        identity.evidence_cutoff,
     )
     memory_refusal = ResearchRefusal(
         detail.refusal_id,

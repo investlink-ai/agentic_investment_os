@@ -537,11 +537,13 @@ class Advance:
                 or current_graph.omitted_belief_events > 0
             ):
                 return self._record_memory_refusal(
-                    context.run_id,
-                    event_id,
-                    "current_belief_history_unavailable",
-                    tuple(event_ids),
-                    recorded_at,
+                    MemoryUpdateRefusal(
+                        context.run_id,
+                        event_id,
+                        MemoryUpdateRefusalReason.CURRENT_BELIEF_HISTORY_UNAVAILABLE,
+                        recorded_at,
+                        tuple(sorted(event_ids)),
+                    )
                 )
             current_events = tuple(
                 node for node in current_graph.belief_nodes if node.event.belief_id == belief_id
@@ -588,31 +590,29 @@ class Advance:
                 reason = (
                     "unknown_record_refusal" if receipt.refusal is None else receipt.refusal.value
                 )
+                refusal_reason = MemoryUpdateRefusalReason(reason)
                 return self._record_memory_refusal(
-                    context.run_id,
-                    event_id,
-                    reason,
-                    tuple(event_ids),
-                    recorded_at,
+                    MemoryUpdateRefusal(
+                        context.run_id,
+                        event_id,
+                        refusal_reason,
+                        recorded_at,
+                        tuple(sorted(event_ids)),
+                        (
+                            event.content_hash
+                            if refusal_reason is MemoryUpdateRefusalReason.EVENT_IDENTITY_CONFLICT
+                            else None
+                        ),
+                    )
                 )
             event_ids.append(event_id)
         return ResearchCheckpoint(tuple(sorted(event_ids)))
 
     def _record_memory_refusal(
         self,
-        run_id: str,
-        event_id: str,
-        reason: str,
-        accepted_event_ids: tuple[str, ...],
-        recorded_at: UtcInstant,
+        refusal: MemoryUpdateRefusal,
     ) -> ResearchRefusal:
-        refusal = MemoryUpdateRefusal(
-            run_id,
-            event_id,
-            MemoryUpdateRefusalReason(reason),
-            tuple(sorted(accepted_event_ids)),
-        )
-        stored = self.memory_refusal_ledger.record_memory_update_refusal(refusal, recorded_at)
+        stored = self.memory_refusal_ledger.record_memory_update_refusal(refusal)
         return _research_refusal(stored)
 
     def _validate_evidence_receipt(

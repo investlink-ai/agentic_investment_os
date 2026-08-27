@@ -41,6 +41,7 @@ from agentic_investment_os.memory.beliefs import (
     BeliefGraphRefusal,
     BeliefGraphRefusalCode,
     BeliefHistory,
+    BeliefIdentityConflictReference,
     BeliefLedgerEntry,
     BeliefLifecycleReference,
     BeliefPersistenceError,
@@ -160,12 +161,11 @@ class SQLiteBeliefLedger:
     def record_memory_update_refusal(
         self,
         refusal: MemoryUpdateRefusal,
-        recorded_at: UtcInstant,
     ) -> MemoryUpdateRefusal:
         """Append or replay one exact lifecycle memory-refusal observation."""
         try:
             refusal.__post_init__()
-            timestamp = recorded_at.isoformat()
+            timestamp = refusal.recorded_at.isoformat()
         except (AttributeError, InvalidUtcInstantError, ValueError) as error:
             raise BeliefPersistenceError(_INVALID_BELIEF_HISTORY) from error
         encoded = _canonical_json(refusal.to_payload())
@@ -177,8 +177,10 @@ class SQLiteBeliefLedger:
                 (refusal.run_id, refusal.failed_event_id),
             ).fetchone()
             if row is not None:
-                stored, _ = _parse_memory_update_refusal_row(row)
+                stored, stored_at = _parse_memory_update_refusal_row(row)
                 if stored != refusal:
+                    raise BeliefPersistenceError(_INVALID_BELIEF_HISTORY)
+                if stored_at != refusal.recorded_at:
                     raise BeliefPersistenceError(_INVALID_BELIEF_HISTORY)
                 return stored
             connection.execute(
@@ -258,6 +260,7 @@ class SQLiteBeliefLedger:
         evidence_resolver: BeliefEvidenceResolver,
         *,
         absent_event_ids: tuple[str, ...] = (),
+        identity_conflicts: tuple[BeliefIdentityConflictReference, ...] = (),
         memory_refusals: tuple[MemoryUpdateRefusal, ...] = (),
     ) -> None:
         """Revalidate exact run-owned belief and refusal material named by lifecycle state."""
@@ -265,17 +268,12 @@ class SQLiteBeliefLedger:
         def operation(connection: sqlite3.Connection) -> None:
             try:
                 history = _load_belief_history(connection)
-                for reference in references:
-                    reference.__post_init__()
-                if (
-                    tuple(sorted(set(absent_event_ids))) != absent_event_ids
-                    or any(not is_sha256(event_id) for event_id in absent_event_ids)
-                    or tuple(sorted({refusal.refusal_id for refusal in memory_refusals}))
-                    != tuple(refusal.refusal_id for refusal in memory_refusals)
-                ):
-                    raise ValueError(_INVALID_BELIEF_HISTORY)
-                for refusal in memory_refusals:
-                    refusal.__post_init__()
+                _validate_lifecycle_reference_inputs(
+                    references,
+                    absent_event_ids,
+                    identity_conflicts,
+                    memory_refusals,
+                )
             except ValueError as error:
                 raise BeliefPersistenceError(_INVALID_BELIEF_HISTORY) from error
             events = tuple(entry.event for entry in history.entries)
@@ -289,6 +287,13 @@ class SQLiteBeliefLedger:
             entries_by_id = {entry.event.event_id: entry for entry in history.entries}
             if any(event_id in entries_by_id for event_id in absent_event_ids):
                 raise BeliefPersistenceError(_INVALID_BELIEF_HISTORY)
+            for conflict in identity_conflicts:
+                entry = entries_by_id.get(conflict.event_id)
+                if (
+                    entry is None
+                    or entry.event.content_hash == conflict.attempted_event_content_hash
+                ):
+                    raise BeliefPersistenceError(_INVALID_BELIEF_HISTORY)
             for reference in references:
                 entry = entries_by_id.get(reference.event_id)
                 if entry is None or not _matches_lifecycle_reference(entry, reference):
@@ -341,10 +346,35 @@ def _parse_memory_update_refusal_row(
         or refusal.refusal_id != refusal_id
         or refusal.run_id != run_id
         or refusal.failed_event_id != failed_event_id
+        or refusal.recorded_at != recorded_at
         or _canonical_json(refusal.to_payload()) != encoded
     ):
         raise _InvalidBeliefHistoryError(_INVALID_BELIEF_HISTORY)
     return refusal, recorded_at
+
+
+def _validate_lifecycle_reference_inputs(
+    references: tuple[BeliefLifecycleReference, ...],
+    absent_event_ids: tuple[str, ...],
+    identity_conflicts: tuple[BeliefIdentityConflictReference, ...],
+    memory_refusals: tuple[MemoryUpdateRefusal, ...],
+) -> None:
+    for reference in references:
+        reference.__post_init__()
+    if (
+        tuple(sorted(set(absent_event_ids))) != absent_event_ids
+        or any(not is_sha256(event_id) for event_id in absent_event_ids)
+        or tuple(sorted({item.event_id for item in identity_conflicts}))
+        != tuple(item.event_id for item in identity_conflicts)
+        or any(item.event_id in absent_event_ids for item in identity_conflicts)
+        or tuple(sorted({refusal.refusal_id for refusal in memory_refusals}))
+        != tuple(refusal.refusal_id for refusal in memory_refusals)
+    ):
+        raise ValueError(_INVALID_BELIEF_HISTORY)
+    for conflict in identity_conflicts:
+        conflict.__post_init__()
+    for refusal in memory_refusals:
+        refusal.__post_init__()
 
 
 def _load_belief_history(connection: sqlite3.Connection) -> BeliefHistory:

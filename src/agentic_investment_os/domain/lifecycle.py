@@ -580,15 +580,26 @@ class MemoryUpdateRefusal:
     run_id: str
     failed_event_id: str
     reason: MemoryUpdateRefusalReason
+    recorded_at: UtcInstant
     accepted_event_ids: tuple[str, ...] = ()
+    attempted_event_content_hash: str | None = None
 
     def __post_init__(self) -> None:
         if (
             not is_sha256(self.run_id)
             or not is_sha256(self.failed_event_id)
             or type(self.reason) is not MemoryUpdateRefusalReason
+            or type(self.recorded_at) is not UtcInstant
             or not _valid_optional_hash_references(self.accepted_event_ids)
             or self.failed_event_id in self.accepted_event_ids
+            or (
+                (self.reason is MemoryUpdateRefusalReason.EVENT_IDENTITY_CONFLICT)
+                != (self.attempted_event_content_hash is not None)
+            )
+            or (
+                self.attempted_event_content_hash is not None
+                and not is_sha256(self.attempted_event_content_hash)
+            )
         ):
             raise ValueError(_INVALID_CHECKPOINT_ORDER)
 
@@ -600,7 +611,9 @@ class MemoryUpdateRefusal:
                 "run_id": self.run_id,
                 "event_id": self.failed_event_id,
                 "reason": self.reason.value,
+                "recorded_at": self.recorded_at.isoformat(),
                 "accepted_event_ids": list(self.accepted_event_ids),
+                "attempted_event_content_hash": self.attempted_event_content_hash,
             }
         )
 
@@ -611,7 +624,9 @@ class MemoryUpdateRefusal:
             "run_id": self.run_id,
             "failed_event_id": self.failed_event_id,
             "reason": self.reason.value,
+            "recorded_at": self.recorded_at.isoformat(),
             "accepted_event_ids": list(self.accepted_event_ids),
+            "attempted_event_content_hash": self.attempted_event_content_hash,
         }
 
 
@@ -2927,7 +2942,9 @@ def parse_research_refusal(value: object) -> ResearchRefusal | None:
         return None
 
 
-def parse_memory_update_refusal(value: object) -> MemoryUpdateRefusal | None:
+def parse_memory_update_refusal(  # noqa: PLR0911 - narrow each hostile field before construction.
+    value: object,
+) -> MemoryUpdateRefusal | None:
     """Parse one exact memory-refusal observation without trusting durable JSON."""
     if value is None:
         return None
@@ -2940,7 +2957,9 @@ def parse_memory_update_refusal(value: object) -> MemoryUpdateRefusal | None:
                 "run_id",
                 "failed_event_id",
                 "reason",
+                "recorded_at",
                 "accepted_event_ids",
+                "attempted_event_content_hash",
             }
         ),
     )
@@ -2954,7 +2973,18 @@ def parse_memory_update_refusal(value: object) -> MemoryUpdateRefusal | None:
         return None
     accepted_event_ids = _parse_hash_tuple(fields["accepted_event_ids"])
     reason_value = fields["reason"]
-    if accepted_event_ids is None or type(reason_value) is not str:
+    attempted_event_content_hash = fields["attempted_event_content_hash"]
+    if (
+        accepted_event_ids is None
+        or type(reason_value) is not str
+        or (
+            attempted_event_content_hash is not None and not is_sha256(attempted_event_content_hash)
+        )
+    ):
+        return None
+    try:
+        recorded_at = UtcInstant.parse(fields["recorded_at"])
+    except (InvalidUtcInstantError, TypeError):
         return None
     try:
         reason = MemoryUpdateRefusalReason(reason_value)
@@ -2965,7 +2995,9 @@ def parse_memory_update_refusal(value: object) -> MemoryUpdateRefusal | None:
             fields["run_id"],
             fields["failed_event_id"],
             reason,
+            recorded_at,
             accepted_event_ids,
+            attempted_event_content_hash,
         )
     except ValueError:
         return None

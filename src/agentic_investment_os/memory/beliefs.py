@@ -39,6 +39,7 @@ __all__ = (
     "BeliefGraphRefusalCode",
     "BeliefHistory",
     "BeliefHistoryValidator",
+    "BeliefIdentityConflictReference",
     "BeliefLedger",
     "BeliefLedgerEntry",
     "BeliefLifecycleReference",
@@ -115,7 +116,6 @@ class BeliefLedger(Protocol):
     def record_memory_update_refusal(
         self,
         refusal: MemoryUpdateRefusal,
-        recorded_at: UtcInstant,
     ) -> MemoryUpdateRefusal: ...
 
     def validate_history(
@@ -130,6 +130,7 @@ class BeliefLedger(Protocol):
         evidence_resolver: BeliefEvidenceResolver,
         *,
         absent_event_ids: tuple[str, ...] = (),
+        identity_conflicts: tuple[BeliefIdentityConflictReference, ...] = (),
         memory_refusals: tuple[MemoryUpdateRefusal, ...] = (),
     ) -> None: ...
 
@@ -191,6 +192,18 @@ class BeliefLifecycleReference:
             or self.valid_at.value > self.lifecycle_recorded_at.value
             or probe.event_id != self.event_id
         ):
+            raise ValueError(_INVALID_HISTORY)
+
+
+@dataclass(frozen=True, slots=True)
+class BeliefIdentityConflictReference:
+    """Bind a refused proposed event to different material stored under its identity."""
+
+    event_id: str
+    attempted_event_content_hash: str
+
+    def __post_init__(self) -> None:
+        if not is_sha256(self.event_id) or not is_sha256(self.attempted_event_content_hash):
             raise ValueError(_INVALID_HISTORY)
 
 
