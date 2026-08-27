@@ -708,6 +708,7 @@ def test_kernel_replays_evidence_refusal_only_for_unchanged_pinned_inputs() -> N
         1,
         command.request.idempotency_key,
         AdvanceFailureReason.EVIDENCE_CAPTURE_FAILED,
+        KERNEL_RECORDED_AT,
         command.request.session,
         REFUSED_EVIDENCE_CAPTURE,
     )
@@ -725,6 +726,16 @@ def test_kernel_replays_evidence_refusal_only_for_unchanged_pinned_inputs() -> N
     )
 
 
+def test_durable_refusal_requires_a_canonical_observation_time() -> None:
+    with pytest.raises(ValueError, match="lifecycle absolute instant must be canonical"):
+        DurableAdvanceRefusal(
+            1,
+            None,
+            AdvanceFailureReason.INVALID_IDEMPOTENCY_KEY,
+            cast("UtcInstant", object()),
+        )
+
+
 def test_scoped_evidence_refusal_replay_fails_closed_on_missing_or_invalid_state() -> None:
     command = _command()
     history, _ = _through_snapshot(command)
@@ -732,6 +743,7 @@ def test_scoped_evidence_refusal_replay_fails_closed_on_missing_or_invalid_state
         1,
         command.request.idempotency_key,
         AdvanceFailureReason.EVIDENCE_CAPTURE_FAILED,
+        KERNEL_RECORDED_AT,
         command.request.session,
         REFUSED_EVIDENCE_CAPTURE,
     )
@@ -745,6 +757,7 @@ def test_scoped_evidence_refusal_replay_fails_closed_on_missing_or_invalid_state
         1,
         command.request.idempotency_key,
         AdvanceFailureReason.INVALID_DURABLE_STATE,
+        KERNEL_RECORDED_AT,
         command.request.session,
     )
     assert decide_evidence_refusal_replay(
@@ -797,6 +810,7 @@ def test_kernel_rejects_each_invalid_required_evidence_refusal_association(
         1,
         command.request.idempotency_key,
         AdvanceFailureReason.EVIDENCE_CAPTURE_FAILED,
+        KERNEL_RECORDED_AT,
         command.request.session,
         evidence_capture,
     )
@@ -812,6 +826,7 @@ def test_kernel_rejects_evidence_references_on_unassociated_refusals() -> None:
             1,
             None,
             AdvanceFailureReason.INVALID_IDEMPOTENCY_KEY,
+            KERNEL_RECORDED_AT,
             command.request.session,
             REFUSED_EVIDENCE_CAPTURE,
         ),
@@ -819,6 +834,7 @@ def test_kernel_rejects_evidence_references_on_unassociated_refusals() -> None:
             1,
             command.request.idempotency_key,
             AdvanceFailureReason.INVALID_MODE,
+            KERNEL_RECORDED_AT,
             command.request.session,
             REFUSED_EVIDENCE_CAPTURE,
         ),
@@ -1068,17 +1084,20 @@ def test_terminal_refusal_selection_distinguishes_keyed_and_unkeyed_history() ->
             1,
             None,
             AdvanceFailureReason.INVALID_MODE,
+            KERNEL_RECORDED_AT,
         ),
         DurableAdvanceRefusal(
             2,
             keyed_command.idempotency_key,
             AdvanceFailureReason.INVALID_SESSION,
+            KERNEL_RECORDED_AT,
             valid_cycle,
         ),
         DurableAdvanceRefusal(
             3,
             None,
             AdvanceFailureReason.INVALID_IDEMPOTENCY_KEY,
+            KERNEL_RECORDED_AT,
             valid_cycle,
         ),
     )
@@ -1200,10 +1219,11 @@ def test_kernel_replays_a_terminal_refusal_when_boundary_history_is_invalid() ->
         1,
         command.request.idempotency_key,
         AdvanceFailureReason.INVALID_DURABLE_STATE,
+        KERNEL_RECORDED_AT,
         command.request.session,
     )
 
-    decision = decide_invalid_history((refusal,), command)
+    decision = decide_invalid_history((refusal,), command, KERNEL_RECORDED_AT)
 
     assert decision == AdvanceReceipt.failed_closed(
         AdvanceFailureReason.INVALID_DURABLE_STATE,
@@ -1215,13 +1235,19 @@ def test_invalid_history_preserves_keyless_input_refusal_semantics() -> None:
     cycle = MarketSession(date(2026, 8, 21))
     command = InputRefusal(InputRefusalCode.INVALID_IDEMPOTENCY_KEY, None, cycle)
 
-    decision = decide_invalid_history((), command, next_refusal_sequence=4)
+    decision = decide_invalid_history(
+        (),
+        command,
+        KERNEL_RECORDED_AT,
+        next_refusal_sequence=4,
+    )
 
     assert isinstance(decision, AppendTerminalLifecycleRecord)
     assert decision.record == DurableAdvanceRefusal(
         4,
         None,
         AdvanceFailureReason.INVALID_IDEMPOTENCY_KEY,
+        KERNEL_RECORDED_AT,
         cycle,
     )
     assert decision.receipt == AdvanceReceipt.failed_closed(
@@ -1301,6 +1327,7 @@ def test_status_preserves_the_latest_universe_cycle_after_a_newer_stream_refusal
         1,
         active_command.request.idempotency_key,
         AdvanceFailureReason.IDEMPOTENCY_KEY_CONFLICT,
+        KERNEL_RECORDED_AT,
     )
 
     status = derive_lifecycle_status(

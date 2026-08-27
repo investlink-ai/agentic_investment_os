@@ -417,11 +417,13 @@ evidence. A scenario becomes mandatory when its owning behavior is implemented.
   research, substitute another run's valid Belief Event into a memory checkpoint, and replace a
   durable memory refusal with a coherently resealed alternate reason, observation time, changed failure
   point and prefix, or changed checkpoint; each must fail closed. Memory refusals bind to an independent
-  append-only observation and its lifecycle-owned instant. Refusals normally prove the failed and later
-  expected events absent. An event-identity conflict instead proves that the failed identity exists with
-  material different from the journaled attempted event hash while later expected events remain absent.
-  Memory checkpoints also prove zero model-call resources, the exact no-action outcome, and run-owned
-  Belief Event material. A clock that
+  append-only observation and the refusal row's own append instant. A changed-clock retry after a crash
+  between the research checkpoint and memory admission must preserve that later refusal instant and
+  reconstruct without duplicate model effects. Refusals normally prove the failed and later expected
+  events absent. An event-identity conflict instead proves that the failed identity exists with material
+  different from the journaled attempted event hash while later expected events remain absent. Memory
+  checkpoints also prove zero model-call resources, the exact no-action outcome, and run-owned Belief
+  Event material. A clock that
   advances independently between lifecycle and memory persistence must still reconstruct valid
   completion. Mutation or removal of referenced production rows fails closed.
 - Production malformed JSON, oversized output, timeout, quota exhaustion, output-token overflow,

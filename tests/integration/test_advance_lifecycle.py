@@ -3384,6 +3384,48 @@ def test_lifecycle_ledger_rejects_a_kernel_record_with_a_different_write_time(
         ledger.advance_step(command, AdvanceAttempt(), write_time)
 
 
+def test_lifecycle_ledger_rejects_a_refusal_with_a_different_write_time(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    capability = _configure(tmp_path / "runtime")
+    ledger = capability.ledger
+    assert isinstance(ledger, SQLiteLifecycleLedger)
+    request = AdvanceRequest.parse(
+        session="2026-08-24",
+        mode="champion",
+        idempotency_key="mismatched-refusal-record-time",
+    )
+    assert isinstance(request, AdvanceRequest)
+    command = advance_command(request)
+    write_time = UtcInstant.from_datetime(datetime(2026, 8, 22, 22, 0, tzinfo=UTC))
+    mismatched_time = UtcInstant.from_datetime(datetime(2026, 8, 22, 22, 1, tzinfo=UTC))
+    record = DurableAdvanceRefusal(
+        1,
+        request.idempotency_key,
+        AdvanceFailureReason.INVALID_DURABLE_STATE,
+        mismatched_time,
+        request.session,
+    )
+    decision = AppendTerminalLifecycleRecord(
+        record,
+        AdvanceReceipt.failed_closed(
+            AdvanceFailureReason.INVALID_DURABLE_STATE,
+            cycle=request.session,
+        ),
+    )
+    monkeypatch.setattr(
+        "agentic_investment_os.adapters.sqlite_lifecycle.decide_advance",
+        lambda _history, _candidate, _attempt, _recorded_at: decision,
+    )
+
+    with pytest.raises(
+        InvalidLifecycleStateError,
+        match="lifecycle stream checkpoint order is invalid",
+    ):
+        ledger.advance_step(command, AdvanceAttempt(), write_time)
+
+
 def test_pinned_constitution_reader_rejects_an_ambiguous_kernel_result(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

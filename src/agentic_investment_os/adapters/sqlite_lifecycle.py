@@ -867,6 +867,7 @@ class SQLiteLifecycleLedger:
                 decision = decide_invalid_history(
                     tuple(refusals),
                     command,
+                    recorded_at_value,
                     next_refusal_sequence=next_refusal_sequence,
                 )
             else:
@@ -1629,12 +1630,13 @@ def _load_refusals(
         )
         attention_refusal_reason = _load_attention_refusal_reason(row[7], reason=reason)
         research_refusal = _load_research_refusal(row[8], row[9], reason=reason)
-        _canonical_timestamp(row[10], "recorded_at")
+        recorded_at = _canonical_timestamp(row[10], "recorded_at")
         refusals.append(
             DurableAdvanceRefusal(
                 sequence,
                 key,
                 reason,
+                recorded_at,
                 cycle,
                 evidence_capture,
                 attention_refusal_reason,
@@ -1870,6 +1872,8 @@ def _append_record(
         )
         return
     if isinstance(record, DurableAdvanceRefusal):
+        if record.recorded_at != recorded_at:
+            raise InvalidLifecycleStateError(_INVALID_CHECKPOINT_ORDER)
         connection.execute(
             """
             INSERT INTO advance_refusals (

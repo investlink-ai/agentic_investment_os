@@ -257,6 +257,21 @@ class _RefusingMemory:
         return self.delegate.graph(query)
 
 
+class _SimulatedMemoryInterruptionError(RuntimeError):
+    pass
+
+
+@dataclass(frozen=True, slots=True)
+class _InterruptingMemory:
+    delegate: Record
+
+    def __call__(self, _event: object) -> RecordReceipt:
+        raise _SimulatedMemoryInterruptionError
+
+    def graph(self, query: object) -> BeliefGraph | BeliefGraphRefusal:
+        return self.delegate.graph(query)
+
+
 @dataclass(frozen=True, slots=True)
 class _ConflictingMemory:
     delegate: Record
@@ -1161,6 +1176,61 @@ def test_status_rejects_changed_memory_refusal_observation_time(tmp_path: Path) 
         match="invalid production research call history",
     ):
         status()
+
+
+def test_memory_refusal_after_retry_uses_its_own_lifecycle_observation_time(
+    tmp_path: Path,
+) -> None:
+    state_root = tmp_path / "runtime"
+    model = _ValidProductionModel()
+    first = _configure(
+        state_root,
+        universe=recorded_universe(),
+        model=model,
+        clock=_ClockAt(datetime(2026, 8, 21, 22, tzinfo=UTC)),
+    )
+    interrupted = replace(
+        first,
+        memory=cast("Record", _InterruptingMemory(first.memory)),
+    )
+
+    with pytest.raises(_SimulatedMemoryInterruptionError):
+        _advance(interrupted, "stage-three-memory-refusal-after-retry")
+    effects_before_retry = model.unique_effect_count
+
+    retry = _configure(
+        state_root,
+        universe=recorded_universe(),
+        model=model,
+        clock=_ClockAt(datetime(2026, 8, 21, 22, 1, tzinfo=UTC)),
+    )
+    refusing = replace(
+        retry,
+        memory=cast("Record", _RefusingMemory(retry.memory)),
+    )
+    receipt = _advance(refusing, "stage-three-memory-refusal-after-retry")
+    rebuilt = _configured_status(state_root)()
+
+    assert receipt.failure_reason is AdvanceFailureReason.MEMORY_UPDATE_FAILED
+    assert rebuilt.liveness is LifecycleLiveness.FAILED_CLOSED
+    assert model.unique_effect_count == effects_before_retry
+    with sqlite3.connect(state_root / "lifecycle.sqlite3") as connection:
+        refusal_row = connection.execute(
+            "SELECT research_refusal, recorded_at FROM advance_refusals"
+        ).fetchone()
+        journal_row = connection.execute(
+            "SELECT refusal_json, recorded_at FROM memory_update_refusals"
+        ).fetchone()
+        assert refusal_row is not None
+        assert journal_row is not None
+        lifecycle_refusal = json.loads(refusal_row[0])
+        memory_refusal = json.loads(journal_row[0])
+        assert isinstance(lifecycle_refusal, dict)
+        assert isinstance(memory_refusal, dict)
+        assert refusal_row[1] == "2026-08-21T22:01:00.000000+00:00"
+        assert journal_row[1] == refusal_row[1]
+        assert memory_refusal["recorded_at"] == refusal_row[1]
+        assert lifecycle_refusal["memory_update_refusal"] == memory_refusal
 
 
 def test_memory_identity_conflict_reconstructs_existing_different_event(

@@ -1444,10 +1444,15 @@ class DurableAdvanceRefusal:
     sequence: int
     idempotency_key: IdempotencyKey | None
     reason: AdvanceFailureReason
+    recorded_at: UtcInstant
     cycle: MarketSession | None = None
     evidence_capture: EvidenceCaptureCheckpoint | None = None
     attention_refusal_reason: AttentionRefusalReason | None = None
     research_refusal: ResearchRefusal | None = None
+
+    def __post_init__(self) -> None:
+        if type(self.recorded_at) is not UtcInstant:
+            raise ValueError(_INVALID_ABSOLUTE_INSTANT)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1560,7 +1565,7 @@ def decide_advance(
     try:
         progresses = reconstruct_lifecycle(history)
     except InvalidLifecycleStateError:
-        return _invalid_history_decision(history, command)
+        return _invalid_history_decision(history, command, recorded_at)
 
     progress_by_key = {progress.request.idempotency_key.value: progress for progress in progresses}
     if terminal is not None:
@@ -1576,7 +1581,7 @@ def decide_advance(
             )
         return terminal
     if isinstance(command, InputRefusal):
-        return _decide_input_refusal(history, progress_by_key, command)
+        return _decide_input_refusal(history, progress_by_key, command, recorded_at)
     if isinstance(command, AdvanceCommand):
         return _decide_valid_advance(
             history,
@@ -1749,6 +1754,7 @@ def _terminal_input_refusal(
 def decide_invalid_history(
     refusals: tuple[DurableAdvanceRefusal, ...],
     command: LifecycleCommand,
+    recorded_at: UtcInstant,
     *,
     next_refusal_sequence: int | None = None,
 ) -> LifecycleDecision:
@@ -1763,12 +1769,14 @@ def decide_invalid_history(
                 history,
                 None,
                 AdvanceFailureReason.INVALID_IDEMPOTENCY_KEY,
+                recorded_at,
                 command.cycle,
             )
         return _append_refusal(
             history,
             command.idempotency_key,
             AdvanceFailureReason.INVALID_DURABLE_STATE,
+            recorded_at,
             command.cycle,
         )
     if isinstance(command, AdvanceCommand):
@@ -1776,6 +1784,7 @@ def decide_invalid_history(
             history,
             command.request.idempotency_key,
             AdvanceFailureReason.INVALID_DURABLE_STATE,
+            recorded_at,
             command.request.session,
         )
     # Strict mypy proves this line unreachable; removing it is runtime-equivalent.
@@ -1853,12 +1862,6 @@ def reconstruct_production_research_checkpoints(
         if event.completed_phase is not None
         and event.completed_phase.phase is LifecyclePhase.UPDATE_MEMORY
     }
-    research_times = {
-        event.request.idempotency_key.value: event.recorded_at
-        for event in history.events
-        if event.completed_phase is not None
-        and event.completed_phase.phase is LifecyclePhase.RUN_RESEARCH
-    }
     references: list[ProductionResearchReference] = []
     for progress in progresses:
         attention = progress.attention_artifact
@@ -1896,6 +1899,7 @@ def reconstruct_production_research_checkpoints(
         research_refusal_id = None
         research_terminal_call_id = None
         memory_refusal = None
+        memory_refusal_time = None
         if (
             research_checkpoint is None
             and refusal is not None
@@ -1913,6 +1917,7 @@ def reconstruct_production_research_checkpoints(
             and refusal.research_refusal is not None
         ):
             memory_refusal = refusal.research_refusal
+            memory_refusal_time = refusal.recorded_at
         references.append(
             ProductionResearchReference(
                 progress.pinned_run_identity,
@@ -1927,9 +1932,7 @@ def reconstruct_production_research_checkpoints(
                 (
                     memory_times.get(progress.request.idempotency_key.value)
                     if progress.memory_checkpoint is not None
-                    else research_times.get(progress.request.idempotency_key.value)
-                    if memory_refusal is not None
-                    else None
+                    else memory_refusal_time
                 ),
                 memory_refusal,
             )
@@ -1991,7 +1994,7 @@ def _validate_refusals(
     keyed_refusals: set[str] = set()
     unkeyed_identities: set[tuple[AdvanceFailureReason, MarketSession | None]] = set()
     for expected_sequence, refusal in enumerate(refusals, start=1):
-        if refusal.sequence != expected_sequence:
+        if refusal.sequence != expected_sequence or type(refusal.recorded_at) is not UtcInstant:
             raise InvalidLifecycleStateError(_INVALID_REFUSAL_ORDER)
         key = refusal.idempotency_key
         if (key is None) != (refusal.reason is AdvanceFailureReason.INVALID_IDEMPOTENCY_KEY):
@@ -2054,6 +2057,9 @@ def _validate_refusals(
                 refusal.reason is AdvanceFailureReason.MEMORY_UPDATE_FAILED
                 and associated_progress.completed_phase is LifecyclePhase.RUN_RESEARCH
                 and refusal.research_refusal is not None
+                and refusal.research_refusal.memory_update_refusal is not None
+                and refusal.research_refusal.memory_update_refusal.recorded_at
+                == refusal.recorded_at
                 and refusal.evidence_capture is None
                 and refusal.attention_refusal_reason is None
             )
@@ -2258,7 +2264,13 @@ def _decide_valid_advance(
             recorded_at,
         )
     if not _advance_matches_progress(progress, command):
-        return _decide_idempotency_conflict(history, progress, key, request.session)
+        return _decide_idempotency_conflict(
+            history,
+            progress,
+            key,
+            request.session,
+            recorded_at,
+        )
     recovery = _recovery_for_progress(progress, attempt)
     if progress.is_complete:
         return AdvanceReceipt.advanced(
@@ -2306,6 +2318,7 @@ def _decide_new_stream(
             history,
             key,
             AdvanceFailureReason.INVALID_DURABLE_STATE,
+            recorded_at,
             request.session,
         )
     if request.stream_id in history.occupied_stream_ids or any(
@@ -2315,6 +2328,7 @@ def _decide_new_stream(
             history,
             key,
             AdvanceFailureReason.SESSION_STREAM_CONFLICT,
+            recorded_at,
             request.session,
         )
     record = LifecycleEvent(
@@ -2336,15 +2350,16 @@ def _decide_input_refusal(
     history: LifecycleHistory,
     progress_by_key: dict[str, LifecycleProgress],
     refusal: InputRefusal,
+    recorded_at: UtcInstant,
 ) -> LifecycleDecision:
     key = refusal.idempotency_key
     reason = _input_failure_reason(refusal.code)
     if key is None:
-        return _append_refusal(history, None, reason, refusal.cycle)
+        return _append_refusal(history, None, reason, recorded_at, refusal.cycle)
     progress = progress_by_key.get(key.value)
     if progress is None:
-        return _append_refusal(history, key, reason, refusal.cycle)
-    return _decide_idempotency_conflict(history, progress, key, refusal.cycle)
+        return _append_refusal(history, key, reason, recorded_at, refusal.cycle)
+    return _decide_idempotency_conflict(history, progress, key, refusal.cycle, recorded_at)
 
 
 def _input_failure_reason(code: InputRefusalCode) -> AdvanceFailureReason:
@@ -2384,10 +2399,11 @@ def _decide_idempotency_conflict(
     progress: LifecycleProgress,
     key: IdempotencyKey,
     cycle: MarketSession | None,
+    recorded_at: UtcInstant,
 ) -> LifecycleDecision:
     reason = AdvanceFailureReason.IDEMPOTENCY_KEY_CONFLICT
     if not progress.is_complete:
-        return _append_refusal(history, key, reason, cycle)
+        return _append_refusal(history, key, reason, recorded_at, cycle)
     conflict = next(
         (item for item in history.conflicts if item.idempotency_key == key),
         None,
@@ -2431,6 +2447,7 @@ def _append_next_event(  # noqa: PLR0911, PLR0912 - exhaust each lifecycle phase
             history,
             command.request.idempotency_key,
             AdvanceFailureReason.EVIDENCE_CAPTURE_FAILED,
+            recorded_at,
             command.request.session,
             evidence_capture=command.evidence_capture,
         )
@@ -2452,6 +2469,7 @@ def _append_next_event(  # noqa: PLR0911, PLR0912 - exhaust each lifecycle phase
             history,
             command.request.idempotency_key,
             AdvanceFailureReason.ATTENTION_SELECTION_FAILED,
+            recorded_at,
             command.request.session,
             evidence_capture=progress.require_evidence_capture(),
             attention_refusal_reason=command.attention_selection,
@@ -2470,6 +2488,7 @@ def _append_next_event(  # noqa: PLR0911, PLR0912 - exhaust each lifecycle phase
             history,
             command.request.idempotency_key,
             AdvanceFailureReason.RESEARCH_FAILED,
+            recorded_at,
             command.request.session,
             research_refusal=command.dossier_build,
         )
@@ -2484,6 +2503,7 @@ def _append_next_event(  # noqa: PLR0911, PLR0912 - exhaust each lifecycle phase
             history,
             command.request.idempotency_key,
             AdvanceFailureReason.RESEARCH_FAILED,
+            recorded_at,
             command.request.session,
             research_refusal=command.research_run,
         )
@@ -2498,6 +2518,7 @@ def _append_next_event(  # noqa: PLR0911, PLR0912 - exhaust each lifecycle phase
             history,
             command.request.idempotency_key,
             AdvanceFailureReason.MEMORY_UPDATE_FAILED,
+            recorded_at,
             command.request.session,
             research_refusal=command.memory_update,
         )
@@ -2623,6 +2644,7 @@ def _append_refusal(  # noqa: PLR0913 - refusal evidence remains explicit.
     history: LifecycleHistory,
     key: IdempotencyKey | None,
     reason: AdvanceFailureReason,
+    recorded_at: UtcInstant,
     cycle: MarketSession | None = None,
     *,
     evidence_capture: EvidenceCaptureCheckpoint | None = None,
@@ -2646,6 +2668,7 @@ def _append_refusal(  # noqa: PLR0913 - refusal evidence remains explicit.
             sequence,
             key,
             reason,
+            recorded_at,
             cycle,
             evidence_capture,
             attention_refusal_reason,
@@ -2658,10 +2681,12 @@ def _append_refusal(  # noqa: PLR0913 - refusal evidence remains explicit.
 def _invalid_history_decision(
     history: LifecycleHistory,
     command: LifecycleCommand,
+    recorded_at: UtcInstant,
 ) -> LifecycleDecision:
     return decide_invalid_history(
         history.refusals,
         command,
+        recorded_at,
         next_refusal_sequence=history.next_refusal_sequence,
     )
 
