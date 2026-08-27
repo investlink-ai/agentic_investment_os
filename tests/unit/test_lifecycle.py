@@ -51,12 +51,14 @@ from agentic_investment_os.domain.lifecycle import (
     PerformMemoryUpdate,
     PerformResearch,
     PinnedRunIdentity,
+    ProductionResearchReference,
     ResearchCheckpoint,
     ResearchRefusal,
     derive_lifecycle_status,
     parse_advance_receipt,
     parse_lifecycle_checkpoint,
     parse_research_checkpoint,
+    parse_research_refusal,
     reconstruct_constitution_uses,
 )
 from agentic_investment_os.domain.temporal import InvalidUtcInstantError, UtcInstant
@@ -831,6 +833,27 @@ def test_research_checkpoint_parser_rejects_hostile_shapes_and_negative_resource
     )
 
     assert all(parse_research_checkpoint(value) is None for value in invalid_values)
+
+
+def test_research_refusal_parser_rejects_hostile_envelopes_and_checkpoints() -> None:
+    valid = ResearchRefusal("f" * SHA256_HEX_LENGTH).to_payload()
+
+    assert parse_research_refusal({**valid, "schema_version": 2}) is None
+    assert parse_research_refusal({**valid, "checkpoint": {}}) is None
+
+
+def test_production_research_reference_rejects_a_non_research_phase() -> None:
+    identity = pinned_run_identity(_request())
+    snapshot = universe_snapshot(identity)
+
+    with pytest.raises(ValueError, match="lifecycle stream checkpoint order is invalid"):
+        ProductionResearchReference(
+            identity,
+            LifecyclePhase.SELECT_ATTENTION,
+            attention_artifact(identity, snapshot, evidence_capture_checkpoint()),
+            snapshot.inputs.position_snapshot,
+            None,
+        )
 
 
 @pytest.mark.parametrize(

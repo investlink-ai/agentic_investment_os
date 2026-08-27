@@ -288,8 +288,9 @@ stateDiagram-v2
   model, reasoning, inert tools, material hashes, and resource bounds before the effect. An intent
   without an observation is indeterminate and is never called again automatically. Lifecycle research
   checkpoints retain call IDs, artifact IDs, tokens, and turns; `Status` revalidates the model ledger
-  and proves every checkpoint reference still resolves. SQLite initializes or validates one exact
-  current physical schema; other non-empty shapes fail before writes.
+  by re-parsing retained responses, proves exact phase ownership and resource totals, and proves every
+  checkpoint and memory reference still resolves. SQLite initializes or validates one exact current
+  physical schema; other non-empty shapes fail before writes.
   [ADR 0004](adr/0004-require-current-sqlite-schema.md) owns that decision. Runtime stores use explicit
   ignored roots; source directories never hold runtime state.
 

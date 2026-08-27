@@ -12,7 +12,11 @@ from agentic_investment_os.domain.identity import MarketSession
 from agentic_investment_os.entrypoints.configuration import ConfigurationSource
 from agentic_investment_os.entrypoints.lifecycle import configure_advance
 from tests._governance import RecordedSessionEligibility
-from tests._production_research import ValidProductionModel, production_recorded_evidence
+from tests._production_research import (
+    ValidProductionModel,
+    production_recorded_evidence,
+    production_recorded_official_evidence,
+)
 from tests._universe import recorded_universe, runtime_configuration
 
 _ARGUMENT_ERROR = "expected state root, session, mode, and idempotency key"
@@ -42,6 +46,7 @@ def main() -> None:
         repository_root=repository_root,
         recorded_universe=recorded_universe(),
         recorded_evidence=production_recorded_evidence(),
+        recorded_official_evidence=production_recorded_official_evidence(),
         recorded_model=ValidProductionModel(),
         session_eligibility=RecordedSessionEligibility(),
         clock=FixedClock(),

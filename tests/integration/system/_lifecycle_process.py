@@ -24,7 +24,11 @@ from agentic_investment_os.domain.lifecycle import (
 from agentic_investment_os.entrypoints.configuration import ConfigurationSource
 from agentic_investment_os.entrypoints.lifecycle import configure_advance, configure_status
 from tests._governance import RecordedSessionEligibility
-from tests._production_research import ValidProductionModel, production_recorded_evidence
+from tests._production_research import (
+    ValidProductionModel,
+    production_recorded_evidence,
+    production_recorded_official_evidence,
+)
 from tests._universe import recorded_universe, runtime_configuration
 
 if TYPE_CHECKING:
@@ -103,6 +107,7 @@ def _advance(state_root: Path) -> Advance:
         repository_root=REPOSITORY_ROOT,
         recorded_universe=recorded_universe(),
         recorded_evidence=production_recorded_evidence(),
+        recorded_official_evidence=production_recorded_official_evidence(),
         recorded_model=ValidProductionModel(),
         session_eligibility=RecordedSessionEligibility(),
         clock=FixedClock(),

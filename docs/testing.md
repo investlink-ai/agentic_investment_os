@@ -410,11 +410,13 @@ evidence. A scenario becomes mandatory when its owning behavior is implemented.
   inputs, raw-response identity, observation hashes, role artifacts, and every checkpoint reference;
   mutation or removal of referenced production rows fails closed.
 - Production malformed JSON, oversized output, timeout, quota exhaustion, output-token overflow,
-  turn overflow, citation failure, evidence failure, and memory refusal are durable failures with no
-  model-service substitution and no invalid Belief Event. Skeptic rejection skips later roles for that
-  subject; an all-rejected run and an all-abstaining CIO run are durable no-action outcomes. A mixed
-  run admits only validated non-abstaining CIO resolutions through `Record`, and retry never duplicates
-  a model observation or Belief Event.
+  turn overflow, citation failure, missing official evidence, over-bound evidence, evidence failure,
+  and memory refusal are durable failures with no model-service substitution and no invalid Belief
+  Event. An active uninvestable condition is a no-valid-Thesis outcome, and Skeptic rejection skips
+  later roles for that subject; an all-invalid-Thesis, all-rejected, or all-abstaining run is a durable
+  no-action outcome. A mixed run admits only validated non-abstaining CIO resolutions through `Record`,
+  preserves exact supporting and contradicting Thesis citations, and never duplicates a model
+  observation or Belief Event on retry.
 - `Replay` accepts only copied or synthetic evidence available by its exact cutoff, canonical subject
   mapping, pinned Constitution and bounded Belief Graph, explicit prompt, model, reasoning, tool, Data
   Regime, portfolio-context, namespace, and material hashes. Belief-node bitemporal state and graph

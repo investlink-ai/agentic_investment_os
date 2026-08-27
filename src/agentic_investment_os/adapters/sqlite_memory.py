@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from contextlib import closing
-from typing import TYPE_CHECKING, TypeVar, assert_never
+from typing import TYPE_CHECKING, Self, TypeVar, assert_never
 
 from agentic_investment_os.adapters.sqlite_lifecycle import (
     _BEGIN_IMMEDIATE_SQL,
@@ -70,6 +70,15 @@ class SQLiteBeliefLedger:
     def __init__(self, database: Path) -> None:
         self._database = database
         _prepare_database(database, mode=_DatabaseOpenMode.CREATE_IF_MISSING)
+
+    @classmethod
+    def open_existing(cls, database: Path) -> Self:
+        """Validate current belief storage without recreating a missing database."""
+        instance = cls.__new__(cls)
+        instance._database = database
+        if database.exists():
+            _prepare_database(database, mode=_DatabaseOpenMode.EXISTING_ONLY)
+        return instance
 
     def record(
         self,
@@ -142,6 +151,36 @@ class SQLiteBeliefLedger:
             return graph
 
         return self._write(operation)
+
+    def validate_history(
+        self,
+        event_ids: tuple[str, ...],
+        evidence_resolver: BeliefEvidenceResolver,
+    ) -> None:
+        """Revalidate authoritative events, evidence, and lifecycle references."""
+
+        def operation(connection: sqlite3.Connection) -> None:
+            try:
+                history = _load_belief_history(connection)
+            except ValueError as error:
+                raise BeliefPersistenceError(_INVALID_BELIEF_HISTORY) from error
+            events = tuple(entry.event for entry in history.entries)
+            if not events:
+                if event_ids:
+                    raise BeliefPersistenceError(_INVALID_BELIEF_HISTORY)
+                return
+            artifacts = evidence_resolver.resolve_belief_evidence(
+                _belief_evidence_references(events)
+            )
+            if isinstance(artifacts, RecordRefusalCode):
+                raise BeliefPersistenceError(_INVALID_BELIEF_HISTORY)
+            if validate_belief_evidence(events, artifacts) is not None:
+                raise BeliefPersistenceError(_INVALID_BELIEF_HISTORY)
+            stored_ids = frozenset(event.event_id for event in events)
+            if any(event_id not in stored_ids for event_id in event_ids):
+                raise BeliefPersistenceError(_INVALID_BELIEF_HISTORY)
+
+        self._write(operation)
 
     def _connect(self) -> sqlite3.Connection:
         return _connect_database(self._database, mode=_DatabaseOpenMode.EXISTING_ONLY)

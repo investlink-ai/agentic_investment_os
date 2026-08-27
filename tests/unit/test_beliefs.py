@@ -42,7 +42,7 @@ from agentic_investment_os.memory.reducer import (
 )
 
 SECOND_LEDGER_POSITION = 2
-FIRST_PROJECTION_IDENTITY = "601f112fd9bf6aba6611924ecc4ff774d553c71223e9716e96116d5062c58622"
+FIRST_PROJECTION_IDENTITY = "dd4df4a0d063a69f5a0a6ee79d12856a7f5449becfc9a78ad7d6bdd809c5b8a6"
 
 
 def _instant(hour: int) -> UtcInstant:

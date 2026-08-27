@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Protocol, TypeGuard
 
 from agentic_investment_os.domain.lifecycle import (
     NoActionReason,
+    ProductionResearchReference,
     ResearchCheckpoint,
     ResearchRefusal,
 )
@@ -111,12 +112,16 @@ class ProductionResearchEvidence:
     available_at: UtcInstant
     artifact_payload_json: str
     content: bytes
+    official: bool
 
     def __post_init__(self) -> None:
         try:
             payload = json.loads(self.artifact_payload_json)
         except json.JSONDecodeError as error:
             raise ValueError(_INVALID_INTENT) from error
+        material_fingerprints = (
+            payload.get("material_fingerprints") if type(payload) is dict else None
+        )
         if (
             not _is_sha256(self.artifact_id)
             or not _is_sha256(self.content_hash)
@@ -125,8 +130,17 @@ class ProductionResearchEvidence:
             or _canonical_json(payload) != self.artifact_payload_json
             or type(payload) is not dict
             or payload.get("content_hash") != self.artifact_id
+            or payload.get("available_at") != self.available_at.isoformat()
+            or type(material_fingerprints) is not dict
+            or material_fingerprints.get("source_content") != self.content_hash
+            or type(self.official) is not bool
         ):
             raise ValueError(_INVALID_INTENT)
+
+    @property
+    def is_official(self) -> bool:
+        """Return whether this record came from an admitted official source."""
+        return self.official
 
 
 @dataclass(frozen=True, slots=True)
@@ -303,7 +317,7 @@ class ProductionCallLedger(Protocol):
 class ProductionResearchHistoryValidator(Protocol):
     """Validate complete durable production research history without invoking effects."""
 
-    def validate_history(self, checkpoints: tuple[ResearchCheckpoint, ...]) -> None: ...
+    def validate_history(self, references: tuple[ProductionResearchReference, ...]) -> None: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -361,11 +375,21 @@ class ProductionResearch:
         dossiers: list[tuple[str, Dossier]] = []
         calls: list[_CallResult] = []
         for subject in context.subjects:
-            if not subject.evidence:
+            if (
+                not subject.evidence
+                or len(subject.evidence) > self.policy.maximum_evidence_artifacts
+                or not any(item.is_official for item in subject.evidence)
+            ):
                 return ProductionResearchBuild(
                     None,
                     (),
-                    _input_refusal(context, subject.request_id, "missing_subject_evidence"),
+                    _input_refusal(
+                        context,
+                        subject.request_id,
+                        "invalid_subject_evidence_coverage",
+                        calls,
+                        tuple(dossier.content_hash for _, dossier in dossiers),
+                    ),
                 )
             call = self._call(
                 context,
@@ -378,10 +402,20 @@ class ProductionResearch:
                 forecast=None,
             )
             if call.observation.disposition is not LabObservationDisposition.VALIDATED:
-                return ProductionResearchBuild(None, (), _call_refusal(call))
+                return ProductionResearchBuild(
+                    None,
+                    (),
+                    _call_refusal(
+                        (*calls, call), tuple(dossier.content_hash for _, dossier in dossiers)
+                    ),
+                )
             dossier = call.observation.artifact
             if type(dossier) is not Dossier:
-                return ProductionResearchBuild(None, (), _call_refusal(call))
+                return ProductionResearchBuild(
+                    None,
+                    (),
+                    _call_refusal((*calls, call), tuple(item.content_hash for _, item in dossiers)),
+                )
             dossiers.append((subject.request_id, dossier))
             calls.append(call)
         return ProductionResearchBuild(
@@ -424,9 +458,17 @@ class ProductionResearch:
             )
             thesis = thesis_call.observation.artifact
             if type(thesis) is not Thesis:
-                return ProductionResearchRun(None, (), None, _call_refusal(thesis_call))
+                return ProductionResearchRun(
+                    None,
+                    (),
+                    None,
+                    _call_refusal((*calls, thesis_call), tuple(artifact_ids)),
+                )
             calls.append(thesis_call)
             artifact_ids.append(thesis.content_hash)
+            if any(condition.active for condition in thesis.uninvestable_conditions):
+                no_action = NoActionReason.NO_VALID_THESIS
+                continue
             skeptic_call = self._call(
                 context,
                 subject,
@@ -439,7 +481,12 @@ class ProductionResearch:
             )
             skeptic = skeptic_call.observation.artifact
             if type(skeptic) is not SkepticResult:
-                return ProductionResearchRun(None, (), None, _call_refusal(skeptic_call))
+                return ProductionResearchRun(
+                    None,
+                    (),
+                    None,
+                    _call_refusal((*calls, skeptic_call), tuple(artifact_ids)),
+                )
             calls.append(skeptic_call)
             artifact_ids.append(skeptic.content_hash)
             if skeptic.decision is SkepticDecision.REJECT:
@@ -453,7 +500,13 @@ class ProductionResearch:
                     None,
                     (),
                     None,
-                    _input_refusal(context, request_id, "skeptic_requested_evidence"),
+                    _input_refusal(
+                        context,
+                        request_id,
+                        "skeptic_requested_evidence",
+                        calls,
+                        tuple(artifact_ids),
+                    ),
                 )
             forecast_call = self._call(
                 context,
@@ -467,7 +520,12 @@ class ProductionResearch:
             )
             forecast = forecast_call.observation.artifact
             if type(forecast) is not ScenarioForecast:
-                return ProductionResearchRun(None, (), None, _call_refusal(forecast_call))
+                return ProductionResearchRun(
+                    None,
+                    (),
+                    None,
+                    _call_refusal((*calls, forecast_call), tuple(artifact_ids)),
+                )
             calls.append(forecast_call)
             artifact_ids.append(forecast.content_hash)
             cio_call = self._call(
@@ -482,7 +540,12 @@ class ProductionResearch:
             )
             cio = cio_call.observation.artifact
             if type(cio) is not CioResolution:
-                return ProductionResearchRun(None, (), None, _call_refusal(cio_call))
+                return ProductionResearchRun(
+                    None,
+                    (),
+                    None,
+                    _call_refusal((*calls, cio_call), tuple(artifact_ids)),
+                )
             calls.append(cio_call)
             artifact_ids.append(cio.content_hash)
             if cio.stance is CioStance.ABSTAIN:
@@ -792,6 +855,13 @@ def _model_response_is_valid(value: object) -> TypeGuard[ModelCallResponse]:
             or (type(value.elapsed_milliseconds) is int and value.elapsed_milliseconds >= 0)
         )
         and type(value.timing_disposition) is ModelTimingDisposition
+        and value.timing_disposition
+        is {
+            ModelCallDisposition.RESPONDED: ModelTimingDisposition.WITHIN_BUDGET,
+            ModelCallDisposition.TIMED_OUT: ModelTimingDisposition.TIMED_OUT,
+            ModelCallDisposition.QUOTA_EXHAUSTED: ModelTimingDisposition.UNAVAILABLE,
+            ModelCallDisposition.REFUSED: ModelTimingDisposition.UNAVAILABLE,
+        }.get(value.disposition)
     )
 
 
@@ -904,7 +974,11 @@ def _checkpoint(
     )
 
 
-def _call_refusal(call: _CallResult) -> ResearchRefusal:
+def _call_refusal(
+    calls: tuple[_CallResult, ...],
+    artifact_ids: tuple[str, ...],
+) -> ResearchRefusal:
+    call = calls[-1]
     return ResearchRefusal(
         _content_hash(
             {
@@ -916,7 +990,8 @@ def _call_refusal(call: _CallResult) -> ResearchRefusal:
                     else call.observation.artifact_refusal.value
                 ),
             }
-        )
+        ),
+        _checkpoint(list(calls), artifact_ids),
     )
 
 
@@ -924,9 +999,12 @@ def _input_refusal(
     context: ProductionResearchContext,
     request_id: str,
     reason: str,
+    calls: list[_CallResult] | None = None,
+    artifact_ids: tuple[str, ...] = (),
 ) -> ResearchRefusal:
     return ResearchRefusal(
-        _content_hash({"run_id": context.run_id, "request_id": request_id, "reason": reason})
+        _content_hash({"run_id": context.run_id, "request_id": request_id, "reason": reason}),
+        _checkpoint([] if calls is None else calls, artifact_ids),
     )
 
 

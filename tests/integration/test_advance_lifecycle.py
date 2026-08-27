@@ -1433,6 +1433,7 @@ def _configure(
         repository_root=REPOSITORY_ROOT,
         recorded_universe=recorded_universe(),
         recorded_evidence=production_recorded_evidence(),
+        recorded_official_evidence=recorded_official_evidence(),
         recorded_model=ValidProductionModel(cio_stance=cio_stance),
         session_eligibility=RecordedSessionEligibility(),
         clock=(FixedClock(datetime(2026, 8, 21, 22, 0, tzinfo=UTC)) if clock is None else clock),
@@ -3783,7 +3784,7 @@ def test_corrupt_refusal_rows_fail_closed_with_a_bounded_diagnostic(
         row = connection.execute(
             "SELECT refusal_id, idempotency_key, cycle_identity, reason_code, "
             "evidence_policy_id, evidence_artifact_ids, evidence_refusal_ids, "
-            "attention_refusal_reason, research_refusal_id, recorded_at "
+            "attention_refusal_reason, research_refusal_id, research_refusal, recorded_at "
             "FROM advance_refusals"
         ).fetchone()
         connection.execute("DROP TABLE advance_refusals")
@@ -3791,11 +3792,11 @@ def test_corrupt_refusal_rows_fail_closed_with_a_bounded_diagnostic(
             "CREATE TABLE advance_refusals "
             "(refusal_id, idempotency_key, cycle_identity, reason_code, "
             "evidence_policy_id, evidence_artifact_ids, evidence_refusal_ids, "
-            "attention_refusal_reason, research_refusal_id, recorded_at)"
+            "attention_refusal_reason, research_refusal_id, research_refusal, recorded_at)"
         )
         assert row is not None
         connection.execute(
-            "INSERT INTO advance_refusals VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO advance_refusals VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 row[0],
                 row[1],
@@ -3806,6 +3807,7 @@ def test_corrupt_refusal_rows_fail_closed_with_a_bounded_diagnostic(
                 row[6],
                 row[7],
                 row[8],
+                row[9],
                 recorded_at,
             ),
         )
@@ -3844,6 +3846,7 @@ def test_corrupt_attention_refusal_reason_fails_closed(
             None,
             AttentionRefusalReason.MISSING_EVIDENCE.value,
             None,
+            None,
             UtcInstant.from_datetime(RECORDED_AT).isoformat(),
         )
     else:
@@ -3857,6 +3860,7 @@ def test_corrupt_attention_refusal_reason_fails_closed(
             "[]",
             "unknown",
             None,
+            None,
             UtcInstant.from_datetime(RECORDED_AT).isoformat(),
         )
     with sqlite3.connect(database) as connection:
@@ -3865,10 +3869,10 @@ def test_corrupt_attention_refusal_reason_fails_closed(
             "CREATE TABLE advance_refusals "
             "(refusal_id, idempotency_key, cycle_identity, reason_code, "
             "evidence_policy_id, evidence_artifact_ids, evidence_refusal_ids, "
-            "attention_refusal_reason, research_refusal_id, recorded_at)"
+            "attention_refusal_reason, research_refusal_id, research_refusal, recorded_at)"
         )
         connection.execute(
-            "INSERT INTO advance_refusals VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO advance_refusals VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             row,
         )
 
@@ -3900,10 +3904,10 @@ def test_research_refusal_identity_on_an_unrelated_refusal_fails_closed(
             "CREATE TABLE advance_refusals "
             "(refusal_id, idempotency_key, cycle_identity, reason_code, "
             "evidence_policy_id, evidence_artifact_ids, evidence_refusal_ids, "
-            "attention_refusal_reason, research_refusal_id, recorded_at)"
+            "attention_refusal_reason, research_refusal_id, research_refusal, recorded_at)"
         )
         connection.execute(
-            "INSERT INTO advance_refusals VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO advance_refusals VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 1,
                 "corrupt-research-refusal",
@@ -3914,6 +3918,7 @@ def test_research_refusal_identity_on_an_unrelated_refusal_fails_closed(
                 None,
                 None,
                 "f" * SHA256_HEX_LENGTH,
+                None,
                 UtcInstant.from_datetime(RECORDED_AT).isoformat(),
             ),
         )
@@ -4219,7 +4224,7 @@ def test_corrupt_attention_history_fails_a_fresh_selection_closed(tmp_path: Path
         row = connection.execute(
             "SELECT refusal_id, idempotency_key, cycle_identity, reason_code, "
             "evidence_policy_id, evidence_artifact_ids, evidence_refusal_ids, "
-            "attention_refusal_reason, research_refusal_id, recorded_at "
+            "attention_refusal_reason, research_refusal_id, research_refusal, recorded_at "
             "FROM advance_refusals"
         ).fetchone()
         connection.execute("DROP TABLE advance_refusals")
@@ -4227,11 +4232,11 @@ def test_corrupt_attention_history_fails_a_fresh_selection_closed(tmp_path: Path
             "CREATE TABLE advance_refusals "
             "(refusal_id, idempotency_key, cycle_identity, reason_code, "
             "evidence_policy_id, evidence_artifact_ids, evidence_refusal_ids, "
-            "attention_refusal_reason, research_refusal_id, recorded_at)"
+            "attention_refusal_reason, research_refusal_id, research_refusal, recorded_at)"
         )
         assert row is not None
         connection.execute(
-            "INSERT INTO advance_refusals VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO advance_refusals VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 row[0],
                 row[1],
@@ -4243,6 +4248,7 @@ def test_corrupt_attention_history_fails_a_fresh_selection_closed(tmp_path: Path
                 row[7],
                 row[8],
                 row[9],
+                row[10],
             ),
         )
 

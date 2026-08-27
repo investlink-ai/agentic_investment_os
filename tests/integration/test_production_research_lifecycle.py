@@ -22,6 +22,7 @@ from agentic_investment_os.domain.lifecycle import (
     AdvanceFailureReason,
     AdvanceReceipt,
     AdvanceRecovery,
+    InvalidLifecycleStateError,
     LifecyclePersistenceError,
     LifecyclePhase,
     NoActionReason,
@@ -33,6 +34,7 @@ from agentic_investment_os.memory.beliefs import (
     BeliefGraph,
     BeliefGraphRefusal,
     BeliefGraphRefusalCode,
+    BeliefPersistenceError,
     RecordReceipt,
 )
 from agentic_investment_os.research.model import (
@@ -54,7 +56,11 @@ from agentic_investment_os.research.resolution import (
     parse_thesis,
 )
 from tests._governance import RecordedSessionEligibility
-from tests._production_research import ValidProductionModel, production_recorded_evidence
+from tests._production_research import (
+    ValidProductionModel,
+    production_recorded_evidence,
+    production_recorded_official_evidence,
+)
 from tests._replay import (
     ARTIFACT_ID,
     SUBJECT,
@@ -75,12 +81,22 @@ MODEL_IDENTITY = "codex-subscription/test-model"
 EXPECTED_SUBJECTS = 2
 EXPECTED_CALLS = 10
 EXPECTED_RESOLUTION_ARTIFACTS = 8
+EXPECTED_NO_THESIS_CALLS = 2
+EXPECTED_INVALID_THESIS_CALLS = 2
 
 
 @dataclass(frozen=True, slots=True)
 class _FixedClock:
     def now(self) -> datetime:
         return datetime(2026, 8, 21, 22, tzinfo=UTC)
+
+
+@dataclass(frozen=True, slots=True)
+class _ClockAt:
+    instant: datetime
+
+    def now(self) -> datetime:
+        return self.instant
 
 
 @dataclass(slots=True)
@@ -139,6 +155,49 @@ class _InterruptingRoleModel:
             self.interrupted = True
             raise _SimulatedModelInterruptionError
         return self.delegate.call(request)
+
+
+@dataclass(slots=True)
+class _ActiveUninvestableModel:
+    delegate: _ValidProductionModel
+
+    @property
+    def unique_effect_count(self) -> int:
+        return self.delegate.unique_effect_count
+
+    def call(self, request: ModelCallRequest) -> ModelCallResponse:
+        response = self.delegate.call(request)
+        if request.role is not ResearchRole.THESIS_BUILDER:
+            return response
+        assert response.raw_response is not None
+        payload = json.loads(response.raw_response)
+        assert isinstance(payload, dict)
+        conditions = payload["uninvestable_conditions"]
+        assert isinstance(conditions, list)
+        condition = conditions[0]
+        assert isinstance(condition, dict)
+        condition["active"] = True
+        return replace(
+            response,
+            raw_response=json.dumps(payload, sort_keys=True, separators=(",", ":")).encode(),
+        )
+
+
+@dataclass(slots=True)
+class _InvalidThesisModel:
+    delegate: _ValidProductionModel
+
+    @property
+    def unique_effect_count(self) -> int:
+        return self.delegate.unique_effect_count
+
+    def call(self, request: ModelCallRequest) -> ModelCallResponse:
+        response = self.delegate.call(request)
+        return (
+            replace(response, raw_response=b"{}")
+            if request.role is ResearchRole.THESIS_BUILDER
+            else response
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -331,15 +390,17 @@ def _configure(
     *,
     universe: dict[str, object],
     model: ResearchRoleModel,
+    clock: _FixedClock | _ClockAt | None = None,
 ) -> Advance:
     capability = configure_advance(
         (ConfigurationSource("test", _configuration(state_root)),),
         repository_root=REPOSITORY_ROOT,
         recorded_universe=universe,
         recorded_evidence=production_recorded_evidence(),
+        recorded_official_evidence=production_recorded_official_evidence(),
         recorded_model=model,
         session_eligibility=RecordedSessionEligibility(),
-        clock=_FixedClock(),
+        clock=_FixedClock() if clock is None else clock,
     )
     assert isinstance(capability, Advance)
     return capability
@@ -355,6 +416,87 @@ def _advance_on(capability: Advance, key: str, trading_date: date) -> AdvanceRec
 
 def _advance(capability: Advance, key: str) -> AdvanceReceipt:
     return _advance_on(capability, key, date(2026, 8, 21))
+
+
+def _configured_status(state_root: Path) -> Status:
+    status = configure_status(
+        (ConfigurationSource("test", _configuration(state_root)),),
+        repository_root=REPOSITORY_ROOT,
+    )
+    assert isinstance(status, Status)
+    return status
+
+
+def _complete_research(
+    state_root: Path,
+    *,
+    model: ResearchRoleModel | None = None,
+) -> tuple[AdvanceReceipt, Status]:
+    configured = _configure(
+        state_root,
+        universe=recorded_universe(),
+        model=_ValidProductionModel() if model is None else model,
+    )
+    receipt = _advance(configured, "stage-three-adversarial-history")
+    assert receipt.disposition in (AdvanceDisposition.ADVANCED, AdvanceDisposition.NO_ACTION)
+    status = _configured_status(state_root)
+    status()
+    return receipt, status
+
+
+def _rewrite_research_checkpoint(database: Path, *, wrong_call_owner: bool) -> None:
+    with sqlite3.connect(database) as connection:
+        row = connection.execute(
+            "SELECT research_checkpoint, event_envelope FROM lifecycle_events "
+            "WHERE event_kind = 'research_run'"
+        ).fetchone()
+        assert row is not None
+        checkpoint = json.loads(row[0])
+        envelope = json.loads(row[1])
+        assert isinstance(checkpoint, dict)
+        assert isinstance(envelope, dict)
+        if wrong_call_owner:
+            build_call = connection.execute(
+                "SELECT call_id FROM production_research_call_intents "
+                "WHERE role = 'evidence_collector' ORDER BY call_id LIMIT 1"
+            ).fetchone()
+            assert build_call is not None
+            call_ids = checkpoint["call_ids"]
+            assert isinstance(call_ids, list)
+            call_ids[0] = build_call[0]
+            call_ids.sort()
+        else:
+            input_tokens = checkpoint["input_tokens"]
+            assert isinstance(input_tokens, int)
+            checkpoint["input_tokens"] = input_tokens + 1
+        payload = envelope["payload"]
+        assert isinstance(payload, dict)
+        payload["research_checkpoint"] = checkpoint
+        envelope_without_hash = {
+            key: value for key, value in envelope.items() if key != "content_hash"
+        }
+        envelope["content_hash"] = _content_hash(envelope_without_hash)
+        connection.execute("DROP TRIGGER lifecycle_events_are_append_only_update")
+        connection.execute(
+            "UPDATE lifecycle_events SET research_checkpoint = ?, event_envelope = ? "
+            "WHERE event_kind = 'research_run'",
+            (
+                json.dumps(checkpoint, sort_keys=True, separators=(",", ":")),
+                json.dumps(envelope, sort_keys=True, separators=(",", ":")),
+            ),
+        )
+
+
+def _belief_evidence_relationships(database: Path) -> set[str]:
+    with sqlite3.connect(database) as connection:
+        event_rows = connection.execute(
+            "SELECT event_json FROM belief_events ORDER BY ledger_position"
+        ).fetchall()
+    return {
+        reference["relationship"]
+        for row in event_rows
+        for reference in json.loads(row[0])["evidence"]
+    }
 
 
 def test_production_advance_completes_stage_three_without_model_effect_for_no_attention(
@@ -420,6 +562,37 @@ def test_production_advance_fails_closed_on_invalid_evidence_collector_output(
     assert receipt.completed_phase is None
     assert replayed == receipt
     assert model.unique_effect_count == 1
+
+
+@pytest.mark.parametrize("corruption", ["invalid_json", "mismatched_identity"])
+def test_status_rejects_corrupt_structured_research_refusal(
+    tmp_path: Path,
+    corruption: str,
+) -> None:
+    state_root = tmp_path / "runtime"
+    model = _InvalidThesisModel(_ValidProductionModel())
+    capability = _configure(state_root, universe=recorded_universe(), model=model)
+    receipt = _advance(capability, "stage-three-invalid-thesis")
+    status = _configured_status(state_root)
+
+    assert receipt.failure_reason is AdvanceFailureReason.RESEARCH_FAILED
+    assert model.unique_effect_count == EXPECTED_INVALID_THESIS_CALLS
+    status()
+    with sqlite3.connect(state_root / "lifecycle.sqlite3") as connection:
+        connection.execute("DROP TRIGGER advance_refusals_are_append_only_update")
+        if corruption == "invalid_json":
+            connection.execute("UPDATE advance_refusals SET research_refusal = 'not-json'")
+        else:
+            connection.execute(
+                "UPDATE advance_refusals SET research_refusal_id = ?",
+                ("e" * 64,),
+            )
+
+    with pytest.raises(
+        InvalidLifecycleStateError,
+        match="invalid idempotency_key in lifecycle refusal ledger",
+    ):
+        status()
 
 
 @pytest.mark.parametrize(
@@ -683,12 +856,12 @@ def test_production_advance_records_validated_research_and_belief_events_once(
         assert connection.execute("SELECT COUNT(*) FROM belief_events").fetchone() == (
             EXPECTED_SUBJECTS,
         )
+    assert _belief_evidence_relationships(state_root / "lifecycle.sqlite3") == {
+        "supporting",
+        "contradicting",
+    }
 
-    status = configure_status(
-        (ConfigurationSource("test", _configuration(state_root)),),
-        repository_root=REPOSITORY_ROOT,
-    )
-    assert isinstance(status, Status)
+    status = _configured_status(state_root)
     status()
 
     with sqlite3.connect(state_root / "lifecycle.sqlite3") as connection:
@@ -734,3 +907,317 @@ def test_production_advance_records_validated_research_and_belief_events_once(
         match="invalid production research call history",
     ):
         status()
+
+
+def test_production_research_requires_official_evidence_before_any_model_effect(
+    tmp_path: Path,
+) -> None:
+    state_root = tmp_path / "runtime"
+    model = _ValidProductionModel()
+    capability = configure_advance(
+        (ConfigurationSource("test", _configuration(state_root)),),
+        repository_root=REPOSITORY_ROOT,
+        recorded_universe=recorded_universe(),
+        recorded_evidence=production_recorded_evidence(),
+        recorded_model=model,
+        session_eligibility=RecordedSessionEligibility(),
+        clock=_FixedClock(),
+    )
+    assert isinstance(capability, Advance)
+
+    receipt = _advance(capability, "stage-three-missing-official-evidence")
+
+    assert receipt.disposition is AdvanceDisposition.FAILED_CLOSED
+    assert receipt.failure_reason is AdvanceFailureReason.RESEARCH_FAILED
+    assert model.unique_effect_count == 0
+    with sqlite3.connect(state_root / "lifecycle.sqlite3") as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM production_research_call_intents"
+        ).fetchone() == (0,)
+
+
+def test_production_research_enforces_subject_evidence_bound_before_model_effect(
+    tmp_path: Path,
+) -> None:
+    state_root = tmp_path / "runtime"
+    configuration = _configuration(state_root)
+    policy = configuration["research_policy"]
+    assert isinstance(policy, dict)
+    policy["maximum_evidence_artifacts"] = 1
+    model = _ValidProductionModel()
+    capability = configure_advance(
+        (ConfigurationSource("test", configuration),),
+        repository_root=REPOSITORY_ROOT,
+        recorded_universe=recorded_universe(),
+        recorded_evidence=production_recorded_evidence(),
+        recorded_official_evidence=production_recorded_official_evidence(),
+        recorded_model=model,
+        session_eligibility=RecordedSessionEligibility(),
+        clock=_FixedClock(),
+    )
+    assert isinstance(capability, Advance)
+
+    receipt = _advance(capability, "stage-three-bounded-evidence")
+
+    assert receipt.failure_reason is AdvanceFailureReason.RESEARCH_FAILED
+    assert model.unique_effect_count == 0
+
+
+def test_active_uninvestable_thesis_is_typed_no_action_and_stops_later_roles(
+    tmp_path: Path,
+) -> None:
+    state_root = tmp_path / "runtime"
+    model = _ActiveUninvestableModel(_ValidProductionModel())
+    capability = _configure(state_root, universe=recorded_universe(), model=model)
+
+    receipt = _advance(capability, "stage-three-no-valid-thesis")
+    status = _configured_status(state_root)()
+
+    assert receipt.disposition is AdvanceDisposition.NO_ACTION
+    assert receipt.no_action_reason is NoActionReason.NO_VALID_THESIS
+    assert status.no_action_reason is NoActionReason.NO_VALID_THESIS
+    assert status.last_completed_cycle is None
+    assert model.unique_effect_count == EXPECTED_NO_THESIS_CALLS
+    with sqlite3.connect(state_root / "lifecycle.sqlite3") as connection:
+        assert connection.execute("SELECT COUNT(*) FROM belief_events").fetchone() == (0,)
+
+
+def test_memory_retry_replays_committed_event_with_its_original_transaction_time(
+    tmp_path: Path,
+) -> None:
+    state_root = tmp_path / "runtime"
+    model = _ValidProductionModel()
+    first = _configure(state_root, universe=recorded_universe(), model=model)
+    database = state_root / "lifecycle.sqlite3"
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            """
+            CREATE TRIGGER stop_memory_checkpoint
+            BEFORE INSERT ON lifecycle_events
+            WHEN NEW.event_kind = 'memory_updated'
+            BEGIN SELECT RAISE(ABORT, 'injected memory checkpoint interruption'); END
+            """
+        )
+
+    with pytest.raises(LifecyclePersistenceError, match="SQLite lifecycle checkpoint failed"):
+        _advance(first, "stage-three-memory-redelivery")
+    with sqlite3.connect(database) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM belief_events").fetchone() == (1,)
+        connection.execute("DROP TRIGGER stop_memory_checkpoint")
+
+    retry = _configure(
+        state_root,
+        universe=recorded_universe(),
+        model=model,
+        clock=_ClockAt(datetime(2026, 8, 21, 23, tzinfo=UTC)),
+    )
+    receipt = _advance(retry, "stage-three-memory-redelivery")
+
+    assert receipt.disposition is AdvanceDisposition.ADVANCED
+    assert len(receipt.belief_event_ids) == 1
+    with sqlite3.connect(database) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM belief_events").fetchone() == (1,)
+
+
+def test_status_rejects_deleted_belief_event_referenced_by_memory_checkpoint(
+    tmp_path: Path,
+) -> None:
+    state_root = tmp_path / "runtime"
+    receipt, status = _complete_research(state_root)
+    assert receipt.belief_event_ids
+    with sqlite3.connect(state_root / "lifecycle.sqlite3") as connection:
+        connection.execute("DROP TRIGGER belief_events_are_append_only_delete")
+        connection.execute(
+            "DELETE FROM belief_events WHERE event_id = ?",
+            (receipt.belief_event_ids[0],),
+        )
+
+    with pytest.raises(BeliefPersistenceError, match="invalid authoritative belief history"):
+        status.memory_history_validator.validate_history(receipt.belief_event_ids)
+    with pytest.raises(
+        LifecyclePersistenceError,
+        match="invalid production research call history",
+    ):
+        status()
+
+
+@pytest.mark.parametrize("corruption", ["resource_total", "call_owner"])
+def test_status_rejects_coherently_resealed_checkpoint_resources_or_phase_ownership(
+    tmp_path: Path,
+    corruption: str,
+) -> None:
+    state_root = tmp_path / "runtime"
+    _, status = _complete_research(state_root)
+    _rewrite_research_checkpoint(
+        state_root / "lifecycle.sqlite3",
+        wrong_call_owner=corruption == "call_owner",
+    )
+
+    with pytest.raises(
+        LifecyclePersistenceError,
+        match="invalid production research call history",
+    ):
+        status()
+
+
+@pytest.mark.parametrize(
+    "corruption",
+    ["raw_response", "recorded_at", "schema_version", "record_kind"],
+)
+def test_status_rederives_observation_content_timing_and_discriminator(
+    tmp_path: Path,
+    corruption: str,
+) -> None:
+    state_root = tmp_path / "runtime"
+    _, status = _complete_research(state_root)
+    database = state_root / "lifecycle.sqlite3"
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "DROP TRIGGER production_research_call_observations_are_append_only_update"
+        )
+        if corruption == "recorded_at":
+            connection.execute(
+                "UPDATE production_research_call_observations SET recorded_at = "
+                "'2026-08-21T21:59:59.000000+00:00' WHERE call_id = "
+                "(SELECT call_id FROM production_research_call_observations "
+                "ORDER BY call_id LIMIT 1)"
+            )
+        else:
+            row = connection.execute(
+                "SELECT call_id, observation_json, raw_response "
+                "FROM production_research_call_observations "
+                "WHERE raw_response IS NOT NULL ORDER BY call_id LIMIT 1"
+            ).fetchone()
+            assert row is not None
+            observation = json.loads(row[1])
+            raw_response = row[2]
+            assert isinstance(observation, dict)
+            assert isinstance(raw_response, bytes)
+            if corruption == "raw_response":
+                raw_response = b"{}"
+                observation["raw_response_hash"] = hashlib.sha256(raw_response).hexdigest()
+            elif corruption == "schema_version":
+                observation["schema_version"] = 2
+            else:
+                observation["record_kind"] = "coherently_resealed_wrong_kind"
+            observation_json = json.dumps(
+                observation,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            connection.execute(
+                "UPDATE production_research_call_observations "
+                "SET observation_json = ?, raw_response = ?, observation_hash = ? "
+                "WHERE call_id = ?",
+                (
+                    observation_json,
+                    raw_response,
+                    hashlib.sha256(observation_json.encode()).hexdigest(),
+                    row[0],
+                ),
+            )
+
+    with pytest.raises(
+        LifecyclePersistenceError,
+        match="invalid production research call history",
+    ):
+        status()
+
+
+def test_status_rejects_coherently_rehashed_model_input_outside_pinned_run(
+    tmp_path: Path,
+) -> None:
+    state_root = tmp_path / "runtime"
+    _, status = _complete_research(state_root)
+    database = state_root / "lifecycle.sqlite3"
+    with sqlite3.connect(database) as connection:
+        row = connection.execute(
+            "SELECT call_id, intent_json FROM production_research_call_intents "
+            "ORDER BY call_id LIMIT 1"
+        ).fetchone()
+        assert row is not None
+        intent = json.loads(row[1])
+        assert isinstance(intent, dict)
+        model_input = json.loads(intent["model_input_json"])
+        assert isinstance(model_input, dict)
+        model_input["data_regime"] = "coherently-altered-regime-v1"
+        model_input_json = json.dumps(model_input, sort_keys=True, separators=(",", ":"))
+        intent["model_input_json"] = model_input_json
+        intent["model_input_hash"] = hashlib.sha256(model_input_json.encode()).hexdigest()
+        intent_json = json.dumps(intent, sort_keys=True, separators=(",", ":"))
+        connection.execute("DROP TRIGGER production_research_call_intents_are_append_only_update")
+        connection.execute(
+            "UPDATE production_research_call_intents SET intent_json = ?, intent_hash = ? "
+            "WHERE call_id = ?",
+            (intent_json, _content_hash(intent), row[0]),
+        )
+
+    with pytest.raises(
+        LifecyclePersistenceError,
+        match="invalid production research call history",
+    ):
+        status()
+
+
+def test_status_rejects_deletion_of_structurally_referenced_failed_call(
+    tmp_path: Path,
+) -> None:
+    state_root = tmp_path / "runtime"
+    model = RecordedResearchModel(
+        (
+            RecordedModelFixture(
+                ModelCallDisposition.RESPONDED,
+                b"{}",
+                MODEL_IDENTITY,
+                timing_disposition=ModelTimingDisposition.WITHIN_BUDGET,
+            ),
+        )
+    )
+    capability = _configure(state_root, universe=recorded_universe(), model=model)
+    receipt = _advance(capability, "stage-three-structured-failed-call")
+    assert receipt.failure_reason is AdvanceFailureReason.RESEARCH_FAILED
+    status = _configured_status(state_root)
+    status()
+    database = state_root / "lifecycle.sqlite3"
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "DROP TRIGGER production_research_call_observations_are_append_only_delete"
+        )
+        connection.execute("DROP TRIGGER production_research_call_intents_are_append_only_delete")
+        connection.execute("DELETE FROM production_research_call_observations")
+        connection.execute("DELETE FROM production_research_call_intents")
+
+    with pytest.raises(
+        LifecyclePersistenceError,
+        match="invalid production research call history",
+    ):
+        status()
+
+
+def test_invalid_response_timing_is_normalized_to_bounded_adapter_refusal(
+    tmp_path: Path,
+) -> None:
+    state_root = tmp_path / "runtime"
+    model = RecordedResearchModel(
+        (
+            RecordedModelFixture(
+                ModelCallDisposition.RESPONDED,
+                b"{}",
+                MODEL_IDENTITY,
+                timing_disposition=ModelTimingDisposition.TIMED_OUT,
+            ),
+        )
+    )
+    capability = _configure(state_root, universe=recorded_universe(), model=model)
+
+    receipt = _advance(capability, "stage-three-invalid-response-timing")
+
+    assert receipt.failure_reason is AdvanceFailureReason.RESEARCH_FAILED
+    with sqlite3.connect(state_root / "lifecycle.sqlite3") as connection:
+        row = connection.execute(
+            "SELECT observation_json FROM production_research_call_observations"
+        ).fetchone()
+    assert row is not None
+    observation = json.loads(row[0])
+    assert observation["disposition"] == LabObservationDisposition.ADAPTER_REFUSED.value
+    assert observation["timing_disposition"] == ModelTimingDisposition.UNAVAILABLE.value

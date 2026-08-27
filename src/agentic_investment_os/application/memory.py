@@ -50,3 +50,7 @@ class Record:
         if parsed is None:
             return BeliefGraphRefusal(BeliefGraphRefusalCode.INVALID_QUERY)
         return self.ledger.rebuild_graph(parsed, self.evidence_resolver)
+
+    def validate_history(self, event_ids: tuple[str, ...]) -> None:
+        """Revalidate authoritative Belief history and lifecycle references."""
+        self.ledger.validate_history(event_ids, self.evidence_resolver)

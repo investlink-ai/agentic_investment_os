@@ -73,6 +73,7 @@ from agentic_investment_os.domain.lifecycle import (
     PerformMemoryUpdate,
     PerformResearch,
     PinnedRunIdentity,
+    ProductionResearchReference,
     ResearchCheckpoint,
     ResearchRefusal,
     decide_advance,
@@ -83,8 +84,10 @@ from agentic_investment_os.domain.lifecycle import (
     is_sha256,
     parse_lifecycle_checkpoint,
     parse_research_checkpoint,
+    parse_research_refusal,
     reconstruct_constitution_uses,
     reconstruct_evidence_checkpoints,
+    reconstruct_memory_event_ids,
     reconstruct_production_research_checkpoints,
 )
 from agentic_investment_os.domain.temporal import InvalidUtcInstantError, UtcInstant
@@ -190,7 +193,7 @@ CREATE TABLE lifecycle_events (
     research_checkpoint TEXT,
     no_action_reason TEXT CHECK (
         no_action_reason IS NULL OR no_action_reason IN (
-            'no_attention', 'skeptic_rejected', 'cio_abstained'
+            'no_attention', 'no_valid_thesis', 'skeptic_rejected', 'cio_abstained'
         )
     ),
     event_envelope TEXT NOT NULL,
@@ -307,6 +310,7 @@ CREATE TABLE advance_refusals (
     research_refusal_id TEXT CHECK (
         research_refusal_id IS NULL OR length(research_refusal_id) = 64
     ),
+    research_refusal TEXT,
     recorded_at TEXT NOT NULL,
     CHECK (
         (reason_code = 'evidence_capture_failed'
@@ -315,20 +319,23 @@ CREATE TABLE advance_refusals (
             AND evidence_refusal_ids IS NOT NULL
             AND evidence_refusal_ids != '[]'
             AND attention_refusal_reason IS NULL
-            AND research_refusal_id IS NULL)
+            AND research_refusal_id IS NULL
+            AND research_refusal IS NULL)
         OR (reason_code = 'attention_selection_failed'
             AND evidence_policy_id IS NOT NULL
             AND evidence_artifact_ids IS NOT NULL
             AND evidence_artifact_ids != '[]'
             AND evidence_refusal_ids = '[]'
             AND attention_refusal_reason IS NOT NULL
-            AND research_refusal_id IS NULL)
+            AND research_refusal_id IS NULL
+            AND research_refusal IS NULL)
         OR (reason_code IN ('research_failed', 'memory_update_failed')
             AND evidence_policy_id IS NULL
             AND evidence_artifact_ids IS NULL
             AND evidence_refusal_ids IS NULL
             AND attention_refusal_reason IS NULL
-            AND research_refusal_id IS NOT NULL)
+            AND research_refusal_id IS NOT NULL
+            AND research_refusal IS NOT NULL)
         OR (reason_code NOT IN (
                 'evidence_capture_failed', 'attention_selection_failed',
                 'research_failed', 'memory_update_failed'
@@ -337,7 +344,8 @@ CREATE TABLE advance_refusals (
             AND evidence_artifact_ids IS NULL
             AND evidence_refusal_ids IS NULL
             AND attention_refusal_reason IS NULL
-            AND research_refusal_id IS NULL)
+            AND research_refusal_id IS NULL
+            AND research_refusal IS NULL)
     )
 ) STRICT
 """,
@@ -538,7 +546,7 @@ class _DatabaseOpenMode(StrEnum):
     EXISTING_ONLY = "rw"
 
 
-_CURRENT_DATABASE_VERSION = 10
+_CURRENT_DATABASE_VERSION = 11
 _CURRENT_SCHEMA_SIGNATURE = frozenset(" ".join(statement.split()) for statement in _CURRENT_SCHEMA)
 
 _PROJECTION_SCHEMA = """
@@ -921,16 +929,33 @@ class SQLiteLifecycleLedger:
 
         return self._write(operation)
 
-    def rebuild_production_research_checkpoints(self) -> tuple[ResearchCheckpoint, ...]:
+    def rebuild_production_research_checkpoints(
+        self,
+    ) -> tuple[ProductionResearchReference, ...]:
         """Reconstruct completed production-call references for Status validation."""
 
-        def operation(connection: sqlite3.Connection) -> tuple[ResearchCheckpoint, ...]:
+        def operation(
+            connection: sqlite3.Connection,
+        ) -> tuple[ProductionResearchReference, ...]:
             history = LifecycleHistory(
                 events=tuple(_load_events(connection)),
                 refusals=tuple(_load_refusals(connection)),
                 conflicts=tuple(_load_conflicts(connection)),
             )
             return reconstruct_production_research_checkpoints(history)
+
+        return self._write(operation)
+
+    def rebuild_memory_event_ids(self) -> tuple[str, ...]:
+        """Reconstruct every Belief Event reference named by lifecycle memory checkpoints."""
+
+        def operation(connection: sqlite3.Connection) -> tuple[str, ...]:
+            history = LifecycleHistory(
+                events=tuple(_load_events(connection)),
+                refusals=tuple(_load_refusals(connection)),
+                conflicts=tuple(_load_conflicts(connection)),
+            )
+            return reconstruct_memory_event_ids(history)
 
         return self._write(operation)
 
@@ -1515,7 +1540,7 @@ def _load_refusals(
             """
             SELECT refusal_id, idempotency_key, cycle_identity, reason_code,
                    evidence_policy_id, evidence_artifact_ids, evidence_refusal_ids,
-                   attention_refusal_reason, research_refusal_id, recorded_at
+                   attention_refusal_reason, research_refusal_id, research_refusal, recorded_at
             FROM advance_refusals ORDER BY refusal_id
             """
         ).fetchall()
@@ -1527,7 +1552,7 @@ def _load_refusals(
                 """
                 SELECT refusal_id, idempotency_key, cycle_identity, reason_code,
                        evidence_policy_id, evidence_artifact_ids, evidence_refusal_ids,
-                       attention_refusal_reason, research_refusal_id, recorded_at
+                       attention_refusal_reason, research_refusal_id, research_refusal, recorded_at
                 FROM advance_refusals
                 WHERE idempotency_key IS NULL AND reason_code = ?
                     AND cycle_identity IS ?
@@ -1543,7 +1568,7 @@ def _load_refusals(
                 """
                 SELECT refusal_id, idempotency_key, cycle_identity, reason_code,
                        evidence_policy_id, evidence_artifact_ids, evidence_refusal_ids,
-                       attention_refusal_reason, research_refusal_id, recorded_at
+                       attention_refusal_reason, research_refusal_id, research_refusal, recorded_at
                 FROM advance_refusals WHERE idempotency_key = ? ORDER BY refusal_id
                 """,
                 (refusal_key.value,),
@@ -1553,7 +1578,7 @@ def _load_refusals(
             """
             SELECT refusal_id, idempotency_key, cycle_identity, reason_code,
                    evidence_policy_id, evidence_artifact_ids, evidence_refusal_ids,
-                   attention_refusal_reason, research_refusal_id, recorded_at
+                   attention_refusal_reason, research_refusal_id, research_refusal, recorded_at
             FROM advance_refusals WHERE idempotency_key = ? ORDER BY refusal_id
             """,
             (command.request.idempotency_key.value,),
@@ -1571,8 +1596,8 @@ def _load_refusals(
             reason=reason,
         )
         attention_refusal_reason = _load_attention_refusal_reason(row[7], reason=reason)
-        research_refusal = _load_research_refusal(row[8], reason=reason)
-        _canonical_timestamp(row[9], "recorded_at")
+        research_refusal = _load_research_refusal(row[8], row[9], reason=reason)
+        _canonical_timestamp(row[10], "recorded_at")
         refusals.append(
             DurableAdvanceRefusal(
                 sequence,
@@ -1634,7 +1659,8 @@ def _load_attention_refusal_reason(
 
 
 def _load_research_refusal(
-    value: object,
+    refusal_id_value: object,
+    refusal_value: object,
     *,
     reason: AdvanceFailureReason,
 ) -> ResearchRefusal | None:
@@ -1642,10 +1668,22 @@ def _load_research_refusal(
         AdvanceFailureReason.RESEARCH_FAILED,
         AdvanceFailureReason.MEMORY_UPDATE_FAILED,
     ):
-        if value is not None:
+        if refusal_id_value is not None or refusal_value is not None:
             raise InvalidLifecycleStateError(_INVALID_REFUSAL_KEY)
         return None
-    return ResearchRefusal(_hash(value, "research_refusal_id"))
+    encoded = _text(refusal_value, "research_refusal")
+    try:
+        decoded: object = json.loads(encoded)
+    except (ValueError, RecursionError) as error:
+        raise InvalidLifecycleStateError(_INVALID_REFUSAL_KEY) from error
+    refusal = parse_research_refusal(decoded)
+    if (
+        refusal is None
+        or refusal.refusal_id != _hash(refusal_id_value, "research_refusal_id")
+        or _canonical_json(refusal.to_payload()) != encoded
+    ):
+        raise InvalidLifecycleStateError(_INVALID_REFUSAL_KEY)
+    return refusal
 
 
 def _load_conflicts(
@@ -1805,8 +1843,8 @@ def _append_record(
             INSERT INTO advance_refusals (
                 refusal_id, idempotency_key, cycle_identity, reason_code,
                 evidence_policy_id, evidence_artifact_ids, evidence_refusal_ids,
-                attention_refusal_reason, research_refusal_id, recorded_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                attention_refusal_reason, research_refusal_id, research_refusal, recorded_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 record.sequence,
@@ -1830,6 +1868,11 @@ def _append_record(
                     else record.attention_refusal_reason.value
                 ),
                 (None if record.research_refusal is None else record.research_refusal.refusal_id),
+                (
+                    None
+                    if record.research_refusal is None
+                    else _canonical_json(record.research_refusal.to_payload())
+                ),
                 timestamp,
             ),
         )

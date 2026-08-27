@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date
 from enum import StrEnum
 from typing import TYPE_CHECKING, Protocol, TypeGuard, assert_never
@@ -35,7 +35,11 @@ from agentic_investment_os.domain.temporal import InvalidUtcInstantError, UtcIns
 from agentic_investment_os.domain.universe import is_data_regime
 
 if TYPE_CHECKING:
-    from agentic_investment_os.domain.universe import UniverseInputIdentity, UniverseSnapshot
+    from agentic_investment_os.domain.universe import (
+        PositionSnapshot,
+        UniverseInputIdentity,
+        UniverseSnapshot,
+    )
 
 __all__ = (
     "AdvanceAttempt",
@@ -72,6 +76,7 @@ __all__ = (
     "PerformMemoryUpdate",
     "PerformResearch",
     "PinnedRunIdentity",
+    "ProductionResearchReference",
     "ResearchCheckpoint",
     "ResearchRefusal",
     "decide_advance",
@@ -83,8 +88,10 @@ __all__ = (
     "parse_advance_receipt",
     "parse_lifecycle_checkpoint",
     "parse_research_checkpoint",
+    "parse_research_refusal",
     "reconstruct_constitution_uses",
     "reconstruct_evidence_checkpoints",
+    "reconstruct_memory_event_ids",
     "reconstruct_production_research_checkpoints",
 )
 
@@ -317,6 +324,7 @@ class NoActionReason(StrEnum):
     """Bound the production paths that intentionally produce no belief update."""
 
     NO_ATTENTION = "no_attention"
+    NO_VALID_THESIS = "no_valid_thesis"
     SKEPTIC_REJECTED = "skeptic_rejected"
     CIO_ABSTAINED = "cio_abstained"
 
@@ -552,9 +560,40 @@ class ResearchRefusal:
     """Identify one bounded fail-closed research or memory outcome."""
 
     refusal_id: str
+    checkpoint: ResearchCheckpoint = field(default_factory=ResearchCheckpoint)
 
     def __post_init__(self) -> None:
-        if not is_sha256(self.refusal_id):
+        if not is_sha256(self.refusal_id) or type(self.checkpoint) is not ResearchCheckpoint:
+            raise ValueError(_INVALID_CHECKPOINT_ORDER)
+
+    def to_payload(self) -> dict[str, object]:
+        return {
+            "schema_version": 1,
+            "record_kind": "research_refusal",
+            "refusal_id": self.refusal_id,
+            "checkpoint": self.checkpoint.to_payload(),
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class ProductionResearchReference:
+    """Bind one production phase to its pinned inputs and optional terminal checkpoint."""
+
+    pinned_run_identity: PinnedRunIdentity
+    phase: LifecyclePhase
+    attention_artifact: AttentionArtifact
+    position_snapshot: PositionSnapshot
+    checkpoint: ResearchCheckpoint | None
+
+    def __post_init__(self) -> None:
+        if (
+            self.phase not in (LifecyclePhase.BUILD_DOSSIERS, LifecyclePhase.RUN_RESEARCH)
+            or self.attention_artifact.run_id != self.pinned_run_identity.run_id
+            or self.attention_artifact.cutoff != self.pinned_run_identity.evidence_cutoff
+            or self.attention_artifact.data_regime != self.pinned_run_identity.data_regime
+            or self.position_snapshot.fingerprint != self.pinned_run_identity.position_snapshot_hash
+            or (self.checkpoint is not None and type(self.checkpoint) is not ResearchCheckpoint)
+        ):
             raise ValueError(_INVALID_CHECKPOINT_ORDER)
 
 
@@ -1227,6 +1266,7 @@ class LifecycleStatus:
     attention_artifact_cycle: DecisionCycleIdentity | None = None
     attention_artifact_id: str | None = None
     constitution_governance: ConstitutionGovernanceStatus | None = None
+    no_action_reason: NoActionReason | None = None
 
     @classmethod
     def not_started(cls) -> LifecycleStatus:
@@ -1635,14 +1675,69 @@ def reconstruct_evidence_checkpoints(
 
 def reconstruct_production_research_checkpoints(
     history: LifecycleHistory,
-) -> tuple[ResearchCheckpoint, ...]:
-    """Return every completed production model checkpoint from validated history."""
+) -> tuple[ProductionResearchReference, ...]:
+    """Return every active or terminal production phase with exact pinned ownership."""
     progresses = reconstruct_lifecycle(history)
+    refusals = {
+        refusal.idempotency_key.value: refusal
+        for refusal in history.refusals
+        if refusal.idempotency_key is not None
+    }
+    references: list[ProductionResearchReference] = []
+    for progress in progresses:
+        attention = progress.attention_artifact
+        snapshot = progress.universe_snapshot
+        if attention is None or snapshot is None:
+            continue
+        refusal = refusals.get(progress.request.idempotency_key.value)
+        build_checkpoint = progress.dossier_checkpoint
+        if (
+            build_checkpoint is None
+            and refusal is not None
+            and refusal.reason is AdvanceFailureReason.RESEARCH_FAILED
+            and progress.completed_phase is LifecyclePhase.SELECT_ATTENTION
+            and refusal.research_refusal is not None
+        ):
+            build_checkpoint = refusal.research_refusal.checkpoint
+        references.append(
+            ProductionResearchReference(
+                progress.pinned_run_identity,
+                LifecyclePhase.BUILD_DOSSIERS,
+                attention,
+                snapshot.inputs.position_snapshot,
+                build_checkpoint,
+            )
+        )
+        if progress.dossier_checkpoint is None:
+            continue
+        research_checkpoint = progress.research_checkpoint
+        if (
+            research_checkpoint is None
+            and refusal is not None
+            and refusal.reason is AdvanceFailureReason.RESEARCH_FAILED
+            and progress.completed_phase is LifecyclePhase.BUILD_DOSSIERS
+            and refusal.research_refusal is not None
+        ):
+            research_checkpoint = refusal.research_refusal.checkpoint
+        references.append(
+            ProductionResearchReference(
+                progress.pinned_run_identity,
+                LifecyclePhase.RUN_RESEARCH,
+                attention,
+                snapshot.inputs.position_snapshot,
+                research_checkpoint,
+            )
+        )
+    return tuple(references)
+
+
+def reconstruct_memory_event_ids(history: LifecycleHistory) -> tuple[str, ...]:
+    """Return every Belief Event identifier named by a completed memory checkpoint."""
     return tuple(
-        checkpoint
-        for progress in progresses
-        for checkpoint in (progress.dossier_checkpoint, progress.research_checkpoint)
-        if checkpoint is not None
+        event_id
+        for progress in reconstruct_lifecycle(history)
+        if progress.memory_checkpoint is not None
+        for event_id in progress.memory_checkpoint.artifact_ids
     )
 
 
@@ -2424,7 +2519,8 @@ def derive_lifecycle_status(history: LifecycleHistory) -> LifecycleStatus:
     active_phase = None if next_phase is None else LifecycleCheckpoint.equity(next_phase)
     return LifecycleStatus(
         active_phase=active_phase,
-        last_completed_cycle=(current.pinned_run_identity.cycle if current.is_complete else None),
+        # Stage 3 ends at UpdateMemory; only the later Complete phase may publish this field.
+        last_completed_cycle=None,
         universe_snapshot_cycle=_latest_universe_cycle(progresses),
         pinned_run_identity=current.pinned_run_identity,
         liveness=LifecycleLiveness.ACTIVE,
@@ -2435,6 +2531,7 @@ def derive_lifecycle_status(history: LifecycleHistory) -> LifecycleStatus:
         universe_snapshot_id=_latest_universe_snapshot_id(progresses),
         attention_artifact_cycle=attention_artifact_cycle,
         attention_artifact_id=attention_artifact_id,
+        no_action_reason=(current.no_action_reason if current.is_complete else None),
     )
 
 
@@ -2519,7 +2616,11 @@ class LifecycleStatusProjection(Protocol):
 
     def rebuild_evidence_checkpoints(self) -> tuple[EvidenceCaptureReference, ...]: ...
 
-    def rebuild_production_research_checkpoints(self) -> tuple[ResearchCheckpoint, ...]: ...
+    def rebuild_production_research_checkpoints(
+        self,
+    ) -> tuple[ProductionResearchReference, ...]: ...
+
+    def rebuild_memory_event_ids(self) -> tuple[str, ...]: ...
 
     def rebuild_constitution_uses(self) -> tuple[ConstitutionUse, ...]: ...
 
@@ -2590,6 +2691,25 @@ def parse_research_checkpoint(value: object) -> ResearchCheckpoint | None:
         )
     except (TypeError, ValueError):
         return None
+
+
+def parse_research_refusal(value: object) -> ResearchRefusal | None:
+    """Validate one durable structured research refusal and its effect references."""
+    fields = _exact_mapping(
+        value,
+        frozenset({"schema_version", "record_kind", "refusal_id", "checkpoint"}),
+    )
+    if (
+        fields is None
+        or fields["schema_version"] != 1
+        or fields["record_kind"] != "research_refusal"
+        or not is_sha256(fields["refusal_id"])
+    ):
+        return None
+    checkpoint = parse_research_checkpoint(fields["checkpoint"])
+    if checkpoint is None:
+        return None
+    return ResearchRefusal(fields["refusal_id"], checkpoint)
 
 
 def _parse_hash_tuple(value: object) -> tuple[str, ...] | None:

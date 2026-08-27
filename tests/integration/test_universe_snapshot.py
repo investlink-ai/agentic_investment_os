@@ -23,7 +23,11 @@ from agentic_investment_os.domain.temporal import UtcInstant
 from agentic_investment_os.entrypoints.configuration import ConfigurationSource
 from agentic_investment_os.entrypoints.lifecycle import configure_advance, configure_status
 from tests._governance import BASELINE_GOVERNANCE_STATUS, RecordedSessionEligibility
-from tests._production_research import ValidProductionModel, production_recorded_evidence
+from tests._production_research import (
+    ValidProductionModel,
+    production_recorded_evidence,
+    production_recorded_official_evidence,
+)
 from tests._universe import (
     mutable_mapping,
     mutable_mapping_list,
@@ -58,6 +62,7 @@ def _configure(
         repository_root=Path.cwd(),
         recorded_universe=payload,
         recorded_evidence=production_recorded_evidence(),
+        recorded_official_evidence=production_recorded_official_evidence(),
         recorded_model=ValidProductionModel(),
         session_eligibility=RecordedSessionEligibility(),
         clock=FixedClock() if clock is None else clock,

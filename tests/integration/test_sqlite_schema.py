@@ -32,7 +32,7 @@ from tests._attention import attention_artifact
 from tests._evidence import evidence_capture_checkpoint
 from tests._universe import advance_command
 
-CURRENT_DATABASE_VERSION = 10
+CURRENT_DATABASE_VERSION = 11
 CONFIGURATION_HASH = "a" * 64
 RECORDED_AT = "2026-08-21T22:00:00.000000+00:00"
 MAX_DIAGNOSTIC_LENGTH = 100

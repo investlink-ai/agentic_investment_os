@@ -61,6 +61,7 @@ from agentic_investment_os.domain.universe import (
     build_universe_snapshot,
 )
 from agentic_investment_os.evidence.capture import (
+    EvidenceFeed,
     EvidencePersistenceError,
     InvalidEvidenceError,
 )
@@ -68,6 +69,7 @@ from agentic_investment_os.memory.admission import (
     BeliefClaimKind,
     BeliefEvent,
     BeliefEvidenceReference,
+    BeliefEvidenceRelationship,
     BeliefStatus,
 )
 from agentic_investment_os.memory.beliefs import (
@@ -98,6 +100,7 @@ if TYPE_CHECKING:
         EvidenceReferenceValidator,
         EvidenceVault,
     )
+    from agentic_investment_os.memory.beliefs import BeliefHistoryValidator
     from agentic_investment_os.research.production import (
         ProductionResearchHistoryValidator,
     )
@@ -326,26 +329,27 @@ class Advance:
         except (EvidencePersistenceError, InvalidEvidenceError) as error:
             raise InvalidLifecycleStateError(_INCOMPLETE_CHECKPOINT_RESULT) from error
         cards = {card.card_id: card for card in attention.candidate_cards}
-        requested: list[tuple[str, EquityInstrumentIdentity, tuple[str, ...]]] = []
+        requested: list[tuple[str, EquityInstrumentIdentity]] = []
         for request in attention.dossier_requests:
             card = cards.get(request.candidate_card_id)
             if card is None or type(request.identity) is not EquityInstrumentIdentity:
                 raise InvalidLifecycleStateError(_INCOMPLETE_CHECKPOINT_RESULT)
-            requested.append((request.request_id, request.identity, card.evidence_artifact_ids))
+            requested.append((request.request_id, request.identity))
         for refresh in attention.holding_refreshes:
             if refresh.disposition is not HoldingRefreshDisposition.REQUIRED:
                 continue
             if type(refresh.identity) is not EquityInstrumentIdentity:
                 raise InvalidLifecycleStateError(_INCOMPLETE_CHECKPOINT_RESULT)
-            requested.append((refresh.refresh_id, refresh.identity, refresh.evidence_artifact_ids))
+            requested.append((refresh.refresh_id, refresh.identity))
         subjects: list[ProductionResearchSubject] = []
         graphs: list[tuple[str, ProductionBeliefGraph]] = []
-        for request_id, identity, artifact_ids in sorted(requested):
+        for request_id, identity in sorted(requested):
             subject_records = tuple(
                 record
                 for record in records
-                if record.artifact.artifact_id in artifact_ids
-                and any(mapping.identity == identity for mapping in record.artifact.entity_mappings)
+                if any(mapping.identity == identity for mapping in record.artifact.entity_mappings)
+                or record.artifact.feed
+                in (EvidenceFeed.FEDERAL_RESERVE, EvidenceFeed.BLS, EvidenceFeed.BEA)
             )
             subject = ProductionResearchSubject(
                 request_id,
@@ -361,6 +365,14 @@ class Advance:
                             separators=(",", ":"),
                         ),
                         record.content,
+                        record.artifact.feed
+                        in (
+                            EvidenceFeed.SEC_EDGAR,
+                            EvidenceFeed.ISSUER_INVESTOR_RELATIONS,
+                            EvidenceFeed.FEDERAL_RESERVE,
+                            EvidenceFeed.BLS,
+                            EvidenceFeed.BEA,
+                        ),
                     )
                     for record in subject_records
                 ),
@@ -438,18 +450,23 @@ class Advance:
                     "claim_kind": BeliefClaimKind.EXPECTATION.value,
                 }
             )
-            cited_ids = tuple(
+            assertions = {
+                assertion.assertion_id: assertion
+                for assertion in (
+                    *resolution.dossier.facts,
+                    *resolution.dossier.interpretations,
+                )
+            }
+            supporting_ids = tuple(
                 sorted(
                     {
                         citation
-                        for assertion in (
-                            *resolution.dossier.facts,
-                            *resolution.dossier.interpretations,
-                        )
-                        for citation in assertion.citation_artifact_ids
+                        for assertion_id in resolution.thesis.variant_view.supporting_assertion_ids
+                        for citation in assertions[assertion_id].citation_artifact_ids
                     }
                 )
             )
+            contradicting_ids = resolution.thesis.variant_view.contradicting_artifact_ids
             records = {
                 item.artifact_id: item
                 for item in next(
@@ -459,8 +476,30 @@ class Advance:
                 )
             }
             evidence = tuple(
-                BeliefEvidenceReference(artifact_id, records[artifact_id].content_hash)
-                for artifact_id in cited_ids
+                sorted(
+                    (
+                        *(
+                            BeliefEvidenceReference(
+                                artifact_id,
+                                records[artifact_id].content_hash,
+                                BeliefEvidenceRelationship.SUPPORTING,
+                            )
+                            for artifact_id in supporting_ids
+                        ),
+                        *(
+                            BeliefEvidenceReference(
+                                artifact_id,
+                                records[artifact_id].content_hash,
+                                BeliefEvidenceRelationship.CONTRADICTING,
+                            )
+                            for artifact_id in contradicting_ids
+                        ),
+                    ),
+                    key=lambda reference: (
+                        reference.artifact_id,
+                        reference.relationship.value,
+                    ),
+                )
             )
             event_id = _content_hash(
                 {
@@ -517,7 +556,9 @@ class Advance:
                 claim_kind=BeliefClaimKind.EXPECTATION,
                 claim=resolution.thesis.variant_view.text,
                 valid_at=context.cutoff,
-                transaction_at=recorded_at,
+                transaction_at=(
+                    recorded_at if redelivered_event is None else redelivered_event.transaction_at
+                ),
                 evidence_cutoff=context.cutoff,
                 confidence={"low": "0.75", "medium": "0.5", "high": "0.25"}[cio.uncertainty],
                 evidence=evidence,
@@ -704,6 +745,7 @@ class Status:
     evidence_validator: EvidenceReferenceValidator
     constitution_status: ConstitutionStatus
     research_history_validator: ProductionResearchHistoryValidator
+    memory_history_validator: BeliefHistoryValidator
 
     def __call__(self) -> LifecycleStatus:
         status = self.projection.rebuild_status()
@@ -711,5 +753,6 @@ class Status:
         self.research_history_validator.validate_history(
             self.projection.rebuild_production_research_checkpoints()
         )
+        self.memory_history_validator.validate_history(self.projection.rebuild_memory_event_ids())
         uses = self.projection.rebuild_constitution_uses()
         return replace(status, constitution_governance=self.constitution_status(uses))

@@ -19,6 +19,7 @@ from agentic_investment_os.memory.admission import (
     BeliefEvent,
     BeliefEvidenceArtifact,
     BeliefEvidenceReference,
+    BeliefEvidenceRelationship,
     RecordRefusalCode,
     validate_belief_evidence,
 )
@@ -35,6 +36,7 @@ __all__ = (
     "BeliefGraphRefusal",
     "BeliefGraphRefusalCode",
     "BeliefHistory",
+    "BeliefHistoryValidator",
     "BeliefLedger",
     "BeliefLedgerEntry",
     "BeliefPersistenceError",
@@ -101,11 +103,24 @@ class BeliefLedger(Protocol):
         evidence_resolver: BeliefEvidenceResolver,
     ) -> BeliefGraph | BeliefGraphRefusal: ...
 
+    def validate_history(
+        self,
+        event_ids: tuple[str, ...],
+        evidence_resolver: BeliefEvidenceResolver,
+    ) -> None: ...
+
+
+class BeliefHistoryValidator(Protocol):
+    """Validate authoritative Belief history and lifecycle event references."""
+
+    def validate_history(self, event_ids: tuple[str, ...]) -> None: ...
+
 
 class BeliefGraphEdgeKind(StrEnum):
     """Name one provenance or belief-history relationship in a projection."""
 
     SUPPORTS = "supports"
+    CONTRADICTS = "contradicts"
     TRANSITION_FROM = "transition_from"
     SUPERSEDES = "supersedes"
 
@@ -538,7 +553,15 @@ def _graph_edges(
     for entry in entries:
         event = entry.event
         edges.extend(
-            BeliefGraphEdge(BeliefGraphEdgeKind.SUPPORTS, reference.artifact_id, event.event_id)
+            BeliefGraphEdge(
+                (
+                    BeliefGraphEdgeKind.SUPPORTS
+                    if reference.relationship is BeliefEvidenceRelationship.SUPPORTING
+                    else BeliefGraphEdgeKind.CONTRADICTS
+                ),
+                reference.artifact_id,
+                event.event_id,
+            )
             for reference in event.evidence
             if reference.artifact_id in evidence_ids
         )

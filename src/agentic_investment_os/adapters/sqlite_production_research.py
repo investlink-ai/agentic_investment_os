@@ -6,22 +6,44 @@ import hashlib
 import json
 import sqlite3
 from contextlib import closing
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol
 
+from agentic_investment_os.domain.attention import (
+    HoldingRefreshDisposition,
+    parse_attention_artifact,
+)
+from agentic_investment_os.domain.governance import ConstitutionArtifact
 from agentic_investment_os.domain.identity import (
     EquityInstrumentIdentity,
     parse_instrument_identity,
 )
 from agentic_investment_os.domain.lifecycle import (
     LifecyclePersistenceError,
+    LifecyclePhase,
+    ProductionResearchReference,
     ResearchCheckpoint,
     is_sha256,
 )
 from agentic_investment_os.domain.temporal import InvalidUtcInstantError, UtcInstant
+from agentic_investment_os.evidence.capture import (
+    EvidenceFeed,
+    EvidencePersistenceError,
+    EvidenceVault,
+    InvalidEvidenceError,
+    parse_evidence_artifact,
+)
+from agentic_investment_os.memory.beliefs import (
+    BeliefEvidenceResolver,
+    BeliefGraphRefusal,
+    BeliefLedger,
+    BeliefPersistenceError,
+    parse_belief_graph_query,
+)
 from agentic_investment_os.research.authority import ResearchAuthority
 from agentic_investment_os.research.dossier import (
     Dossier,
     DossierRefusalReason,
+    parse_dossier,
     parse_stored_dossier,
 )
 from agentic_investment_os.research.model import (
@@ -36,6 +58,7 @@ from agentic_investment_os.research.model import (
 from agentic_investment_os.research.production import (
     ProductionCallIntent,
     ProductionCallPreparation,
+    ProductionResearchEvidence,
 )
 from agentic_investment_os.research.resolution import (
     CioRefusalReason,
@@ -46,10 +69,14 @@ from agentic_investment_os.research.resolution import (
     SkepticResult,
     Thesis,
     ThesisRefusalReason,
+    parse_cio_resolution,
+    parse_scenario_forecast,
+    parse_skeptic_result,
     parse_stored_cio_resolution,
     parse_stored_scenario_forecast,
     parse_stored_skeptic_result,
     parse_stored_thesis,
+    parse_thesis,
 )
 
 __all__ = ("SQLiteProductionCallLedger",)
@@ -57,17 +84,32 @@ __all__ = ("SQLiteProductionCallLedger",)
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from agentic_investment_os.research.policy import ProductionResearchPolicy
+
 _CORRUPT = "invalid production research call history"
 _WRITE_FAILED = "production research call persistence failed"
 _BEGIN_IMMEDIATE = "BEGIN IMMEDIATE"
 _INTENT_COLUMN_COUNT = 7
 
 
+class _ProductionEvidenceVault(EvidenceVault, BeliefEvidenceResolver, Protocol):
+    """Expose exact research records and evidence-bound belief resolution."""
+
+
 class SQLiteProductionCallLedger:
     """Append and replay exact production research effects in the runtime database."""
 
-    def __init__(self, database: Path) -> None:
+    def __init__(
+        self,
+        database: Path,
+        policy: ProductionResearchPolicy,
+        belief_ledger: BeliefLedger,
+        evidence_vault: _ProductionEvidenceVault,
+    ) -> None:
         self._database = database
+        self._policy = policy
+        self._belief_ledger = belief_ledger
+        self._evidence_vault = evidence_vault
 
     def prepare_call(
         self,
@@ -163,8 +205,8 @@ class SQLiteProductionCallLedger:
         except sqlite3.Error as error:
             raise LifecyclePersistenceError(_WRITE_FAILED) from error
 
-    def validate_history(self, checkpoints: tuple[ResearchCheckpoint, ...]) -> None:
-        """Revalidate production rows and every lifecycle checkpoint reference."""
+    def validate_history(self, references: tuple[ProductionResearchReference, ...]) -> None:
+        """Revalidate production rows against their exact lifecycle and authority owners."""
         try:
             with closing(self._connect()) as connection:
                 intent_rows = connection.execute(
@@ -172,48 +214,232 @@ class SQLiteProductionCallLedger:
                     "recorded_at FROM production_research_call_intents ORDER BY call_id"
                 ).fetchall()
                 intents: dict[str, ProductionCallIntent] = {}
+                intent_times: dict[str, UtcInstant] = {}
                 for row in intent_rows:
                     intent = _parse_intent_row(row)
                     if intent.call_id in intents:
                         raise LifecyclePersistenceError(_CORRUPT)
                     intents[intent.call_id] = intent
+                    intent_times[intent.call_id] = _canonical_instant(row[6])
                 observation_rows = connection.execute(
                     "SELECT call_id, recorded_at FROM production_research_call_observations "
                     "ORDER BY call_id"
                 ).fetchall()
-                observed_call_ids: set[str] = set()
-                observed_artifact_ids: set[str] = set()
+                observations: dict[str, LabCallObservation] = {}
                 for call_id_value, recorded_at_value in observation_rows:
                     if (
                         type(call_id_value) is not str
-                        or call_id_value in observed_call_ids
+                        or call_id_value in observations
                         or call_id_value not in intents
                     ):
                         raise LifecyclePersistenceError(_CORRUPT)
-                    _canonical_instant(recorded_at_value)
-                    observed_call_ids.add(call_id_value)
+                    observation_time = _canonical_instant(recorded_at_value)
+                    if observation_time.value < intent_times[call_id_value].value:
+                        raise LifecyclePersistenceError(_CORRUPT)
                     observation = self._load_observation(
                         connection,
                         intents[call_id_value],
                     )
                     if observation is None:  # pragma: no cover - selected row proves presence.
                         raise LifecyclePersistenceError(_CORRUPT)
-                    if observation.artifact is not None:
-                        observed_artifact_ids.add(observation.artifact.content_hash)
-                referenced_call_ids = {
-                    call_id for checkpoint in checkpoints for call_id in checkpoint.call_ids
-                }
-                referenced_artifact_ids = {
-                    artifact_id
-                    for checkpoint in checkpoints
-                    for artifact_id in checkpoint.artifact_ids
-                }
-                if not referenced_call_ids.issubset(observed_call_ids) or not (
-                    referenced_artifact_ids.issubset(observed_artifact_ids)
-                ):
-                    raise LifecyclePersistenceError(_CORRUPT)
-        except sqlite3.Error as error:
+                    observations[call_id_value] = observation
+                self._validate_references(references, intents, observations)
+        except (
+            BeliefPersistenceError,
+            EvidencePersistenceError,
+            InvalidEvidenceError,
+            sqlite3.Error,
+        ) as error:
             raise LifecyclePersistenceError(_CORRUPT) from error
+
+    def _validate_references(
+        self,
+        references: tuple[ProductionResearchReference, ...],
+        intents: dict[str, ProductionCallIntent],
+        observations: dict[str, LabCallObservation],
+    ) -> None:
+        owners: dict[tuple[str, LifecyclePhase], ProductionResearchReference] = {}
+        for reference in references:
+            reference.__post_init__()
+            owner = (reference.pinned_run_identity.run_id, reference.phase)
+            if owner in owners:
+                raise LifecyclePersistenceError(_CORRUPT)
+            owners[owner] = reference
+        grouped: dict[tuple[str, LifecyclePhase], list[ProductionCallIntent]] = {
+            owner: [] for owner in owners
+        }
+        for intent in intents.values():
+            phase = _phase_for_role(intent.role)
+            owner = (intent.run_id, phase)
+            matched_reference = owners.get(owner)
+            if matched_reference is None:
+                raise LifecyclePersistenceError(_CORRUPT)
+            self._validate_intent_authority(intent, matched_reference)
+            grouped[owner].append(intent)
+        if any(call_id not in intents for call_id in observations):  # pragma: no cover
+            raise LifecyclePersistenceError(_CORRUPT)
+        self._validate_role_predecessors(tuple(intents.values()), observations)
+        for owner, reference in owners.items():
+            owner_intents = tuple(sorted(grouped[owner], key=lambda item: item.call_id))
+            checkpoint = reference.checkpoint
+            if checkpoint is None:
+                continue
+            owner_call_ids = tuple(intent.call_id for intent in owner_intents)
+            owner_observations = tuple(
+                observations[call_id] for call_id in owner_call_ids if call_id in observations
+            )
+            artifact_ids = tuple(
+                sorted(
+                    observation.artifact.content_hash
+                    for observation in owner_observations
+                    if observation.artifact is not None
+                )
+            )
+            expected = ResearchCheckpoint(
+                artifact_ids,
+                owner_call_ids,
+                sum(item.input_tokens for item in owner_observations),
+                sum(item.output_tokens for item in owner_observations),
+                sum(item.turns for item in owner_observations),
+            )
+            if checkpoint != expected:
+                raise LifecyclePersistenceError(_CORRUPT)
+
+    def _validate_intent_authority(
+        self,
+        intent: ProductionCallIntent,
+        reference: ProductionResearchReference,
+    ) -> None:
+        try:
+            model_input = json.loads(intent.model_input_json)
+        except json.JSONDecodeError as error:  # pragma: no cover - intent parser rejects this.
+            raise LifecyclePersistenceError(_CORRUPT) from error
+        if type(model_input) is not dict:
+            raise LifecyclePersistenceError(_CORRUPT)
+        identity = reference.pinned_run_identity
+        attention = parse_attention_artifact(model_input.get("attention_artifact"))
+        constitution = ConstitutionArtifact.parse(model_input.get("constitution"))
+        subject = parse_instrument_identity(model_input.get("subject"))
+        expected_subject = _subject_owner(reference, intent.request_id)
+        contract = self._policy.contract_for(intent.role)
+        if (
+            attention != reference.attention_artifact
+            or constitution is None
+            or constitution.content_hash != identity.constitution_hash
+            or model_input.get("portfolio_context") != reference.position_snapshot.to_payload()
+            or model_input.get("run_id") != identity.run_id
+            or model_input.get("evidence_cutoff") != identity.evidence_cutoff.isoformat()
+            or model_input.get("data_regime") != identity.data_regime
+            or subject is None
+            or expected_subject is None
+            or subject != expected_subject
+            or model_input.get("prompt") != contract.prompt.to_payload()
+            or model_input.get("model_configuration") != contract.model_configuration.to_payload()
+            or model_input.get("tools") != [tool.to_payload() for tool in contract.tools]
+        ):
+            raise LifecyclePersistenceError(_CORRUPT)
+        evidence = _parse_intent_evidence(model_input.get("evidence"), subject)
+        records = self._evidence_vault.stored_records_for_artifacts(
+            reference.attention_artifact.evidence_artifact_ids
+        )
+        expected_evidence = tuple(
+            ProductionResearchEvidence(
+                record.artifact.artifact_id,
+                record.artifact.content_hash,
+                record.artifact.available_at,
+                _canonical_json(record.artifact.to_payload()),
+                record.content,
+                _artifact_is_official(record.artifact.feed),
+            )
+            for record in records
+            if any(mapping.identity == subject for mapping in record.artifact.entity_mappings)
+            or record.artifact.feed
+            in (EvidenceFeed.FEDERAL_RESERVE, EvidenceFeed.BLS, EvidenceFeed.BEA)
+        )
+        if (
+            evidence is None
+            or evidence != expected_evidence
+            or len(evidence) > self._policy.maximum_evidence_artifacts
+            or not any(item.is_official for item in evidence)
+        ):
+            raise LifecyclePersistenceError(_CORRUPT)
+        graph_payload = model_input.get("belief_graph")
+        if type(graph_payload) is not dict:
+            raise LifecyclePersistenceError(_CORRUPT)
+        query = parse_belief_graph_query(graph_payload.get("query"))
+        if (
+            query is None
+            or query.cutoff != identity.evidence_cutoff
+            or query.subjects != (subject,)
+            or query.maximum_belief_events != self._policy.maximum_belief_events
+            or query.maximum_evidence_artifacts != self._policy.maximum_evidence_artifacts
+        ):
+            raise LifecyclePersistenceError(_CORRUPT)
+        graph = self._belief_ledger.rebuild_graph(query, self._evidence_vault)
+        if isinstance(graph, BeliefGraphRefusal) or graph.to_payload() != graph_payload:
+            raise LifecyclePersistenceError(_CORRUPT)
+        expected_material_hashes = {
+            attention.content_hash,
+            constitution.content_hash,
+            reference.position_snapshot.fingerprint,
+            graph.content_hash,
+            contract.prompt.fingerprint,
+            contract.model_configuration.content_hash,
+            *(tool.fingerprint for tool in contract.tools),
+            *(item.content_hash for item in evidence),
+        }
+        for field in ("dossier", "thesis", "skeptic", "forecast"):
+            artifact = model_input.get(field)
+            if type(artifact) is dict:
+                content_hash = artifact.get("content_hash")
+                if not is_sha256(content_hash):
+                    raise LifecyclePersistenceError(_CORRUPT)
+                expected_material_hashes.add(content_hash)
+        if intent.material_input_hashes != tuple(
+            sorted(expected_material_hashes)
+        ) or model_input.get("material_input_hashes") != sorted(expected_material_hashes):
+            raise LifecyclePersistenceError(_CORRUPT)
+
+    def _validate_role_predecessors(
+        self,
+        intents: tuple[ProductionCallIntent, ...],
+        observations: dict[str, LabCallObservation],
+    ) -> None:
+        by_request: dict[str, dict[ResearchRole, ProductionCallIntent]] = {}
+        for intent in intents:
+            roles = by_request.setdefault(intent.request_id, {})
+            if intent.role in roles:
+                raise LifecyclePersistenceError(_CORRUPT)
+            roles[intent.role] = intent
+        order = (
+            ResearchRole.EVIDENCE_COLLECTOR,
+            ResearchRole.THESIS_BUILDER,
+            ResearchRole.INDEPENDENT_SKEPTIC,
+            ResearchRole.SCENARIO_FORECASTER,
+            ResearchRole.CIO,
+        )
+        fields = ("dossier", "thesis", "skeptic", "forecast")
+        for roles in by_request.values():
+            prior_artifacts: list[object] = []
+            for index, role in enumerate(order):
+                candidate = roles.get(role)
+                if candidate is None:
+                    if any(later in roles for later in order[index + 1 :]):
+                        raise LifecyclePersistenceError(_CORRUPT)
+                    break
+                model_input = json.loads(candidate.model_input_json)
+                for field_index, field in enumerate(fields):
+                    expected = (
+                        prior_artifacts[field_index] if field_index < len(prior_artifacts) else None
+                    )
+                    if model_input[field] != expected:
+                        raise LifecyclePersistenceError(_CORRUPT)
+                observation = observations.get(candidate.call_id)
+                if observation is None or observation.artifact is None:
+                    if any(later in roles for later in order[index + 1 :]):
+                        raise LifecyclePersistenceError(_CORRUPT)
+                    break
+                prior_artifacts.append(observation.artifact.to_payload())
 
     def _require_intent(
         self,
@@ -257,6 +483,98 @@ class SQLiteProductionCallLedger:
         connection.execute("PRAGMA foreign_keys = ON")
         connection.execute("PRAGMA busy_timeout = 5000")
         return connection
+
+
+def _phase_for_role(role: ResearchRole) -> LifecyclePhase:
+    return (
+        LifecyclePhase.BUILD_DOSSIERS
+        if role is ResearchRole.EVIDENCE_COLLECTOR
+        else LifecyclePhase.RUN_RESEARCH
+    )
+
+
+def _artifact_is_official(feed: EvidenceFeed) -> bool:
+    return feed in (
+        EvidenceFeed.SEC_EDGAR,
+        EvidenceFeed.ISSUER_INVESTOR_RELATIONS,
+        EvidenceFeed.FEDERAL_RESERVE,
+        EvidenceFeed.BLS,
+        EvidenceFeed.BEA,
+    )
+
+
+def _subject_owner(
+    reference: ProductionResearchReference,
+    request_id: str,
+) -> EquityInstrumentIdentity | None:
+    cards = {card.card_id: card for card in reference.attention_artifact.candidate_cards}
+    for request in reference.attention_artifact.dossier_requests:
+        card = cards.get(request.candidate_card_id)
+        if request.request_id == request_id and card is not None:
+            return request.identity if type(request.identity) is EquityInstrumentIdentity else None
+    for refresh in reference.attention_artifact.holding_refreshes:
+        if (
+            refresh.refresh_id == request_id
+            and refresh.disposition is HoldingRefreshDisposition.REQUIRED
+        ):
+            return refresh.identity if type(refresh.identity) is EquityInstrumentIdentity else None
+    return None
+
+
+def _parse_intent_evidence(  # noqa: PLR0911 - reject each hostile evidence mismatch locally.
+    value: object,
+    subject: EquityInstrumentIdentity,
+) -> tuple[ProductionResearchEvidence, ...] | None:
+    fields = {
+        "artifact_id",
+        "content_hash",
+        "available_at",
+        "subject",
+        "content",
+        "provenance",
+    }
+    if type(value) is not list or not value:
+        return None
+    parsed: list[ProductionResearchEvidence] = []
+    try:
+        for item in value:
+            if type(item) is not dict or set(item) != fields:
+                return None
+            if parse_instrument_identity(item["subject"]) != subject:
+                return None
+            artifact = parse_evidence_artifact(item["provenance"])
+            available_at = UtcInstant.parse(item["available_at"])
+            if (
+                artifact is None
+                or type(item["artifact_id"]) is not str
+                or type(item["content_hash"]) is not str
+                or type(item["content"]) is not str
+                or artifact.artifact_id != item["artifact_id"]
+                or artifact.content_hash != item["content_hash"]
+                or artifact.available_at != available_at
+                or not (
+                    any(mapping.identity == subject for mapping in artifact.entity_mappings)
+                    or artifact.feed
+                    in (EvidenceFeed.FEDERAL_RESERVE, EvidenceFeed.BLS, EvidenceFeed.BEA)
+                )
+            ):
+                return None
+            parsed.append(
+                ProductionResearchEvidence(
+                    item["artifact_id"],
+                    item["content_hash"],
+                    available_at,
+                    _canonical_json(item["provenance"]),
+                    item["content"].encode(),
+                    _artifact_is_official(artifact.feed),
+                )
+            )
+    except (InvalidUtcInstantError, TypeError, ValueError):
+        return None
+    result = tuple(parsed)
+    if tuple(sorted(result, key=lambda item: item.artifact_id)) != result:
+        return None
+    return result
 
 
 def _parse_intent_row(row: tuple[object, ...]) -> ProductionCallIntent:
@@ -399,7 +717,13 @@ def _parse_observation(
         "artifact",
         "artifact_refusal",
     }
-    if type(fields) is not dict or set(fields) != required or fields["call_id"] != intent.call_id:
+    if (
+        type(fields) is not dict
+        or set(fields) != required
+        or fields["schema_version"] != 1
+        or fields["record_kind"] != "lab_model_call_observation"
+        or fields["call_id"] != intent.call_id
+    ):
         raise LifecyclePersistenceError(_CORRUPT)
     try:
         disposition = LabObservationDisposition(fields["disposition"])
@@ -457,7 +781,129 @@ def _parse_observation(
         raise LifecyclePersistenceError(_CORRUPT) from error
     if not observation_matches_role(observation, intent.role):
         raise LifecyclePersistenceError(_CORRUPT)
+    if not _observation_timing_is_valid(observation):
+        raise LifecyclePersistenceError(_CORRUPT)
+    if observation.disposition in (
+        LabObservationDisposition.VALIDATED,
+        LabObservationDisposition.INVALID_DOSSIER,
+        LabObservationDisposition.INVALID_ARTIFACT,
+    ):
+        if raw_response is None:
+            raise LifecyclePersistenceError(_CORRUPT)
+        try:
+            decoded = json.loads(raw_response.decode())
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise LifecyclePersistenceError(_CORRUPT) from error
+        artifact, refusal = _parse_raw_role_output(decoded, intent)
+        if observation.artifact != artifact or observation.artifact_refusal != refusal:
+            raise LifecyclePersistenceError(_CORRUPT)
     return observation
+
+
+def _observation_timing_is_valid(observation: LabCallObservation) -> bool:
+    if observation.disposition is LabObservationDisposition.MODEL_TIMEOUT:
+        return observation.timing_disposition is ModelTimingDisposition.TIMED_OUT
+    if observation.disposition in (
+        LabObservationDisposition.QUOTA_EXHAUSTED,
+        LabObservationDisposition.ADAPTER_REFUSED,
+    ):
+        return observation.timing_disposition is ModelTimingDisposition.UNAVAILABLE
+    return observation.timing_disposition is ModelTimingDisposition.WITHIN_BUDGET
+
+
+def _parse_raw_role_output(
+    value: object,
+    intent: ProductionCallIntent,
+) -> tuple[
+    Dossier | Thesis | SkepticResult | ScenarioForecast | CioResolution | None,
+    DossierRefusalReason
+    | ThesisRefusalReason
+    | SkepticRefusalReason
+    | ForecastRefusalReason
+    | CioRefusalReason
+    | None,
+]:
+    try:
+        model_input = json.loads(intent.model_input_json)
+        subject = parse_instrument_identity(model_input["subject"])
+        cutoff = UtcInstant.parse(model_input["evidence_cutoff"])
+        evidence = model_input["evidence"]
+    except (InvalidUtcInstantError, KeyError, TypeError, json.JSONDecodeError) as error:
+        raise LifecyclePersistenceError(_CORRUPT) from error
+    if type(subject) is not EquityInstrumentIdentity or type(evidence) is not list:
+        raise LifecyclePersistenceError(_CORRUPT)
+    bindings = tuple(
+        (item["artifact_id"], item["content_hash"])
+        for item in evidence
+        if type(item) is dict
+        and type(item.get("artifact_id")) is str
+        and type(item.get("content_hash")) is str
+    )
+    if len(bindings) != len(evidence):
+        raise LifecyclePersistenceError(_CORRUPT)
+    if intent.role is ResearchRole.EVIDENCE_COLLECTOR:
+        parsed = parse_dossier(
+            value,
+            expected_subject=subject,
+            available_artifact_ids=tuple(item[0] for item in bindings),
+            available_artifact_bindings=bindings,
+            cutoff=cutoff,
+            authority=ResearchAuthority.PRODUCTION,
+        )
+        return (parsed, None) if isinstance(parsed, Dossier) else (None, parsed)
+    dossier = parse_stored_dossier(
+        model_input["dossier"],
+        expected_subject=subject,
+        available_artifact_bindings=bindings,
+        cutoff=cutoff,
+        authority=ResearchAuthority.PRODUCTION,
+    )
+    if dossier is None:
+        raise LifecyclePersistenceError(_CORRUPT)
+    if intent.role is ResearchRole.THESIS_BUILDER:
+        parsed_thesis = parse_thesis(value, dossier=dossier)
+        return (parsed_thesis, None) if isinstance(parsed_thesis, Thesis) else (None, parsed_thesis)
+    thesis = parse_stored_thesis(model_input["thesis"], dossier=dossier)
+    if thesis is None:
+        raise LifecyclePersistenceError(_CORRUPT)
+    if intent.role is ResearchRole.INDEPENDENT_SKEPTIC:
+        parsed_skeptic = parse_skeptic_result(value, dossier=dossier, thesis=thesis)
+        return (
+            (parsed_skeptic, None)
+            if isinstance(parsed_skeptic, SkepticResult)
+            else (None, parsed_skeptic)
+        )
+    skeptic = parse_stored_skeptic_result(model_input["skeptic"], dossier=dossier, thesis=thesis)
+    if skeptic is None:
+        raise LifecyclePersistenceError(_CORRUPT)
+    if intent.role is ResearchRole.SCENARIO_FORECASTER:
+        parsed_forecast = parse_scenario_forecast(
+            value,
+            dossier=dossier,
+            thesis=thesis,
+            skeptic=skeptic,
+        )
+        return (
+            (parsed_forecast, None)
+            if isinstance(parsed_forecast, ScenarioForecast)
+            else (None, parsed_forecast)
+        )
+    forecast = parse_stored_scenario_forecast(
+        model_input["forecast"],
+        dossier=dossier,
+        thesis=thesis,
+        skeptic=skeptic,
+    )
+    if forecast is None:
+        raise LifecyclePersistenceError(_CORRUPT)
+    parsed_cio = parse_cio_resolution(
+        value,
+        dossier=dossier,
+        thesis=thesis,
+        skeptic=skeptic,
+        forecast=forecast,
+    )
+    return (parsed_cio, None) if isinstance(parsed_cio, CioResolution) else (None, parsed_cio)
 
 
 def _parse_artifact(  # noqa: PLR0912 - revalidate each predecessor by fixed role.

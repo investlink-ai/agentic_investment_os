@@ -98,6 +98,8 @@ def test_belief_event_rejects_boolean_schema_version_lookalikes() -> None:
         "evidence_identifier_not_text",
         "evidence_content_hash_not_text",
         "evidence_hash_invalid",
+        "evidence_relationship_not_text",
+        "evidence_relationship_invalid",
         "falsifier_not_text",
         "mixed_falsifier_types",
     ],
@@ -157,11 +159,37 @@ def test_belief_event_rejects_hostile_or_ambiguous_representations(  # noqa: PLR
     elif case == "evidence_fields_wrong":
         payload["evidence"] = [{"artifact_id": "a" * 64}]
     elif case == "evidence_identifier_not_text":
-        payload["evidence"] = [{"artifact_id": 1, "content_hash": "b" * 64}]
+        payload["evidence"] = [
+            {"artifact_id": 1, "content_hash": "b" * 64, "relationship": "supporting"}
+        ]
     elif case == "evidence_content_hash_not_text":
-        payload["evidence"] = [{"artifact_id": "a" * 64, "content_hash": 1}]
+        payload["evidence"] = [
+            {"artifact_id": "a" * 64, "content_hash": 1, "relationship": "supporting"}
+        ]
     elif case == "evidence_hash_invalid":
-        payload["evidence"] = [{"artifact_id": "invalid", "content_hash": "b" * 64}]
+        payload["evidence"] = [
+            {
+                "artifact_id": "invalid",
+                "content_hash": "b" * 64,
+                "relationship": "supporting",
+            }
+        ]
+    elif case == "evidence_relationship_not_text":
+        payload["evidence"] = [
+            {
+                "artifact_id": "a" * 64,
+                "content_hash": "b" * 64,
+                "relationship": 1,
+            }
+        ]
+    elif case == "evidence_relationship_invalid":
+        payload["evidence"] = [
+            {
+                "artifact_id": "a" * 64,
+                "content_hash": "b" * 64,
+                "relationship": "unknown",
+            }
+        ]
     elif case == "falsifier_not_text":
         payload["falsifiers"] = [1]
     else:

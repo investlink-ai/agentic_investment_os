@@ -34,7 +34,11 @@ from agentic_investment_os.entrypoints.configuration import ConfigurationSource
 from agentic_investment_os.entrypoints.lifecycle import configure_advance
 from tests._evidence import recorded_evidence
 from tests._governance import RecordedSessionEligibility
-from tests._production_research import ValidProductionModel, production_recorded_evidence
+from tests._production_research import (
+    ValidProductionModel,
+    production_recorded_evidence,
+    production_recorded_official_evidence,
+)
 from tests._universe import recorded_universe, runtime_configuration
 
 if TYPE_CHECKING:
@@ -126,6 +130,7 @@ def _configure(
         repository_root=REPOSITORY_ROOT,
         recorded_universe=recorded_universe(),
         recorded_evidence=production_recorded_evidence() if evidence is None else evidence,
+        recorded_official_evidence=production_recorded_official_evidence(),
         recorded_model=ValidProductionModel(cio_stance="abstain"),
         session_eligibility=RecordedSessionEligibility(),
         clock=_FixedClock(),
@@ -189,7 +194,7 @@ def test_attention_selection_publishes_progression_refresh_and_exploration_idemp
         if card.identity.catalog_id == "equity-aapl"
     )
     assert AttentionFeature.NEWS_ARRIVAL not in aapl.missing_features
-    assert AttentionFeature.FILING_ARRIVAL in aapl.missing_features
+    assert AttentionFeature.FILING_ARRIVAL not in aapl.missing_features
     assert aapl.evidence_artifact_ids
     with sqlite3.connect(state_root / "lifecycle.sqlite3") as connection:
         assert connection.execute(

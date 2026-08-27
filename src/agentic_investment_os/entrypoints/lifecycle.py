@@ -87,6 +87,7 @@ def configure_advance(  # noqa: PLR0913 - composition names each untrusted bound
     if isinstance(database, PreparedRuntimeDatabase):
         evidence_vault = FilesystemEvidenceVault(resolution.state_root / "evidence-vault")
         trusted_clock = clock if clock is not None else SystemClock()
+        belief_ledger = SQLiteBeliefLedger(database.path)
         return Advance(
             ledger=SQLiteLifecycleLedger(database.path),
             configuration_version=resolution.schema_version,
@@ -113,12 +114,17 @@ def configure_advance(  # noqa: PLR0913 - composition names each untrusted bound
             ),
             production_research=ProductionResearch(
                 resolution.research_policy,
-                SQLiteProductionCallLedger(database.path),
+                SQLiteProductionCallLedger(
+                    database.path,
+                    resolution.research_policy,
+                    belief_ledger,
+                    evidence_vault,
+                ),
                 recorded_model,
             ),
             evidence_vault=evidence_vault,
             memory=Record(
-                SQLiteBeliefLedger(database.path),
+                belief_ledger,
                 evidence_vault,
                 trusted_clock,
             ),
@@ -152,16 +158,28 @@ def configure_status(
             fields=("state_root",),
         )
     if isinstance(database, PreparedRuntimeDatabase):
+        evidence_vault = FilesystemEvidenceVault.reference_validator(
+            resolution.state_root / "evidence-vault"
+        )
+        belief_ledger = SQLiteBeliefLedger.open_existing(database.path)
         return Status(
             SQLiteLifecycleLedger.open_existing(database.path),
-            FilesystemEvidenceVault.reference_validator(
-                resolution.state_root / "evidence-vault",
-            ),
+            evidence_vault,
             ConstitutionStatus(
                 SQLiteConstitutionGovernance.open_existing(database.path),
                 approval_verifier,
             ),
-            SQLiteProductionCallLedger(database.path),
+            SQLiteProductionCallLedger(
+                database.path,
+                resolution.research_policy,
+                belief_ledger,
+                evidence_vault,
+            ),
+            Record(
+                belief_ledger,
+                evidence_vault,
+                SystemClock(),
+            ),
         )
     # Strict mypy proves this line unreachable; removing it is runtime-equivalent.
     assert_never(database)  # pragma: no cover

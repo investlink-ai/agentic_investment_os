@@ -22,6 +22,7 @@ __all__ = (
     "BeliefEvent",
     "BeliefEvidenceArtifact",
     "BeliefEvidenceReference",
+    "BeliefEvidenceRelationship",
     "BeliefStatus",
     "RecordRefusalCode",
     "canonical_belief_event_payload",
@@ -30,7 +31,7 @@ __all__ = (
     "validate_belief_evidence",
 )
 
-_BELIEF_SCHEMA_VERSION = 1
+_BELIEF_SCHEMA_VERSION = 2
 _IDENTIFIER = re.compile(r"[a-z0-9][a-z0-9._:-]{0,127}\Z")
 _CONFIDENCE_INPUT = re.compile(r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)\Z")
 _MAXIMUM_CLAIM_CHARACTERS = 4_000
@@ -60,7 +61,7 @@ _EVENT_FIELDS = frozenset(
     }
 )
 _CLAIM_FIELDS = frozenset({"kind", "statement"})
-_EVIDENCE_REFERENCE_FIELDS = frozenset({"artifact_id", "content_hash"})
+_EVIDENCE_REFERENCE_FIELDS = frozenset({"artifact_id", "content_hash", "relationship"})
 
 
 class BeliefClaimKind(StrEnum):
@@ -72,6 +73,13 @@ class BeliefClaimKind(StrEnum):
     RISK = "risk"
     VALUATION = "valuation"
     LIQUIDITY = "liquidity"
+
+
+class BeliefEvidenceRelationship(StrEnum):
+    """Preserve whether evidence supports or contradicts the recorded claim."""
+
+    SUPPORTING = "supporting"
+    CONTRADICTING = "contradicting"
 
 
 class BeliefStatus(StrEnum):
@@ -106,13 +114,22 @@ class BeliefEvidenceReference:
 
     artifact_id: str
     content_hash: str
+    relationship: BeliefEvidenceRelationship = BeliefEvidenceRelationship.SUPPORTING
 
     def __post_init__(self) -> None:
-        if not is_sha256(self.artifact_id) or not is_sha256(self.content_hash):
+        if (
+            not is_sha256(self.artifact_id)
+            or not is_sha256(self.content_hash)
+            or type(self.relationship) is not BeliefEvidenceRelationship
+        ):
             raise ValueError(_INVALID_EVENT)
 
     def to_payload(self) -> dict[str, object]:
-        return {"artifact_id": self.artifact_id, "content_hash": self.content_hash}
+        return {
+            "artifact_id": self.artifact_id,
+            "content_hash": self.content_hash,
+            "relationship": self.relationship.value,
+        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -403,7 +420,7 @@ def _valid_evidence_tuple(value: object) -> bool:
         return False
     if any(not _valid_reference(reference) for reference in value):
         return False
-    keys = tuple(reference.artifact_id for reference in value)
+    keys = tuple((reference.artifact_id, reference.relationship.value) for reference in value)
     return keys == tuple(sorted(set(keys)))
 
 
@@ -508,17 +525,31 @@ def _evidence_references(value: object) -> tuple[BeliefEvidenceReference, ...] |
         fields = _exact_mapping(item, _EVIDENCE_REFERENCE_FIELDS)
         if fields is None:
             return None
-        artifact_id = _text(fields["artifact_id"])
-        content_hash = _text(fields["content_hash"])
-        if artifact_id is None:
+        reference = _evidence_reference(fields)
+        if reference is None:
             return None
-        if content_hash is None:
-            return None
-        try:
-            references.append(BeliefEvidenceReference(artifact_id, content_hash))
-        except ValueError:
-            return None
+        references.append(reference)
     return tuple(references)
+
+
+def _evidence_reference(fields: dict[str, object]) -> BeliefEvidenceReference | None:
+    artifact_id = _text(fields["artifact_id"])
+    content_hash = _text(fields["content_hash"])
+    relationship = fields["relationship"]
+    if artifact_id is None:
+        return None
+    if content_hash is None:
+        return None
+    if type(relationship) is not str:
+        return None
+    try:
+        return BeliefEvidenceReference(
+            artifact_id,
+            content_hash,
+            BeliefEvidenceRelationship(relationship),
+        )
+    except (TypeError, ValueError):
+        return None
 
 
 def _string_tuple(value: object) -> tuple[str, ...] | None:

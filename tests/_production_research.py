@@ -21,7 +21,7 @@ from agentic_investment_os.research.resolution import (
     parse_skeptic_result,
     parse_thesis,
 )
-from tests._evidence import recorded_evidence
+from tests._evidence import recorded_evidence, recorded_official_evidence
 from tests._replay import (
     ARTIFACT_ID,
     SUBJECT,
@@ -81,6 +81,11 @@ def production_recorded_evidence() -> dict[str, object]:
         }
     )
     return payload
+
+
+def production_recorded_official_evidence() -> dict[str, object]:
+    """Return synthetic issuer and globally relevant official macro records."""
+    return recorded_official_evidence()
 
 
 @dataclass(slots=True)

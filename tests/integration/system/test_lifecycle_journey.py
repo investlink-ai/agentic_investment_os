@@ -199,11 +199,7 @@ def test_lifecycle_journey_resumes_replays_and_rebuilds_status_across_processes(
 
     assert expected_status == StatusObservation(
         active_phase="",
-        last_completed_cycle=(
-            '{"asset_class":"us_equity","cycle_type":"market_session",'
-            '"payload":{"trading_date":"2026-08-21"},'
-            '"payload_schema_version":1,"schema_version":1}'
-        ),
+        last_completed_cycle="",
         universe_snapshot_cycle=(
             '{"asset_class":"us_equity","cycle_type":"market_session",'
             '"payload":{"trading_date":"2026-08-21"},'
