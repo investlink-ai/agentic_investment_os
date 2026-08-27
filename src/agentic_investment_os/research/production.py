@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol, TypeGuard
 
@@ -76,6 +77,7 @@ __all__ = (
 _INVALID_INTENT = "invalid production research call intent"
 _MISSING_REPLAY_OBSERVATION = "production research replay omitted its observation"
 _SHA256_LENGTH = 64
+_MODEL_IDENTITY = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}\Z")
 _MODEL_INPUT_FIELDS = frozenset(
     {
         "schema_version",
@@ -312,6 +314,7 @@ class ProductionCallLedger(Protocol):
         self,
         intent: ProductionCallIntent,
         observation: LabCallObservation,
+        model_disposition: ModelCallDisposition,
         recorded_at: UtcInstant,
     ) -> LabCallObservation: ...
 
@@ -602,10 +605,11 @@ class ProductionResearch:
                 observation = self.ledger.append_observation(
                     intent,
                     observation,
+                    ModelCallDisposition.REFUSED,
                     recorded_at,
                 )
             return _CallResult(intent, observation)
-        response = self.model.call(intent.model_request())
+        response = _normalized_model_response(self.model.call(intent.model_request()))
         observation = _observe(
             intent,
             contract.model_configuration,
@@ -616,7 +620,12 @@ class ProductionResearch:
             skeptic=skeptic,
             forecast=forecast,
         )
-        stored = self.ledger.append_observation(intent, observation, recorded_at)
+        stored = self.ledger.append_observation(
+            intent,
+            observation,
+            response.disposition,
+            recorded_at,
+        )
         return _CallResult(intent, stored)
 
 
@@ -711,7 +720,7 @@ def _evidence_payload(
 def _observe(  # noqa: PLR0912, PLR0913 - validate every role predecessor explicitly.
     intent: ProductionCallIntent,
     configuration: ModelConfiguration,
-    response: object,
+    response: ModelCallResponse,
     subject: ProductionResearchSubject,
     *,
     dossier: Dossier | None,
@@ -719,26 +728,15 @@ def _observe(  # noqa: PLR0912, PLR0913 - validate every role predecessor explic
     skeptic: SkepticResult | None,
     forecast: ScenarioForecast | None,
 ) -> LabCallObservation:
-    if not _model_response_is_valid(response):
-        response = ModelCallResponse(
-            ModelCallDisposition.REFUSED,
-            None,
-            None,
-            0,
-            0,
-            0,
-            None,
-            ModelTimingDisposition.UNAVAILABLE,
-        )
     disposition = production_response_disposition(configuration, response)
     artifact: Dossier | Thesis | SkepticResult | ScenarioForecast | CioResolution | None = None
     artifact_refusal: DossierRefusalReason | ResearchArtifactRefusal | None = None
-    if disposition is LabObservationDisposition.INVALID_ARTIFACT and response.raw_response:
+    if (
+        disposition is LabObservationDisposition.INVALID_ARTIFACT
+        and response.raw_response is not None
+    ):
         try:
             decoded = json.loads(response.raw_response.decode())
-        except (UnicodeDecodeError, json.JSONDecodeError):
-            disposition = LabObservationDisposition.INVALID_JSON
-        else:
             available_ids = tuple(item.artifact_id for item in subject.evidence)
             bindings = tuple((item.artifact_id, item.content_hash) for item in subject.evidence)
             if intent.role is ResearchRole.EVIDENCE_COLLECTOR:
@@ -810,6 +808,8 @@ def _observe(  # noqa: PLR0912, PLR0913 - validate every role predecessor explic
                     disposition = LabObservationDisposition.VALIDATED
                 else:
                     artifact_refusal = parsed_cio
+        except (UnicodeDecodeError, json.JSONDecodeError, RecursionError):
+            disposition = LabObservationDisposition.INVALID_JSON
     return LabCallObservation.create(
         call_id=intent.call_id,
         disposition=disposition,
@@ -859,7 +859,13 @@ def _model_response_is_valid(value: object) -> TypeGuard[ModelCallResponse]:
         and value.output_tokens >= 0
         and type(value.turns) is int
         and value.turns >= 0
-        and (value.exposed_model_identity is None or type(value.exposed_model_identity) is str)
+        and (
+            value.exposed_model_identity is None
+            or (
+                type(value.exposed_model_identity) is str
+                and _MODEL_IDENTITY.fullmatch(value.exposed_model_identity) is not None
+            )
+        )
         and (
             value.elapsed_milliseconds is None
             or (type(value.elapsed_milliseconds) is int and value.elapsed_milliseconds >= 0)
@@ -872,6 +878,21 @@ def _model_response_is_valid(value: object) -> TypeGuard[ModelCallResponse]:
             ModelCallDisposition.QUOTA_EXHAUSTED: ModelTimingDisposition.UNAVAILABLE,
             ModelCallDisposition.REFUSED: ModelTimingDisposition.UNAVAILABLE,
         }.get(value.disposition)
+    )
+
+
+def _normalized_model_response(value: object) -> ModelCallResponse:
+    if _model_response_is_valid(value):
+        return value
+    return ModelCallResponse(
+        ModelCallDisposition.REFUSED,
+        None,
+        None,
+        0,
+        0,
+        0,
+        None,
+        ModelTimingDisposition.UNAVAILABLE,
     )
 
 

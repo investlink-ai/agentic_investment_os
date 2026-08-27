@@ -161,14 +161,14 @@ class SQLiteProductionCallLedger:
                     or stored_hash != intent.content_hash
                 ):
                     return ProductionCallPreparation(LabCallPreparationDisposition.CONFLICT)
-                observation = self._load_observation(connection, intent)
-                if observation is None:
+                stored_observation = self._load_observation(connection, intent)
+                if stored_observation is None:
                     return ProductionCallPreparation(
                         LabCallPreparationDisposition.INDETERMINATE_EFFECT
                     )
                 return ProductionCallPreparation(
                     LabCallPreparationDisposition.REPLAY,
-                    observation,
+                    stored_observation[0],
                 )
         except sqlite3.Error as error:
             raise LifecyclePersistenceError(_WRITE_FAILED) from error
@@ -177,12 +177,18 @@ class SQLiteProductionCallLedger:
         self,
         intent: ProductionCallIntent,
         observation: LabCallObservation,
+        model_disposition: ModelCallDisposition,
         recorded_at: UtcInstant,
     ) -> LabCallObservation:
         observation.__post_init__()
-        if not observation_matches_role(observation, intent.role):
+        if type(model_disposition) is not ModelCallDisposition or not observation_matches_role(
+            observation, intent.role
+        ):
             raise LifecyclePersistenceError(_WRITE_FAILED)
-        observation_json = _canonical_json(observation.to_payload())
+        observation_payload = observation.to_payload()
+        observation_payload["record_kind"] = "production_research_call_observation"
+        observation_payload["model_disposition"] = model_disposition.value
+        observation_json = _canonical_json(observation_payload)
         observation_hash = hashlib.sha256(observation_json.encode()).hexdigest()
         try:
             with closing(self._connect()) as connection, connection:
@@ -190,9 +196,9 @@ class SQLiteProductionCallLedger:
                 self._require_intent(connection, intent)
                 prior = self._load_observation(connection, intent)
                 if prior is not None:
-                    if prior != observation:
+                    if prior != (observation, model_disposition):
                         raise LifecyclePersistenceError(_CORRUPT)
-                    return prior
+                    return prior[0]
                 connection.execute(
                     "INSERT INTO production_research_call_observations "
                     "(call_id, observation_json, raw_response, observation_hash, recorded_at) "
@@ -240,13 +246,13 @@ class SQLiteProductionCallLedger:
                     observation_time = _canonical_instant(recorded_at_value)
                     if observation_time.value < intent_times[call_id_value].value:
                         raise LifecyclePersistenceError(_CORRUPT)
-                    observation = self._load_observation(
+                    stored_observation = self._load_observation(
                         connection,
                         intents[call_id_value],
                     )
-                    if observation is None:  # pragma: no cover - selected row proves presence.
+                    if stored_observation is None:  # pragma: no cover - row proves presence.
                         raise LifecyclePersistenceError(_CORRUPT)
-                    observations[call_id_value] = observation
+                    observations[call_id_value] = stored_observation[0]
                 self._validate_references(references, intents, observations)
         except (
             BeliefPersistenceError,
@@ -292,6 +298,8 @@ class SQLiteProductionCallLedger:
             owner_observations = tuple(
                 observations[call_id] for call_id in owner_call_ids if call_id in observations
             )
+            if len(owner_observations) != len(owner_call_ids):
+                raise LifecyclePersistenceError(_CORRUPT)
             artifact_ids = tuple(
                 sorted(
                     observation.artifact.content_hash
@@ -451,7 +459,7 @@ class SQLiteProductionCallLedger:
         self,
         connection: sqlite3.Connection,
         intent: ProductionCallIntent,
-    ) -> LabCallObservation | None:
+    ) -> tuple[LabCallObservation, ModelCallDisposition] | None:
         row = connection.execute(
             "SELECT observation_json, raw_response, observation_hash, recorded_at "
             "FROM production_research_call_observations WHERE call_id = ?",
@@ -749,7 +757,7 @@ def _parse_observation(
     raw_response: bytes | None,
     intent: ProductionCallIntent,
     configuration: ModelConfiguration,
-) -> LabCallObservation:
+) -> tuple[LabCallObservation, ModelCallDisposition]:
     try:
         fields = json.loads(observation_json)
     except json.JSONDecodeError as error:
@@ -759,6 +767,7 @@ def _parse_observation(
         "record_kind",
         "call_id",
         "disposition",
+        "model_disposition",
         "raw_response_hash",
         "raw_response_retained",
         "exposed_model_identity",
@@ -774,12 +783,13 @@ def _parse_observation(
         type(fields) is not dict
         or set(fields) != required
         or fields["schema_version"] != 1
-        or fields["record_kind"] != "lab_model_call_observation"
+        or fields["record_kind"] != "production_research_call_observation"
         or fields["call_id"] != intent.call_id
     ):
         raise LifecyclePersistenceError(_CORRUPT)
     try:
         disposition = LabObservationDisposition(fields["disposition"])
+        model_disposition = ModelCallDisposition(fields["model_disposition"])
         timing = ModelTimingDisposition(fields["timing_disposition"])
     except (TypeError, ValueError) as error:
         raise LifecyclePersistenceError(_CORRUPT) from error
@@ -839,6 +849,7 @@ def _parse_observation(
             _rederive_response_backed_observation(
                 raw_response,
                 observation,
+                model_disposition,
                 intent,
                 configuration,
             )
@@ -850,21 +861,22 @@ def _parse_observation(
         ):
             raise LifecyclePersistenceError(_CORRUPT)
     else:
-        if not _observation_timing_is_valid(observation):
+        if not _model_timing_is_valid(model_disposition, observation.timing_disposition):
             raise LifecyclePersistenceError(_CORRUPT)
-        if observation.disposition in (
-            LabObservationDisposition.VALIDATED,
-            LabObservationDisposition.INVALID_JSON,
-            LabObservationDisposition.INVALID_DOSSIER,
-            LabObservationDisposition.INVALID_ARTIFACT,
-        ):
+        expected_disposition = _response_less_disposition(
+            model_disposition,
+            observation,
+            configuration,
+        )
+        if observation.disposition is not expected_disposition:
             raise LifecyclePersistenceError(_CORRUPT)
-    return observation
+    return observation, model_disposition
 
 
 def _rederive_response_backed_observation(
     raw_response: bytes,
     observation: LabCallObservation,
+    model_disposition: ModelCallDisposition,
     intent: ProductionCallIntent,
     configuration: ModelConfiguration,
 ) -> tuple[
@@ -877,10 +889,10 @@ def _rederive_response_backed_observation(
     | CioRefusalReason
     | None,
 ]:
-    if observation.timing_disposition is not ModelTimingDisposition.WITHIN_BUDGET:
+    if not _model_timing_is_valid(model_disposition, observation.timing_disposition):
         raise LifecyclePersistenceError(_CORRUPT)
     response = ModelCallResponse(
-        ModelCallDisposition.RESPONDED,
+        model_disposition,
         raw_response,
         observation.exposed_model_identity,
         observation.input_tokens,
@@ -894,9 +906,9 @@ def _rederive_response_backed_observation(
         return disposition, None, None
     try:
         decoded = json.loads(raw_response.decode())
-    except (UnicodeDecodeError, json.JSONDecodeError):
+        artifact, refusal = _parse_raw_role_output(decoded, intent)
+    except (UnicodeDecodeError, json.JSONDecodeError, RecursionError):
         return LabObservationDisposition.INVALID_JSON, None, None
-    artifact, refusal = _parse_raw_role_output(decoded, intent)
     if artifact is not None:
         return LabObservationDisposition.VALIDATED, artifact, None
     return (
@@ -910,16 +922,44 @@ def _rederive_response_backed_observation(
     )
 
 
-def _observation_timing_is_valid(observation: LabCallObservation) -> bool:
-    if observation.disposition is LabObservationDisposition.MODEL_TIMEOUT:
-        return observation.timing_disposition is ModelTimingDisposition.TIMED_OUT
-    if observation.disposition in (
-        LabObservationDisposition.QUOTA_EXHAUSTED,
-        LabObservationDisposition.ADAPTER_REFUSED,
-        LabObservationDisposition.INDETERMINATE_EFFECT,
-    ):
-        return observation.timing_disposition is ModelTimingDisposition.UNAVAILABLE
-    return observation.timing_disposition is ModelTimingDisposition.WITHIN_BUDGET
+def _response_less_disposition(
+    model_disposition: ModelCallDisposition,
+    observation: LabCallObservation,
+    configuration: ModelConfiguration,
+) -> LabObservationDisposition:
+    if observation.disposition is LabObservationDisposition.INDETERMINATE_EFFECT:
+        if (
+            model_disposition is not ModelCallDisposition.REFUSED
+            or observation.raw_response_hash is not None
+        ):
+            raise LifecyclePersistenceError(_CORRUPT)
+        return LabObservationDisposition.INDETERMINATE_EFFECT
+    if observation.disposition is LabObservationDisposition.OVERSIZED_OUTPUT:
+        if observation.raw_response_hash is None:
+            raise LifecyclePersistenceError(_CORRUPT)
+        return LabObservationDisposition.OVERSIZED_OUTPUT
+    response = ModelCallResponse(
+        model_disposition,
+        None,
+        observation.exposed_model_identity,
+        observation.input_tokens,
+        observation.output_tokens,
+        observation.turns,
+        observation.elapsed_milliseconds,
+        observation.timing_disposition,
+    )
+    return production_response_disposition(configuration, response)
+
+
+def _model_timing_is_valid(
+    disposition: ModelCallDisposition,
+    timing: ModelTimingDisposition,
+) -> bool:
+    if disposition is ModelCallDisposition.TIMED_OUT:
+        return timing is ModelTimingDisposition.TIMED_OUT
+    if disposition in (ModelCallDisposition.QUOTA_EXHAUSTED, ModelCallDisposition.REFUSED):
+        return timing is ModelTimingDisposition.UNAVAILABLE
+    return timing is ModelTimingDisposition.WITHIN_BUDGET
 
 
 def _parse_raw_role_output(

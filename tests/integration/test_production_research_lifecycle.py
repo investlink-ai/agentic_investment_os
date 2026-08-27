@@ -84,6 +84,7 @@ EXPECTED_CALLS = 10
 EXPECTED_RESOLUTION_ARTIFACTS = 8
 EXPECTED_NO_THESIS_CALLS = 2
 EXPECTED_INVALID_THESIS_CALLS = 2
+DEEP_JSON_RESPONSE = b"[" * 1_200 + b"0" + b"]" * 1_200
 
 
 @dataclass(frozen=True, slots=True)
@@ -597,7 +598,7 @@ def test_status_rejects_corrupt_structured_research_refusal(
 
 
 @pytest.mark.parametrize(
-    ("fixture", "expected_disposition"),
+    ("fixture", "expected_disposition", "expected_model_disposition"),
     [
         (
             RecordedModelFixture(
@@ -606,6 +607,25 @@ def test_status_rejects_corrupt_structured_research_refusal(
                 MODEL_IDENTITY,
             ),
             LabObservationDisposition.INVALID_JSON,
+            ModelCallDisposition.RESPONDED,
+        ),
+        (
+            RecordedModelFixture(
+                ModelCallDisposition.RESPONDED,
+                b"",
+                MODEL_IDENTITY,
+            ),
+            LabObservationDisposition.INVALID_JSON,
+            ModelCallDisposition.RESPONDED,
+        ),
+        (
+            RecordedModelFixture(
+                ModelCallDisposition.RESPONDED,
+                DEEP_JSON_RESPONSE,
+                MODEL_IDENTITY,
+            ),
+            LabObservationDisposition.INVALID_JSON,
+            ModelCallDisposition.RESPONDED,
         ),
         (
             RecordedModelFixture(
@@ -614,6 +634,7 @@ def test_status_rejects_corrupt_structured_research_refusal(
                 MODEL_IDENTITY,
             ),
             LabObservationDisposition.OVERSIZED_OUTPUT,
+            ModelCallDisposition.RESPONDED,
         ),
         (
             RecordedModelFixture(
@@ -623,6 +644,17 @@ def test_status_rejects_corrupt_structured_research_refusal(
                 timing_disposition=ModelTimingDisposition.TIMED_OUT,
             ),
             LabObservationDisposition.MODEL_TIMEOUT,
+            ModelCallDisposition.TIMED_OUT,
+        ),
+        (
+            RecordedModelFixture(
+                ModelCallDisposition.TIMED_OUT,
+                b"partial timeout response",
+                MODEL_IDENTITY,
+                timing_disposition=ModelTimingDisposition.TIMED_OUT,
+            ),
+            LabObservationDisposition.MODEL_TIMEOUT,
+            ModelCallDisposition.TIMED_OUT,
         ),
         (
             RecordedModelFixture(
@@ -632,6 +664,36 @@ def test_status_rejects_corrupt_structured_research_refusal(
                 timing_disposition=ModelTimingDisposition.UNAVAILABLE,
             ),
             LabObservationDisposition.QUOTA_EXHAUSTED,
+            ModelCallDisposition.QUOTA_EXHAUSTED,
+        ),
+        (
+            RecordedModelFixture(
+                ModelCallDisposition.QUOTA_EXHAUSTED,
+                b"quota diagnostic",
+                MODEL_IDENTITY,
+                timing_disposition=ModelTimingDisposition.UNAVAILABLE,
+            ),
+            LabObservationDisposition.QUOTA_EXHAUSTED,
+            ModelCallDisposition.QUOTA_EXHAUSTED,
+        ),
+        (
+            RecordedModelFixture(
+                ModelCallDisposition.REFUSED,
+                b"adapter diagnostic",
+                MODEL_IDENTITY,
+                timing_disposition=ModelTimingDisposition.UNAVAILABLE,
+            ),
+            LabObservationDisposition.ADAPTER_REFUSED,
+            ModelCallDisposition.REFUSED,
+        ),
+        (
+            RecordedModelFixture(
+                ModelCallDisposition.RESPONDED,
+                b"{}",
+                "",
+            ),
+            LabObservationDisposition.ADAPTER_REFUSED,
+            ModelCallDisposition.REFUSED,
         ),
         (
             RecordedModelFixture(
@@ -641,6 +703,7 @@ def test_status_rejects_corrupt_structured_research_refusal(
                 output_tokens=4_001,
             ),
             LabObservationDisposition.ADAPTER_REFUSED,
+            ModelCallDisposition.RESPONDED,
         ),
         (
             RecordedModelFixture(
@@ -650,6 +713,7 @@ def test_status_rejects_corrupt_structured_research_refusal(
                 turns=2,
             ),
             LabObservationDisposition.ADAPTER_REFUSED,
+            ModelCallDisposition.RESPONDED,
         ),
     ],
 )
@@ -657,6 +721,7 @@ def test_production_research_resource_or_boundary_failure_stops_before_memory(
     tmp_path: Path,
     fixture: RecordedModelFixture,
     expected_disposition: LabObservationDisposition,
+    expected_model_disposition: ModelCallDisposition,
 ) -> None:
     state_root = tmp_path / "runtime"
     model = RecordedResearchModel((fixture,))
@@ -674,6 +739,7 @@ def test_production_research_resource_or_boundary_failure_stops_before_memory(
         ).fetchone()
         observation = json.loads(observation_json)
         assert observation["disposition"] == expected_disposition.value
+        assert observation["model_disposition"] == expected_model_disposition.value
         assert connection.execute("SELECT COUNT(*) FROM belief_events").fetchone() == (0,)
     if expected_disposition is LabObservationDisposition.OVERSIZED_OUTPUT:
         assert raw_response is None
@@ -1302,8 +1368,10 @@ def test_status_rejects_coherently_rehashed_model_input_outside_pinned_run(
         status()
 
 
+@pytest.mark.parametrize("corruption", ["deleted_observation", "unbound_deleted_observation"])
 def test_status_rejects_deletion_of_structurally_referenced_failed_call(
     tmp_path: Path,
+    corruption: str,
 ) -> None:
     state_root = tmp_path / "runtime"
     model = RecordedResearchModel(
@@ -1323,6 +1391,17 @@ def test_status_rejects_deletion_of_structurally_referenced_failed_call(
     status()
     database = state_root / "lifecycle.sqlite3"
     with sqlite3.connect(database) as connection:
+        if corruption == "unbound_deleted_observation":
+            row = connection.execute("SELECT research_refusal FROM advance_refusals").fetchone()
+            assert row is not None
+            refusal = json.loads(row[0])
+            assert isinstance(refusal, dict)
+            refusal["terminal_call_id"] = None
+            connection.execute("DROP TRIGGER advance_refusals_are_append_only_update")
+            connection.execute(
+                "UPDATE advance_refusals SET research_refusal = ?",
+                (json.dumps(refusal, sort_keys=True, separators=(",", ":")),),
+            )
         connection.execute(
             "DROP TRIGGER production_research_call_observations_are_append_only_delete"
         )
@@ -1361,4 +1440,5 @@ def test_invalid_response_timing_is_normalized_to_bounded_adapter_refusal(
     assert row is not None
     observation = json.loads(row[0])
     assert observation["disposition"] == LabObservationDisposition.ADAPTER_REFUSED.value
+    assert observation["model_disposition"] == ModelCallDisposition.REFUSED.value
     assert observation["timing_disposition"] == ModelTimingDisposition.UNAVAILABLE.value
