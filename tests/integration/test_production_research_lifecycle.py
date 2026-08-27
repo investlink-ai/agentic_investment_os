@@ -187,6 +187,34 @@ class _ActiveUninvestableModel:
 
 
 @dataclass(slots=True)
+class _RunDistinctThesisModel:
+    delegate: _ValidProductionModel
+
+    @property
+    def unique_effect_count(self) -> int:
+        return self.delegate.unique_effect_count
+
+    def call(self, request: ModelCallRequest) -> ModelCallResponse:
+        response = self.delegate.call(request)
+        if request.role is not ResearchRole.THESIS_BUILDER:
+            return response
+        assert response.raw_response is not None
+        payload = json.loads(response.raw_response)
+        model_input = json.loads(request.model_input_json)
+        assert isinstance(payload, dict)
+        assert isinstance(model_input, dict)
+        variant = payload["variant_view"]
+        run_id = model_input["run_id"]
+        assert isinstance(variant, dict)
+        assert isinstance(run_id, str)
+        variant["text"] = f"{variant['text']} Run {run_id[:12]}."
+        return replace(
+            response,
+            raw_response=json.dumps(payload, sort_keys=True, separators=(",", ":")).encode(),
+        )
+
+
+@dataclass(slots=True)
 class _InvalidThesisModel:
     delegate: _ValidProductionModel
 
@@ -486,6 +514,41 @@ def _rewrite_research_checkpoint(database: Path, *, wrong_call_owner: bool) -> N
             (
                 json.dumps(checkpoint, sort_keys=True, separators=(",", ":")),
                 json.dumps(envelope, sort_keys=True, separators=(",", ":")),
+            ),
+        )
+
+
+def _replace_lifecycle_checkpoint(
+    database: Path,
+    *,
+    idempotency_key: str,
+    event_kind: str,
+    checkpoint: dict[str, object],
+) -> None:
+    with sqlite3.connect(database) as connection:
+        row = connection.execute(
+            "SELECT event_envelope FROM lifecycle_events "
+            "WHERE idempotency_key = ? AND event_kind = ?",
+            (idempotency_key, event_kind),
+        ).fetchone()
+        assert row is not None
+        envelope = json.loads(row[0])
+        assert isinstance(envelope, dict)
+        payload = envelope["payload"]
+        assert isinstance(payload, dict)
+        payload["research_checkpoint"] = checkpoint
+        envelope["content_hash"] = _content_hash(
+            {key: value for key, value in envelope.items() if key != "content_hash"}
+        )
+        connection.execute("DROP TRIGGER lifecycle_events_are_append_only_update")
+        connection.execute(
+            "UPDATE lifecycle_events SET research_checkpoint = ?, event_envelope = ? "
+            "WHERE idempotency_key = ? AND event_kind = ?",
+            (
+                json.dumps(checkpoint, sort_keys=True, separators=(",", ":")),
+                json.dumps(envelope, sort_keys=True, separators=(",", ":")),
+                idempotency_key,
+                event_kind,
             ),
         )
 
@@ -1333,6 +1396,107 @@ def test_status_rejects_deleted_belief_event_referenced_by_memory_checkpoint(
 
     with pytest.raises(BeliefPersistenceError, match="invalid authoritative belief history"):
         status.memory_history_validator.validate_history(receipt.belief_event_ids)
+    with pytest.raises(
+        LifecyclePersistenceError,
+        match="invalid production research call history",
+    ):
+        status()
+
+
+def test_status_rejects_belief_event_owned_by_another_completed_run(tmp_path: Path) -> None:
+    state_root = tmp_path / "runtime"
+    model = _RunDistinctThesisModel(_ValidProductionModel())
+    first_key = "stage-three-memory-owner-first"
+    first = _configure(state_root, universe=recorded_universe(), model=model)
+    first_receipt = _advance_on(first, first_key, date(2026, 8, 21))
+    second = _configure(
+        state_root,
+        universe=recorded_universe(),
+        model=model,
+        clock=_ClockAt(datetime(2026, 8, 22, 23, tzinfo=UTC)),
+    )
+    second_receipt = _advance_on(
+        second,
+        "stage-three-memory-owner-second",
+        date(2026, 8, 22),
+    )
+    assert first_receipt.belief_event_ids
+    assert second_receipt.belief_event_ids
+    assert first_receipt.belief_event_ids != second_receipt.belief_event_ids
+    status = _configured_status(state_root)
+    status()
+    database = state_root / "lifecycle.sqlite3"
+    with sqlite3.connect(database) as connection:
+        row = connection.execute(
+            "SELECT research_checkpoint FROM lifecycle_events "
+            "WHERE idempotency_key = ? AND event_kind = 'memory_updated'",
+            (first_key,),
+        ).fetchone()
+    assert row is not None
+    checkpoint = json.loads(row[0])
+    assert isinstance(checkpoint, dict)
+    checkpoint["artifact_ids"] = list(second_receipt.belief_event_ids)
+    _replace_lifecycle_checkpoint(
+        database,
+        idempotency_key=first_key,
+        event_kind="memory_updated",
+        checkpoint=checkpoint,
+    )
+
+    with pytest.raises(
+        LifecyclePersistenceError,
+        match="invalid production research call history",
+    ):
+        status()
+
+
+def test_status_rejects_completed_research_with_a_successful_role_prefix(
+    tmp_path: Path,
+) -> None:
+    state_root = tmp_path / "runtime"
+    _, status = _complete_research(state_root)
+    database = state_root / "lifecycle.sqlite3"
+    with sqlite3.connect(database) as connection:
+        row = connection.execute(
+            "SELECT i.call_id, o.observation_json FROM production_research_call_intents i "
+            "JOIN production_research_call_observations o USING (call_id) "
+            "WHERE i.role = 'thesis_builder' ORDER BY i.request_id LIMIT 1"
+        ).fetchone()
+        assert row is not None
+        call_id, observation_json = row
+        observation = json.loads(observation_json)
+        artifact = observation["artifact"]
+        assert isinstance(artifact, dict)
+        checkpoint: dict[str, object] = {
+            "schema_version": 1,
+            "artifact_ids": [artifact["content_hash"]],
+            "call_ids": [call_id],
+            "input_tokens": observation["input_tokens"],
+            "output_tokens": observation["output_tokens"],
+            "turns": observation["turns"],
+        }
+        connection.execute(
+            "DROP TRIGGER production_research_call_observations_are_append_only_delete"
+        )
+        connection.execute("DROP TRIGGER production_research_call_intents_are_append_only_delete")
+        connection.execute(
+            "DELETE FROM production_research_call_observations WHERE call_id IN "
+            "(SELECT call_id FROM production_research_call_intents "
+            "WHERE role != 'evidence_collector' AND call_id != ?)",
+            (call_id,),
+        )
+        connection.execute(
+            "DELETE FROM production_research_call_intents "
+            "WHERE role != 'evidence_collector' AND call_id != ?",
+            (call_id,),
+        )
+    _replace_lifecycle_checkpoint(
+        database,
+        idempotency_key="stage-three-adversarial-history",
+        event_kind="research_run",
+        checkpoint=checkpoint,
+    )
+
     with pytest.raises(
         LifecyclePersistenceError,
         match="invalid production research call history",

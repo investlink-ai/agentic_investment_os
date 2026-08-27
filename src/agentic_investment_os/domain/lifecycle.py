@@ -598,6 +598,9 @@ class ProductionResearchReference:
     checkpoint: ResearchCheckpoint | None
     refusal_id: str | None = None
     terminal_call_id: str | None = None
+    memory_checkpoint: ResearchCheckpoint | None = None
+    no_action_reason: NoActionReason | None = None
+    memory_recorded_at: UtcInstant | None = None
 
     def __post_init__(self) -> None:
         if (
@@ -619,6 +622,32 @@ class ProductionResearchReference:
                     or not is_sha256(self.terminal_call_id)
                     or self.terminal_call_id not in self.checkpoint.call_ids
                 )
+            )
+            or (self.memory_checkpoint is None) != (self.memory_recorded_at is None)
+            or (
+                self.memory_checkpoint is not None
+                and type(self.memory_checkpoint) is not ResearchCheckpoint
+            )
+            or (
+                self.no_action_reason is not None
+                and type(self.no_action_reason) is not NoActionReason
+            )
+            or (
+                type(self.memory_checkpoint) is ResearchCheckpoint
+                and (
+                    self.phase is not LifecyclePhase.RUN_RESEARCH
+                    or self.memory_checkpoint.call_ids
+                    or self.memory_checkpoint.input_tokens != 0
+                    or self.memory_checkpoint.output_tokens != 0
+                    or self.memory_checkpoint.turns != 0
+                    or (not self.memory_checkpoint.artifact_ids)
+                    != (self.no_action_reason is not None)
+                    or type(self.memory_recorded_at) is not UtcInstant
+                )
+            )
+            or (
+                self.memory_checkpoint is None
+                and (self.no_action_reason is not None or self.memory_recorded_at is not None)
             )
         ):
             raise ValueError(_INVALID_CHECKPOINT_ORDER)
@@ -1710,6 +1739,12 @@ def reconstruct_production_research_checkpoints(
         for refusal in history.refusals
         if refusal.idempotency_key is not None
     }
+    memory_times = {
+        event.request.idempotency_key.value: event.recorded_at
+        for event in history.events
+        if event.completed_phase is not None
+        and event.completed_phase.phase is LifecyclePhase.UPDATE_MEMORY
+    }
     references: list[ProductionResearchReference] = []
     for progress in progresses:
         attention = progress.attention_artifact
@@ -1765,6 +1800,9 @@ def reconstruct_production_research_checkpoints(
                 research_checkpoint,
                 research_refusal_id,
                 research_terminal_call_id,
+                progress.memory_checkpoint,
+                progress.no_action_reason,
+                memory_times.get(progress.request.idempotency_key.value),
             )
         )
     return tuple(references)

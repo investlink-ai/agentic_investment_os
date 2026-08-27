@@ -19,8 +19,10 @@ from agentic_investment_os.adapters.sqlite_lifecycle import (
 from agentic_investment_os.domain.lifecycle import is_sha256
 from agentic_investment_os.domain.temporal import InvalidUtcInstantError, UtcInstant
 from agentic_investment_os.memory.admission import (
+    BeliefClaimKind,
     BeliefEvent,
     BeliefEvidenceReference,
+    BeliefStatus,
     RecordRefusalCode,
     canonical_belief_event_payload,
     parse_belief_event,
@@ -36,6 +38,7 @@ from agentic_investment_os.memory.beliefs import (
     BeliefGraphRefusalCode,
     BeliefHistory,
     BeliefLedgerEntry,
+    BeliefLifecycleReference,
     BeliefPersistenceError,
     RecordDisposition,
     RecordReceipt,
@@ -182,6 +185,36 @@ class SQLiteBeliefLedger:
 
         self._write(operation)
 
+    def validate_lifecycle_references(
+        self,
+        references: tuple[BeliefLifecycleReference, ...],
+        evidence_resolver: BeliefEvidenceResolver,
+    ) -> None:
+        """Revalidate exact run-owned belief material named by memory checkpoints."""
+
+        def operation(connection: sqlite3.Connection) -> None:
+            try:
+                history = _load_belief_history(connection)
+                for reference in references:
+                    reference.__post_init__()
+            except ValueError as error:
+                raise BeliefPersistenceError(_INVALID_BELIEF_HISTORY) from error
+            events = tuple(entry.event for entry in history.entries)
+            artifacts = evidence_resolver.resolve_belief_evidence(
+                _belief_evidence_references(events)
+            )
+            if isinstance(artifacts, RecordRefusalCode):
+                raise BeliefPersistenceError(_INVALID_BELIEF_HISTORY)
+            if validate_belief_evidence(events, artifacts) is not None:
+                raise BeliefPersistenceError(_INVALID_BELIEF_HISTORY)
+            entries_by_id = {entry.event.event_id: entry for entry in history.entries}
+            for reference in references:
+                entry = entries_by_id.get(reference.event_id)
+                if entry is None or not _matches_lifecycle_reference(entry, reference):
+                    raise BeliefPersistenceError(_INVALID_BELIEF_HISTORY)
+
+        self._write(operation)
+
     def _connect(self) -> sqlite3.Connection:
         return _connect_database(self._database, mode=_DatabaseOpenMode.EXISTING_ONLY)
 
@@ -267,6 +300,29 @@ def _belief_evidence_references(
         reference.artifact_id: reference for event in events for reference in event.evidence
     }
     return tuple(references[key] for key in sorted(references))
+
+
+def _matches_lifecycle_reference(
+    entry: BeliefLedgerEntry,
+    reference: BeliefLifecycleReference,
+) -> bool:
+    event = entry.event
+    return (
+        event.event_id == reference.event_id
+        and event.belief_id == reference.belief_id
+        and event.subject == reference.subject
+        and event.claim_kind is BeliefClaimKind.EXPECTATION
+        and event.claim == reference.claim
+        and event.valid_at == reference.valid_at
+        and event.transaction_at.value <= reference.lifecycle_recorded_at.value
+        and entry.recorded_at.value <= reference.lifecycle_recorded_at.value
+        and event.evidence_cutoff == reference.evidence_cutoff
+        and event.confidence == reference.confidence
+        and event.evidence == reference.evidence
+        and event.falsifiers == reference.falsifiers
+        and event.status is BeliefStatus.ACTIVE
+        and event.supersedes_event_id is None
+    )
 
 
 def _append_belief_entry(

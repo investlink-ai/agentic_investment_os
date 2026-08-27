@@ -6,6 +6,7 @@ import hashlib
 import json
 import sqlite3
 from contextlib import closing
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol
 
 from agentic_investment_os.domain.attention import (
@@ -20,6 +21,7 @@ from agentic_investment_os.domain.identity import (
 from agentic_investment_os.domain.lifecycle import (
     LifecyclePersistenceError,
     LifecyclePhase,
+    NoActionReason,
     ProductionResearchReference,
     ResearchCheckpoint,
     is_sha256,
@@ -32,10 +34,16 @@ from agentic_investment_os.evidence.capture import (
     InvalidEvidenceError,
     parse_evidence_artifact,
 )
+from agentic_investment_os.memory.admission import (
+    BeliefClaimKind,
+    BeliefEvidenceReference,
+    BeliefEvidenceRelationship,
+)
 from agentic_investment_os.memory.beliefs import (
     BeliefEvidenceResolver,
     BeliefGraphRefusal,
     BeliefLedger,
+    BeliefLifecycleReference,
     BeliefPersistenceError,
     parse_belief_graph_query,
 )
@@ -68,8 +76,10 @@ from agentic_investment_os.research.production import (
 from agentic_investment_os.research.resolution import (
     CioRefusalReason,
     CioResolution,
+    CioStance,
     ForecastRefusalReason,
     ScenarioForecast,
+    SkepticDecision,
     SkepticRefusalReason,
     SkepticResult,
     Thesis,
@@ -95,6 +105,14 @@ _CORRUPT = "invalid production research call history"
 _WRITE_FAILED = "production research call persistence failed"
 _BEGIN_IMMEDIATE = "BEGIN IMMEDIATE"
 _INTENT_COLUMN_COUNT = 7
+
+
+@dataclass(frozen=True, slots=True)
+class _ReconstructedPhase:
+    refusal_id: str | None = None
+    terminal_call_id: str | None = None
+    active_resolutions: tuple[tuple[str, Dossier, Thesis, CioResolution], ...] = ()
+    no_action_reason: NoActionReason | None = None
 
 
 class _ProductionEvidenceVault(EvidenceVault, BeliefEvidenceResolver, Protocol):
@@ -294,34 +312,309 @@ class SQLiteProductionCallLedger:
         if any(call_id not in intents for call_id in observations):  # pragma: no cover
             raise LifecyclePersistenceError(_CORRUPT)
         self._validate_role_predecessors(tuple(intents.values()), observations)
+        dossiers = {
+            (intent.run_id, intent.request_id): observation.artifact
+            for call_id, observation in observations.items()
+            if (intent := intents[call_id]).role is ResearchRole.EVIDENCE_COLLECTOR
+            and type(observation.artifact) is Dossier
+        }
+        belief_references: list[BeliefLifecycleReference] = []
         for owner, reference in owners.items():
             owner_intents = tuple(sorted(grouped[owner], key=lambda item: item.call_id))
-            checkpoint = reference.checkpoint
-            if checkpoint is None:
-                continue
-            owner_call_ids = tuple(intent.call_id for intent in owner_intents)
-            owner_observations = tuple(
-                observations[call_id] for call_id in owner_call_ids if call_id in observations
+            self._validate_checkpoint(reference.checkpoint, owner_intents, observations)
+            by_request = _intents_by_request(owner_intents)
+            outcome = (
+                self._reconstruct_build(reference, by_request, observations)
+                if reference.phase is LifecyclePhase.BUILD_DOSSIERS
+                else self._reconstruct_run(reference, by_request, observations, dossiers)
             )
-            if len(owner_observations) != len(owner_call_ids):
+            _validate_terminal_outcome(reference, outcome)
+            if reference.memory_checkpoint is not None:
+                if outcome is None or outcome.refusal_id is not None:
+                    raise LifecyclePersistenceError(_CORRUPT)
+                belief_references.extend(
+                    self._memory_references(reference, outcome.active_resolutions)
+                )
+                expected_event_ids = tuple(
+                    sorted(item.event_id for item in belief_references if item.run_id == owner[0])
+                )
+                if (
+                    reference.memory_checkpoint.artifact_ids != expected_event_ids
+                    or reference.no_action_reason != outcome.no_action_reason
+                ):
+                    raise LifecyclePersistenceError(_CORRUPT)
+        if belief_references:
+            self._belief_ledger.validate_lifecycle_references(
+                tuple(belief_references),
+                self._evidence_vault,
+            )
+
+    @staticmethod
+    def _validate_checkpoint(
+        checkpoint: ResearchCheckpoint | None,
+        owner_intents: tuple[ProductionCallIntent, ...],
+        observations: dict[str, LabCallObservation],
+    ) -> None:
+        if checkpoint is None:
+            return
+        owner_call_ids = tuple(intent.call_id for intent in owner_intents)
+        owner_observations = tuple(
+            observations[call_id] for call_id in owner_call_ids if call_id in observations
+        )
+        if len(owner_observations) != len(owner_call_ids):
+            raise LifecyclePersistenceError(_CORRUPT)
+        artifact_ids = tuple(
+            sorted(
+                observation.artifact.content_hash
+                for observation in owner_observations
+                if observation.artifact is not None
+            )
+        )
+        expected = ResearchCheckpoint(
+            artifact_ids,
+            owner_call_ids,
+            sum(item.input_tokens for item in owner_observations),
+            sum(item.output_tokens for item in owner_observations),
+            sum(item.turns for item in owner_observations),
+        )
+        if checkpoint != expected:
+            raise LifecyclePersistenceError(_CORRUPT)
+
+    def _reconstruct_build(
+        self,
+        reference: ProductionResearchReference,
+        by_request: dict[str, dict[ResearchRole, ProductionCallIntent]],
+        observations: dict[str, LabCallObservation],
+    ) -> _ReconstructedPhase | None:
+        request_ids = _request_ids(reference)
+        for index, request_id in enumerate(request_ids):
+            subject_owner = _subject_owner(reference, request_id)
+            if subject_owner is None:  # pragma: no cover - typed attention proves ownership.
                 raise LifecyclePersistenceError(_CORRUPT)
-            artifact_ids = tuple(
-                sorted(
-                    observation.artifact.content_hash
-                    for observation in owner_observations
-                    if observation.artifact is not None
+            evidence = _expected_subject_evidence(self._evidence_vault, subject_owner[1])
+            if (
+                not evidence
+                or len(evidence) > self._policy.maximum_evidence_artifacts
+                or not any(item.is_official for item in evidence)
+            ):
+                _require_no_later_intents(by_request, request_ids, index, frozenset())
+                return _ReconstructedPhase(
+                    _input_refusal_identity(
+                        reference.pinned_run_identity.run_id,
+                        request_id,
+                        "invalid_subject_evidence_coverage",
+                    )
+                )
+            roles = by_request.get(request_id, {})
+            intent = roles.get(ResearchRole.EVIDENCE_COLLECTOR)
+            if intent is None:
+                _require_no_later_intents(by_request, request_ids, index, frozenset())
+                return None
+            observation = observations.get(intent.call_id)
+            if observation is None:
+                _require_no_later_intents(
+                    by_request,
+                    request_ids,
+                    index,
+                    frozenset({ResearchRole.EVIDENCE_COLLECTOR}),
+                )
+                return None
+            if type(observation.artifact) is not Dossier:
+                _require_no_later_intents(
+                    by_request,
+                    request_ids,
+                    index,
+                    frozenset({ResearchRole.EVIDENCE_COLLECTOR}),
+                )
+                return _call_failure_outcome(intent, observation)
+        return _ReconstructedPhase()
+
+    def _reconstruct_run(  # noqa: PLR0911, PLR0912, PLR0915 - mirror terminal paths.
+        self,
+        reference: ProductionResearchReference,
+        by_request: dict[str, dict[ResearchRole, ProductionCallIntent]],
+        observations: dict[str, LabCallObservation],
+        dossiers: dict[tuple[str, str], Dossier],
+    ) -> _ReconstructedPhase | None:
+        request_ids = _request_ids(reference)
+        active: list[tuple[str, Dossier, Thesis, CioResolution]] = []
+        no_action: NoActionReason | None = None
+        run_id = reference.pinned_run_identity.run_id
+        if not request_ids:
+            return _ReconstructedPhase(no_action_reason=NoActionReason.NO_ATTENTION)
+        for index, request_id in enumerate(request_ids):
+            dossier = dossiers.get((run_id, request_id))
+            if dossier is None:
+                raise LifecyclePersistenceError(_CORRUPT)
+            roles = by_request.get(request_id, {})
+            allowed: set[ResearchRole] = set()
+            thesis_result = _role_artifact(
+                roles,
+                observations,
+                ResearchRole.THESIS_BUILDER,
+                Thesis,
+            )
+            allowed.add(ResearchRole.THESIS_BUILDER)
+            if thesis_result is None:
+                _require_no_later_intents(by_request, request_ids, index, frozenset(allowed))
+                return None
+            thesis_intent, thesis_observation, thesis = thesis_result
+            if thesis is None:
+                _require_no_later_intents(by_request, request_ids, index, frozenset(allowed))
+                return _call_failure_outcome(thesis_intent, thesis_observation)
+            if any(condition.active for condition in thesis.uninvestable_conditions):
+                _require_no_current_roles(roles, frozenset(allowed))
+                no_action = NoActionReason.NO_VALID_THESIS
+                continue
+            skeptic_result = _role_artifact(
+                roles,
+                observations,
+                ResearchRole.INDEPENDENT_SKEPTIC,
+                SkepticResult,
+            )
+            allowed.add(ResearchRole.INDEPENDENT_SKEPTIC)
+            if skeptic_result is None:
+                _require_no_later_intents(by_request, request_ids, index, frozenset(allowed))
+                return None
+            skeptic_intent, skeptic_observation, skeptic = skeptic_result
+            if skeptic is None:
+                _require_no_later_intents(by_request, request_ids, index, frozenset(allowed))
+                return _call_failure_outcome(skeptic_intent, skeptic_observation)
+            if skeptic.decision is SkepticDecision.REJECT:
+                _require_no_current_roles(roles, frozenset(allowed))
+                no_action = NoActionReason.SKEPTIC_REJECTED
+                continue
+            if skeptic.decision is SkepticDecision.REQUEST_EVIDENCE:
+                _require_no_later_intents(by_request, request_ids, index, frozenset(allowed))
+                return _ReconstructedPhase(
+                    _input_refusal_identity(run_id, request_id, "skeptic_requested_evidence")
+                )
+            forecast_result = _role_artifact(
+                roles,
+                observations,
+                ResearchRole.SCENARIO_FORECASTER,
+                ScenarioForecast,
+            )
+            allowed.add(ResearchRole.SCENARIO_FORECASTER)
+            if forecast_result is None:
+                _require_no_later_intents(by_request, request_ids, index, frozenset(allowed))
+                return None
+            forecast_intent, forecast_observation, forecast = forecast_result
+            if forecast is None:
+                _require_no_later_intents(by_request, request_ids, index, frozenset(allowed))
+                return _call_failure_outcome(forecast_intent, forecast_observation)
+            cio_result = _role_artifact(
+                roles,
+                observations,
+                ResearchRole.CIO,
+                CioResolution,
+            )
+            allowed.add(ResearchRole.CIO)
+            if cio_result is None:
+                _require_no_later_intents(by_request, request_ids, index, frozenset(allowed))
+                return None
+            cio_intent, cio_observation, cio = cio_result
+            if cio is None:
+                _require_no_later_intents(by_request, request_ids, index, frozenset(allowed))
+                return _call_failure_outcome(cio_intent, cio_observation)
+            _require_no_current_roles(roles, frozenset(allowed))
+            if cio.stance is CioStance.ABSTAIN:
+                no_action = NoActionReason.CIO_ABSTAINED
+            else:
+                active.append((request_id, dossier, thesis, cio))
+        if active:
+            no_action = None
+        return _ReconstructedPhase(
+            active_resolutions=tuple(active),
+            no_action_reason=no_action,
+        )
+
+    def _memory_references(
+        self,
+        reference: ProductionResearchReference,
+        active: tuple[tuple[str, Dossier, Thesis, CioResolution], ...],
+    ) -> tuple[BeliefLifecycleReference, ...]:
+        recorded_at = reference.memory_recorded_at
+        if recorded_at is None:  # pragma: no cover - reference invariant rejects this.
+            raise LifecyclePersistenceError(_CORRUPT)
+        expected: list[BeliefLifecycleReference] = []
+        for request_id, dossier, thesis, cio in active:
+            assertions = {
+                assertion.assertion_id: assertion
+                for assertion in (*dossier.facts, *dossier.interpretations)
+            }
+            try:
+                supporting_ids = tuple(
+                    sorted(
+                        {
+                            citation
+                            for assertion_id in thesis.variant_view.supporting_assertion_ids
+                            for citation in assertions[assertion_id].citation_artifact_ids
+                        }
+                    )
+                )
+            except KeyError as error:  # pragma: no cover - parsed thesis binds the Dossier.
+                raise LifecyclePersistenceError(_CORRUPT) from error
+            owner = _subject_owner(reference, request_id)
+            if owner is None:  # pragma: no cover - reference authority validates this.
+                raise LifecyclePersistenceError(_CORRUPT)
+            records = {
+                item.artifact_id: item
+                for item in _expected_subject_evidence(self._evidence_vault, owner[1])
+            }
+            contradicting_ids = thesis.variant_view.contradicting_artifact_ids
+            try:
+                evidence = tuple(
+                    sorted(
+                        (
+                            *(
+                                BeliefEvidenceReference(
+                                    artifact_id,
+                                    records[artifact_id].content_hash,
+                                    BeliefEvidenceRelationship.SUPPORTING,
+                                )
+                                for artifact_id in supporting_ids
+                            ),
+                            *(
+                                BeliefEvidenceReference(
+                                    artifact_id,
+                                    records[artifact_id].content_hash,
+                                    BeliefEvidenceRelationship.CONTRADICTING,
+                                )
+                                for artifact_id in contradicting_ids
+                            ),
+                        ),
+                        key=lambda item: (item.artifact_id, item.relationship.value),
+                    )
+                )
+            except KeyError as error:
+                raise LifecyclePersistenceError(_CORRUPT) from error
+            belief_id = _content_hash(
+                {
+                    "subject": cio.subject.to_payload(),
+                    "claim_kind": BeliefClaimKind.EXPECTATION.value,
+                }
+            )
+            event_id = _content_hash(
+                {"cio_resolution_id": cio.content_hash, "belief_id": belief_id}
+            )
+            expected.append(
+                BeliefLifecycleReference(
+                    run_id=reference.pinned_run_identity.run_id,
+                    cio_resolution_id=cio.content_hash,
+                    event_id=event_id,
+                    belief_id=belief_id,
+                    subject=cio.subject,
+                    claim=thesis.variant_view.text,
+                    valid_at=reference.pinned_run_identity.evidence_cutoff,
+                    evidence_cutoff=reference.pinned_run_identity.evidence_cutoff,
+                    confidence={"low": "0.75", "medium": "0.5", "high": "0.25"}[cio.uncertainty],
+                    evidence=evidence,
+                    falsifiers=tuple(sorted(claim.text for claim in thesis.invalidators)),
+                    lifecycle_recorded_at=recorded_at,
                 )
             )
-            expected = ResearchCheckpoint(
-                artifact_ids,
-                owner_call_ids,
-                sum(item.input_tokens for item in owner_observations),
-                sum(item.output_tokens for item in owner_observations),
-                sum(item.turns for item in owner_observations),
-            )
-            if checkpoint != expected:
-                raise LifecyclePersistenceError(_CORRUPT)
-            _validate_reference_refusal(reference, owner_observations)
+        return tuple(expected)
 
     def _validate_intent_authority(
         self,
@@ -535,27 +828,96 @@ def _expected_subject_evidence(
     )
 
 
-def _validate_reference_refusal(
-    reference: ProductionResearchReference,
-    observations: tuple[LabCallObservation, ...],
-) -> None:
-    failed = tuple(
-        observation
-        for observation in observations
-        if observation.disposition is not LabObservationDisposition.VALIDATED
+def _request_ids(reference: ProductionResearchReference) -> tuple[str, ...]:
+    return tuple(
+        sorted(
+            (
+                *(request.request_id for request in reference.attention_artifact.dossier_requests),
+                *(
+                    refresh.refresh_id
+                    for refresh in reference.attention_artifact.holding_refreshes
+                    if refresh.disposition is HoldingRefreshDisposition.REQUIRED
+                ),
+            )
+        )
     )
-    if reference.refusal_id is None:
-        if failed or reference.terminal_call_id is not None:
+
+
+def _intents_by_request(
+    intents: tuple[ProductionCallIntent, ...],
+) -> dict[str, dict[ResearchRole, ProductionCallIntent]]:
+    grouped: dict[str, dict[ResearchRole, ProductionCallIntent]] = {}
+    for intent in intents:
+        roles = grouped.setdefault(intent.request_id, {})
+        if intent.role in roles:
             raise LifecyclePersistenceError(_CORRUPT)
-        return
-    if reference.terminal_call_id is None:
-        if failed:
-            raise LifecyclePersistenceError(_CORRUPT)
+        roles[intent.role] = intent
+    return grouped
+
+
+def _role_artifact[ArtifactT: Dossier | Thesis | SkepticResult | ScenarioForecast | CioResolution](
+    roles: dict[ResearchRole, ProductionCallIntent],
+    observations: dict[str, LabCallObservation],
+    role: ResearchRole,
+    expected_type: type[ArtifactT],
+) -> tuple[ProductionCallIntent, LabCallObservation, ArtifactT | None] | None:
+    intent = roles.get(role)
+    if intent is None:
+        return None
+    observation = observations.get(intent.call_id)
+    if observation is None:
+        return None
+    artifact = observation.artifact
+    return (
+        (intent, observation, artifact)
+        if isinstance(artifact, expected_type)
+        else (intent, observation, None)
+    )
+
+
+def _require_no_current_roles(
+    roles: dict[ResearchRole, ProductionCallIntent],
+    allowed: frozenset[ResearchRole],
+) -> None:
+    if not set(roles).issubset(allowed):
+        raise LifecyclePersistenceError(_CORRUPT)
+
+
+def _require_no_later_intents(
+    by_request: dict[str, dict[ResearchRole, ProductionCallIntent]],
+    request_ids: tuple[str, ...],
+    index: int,
+    allowed_current: frozenset[ResearchRole],
+) -> None:
+    _require_no_current_roles(by_request.get(request_ids[index], {}), allowed_current)
+    if any(by_request.get(request_id) for request_id in request_ids[index + 1 :]):
+        raise LifecyclePersistenceError(_CORRUPT)
+
+
+def _call_failure_outcome(
+    intent: ProductionCallIntent,
+    observation: LabCallObservation,
+) -> _ReconstructedPhase:
+    return _ReconstructedPhase(
+        production_call_refusal_identity(intent.call_id, observation),
+        intent.call_id,
+    )
+
+
+def _input_refusal_identity(run_id: str, request_id: str, reason: str) -> str:
+    return _content_hash({"run_id": run_id, "request_id": request_id, "reason": reason})
+
+
+def _validate_terminal_outcome(
+    reference: ProductionResearchReference,
+    outcome: _ReconstructedPhase | None,
+) -> None:
+    if reference.checkpoint is None:
         return
     if (
-        len(failed) != 1
-        or failed[0].call_id != reference.terminal_call_id
-        or production_call_refusal_identity(failed[0].call_id, failed[0]) != reference.refusal_id
+        outcome is None
+        or reference.refusal_id != outcome.refusal_id
+        or reference.terminal_call_id != outcome.terminal_call_id
     ):
         raise LifecyclePersistenceError(_CORRUPT)
 
@@ -1191,6 +1553,10 @@ def _parse_refusal(
 
 def _canonical_json(value: object) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"))
+
+
+def _content_hash(value: object) -> str:
+    return hashlib.sha256(_canonical_json(value).encode()).hexdigest()
 
 
 def _is_canonical_json(value: str) -> bool:

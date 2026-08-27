@@ -292,9 +292,11 @@ stateDiagram-v2
   derived research disposition. Lifecycle research checkpoints retain call IDs, artifact IDs, tokens,
   and turns; `Status` revalidates the exact Attention-owned evidence set and the model ledger by
   re-parsing every retained response, binds each failed observation to its lifecycle refusal, proves
-  exact phase ownership and resource totals, and proves every checkpoint and memory reference still
-  resolves. SQLite initializes or validates one exact current physical schema; other non-empty shapes
-  fail before writes.
+  exact phase ownership and resource totals, and re-derives each allowed terminal role path. Completed
+  memory checkpoints retain zero model-call resources and bind their exact no-action outcome or
+  run-owned Belief Event material to the validated CIO resolutions; global event existence is not
+  sufficient. SQLite initializes or validates one exact current physical schema; other non-empty
+  shapes fail before writes.
   [ADR 0004](adr/0004-require-current-sqlite-schema.md) owns that decision. Runtime stores use explicit
   ignored roots; source directories never hold runtime state.
 
