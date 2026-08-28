@@ -23,8 +23,10 @@ from agentic_investment_os.domain.lifecycle import (
     PerformDossierBuild,
     PerformEvidenceCapture,
     PerformMemoryUpdate,
+    PerformPortfolioConstruction,
     PerformResearch,
     PinnedRunIdentity,
+    PortfolioCheckpoint,
     ResearchCheckpoint,
 )
 from agentic_investment_os.domain.temporal import UtcInstant
@@ -32,12 +34,12 @@ from tests._attention import attention_artifact
 from tests._evidence import evidence_capture_checkpoint
 from tests._universe import advance_command
 
-CURRENT_DATABASE_VERSION = 12
+CURRENT_DATABASE_VERSION = 13
 CONFIGURATION_HASH = "a" * 64
 RECORDED_AT = "2026-08-21T22:00:00.000000+00:00"
 MAX_DIAGNOSTIC_LENGTH = 100
 SQLiteValue = str | bytes | int | float | None
-MEMORY_EVENT_SEQUENCE = 8
+PORTFOLIO_EVENT_SEQUENCE = 9
 DOSSIER_CHECKPOINT = ResearchCheckpoint(("1" * 64,))
 RESEARCH_CHECKPOINT = ResearchCheckpoint(("2" * 64,))
 MEMORY_CHECKPOINT = ResearchCheckpoint(("3" * 64,))
@@ -103,7 +105,7 @@ def _populate_current_history(database: Path) -> tuple[AdvanceRequest, PinnedRun
     attempt = AdvanceAttempt()
     recorded_at = UtcInstant.parse(RECORDED_AT)
     capture = evidence_capture_checkpoint()
-    for expected_sequence in range(MEMORY_EVENT_SEQUENCE + 1):
+    for expected_sequence in range(PORTFOLIO_EVENT_SEQUENCE + 1):
         decision = ledger.advance_step(command, attempt, recorded_at)
         if isinstance(decision, PerformEvidenceCapture):
             command = replace(command, evidence_capture=capture)
@@ -128,7 +130,19 @@ def _populate_current_history(database: Path) -> tuple[AdvanceRequest, PinnedRun
         if isinstance(decision, PerformMemoryUpdate):
             command = replace(command, memory_update=MEMORY_CHECKPOINT)
             decision = ledger.advance_step(command, attempt, recorded_at)
-        if expected_sequence < MEMORY_EVENT_SEQUENCE:
+        if isinstance(decision, PerformPortfolioConstruction):
+            command = replace(
+                command,
+                portfolio_construction=PortfolioCheckpoint(
+                    "4" * 64,
+                    "5" * 64,
+                    identity.portfolio_policy_hash,
+                    identity.portfolio_input_hash,
+                    ("6" * 64,),
+                ),
+            )
+            decision = ledger.advance_step(command, attempt, recorded_at)
+        if expected_sequence < PORTFOLIO_EVENT_SEQUENCE:
             assert isinstance(decision, AppendLifecycleRecord)
             attempt = decision.attempt
         else:
@@ -219,6 +233,9 @@ def test_fresh_database_records_its_physical_schema_version(tmp_path: Path) -> N
         "one_initial_event_per_stream",
         "one_constitution_governance_fact_per_kind_request_and_material",
         "one_unkeyed_refusal_per_reason_and_cycle",
+        "portfolio_constructions",
+        "portfolio_constructions_are_append_only_delete",
+        "portfolio_constructions_are_append_only_update",
         "production_research_call_intents",
         "production_research_call_intents_are_append_only_delete",
         "production_research_call_intents_are_append_only_update",

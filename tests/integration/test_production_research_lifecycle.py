@@ -6,6 +6,7 @@ import sqlite3
 from copy import deepcopy
 from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, timedelta
+from decimal import Decimal
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
@@ -15,18 +16,28 @@ from agentic_investment_os.adapters.recorded_model import (
     RecordedModelFixture,
     RecordedResearchModel,
 )
+from agentic_investment_os.adapters.recorded_universe import RecordedUniverseSource
+from agentic_investment_os.adapters.sqlite_portfolio import SQLitePortfolioLedger
 from agentic_investment_os.application.lifecycle import Advance, Status
-from agentic_investment_os.domain.identity import MarketSession
+from agentic_investment_os.domain.identity import CryptoSpotInstrumentIdentity, MarketSession
 from agentic_investment_os.domain.lifecycle import (
     AdvanceDisposition,
     AdvanceFailureReason,
     AdvanceReceipt,
     AdvanceRecovery,
     InvalidLifecycleStateError,
+    LifecycleCheckpoint,
     LifecycleLiveness,
     LifecyclePersistenceError,
     LifecyclePhase,
     NoActionReason,
+    PortfolioCheckpointReference,
+)
+from agentic_investment_os.domain.temporal import UtcInstant
+from agentic_investment_os.domain.universe import (
+    CryptoSpotPosition,
+    PositionValuation,
+    UniverseRefusal,
 )
 from agentic_investment_os.entrypoints.configuration import ConfigurationSource
 from agentic_investment_os.entrypoints.lifecycle import configure_advance, configure_status
@@ -42,6 +53,11 @@ from agentic_investment_os.memory.beliefs import (
     BeliefPersistenceError,
     RecordDisposition,
     RecordReceipt,
+)
+from agentic_investment_os.portfolio.construction import (
+    PortfolioTradeReason,
+    construct_balanced_portfolio,
+    parse_portfolio_construction_result,
 )
 from agentic_investment_os.research.model import (
     MAXIMUM_MODEL_OUTPUT_BYTES,
@@ -62,6 +78,7 @@ from agentic_investment_os.research.resolution import (
     parse_thesis,
 )
 from tests._governance import RecordedSessionEligibility
+from tests._portfolio import recorded_portfolio_inputs
 from tests._production_research import (
     ValidProductionModel,
     production_recorded_evidence,
@@ -77,7 +94,14 @@ from tests._replay import (
     skeptic_payload,
     thesis_payload,
 )
-from tests._universe import recorded_universe, reseal_recorded_snapshot, runtime_configuration
+from tests._universe import (
+    mutable_mapping,
+    mutable_mapping_list,
+    recorded_portfolio,
+    recorded_universe,
+    reseal_recorded_snapshot,
+    runtime_configuration,
+)
 
 if TYPE_CHECKING:
     from agentic_investment_os.application.memory import Record
@@ -155,6 +179,34 @@ class _ValidProductionModel:
             turns=1,
             elapsed_milliseconds=10,
             timing_disposition=ModelTimingDisposition.WITHIN_BUDGET,
+        )
+
+
+@dataclass(slots=True)
+class _RejectingOneSubjectModel:
+    delegate: _ValidProductionModel
+
+    @property
+    def unique_effect_count(self) -> int:
+        return self.delegate.unique_effect_count
+
+    def call(self, request: ModelCallRequest) -> ModelCallResponse:
+        response = self.delegate.call(request)
+        if request.role is not ResearchRole.INDEPENDENT_SKEPTIC:
+            return response
+        model_input = json.loads(request.model_input_json)
+        assert isinstance(model_input, dict)
+        subject = model_input["subject"]
+        assert isinstance(subject, dict)
+        if subject["catalog_id"] != "equity-aapl":
+            return response
+        assert response.raw_response is not None
+        payload = json.loads(response.raw_response)
+        assert isinstance(payload, dict)
+        payload["decision"] = "reject"
+        return replace(
+            response,
+            raw_response=json.dumps(payload, sort_keys=True, separators=(",", ":")).encode(),
         )
 
 
@@ -500,11 +552,19 @@ def _configure(
     universe: dict[str, object],
     model: ResearchRoleModel,
     clock: _FixedClock | _ClockAt | _AdvancingClock | None = None,
+    portfolio: dict[str, object] | None = None,
 ) -> Advance:
+    universe_inputs = RecordedUniverseSource(universe).load()
+    assert not isinstance(universe_inputs, UniverseRefusal)
     capability = configure_advance(
         (ConfigurationSource("test", _configuration(state_root)),),
         repository_root=REPOSITORY_ROOT,
         recorded_universe=universe,
+        recorded_portfolio=(
+            recorded_portfolio_inputs(universe_inputs.position_snapshot)
+            if portfolio is None
+            else portfolio
+        ),
         recorded_evidence=production_recorded_evidence(),
         recorded_official_evidence=production_recorded_official_evidence(),
         recorded_model=model,
@@ -513,6 +573,321 @@ def _configure(
     )
     assert isinstance(capability, Advance)
     return capability
+
+
+def _portfolio_payload(universe: dict[str, object]) -> dict[str, object]:
+    universe_inputs = RecordedUniverseSource(universe).load()
+    assert not isinstance(universe_inputs, UniverseRefusal)
+    return recorded_portfolio_inputs(universe_inputs.position_snapshot)
+
+
+def _portfolio_risk(portfolio: dict[str, object], catalog_id: str) -> dict[str, object]:
+    for risk in mutable_mapping_list(portfolio["risk_inputs"]):
+        if mutable_mapping(risk["identity"])["catalog_id"] == catalog_id:
+            return risk
+    message = f"missing synthetic portfolio risk for {catalog_id}"
+    raise AssertionError(message)
+
+
+def test_advance_constructs_and_status_rebuilds_one_portfolio_checkpoint(
+    tmp_path: Path,
+) -> None:
+    state_root = tmp_path / "state"
+    capability = _configure(
+        state_root,
+        universe=recorded_universe(),
+        model=_ValidProductionModel(),
+    )
+
+    receipt = _advance(capability, "construct-balanced-target-bands")
+    replayed = _advance(capability, "construct-balanced-target-bands")
+
+    assert receipt.completed_phase == LifecycleCheckpoint.equity(LifecyclePhase.CONSTRUCT_PORTFOLIO)
+    assert receipt.portfolio_checkpoint is not None
+    assert receipt.portfolio_checkpoint.house_view_id is not None
+    assert receipt.portfolio_checkpoint.target_band_ids
+    assert replayed.portfolio_checkpoint == receipt.portfolio_checkpoint
+    with sqlite3.connect(state_root / "lifecycle.sqlite3") as connection:
+        assert connection.execute("SELECT COUNT(*) FROM portfolio_constructions").fetchone() == (1,)
+        row = connection.execute(
+            "SELECT run_id, result_json FROM portfolio_constructions"
+        ).fetchone()
+    assert row is not None
+    result = parse_portfolio_construction_result(json.loads(row[1]))
+    assert result is not None
+    assert receipt.pinned_run_identity is not None
+    ledger = SQLitePortfolioLedger.open_existing(state_root / "lifecycle.sqlite3")
+    assert (
+        ledger.record(
+            row[0],
+            result,
+            receipt.pinned_run_identity.evidence_cutoff,
+        )
+        == receipt.portfolio_checkpoint
+    )
+    with pytest.raises(LifecyclePersistenceError, match="portfolio checkpoint"):
+        ledger.record(
+            "invalid-run-id",
+            result,
+            receipt.pinned_run_identity.evidence_cutoff,
+        )
+    assert receipt.recorded_at is not None
+    with pytest.raises(InvalidLifecycleStateError, match="durable portfolio construction"):
+        ledger.validate_history(
+            (
+                PortfolioCheckpointReference(
+                    row[0],
+                    replace(receipt.portfolio_checkpoint, result_id="f" * 64),
+                    receipt.recorded_at,
+                ),
+            )
+        )
+    with pytest.raises(InvalidLifecycleStateError, match="durable portfolio construction"):
+        ledger.validate_history(
+            (
+                PortfolioCheckpointReference(
+                    row[0],
+                    receipt.portfolio_checkpoint,
+                    UtcInstant.from_datetime(receipt.recorded_at.value + timedelta(microseconds=1)),
+                ),
+            )
+        )
+    with pytest.raises(LifecyclePersistenceError, match="portfolio checkpoint"):
+        SQLitePortfolioLedger.open_existing(tmp_path / "missing-schema.sqlite3").record(
+            row[0],
+            result,
+            receipt.pinned_run_identity.evidence_cutoff,
+        )
+    status = _configured_status(state_root)()
+    assert status.portfolio_checkpoint == receipt.portfolio_checkpoint
+
+
+def test_advance_and_status_persist_in_band_event_block_and_hard_risk_outcomes(
+    tmp_path: Path,
+) -> None:
+    scenarios: list[
+        tuple[str, dict[str, object], dict[str, object], PortfolioTradeReason, bool]
+    ] = []
+
+    in_band_universe = recorded_universe()
+    in_band_portfolio = _portfolio_payload(in_band_universe)
+    _portfolio_risk(in_band_portfolio, "equity-hold")["median_dollar_volume"] = "10800"
+    scenarios.append(
+        (
+            "in-band",
+            in_band_universe,
+            in_band_portfolio,
+            PortfolioTradeReason.IN_BAND,
+            False,
+        )
+    )
+
+    event_universe = _production_universe_with_active_holding()
+    event_portfolio = _portfolio_payload(event_universe)
+    _portfolio_risk(event_portfolio, "equity-aapl")["material_events"] = [
+        {
+            "event_id": "aapl-earnings-2026q3",
+            "event_type": "company_release",
+            "releases_at": "2026-08-22T20:00:00.000000+00:00",
+            "source_identity": "issuer-calendar-v1",
+            "calendar_available_at": "2026-08-21T19:40:00.000000+00:00",
+            "release_artifact_id": None,
+            "release_available_at": None,
+            "fresh_research_request_id": None,
+            "fresh_research_resolution_id": None,
+        }
+    ]
+    scenarios.append(
+        (
+            "event-block",
+            event_universe,
+            event_portfolio,
+            PortfolioTradeReason.EVENT_BLOCKED,
+            True,
+        )
+    )
+
+    hard_risk_universe = recorded_universe()
+    positions = mutable_mapping(hard_risk_universe["positions"])
+    position_payload = mutable_mapping(
+        mutable_mapping_list(mutable_mapping(positions["payload"])["items"])[0]["payload"]
+    )
+    mutable_mapping(position_payload["valuation"])["amount"] = "9000"
+    reseal_recorded_snapshot(hard_risk_universe, "positions")
+    hard_risk_portfolio = _portfolio_payload(hard_risk_universe)
+    hard_risk_portfolio["cash"] = "1000"
+    holding_risk = _portfolio_risk(hard_risk_portfolio, "equity-hold")
+    holding_risk["price"] = "3000"
+    holding_risk["adjusted_closes"] = [
+        {
+            "observed_at": (
+                datetime(2026, 8, 21, 20, tzinfo=UTC) - timedelta(days=21 - index)
+            ).isoformat(timespec="microseconds"),
+            "price": str(2980 + index),
+        }
+        for index in range(21)
+    ]
+    scenarios.append(
+        (
+            "hard-risk",
+            hard_risk_universe,
+            hard_risk_portfolio,
+            PortfolioTradeReason.HARD_RISK_BREACH,
+            False,
+        )
+    )
+
+    for name, universe, portfolio, expected_reason, requires_discovery in scenarios:
+        state_root = tmp_path / name
+        model = _ValidProductionModel()
+        if requires_discovery:
+            discovery_universe = deepcopy(universe)
+            positions = mutable_mapping(discovery_universe["positions"])
+            mutable_mapping(positions["payload"])["items"] = []
+            reseal_recorded_snapshot(discovery_universe, "positions")
+            for day in (19, 20):
+                discovery = _configure(
+                    state_root,
+                    universe=discovery_universe,
+                    model=model,
+                )
+                assert (
+                    _advance_on(
+                        discovery,
+                        f"portfolio-{name}-discovery-{day}",
+                        date(2026, 8, day),
+                    ).disposition
+                    is AdvanceDisposition.NO_ACTION
+                )
+        capability = _configure(
+            state_root,
+            universe=universe,
+            model=model,
+            portfolio=portfolio,
+        )
+
+        receipt = _advance(capability, f"portfolio-{name}")
+        status = _configured_status(state_root)()
+
+        assert receipt.portfolio_checkpoint is not None
+        assert receipt.pinned_run_identity is not None
+        assert status.portfolio_checkpoint == receipt.portfolio_checkpoint
+        with sqlite3.connect(state_root / "lifecycle.sqlite3") as connection:
+            row = connection.execute(
+                "SELECT result_json FROM portfolio_constructions WHERE run_id = ?",
+                (receipt.pinned_run_identity.run_id,),
+            ).fetchone()
+        assert row is not None
+        result = parse_portfolio_construction_result(json.loads(row[0]))
+        assert result is not None
+        assert any(band.trade_reason is expected_reason for band in result.target_bands), (
+            name,
+            tuple((band.identity.catalog_id, band.trade_reason) for band in result.target_bands),
+        )
+
+
+def test_advance_never_constructs_from_a_disabled_asset_holding(tmp_path: Path) -> None:
+    universe = recorded_universe()
+    positions = mutable_mapping(universe["positions"])
+    mutable_mapping(positions["payload"])["items"] = [
+        CryptoSpotPosition(
+            CryptoSpotInstrumentIdentity("alpaca-paper", "crypto-btc-usd", "BTC", "USD", "ALPACA"),
+            Decimal("0.5"),
+            PositionValuation(Decimal(35000), "USD", "alpaca-paper-market-value"),
+        ).to_payload()
+    ]
+    reseal_recorded_snapshot(universe, "positions")
+    state_root = tmp_path / "state"
+    capability = _configure(
+        state_root,
+        universe=universe,
+        model=_ValidProductionModel(),
+    )
+
+    receipt = _advance(capability, "disabled-asset-holding")
+
+    assert receipt.portfolio_checkpoint is None
+    with sqlite3.connect(state_root / "lifecycle.sqlite3") as connection:
+        assert connection.execute("SELECT COUNT(*) FROM portfolio_constructions").fetchone() == (0,)
+
+
+def test_portfolio_refusal_rows_cannot_substitute_across_runs(tmp_path: Path) -> None:
+    state_root = tmp_path / "state"
+    _configure(
+        state_root,
+        universe=recorded_universe(),
+        model=_ValidProductionModel(),
+    )
+    ledger = SQLitePortfolioLedger.open_existing(state_root / "lifecycle.sqlite3")
+    result = construct_balanced_portfolio(
+        "invalid",  # type: ignore[arg-type]  # Exercise the typed invalid-request refusal.
+    )
+    first_time = UtcInstant.from_datetime(datetime(2026, 8, 21, 20, tzinfo=UTC))
+    second_time = UtcInstant.from_datetime(first_time.value + timedelta(seconds=1))
+    first_run = "a" * 64
+    second_run = "b" * 64
+    checkpoint = ledger.record(first_run, result, first_time)
+    assert ledger.record(second_run, result, second_time) == checkpoint
+
+    with sqlite3.connect(state_root / "lifecycle.sqlite3") as connection, connection:
+        connection.execute("DROP TRIGGER portfolio_constructions_are_append_only_delete")
+        connection.execute("DELETE FROM portfolio_constructions WHERE run_id = ?", (first_run,))
+
+    with pytest.raises(InvalidLifecycleStateError, match="durable portfolio construction"):
+        ledger.validate_history((PortfolioCheckpointReference(first_run, checkpoint, first_time),))
+
+
+def test_status_rejects_corrupt_portfolio_construction_history(tmp_path: Path) -> None:
+    state_root = tmp_path / "state"
+    capability = _configure(
+        state_root,
+        universe=recorded_universe(),
+        model=_ValidProductionModel(),
+    )
+    receipt = _advance(capability, "corrupt-balanced-target-bands")
+    assert receipt.portfolio_checkpoint is not None
+    assert receipt.pinned_run_identity is not None
+
+    with sqlite3.connect(state_root / "lifecycle.sqlite3") as connection, connection:
+        row = connection.execute(
+            "SELECT run_id, result_json, recorded_at FROM portfolio_constructions"
+        ).fetchone()
+        assert row is not None
+        connection.execute("DROP TRIGGER portfolio_constructions_are_append_only_update")
+        connection.execute("UPDATE portfolio_constructions SET recorded_at = 'not-an-instant'")
+        connection.execute(
+            """
+            CREATE TRIGGER portfolio_constructions_are_append_only_update
+            BEFORE UPDATE ON portfolio_constructions
+            BEGIN SELECT RAISE(ABORT, 'append-only portfolio construction'); END
+            """
+        )
+    result = parse_portfolio_construction_result(json.loads(row[1]))
+    assert result is not None
+    ledger = SQLitePortfolioLedger.open_existing(state_root / "lifecycle.sqlite3")
+    with pytest.raises(InvalidLifecycleStateError, match="durable portfolio construction"):
+        ledger.record(
+            row[0],
+            result,
+            receipt.pinned_run_identity.evidence_cutoff,
+        )
+
+    with sqlite3.connect(state_root / "lifecycle.sqlite3") as connection, connection:
+        connection.execute("DROP TRIGGER portfolio_constructions_are_append_only_update")
+        connection.execute(
+            "UPDATE portfolio_constructions SET recorded_at = ?, result_json = '{'",
+            (row[2],),
+        )
+        connection.execute(
+            """
+            CREATE TRIGGER portfolio_constructions_are_append_only_update
+            BEFORE UPDATE ON portfolio_constructions
+            BEGIN SELECT RAISE(ABORT, 'append-only portfolio construction'); END
+            """
+        )
+
+    with pytest.raises(InvalidLifecycleStateError, match="durable portfolio construction"):
+        _configured_status(state_root)()
 
 
 def _advance_on(capability: Advance, key: str, trading_date: date) -> AdvanceReceipt:
@@ -669,7 +1044,7 @@ def test_production_advance_completes_stage_three_without_model_effect_for_no_at
 
     assert receipt.disposition is AdvanceDisposition.NO_ACTION
     assert receipt.completed_phase is not None
-    assert receipt.completed_phase.phase is LifecyclePhase.UPDATE_MEMORY
+    assert receipt.completed_phase.phase is LifecyclePhase.CONSTRUCT_PORTFOLIO
     assert receipt.research_resolution_ids == ()
     assert receipt.belief_event_ids == ()
     assert replayed == replace(
@@ -1105,12 +1480,41 @@ def test_skeptic_rejection_is_durable_no_action_without_memory(tmp_path: Path) -
     assert receipt.disposition is AdvanceDisposition.NO_ACTION
     assert receipt.no_action_reason is NoActionReason.SKEPTIC_REJECTED
     assert receipt.completed_phase is not None
-    assert receipt.completed_phase.phase is LifecyclePhase.UPDATE_MEMORY
+    assert receipt.completed_phase.phase is LifecyclePhase.CONSTRUCT_PORTFOLIO
     assert receipt.belief_event_ids == ()
     assert replayed == replace(receipt, recovery=AdvanceRecovery.PREVIOUSLY_COMPLETED)
     assert model.unique_effect_count > 0
     with sqlite3.connect(state_root / "lifecycle.sqlite3") as connection:
         assert connection.execute("SELECT COUNT(*) FROM belief_events").fetchone() == (0,)
+        row = connection.execute("SELECT result_json FROM portfolio_constructions").fetchone()
+    assert row is not None
+    result = parse_portfolio_construction_result(json.loads(row[0]))
+    assert result is not None
+    assert result.refusal is None
+    assert result.house_view is not None
+    assert result.house_view.items == ()
+    assert result.targets == ()
+    assert result.cash_weight == 1
+
+
+def test_partial_terminal_cio_set_constructs_only_resolved_subjects(tmp_path: Path) -> None:
+    state_root = tmp_path / "runtime"
+    model = _RejectingOneSubjectModel(_ValidProductionModel())
+    capability = _configure(state_root, universe=recorded_universe(), model=model)
+
+    receipt = _advance(capability, "partial-terminal-cio-set")
+
+    assert receipt.completed_phase == LifecycleCheckpoint.equity(LifecyclePhase.CONSTRUCT_PORTFOLIO)
+    assert receipt.portfolio_checkpoint is not None
+    assert receipt.portfolio_checkpoint.refusal_reason is None
+    with sqlite3.connect(state_root / "lifecycle.sqlite3") as connection:
+        row = connection.execute("SELECT result_json FROM portfolio_constructions").fetchone()
+    assert row is not None
+    result = parse_portfolio_construction_result(json.loads(row[0]))
+    assert result is not None
+    assert result.house_view is not None
+    assert len(result.house_view.items) == 1
+    assert len(result.targets) == 1
 
 
 def test_memory_refusal_is_durable_after_model_observations(tmp_path: Path) -> None:
@@ -1690,7 +2094,7 @@ def test_production_advance_records_validated_research_and_belief_events_once(
 
     assert receipt.disposition is AdvanceDisposition.ADVANCED
     assert receipt.completed_phase is not None
-    assert receipt.completed_phase.phase is LifecyclePhase.UPDATE_MEMORY
+    assert receipt.completed_phase.phase is LifecyclePhase.CONSTRUCT_PORTFOLIO
     assert len(receipt.dossier_ids) == EXPECTED_SUBJECTS
     assert len(receipt.research_call_ids) == EXPECTED_CALLS
     assert len(receipt.research_resolution_ids) == EXPECTED_RESOLUTION_ARTIFACTS
@@ -1841,6 +2245,7 @@ def test_production_research_requires_official_evidence_before_any_model_effect(
         (ConfigurationSource("test", _configuration(state_root)),),
         repository_root=REPOSITORY_ROOT,
         recorded_universe=recorded_universe(),
+        recorded_portfolio=recorded_portfolio(),
         recorded_evidence=production_recorded_evidence(),
         recorded_model=model,
         session_eligibility=RecordedSessionEligibility(),
@@ -1872,6 +2277,7 @@ def test_production_research_enforces_subject_evidence_bound_before_model_effect
         (ConfigurationSource("test", configuration),),
         repository_root=REPOSITORY_ROOT,
         recorded_universe=recorded_universe(),
+        recorded_portfolio=recorded_portfolio(),
         recorded_evidence=production_recorded_evidence(),
         recorded_official_evidence=production_recorded_official_evidence(),
         recorded_model=model,

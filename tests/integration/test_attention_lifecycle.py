@@ -45,7 +45,7 @@ from tests._production_research import (
     production_recorded_evidence,
     production_recorded_official_evidence,
 )
-from tests._universe import recorded_universe, runtime_configuration
+from tests._universe import recorded_portfolio, recorded_universe, runtime_configuration
 
 if TYPE_CHECKING:
     from agentic_investment_os.domain.attention import AttentionInputs
@@ -59,7 +59,7 @@ if TYPE_CHECKING:
     )
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
-EXPECTED_EVENT_COUNT = 9
+EXPECTED_EVENT_COUNT = 10
 EXPECTED_SELECTED_SUBJECT_COUNT = 2
 
 
@@ -151,6 +151,22 @@ class _AttentionOnlyResearch:
             None,
         )
 
+    def replay_run(
+        self,
+        *,
+        run_id: str,
+        dossier_checkpoint: ResearchCheckpoint,
+        research_checkpoint: ResearchCheckpoint,
+        no_action_reason: NoActionReason | None,
+    ) -> ProductionResearchRun:
+        _ = (run_id, dossier_checkpoint)
+        return ProductionResearchRun(
+            research_checkpoint,
+            (),
+            no_action_reason,
+            None,
+        )
+
 
 def _configure(
     state_root: Path,
@@ -167,6 +183,7 @@ def _configure(
         ),
         repository_root=REPOSITORY_ROOT,
         recorded_universe=recorded_universe(),
+        recorded_portfolio=recorded_portfolio(),
         recorded_evidence=production_recorded_evidence() if evidence is None else evidence,
         recorded_official_evidence=production_recorded_official_evidence(),
         recorded_model=ValidProductionModel(cio_stance="abstain"),

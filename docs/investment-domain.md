@@ -243,19 +243,38 @@ Constitution, or evaluation.
 ## Portfolio construction
 
 HouseView supplies eligibility and stance, not weights. Portfolio construction is deterministic and
-versioned.
+versioned. After `UpdateMemory`, `ConstructPortfolio` creates exactly one immutable HouseView from the
+terminal production CIO resolution set. The HouseView binds the Market Session, Evidence Cutoff,
+Data Regime, Constitution, runtime configuration, research policy, complete production artifact set,
+admitted memory events, universe snapshot, portfolio policy, as-of portfolio inputs, canonical
+Instrument Identities, and each source request and resolution hash. Research Lab material and model-
+authored weights have no admission path. An empty terminal set is a valid full-cash HouseView.
 
 The V0 champion uses capped inverse-volatility risk budgeting:
 
 - Accepted longs begin with equal standalone risk budgets.
-- Raw notional is proportional to inverse realized volatility under a frozen estimator, lookback,
-  floor, and price-adjustment convention selected through mechanics calibration rather than investment
-  return. Stale or insufficient history rejects sizing.
+- Raw notional is proportional to inverse realized volatility computed from twenty daily returns over
+  twenty-one split-adjusted closes. The estimator is sample standard deviation, annualized over 252
+  periods with a 10% floor. Inputs older than two hours, future-available material, duplicate or
+  unordered observations, or insufficient history reject sizing.
+- All allocation arithmetic runs under the portfolio-owned decimal context: precision 28,
+  round-half-even, with invalid operation, division by zero, and overflow trapped. Ambient process
+  decimal settings cannot change targets, cash, bands, or their hashes.
 - Constitution-defined uncertainty, event risk, incomplete evidence, and downside may reduce or reject
-  allocation. Model conviction and self-reported probabilities cannot increase it.
-- Name, sector, liquidity, gross-exposure, and common-cause or correlation clamps apply afterward.
+  allocation. Low, medium, and high uncertainty multiply an otherwise identical allocation by 1,
+  0.75, and 0.5. Model conviction and self-reported probabilities cannot increase it.
+- The 8% name limit and a liquidity limit of 1% of median daily dollar volume apply per instrument.
+  Sector, common-cause, and correlation-cluster exposure are each capped at 25%; gross exposure is
+  capped at 80%. Each cap scales only the affected accepted weights downward in canonical identity
+  order.
 - The allocator does not force gross exposure or redistribute capped remainder; unused capital stays
   cash.
+- A `reduce` stance begins at half the current weight and remains subject to every clamp. `exit` and
+  `abstain` target zero. Missing, stale, contradictory, incomplete, non-production, or altered
+  terminal material produces a typed refusal rather than a partial portfolio. Every held asset must
+  be one canonical long US-equity position with positive quantity, positive USD valuation, matching
+  price and risk inputs, and no mixed-asset companion; otherwise construction fails closed. An
+  ineligible existing holding may be preserved or reduced but cannot increase.
 
 A capped equal-weight comparator consumes the identical HouseView, constraints, timing, and frozen
 cost model but never reaches Alpaca. Conservative and Growth shadows also consume the same HouseView
@@ -279,15 +298,24 @@ one-change shadow Challenger behind the same HouseView interface and with prospe
 
 ## Rebalancing and execution policy
 
-Daily research produces Target Bands, not instructions to chase exact weights. A trade becomes
-eligible when a Thesis enters, exits, expires, or is invalidated; a hard risk constraint is breached;
-or current weight moves outside its band by more than the minimum executable notional. Normal drift
-moves to the nearest band or partially toward target. There is no forced weekly rebalance.
-Weekly maintenance reconciles stale state, configuration, upcoming events, and long-dormant beliefs
-without creating a calendar-driven trade requirement.
+Daily research produces Target Bands, not instructions to chase exact weights. The V0 band extends
+one percentage point below and above target, clipped at zero and the 8% name limit. A current weight
+inside that band creates no trade. Outside the band, a Thesis entry, reduction, or ordinary breach
+moves halfway from current weight toward target; a Thesis exit moves to zero. Adjustments below USD
+100 remain at current weight. A hard name, liquidity, sector, common-cause, correlation, or gross-risk
+breach instead authorizes the full reduction to the already compliant target. There is no forced
+weekly rebalance and capped exposure is never redistributed.
 
-Known material company or macro releases block new pre-event binary positions until the release is
-captured and a fresh complete research cycle finishes. The pre-open DecisionPacket freezes fifteen
+The complete known material company and macro release set blocks a new `long` or `hold` position
+until every release is captured in the Evidence Vault and cited by the exact fresh terminal research
+resolution for its request. Claimed booleans, an earlier cycle, or one cleared event cannot clear
+another pending event. Event risk does not suppress a deterministic reduction or exit for an existing
+position. Target Bands retain the target, bounds, current weight, permitted adjustment, eligibility,
+and the exact entry, exit, reduction, band, minimum-notional, event, or hard-risk reason. Weekly
+maintenance reconciles stale state, configuration, upcoming events, and long-dormant beliefs without
+creating a calendar-driven trade requirement.
+
+The pre-open DecisionPacket freezes fifteen
 minutes before the regular session. Five minutes after open, execution rechecks quote freshness,
 spread, gap, status or LULD, account, positions, pending orders, buying power, packet expiry, and new
 evidence.

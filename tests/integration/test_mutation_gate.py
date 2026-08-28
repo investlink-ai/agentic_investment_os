@@ -14,6 +14,7 @@ EXPECTED_MUTATION_SOURCES = [
     "src/agentic_investment_os/memory/admission.py",
     "src/agentic_investment_os/memory/reducer.py",
     "src/agentic_investment_os/portfolio/__init__.py",
+    "src/agentic_investment_os/portfolio/construction.py",
 ]
 EXPECTED_AUTHORITY_ROOTS = [
     "src/agentic_investment_os/execution",
@@ -24,6 +25,7 @@ EXPECTED_NONCRITICAL_MODULES = ["src/agentic_investment_os/memory/beliefs.py"]
 EXPECTED_MUTATION_TESTS = [
     "tests/unit/test_beliefs.py",
     "tests/contract/test_belief_event_contract.py",
+    "tests/unit/test_portfolio.py",
 ]
 INVALID_CONFIGURATION_EXIT = 2
 REJECTED_RESULT_KEYS = (

@@ -76,8 +76,12 @@ __all__ = (
     "PerformDossierBuild",
     "PerformEvidenceCapture",
     "PerformMemoryUpdate",
+    "PerformPortfolioConstruction",
     "PerformResearch",
     "PinnedRunIdentity",
+    "PortfolioCheckpoint",
+    "PortfolioCheckpointReference",
+    "PortfolioCheckpointRefusalReason",
     "ProductionResearchReference",
     "ResearchCheckpoint",
     "ResearchRefusal",
@@ -90,11 +94,13 @@ __all__ = (
     "parse_advance_receipt",
     "parse_lifecycle_checkpoint",
     "parse_memory_update_refusal",
+    "parse_portfolio_checkpoint",
     "parse_research_checkpoint",
     "parse_research_refusal",
     "reconstruct_constitution_uses",
     "reconstruct_evidence_checkpoints",
     "reconstruct_memory_event_ids",
+    "reconstruct_portfolio_checkpoints",
     "reconstruct_production_research_checkpoints",
 )
 
@@ -163,6 +169,7 @@ _RECEIPT_PAYLOAD_FIELDS = frozenset(
         "dossier_checkpoint",
         "research_checkpoint",
         "memory_checkpoint",
+        "portfolio_checkpoint",
         "research_refusal_id",
         "no_action_reason",
     }
@@ -181,6 +188,8 @@ _PINNED_IDENTITY_FIELDS = frozenset(
         "instrument_snapshot_hash",
         "position_snapshot_hash",
         "eligibility_policy_hash",
+        "portfolio_policy_hash",
+        "portfolio_input_hash",
     }
 )
 _MATERIAL_FINGERPRINT_FIELDS = frozenset(
@@ -191,6 +200,8 @@ _MATERIAL_FINGERPRINT_FIELDS = frozenset(
         "instrument_snapshot",
         "position_snapshot",
         "eligibility_policy",
+        "portfolio_policy",
+        "portfolio_input",
     }
 )
 
@@ -220,6 +231,7 @@ class LifecyclePhase(StrEnum):
     BUILD_DOSSIERS = "BuildDossiers"
     RUN_RESEARCH = "RunResearch"
     UPDATE_MEMORY = "UpdateMemory"
+    CONSTRUCT_PORTFOLIO = "ConstructPortfolio"
 
 
 @dataclass(frozen=True, slots=True)
@@ -297,6 +309,7 @@ class LifecycleEventKind(StrEnum):
     DOSSIERS_BUILT = "dossiers_built"
     RESEARCH_RUN = "research_run"
     MEMORY_UPDATED = "memory_updated"
+    PORTFOLIO_CONSTRUCTED = "portfolio_constructed"
 
 
 class LifecycleLiveness(StrEnum):
@@ -358,6 +371,10 @@ class InputRefusalCode(StrEnum):
     INVALID_UNIVERSE_INPUT = "invalid_universe_input"
     STALE_UNIVERSE_INPUT = "stale_universe_input"
     CONTRADICTORY_UNIVERSE_INPUT = "contradictory_universe_input"
+    MISSING_PORTFOLIO_INPUT = "missing_portfolio_input"
+    INVALID_PORTFOLIO_INPUT = "invalid_portfolio_input"
+    STALE_PORTFOLIO_INPUT = "stale_portfolio_input"
+    CONTRADICTORY_PORTFOLIO_INPUT = "contradictory_portfolio_input"
     INVALID_DURABLE_STATE = "invalid_durable_state"
 
 
@@ -372,6 +389,10 @@ class AdvanceFailureReason(StrEnum):
     INVALID_UNIVERSE_INPUT = "invalid_universe_input"
     STALE_UNIVERSE_INPUT = "stale_universe_input"
     CONTRADICTORY_UNIVERSE_INPUT = "contradictory_universe_input"
+    MISSING_PORTFOLIO_INPUT = "missing_portfolio_input"
+    INVALID_PORTFOLIO_INPUT = "invalid_portfolio_input"
+    STALE_PORTFOLIO_INPUT = "stale_portfolio_input"
+    CONTRADICTORY_PORTFOLIO_INPUT = "contradictory_portfolio_input"
     SESSION_STREAM_CONFLICT = "session_stream_conflict"
     IDEMPOTENCY_KEY_CONFLICT = "idempotency_key_conflict"
     INVALID_DURABLE_STATE = "invalid_durable_state"
@@ -379,6 +400,16 @@ class AdvanceFailureReason(StrEnum):
     ATTENTION_SELECTION_FAILED = "attention_selection_failed"
     RESEARCH_FAILED = "research_failed"
     MEMORY_UPDATE_FAILED = "memory_update_failed"
+
+
+class PortfolioCheckpointRefusalReason(StrEnum):
+    """Preserve the closed deterministic portfolio-construction refusal set."""
+
+    INVALID_REQUEST = "invalid_request"
+    INCOMPLETE_INPUT = "incomplete_input"
+    STALE_INPUT = "stale_input"
+    CONTRADICTORY_INPUT = "contradictory_input"
+    AUTHORITY_VIOLATION = "authority_violation"
 
 
 @dataclass(frozen=True, slots=True)
@@ -451,6 +482,8 @@ class PinnedRunIdentity:
     instrument_snapshot_hash: str
     position_snapshot_hash: str
     eligibility_policy_hash: str
+    portfolio_policy_hash: str
+    portfolio_input_hash: str
 
     @classmethod
     def create(  # noqa: PLR0913 - every material run pin remains explicit at creation.
@@ -460,6 +493,8 @@ class PinnedRunIdentity:
         configuration_version: int,
         configuration_hash: str,
         research_policy_hash: str,
+        portfolio_policy_hash: str,
+        portfolio_input_hash: str,
         universe_inputs: UniverseInputIdentity,
         constitution: ConstitutionReference,
     ) -> PinnedRunIdentity:
@@ -478,6 +513,8 @@ class PinnedRunIdentity:
                     universe_inputs.instrument_snapshot_hash,
                     universe_inputs.position_snapshot_hash,
                     universe_inputs.eligibility_policy_hash,
+                    portfolio_policy_hash,
+                    portfolio_input_hash,
                 )
             ),
             cycle=request.session,
@@ -491,6 +528,8 @@ class PinnedRunIdentity:
             instrument_snapshot_hash=universe_inputs.instrument_snapshot_hash,
             position_snapshot_hash=universe_inputs.position_snapshot_hash,
             eligibility_policy_hash=universe_inputs.eligibility_policy_hash,
+            portfolio_policy_hash=portfolio_policy_hash,
+            portfolio_input_hash=portfolio_input_hash,
         )
 
 
@@ -571,6 +610,115 @@ class ResearchCheckpoint:
             "output_tokens": self.output_tokens,
             "turns": self.turns,
         }
+
+
+@dataclass(frozen=True, slots=True)
+class PortfolioCheckpoint:
+    """Bind one durable portfolio result to its HouseView, policy, and as-of inputs."""
+
+    result_id: str
+    house_view_id: str | None
+    policy_id: str
+    input_id: str
+    target_band_ids: tuple[str, ...]
+    refusal_reason: PortfolioCheckpointRefusalReason | None = None
+
+    def __post_init__(self) -> None:
+        if (
+            not is_sha256(self.result_id)
+            or (self.house_view_id is not None and not is_sha256(self.house_view_id))
+            or not is_sha256(self.policy_id)
+            or not is_sha256(self.input_id)
+            or not _valid_optional_hash_references(self.target_band_ids)
+            or (self.refusal_reason is None and self.house_view_id is None)
+            or (
+                self.refusal_reason is not None
+                and (
+                    type(self.refusal_reason) is not PortfolioCheckpointRefusalReason
+                    or self.house_view_id is not None
+                    or self.target_band_ids
+                )
+            )
+        ):
+            raise ValueError(_INVALID_CHECKPOINT_ORDER)
+
+    def to_payload(self) -> dict[str, object]:
+        return {
+            "schema_version": 1,
+            "result_id": self.result_id,
+            "house_view_id": self.house_view_id,
+            "policy_id": self.policy_id,
+            "input_id": self.input_id,
+            "target_band_ids": list(self.target_band_ids),
+            "refusal_reason": (None if self.refusal_reason is None else self.refusal_reason.value),
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class PortfolioCheckpointReference:
+    """Bind one lifecycle checkpoint to its owning run and exact append instant."""
+
+    run_id: str
+    checkpoint: PortfolioCheckpoint
+    recorded_at: UtcInstant
+
+    def __post_init__(self) -> None:
+        if (
+            not is_sha256(self.run_id)
+            or type(self.checkpoint) is not PortfolioCheckpoint
+            or type(self.recorded_at) is not UtcInstant
+        ):
+            raise ValueError(_INVALID_CHECKPOINT_ORDER)
+
+
+def parse_portfolio_checkpoint(value: object) -> PortfolioCheckpoint | None:
+    """Validate one hostile durable portfolio-checkpoint payload."""
+    fields = _exact_mapping(
+        value,
+        frozenset(
+            {
+                "schema_version",
+                "result_id",
+                "house_view_id",
+                "policy_id",
+                "input_id",
+                "target_band_ids",
+                "refusal_reason",
+            }
+        ),
+    )
+    if fields is None or fields["schema_version"] != 1:
+        return None
+    target_band_ids = _parse_hash_tuple(fields["target_band_ids"])
+    result_id = fields["result_id"]
+    house_view_id = fields["house_view_id"]
+    policy_id = fields["policy_id"]
+    input_id = fields["input_id"]
+    valid_refusal, refusal = _optional_enum(
+        PortfolioCheckpointRefusalReason,
+        fields["refusal_reason"],
+    )
+    if (
+        target_band_ids is None
+        or not valid_refusal
+        or not is_sha256(result_id)
+        or (house_view_id is not None and not is_sha256(house_view_id))
+        or not is_sha256(policy_id)
+        or not is_sha256(input_id)
+    ):
+        return None
+    try:
+        checkpoint = PortfolioCheckpoint(
+            result_id=result_id,
+            house_view_id=house_view_id,
+            policy_id=policy_id,
+            input_id=input_id,
+            target_band_ids=target_band_ids,
+            refusal_reason=refusal,
+        )
+    except (TypeError, ValueError):
+        return None
+    return checkpoint if checkpoint.to_payload() == fields else None
 
 
 @dataclass(frozen=True, slots=True)
@@ -781,6 +929,7 @@ class AdvanceReceipt:
     dossier_checkpoint: ResearchCheckpoint | None = None
     research_checkpoint: ResearchCheckpoint | None = None
     memory_checkpoint: ResearchCheckpoint | None = None
+    portfolio_checkpoint: PortfolioCheckpoint | None = None
     research_refusal_id: str | None = None
     no_action_reason: NoActionReason | None = None
 
@@ -878,6 +1027,11 @@ class AdvanceReceipt:
                 "dossier_checkpoint": _research_checkpoint_payload(self.dossier_checkpoint),
                 "research_checkpoint": _research_checkpoint_payload(self.research_checkpoint),
                 "memory_checkpoint": _research_checkpoint_payload(self.memory_checkpoint),
+                "portfolio_checkpoint": (
+                    None
+                    if self.portfolio_checkpoint is None
+                    else self.portfolio_checkpoint.to_payload()
+                ),
                 "research_refusal_id": self.research_refusal_id,
                 "no_action_reason": (
                     None if self.no_action_reason is None else self.no_action_reason.value
@@ -898,7 +1052,8 @@ class AdvanceReceipt:
             except InvalidUtcInstantError as error:
                 raise ValueError(_INVALID_ADVANCED_RECEIPT) from error
             if (
-                self.completed_phase != LifecycleCheckpoint.equity(LifecyclePhase.UPDATE_MEMORY)
+                self.completed_phase
+                != LifecycleCheckpoint.equity(LifecyclePhase.CONSTRUCT_PORTFOLIO)
                 or self.failure_reason is not None
                 or self.recovery is None
                 or self.universe_snapshot_id is None
@@ -924,16 +1079,28 @@ class AdvanceReceipt:
                 or type(self.dossier_checkpoint) is not ResearchCheckpoint
                 or type(self.research_checkpoint) is not ResearchCheckpoint
                 or type(self.memory_checkpoint) is not ResearchCheckpoint
+                or type(self.portfolio_checkpoint) is not PortfolioCheckpoint
+                or self.portfolio_checkpoint.policy_id != identity.portfolio_policy_hash
+                or self.portfolio_checkpoint.input_id != identity.portfolio_input_hash
                 or self.research_refusal_id is not None
                 or (
                     self.disposition is AdvanceDisposition.ADVANCED
                     and (
-                        not self.memory_checkpoint.artifact_ids or self.no_action_reason is not None
+                        not self.memory_checkpoint.artifact_ids
+                        or self.no_action_reason is not None
+                        or self.portfolio_checkpoint.refusal_reason is not None
                     )
                 )
                 or (
                     self.disposition is AdvanceDisposition.NO_ACTION
-                    and (self.memory_checkpoint.artifact_ids or self.no_action_reason is None)
+                    and not (
+                        (
+                            not self.memory_checkpoint.artifact_ids
+                            and self.no_action_reason is not None
+                            and self.portfolio_checkpoint.refusal_reason is None
+                        )
+                        or self.portfolio_checkpoint.refusal_reason is not None
+                    )
                 )
             ):
                 raise ValueError(_INVALID_ADVANCED_RECEIPT)
@@ -949,6 +1116,7 @@ class AdvanceReceipt:
                 or self.dossier_checkpoint is not None
                 or self.research_checkpoint is not None
                 or self.memory_checkpoint is not None
+                or self.portfolio_checkpoint is not None
                 or self.no_action_reason is not None
                 or (
                     self.failure_reason
@@ -1021,15 +1189,16 @@ class AdvanceReceipt:
         dossier_checkpoint: ResearchCheckpoint,
         research_checkpoint: ResearchCheckpoint,
         memory_checkpoint: ResearchCheckpoint,
+        portfolio_checkpoint: PortfolioCheckpoint,
         no_action_reason: NoActionReason | None,
     ) -> AdvanceReceipt:
         return cls(
             (
                 AdvanceDisposition.ADVANCED
-                if no_action_reason is None
+                if no_action_reason is None and portfolio_checkpoint.refusal_reason is None
                 else AdvanceDisposition.NO_ACTION
             ),
-            LifecycleCheckpoint.equity(LifecyclePhase.UPDATE_MEMORY),
+            LifecycleCheckpoint.equity(LifecyclePhase.CONSTRUCT_PORTFOLIO),
             identity,
             None,
             recovery,
@@ -1042,6 +1211,7 @@ class AdvanceReceipt:
             dossier_checkpoint=dossier_checkpoint,
             research_checkpoint=research_checkpoint,
             memory_checkpoint=memory_checkpoint,
+            portfolio_checkpoint=portfolio_checkpoint,
             no_action_reason=no_action_reason,
         )
 
@@ -1071,7 +1241,7 @@ class AdvanceReceipt:
         )
 
 
-def parse_advance_receipt(  # noqa: PLR0911, PLR0912 - reject hostile fields directly.
+def parse_advance_receipt(  # noqa: PLR0911, PLR0912, PLR0915 - reject hostile fields directly.
     value: object,
 ) -> AdvanceReceipt | None:
     """Validate one hostile common receipt envelope and reconstruct its typed result."""
@@ -1148,12 +1318,14 @@ def parse_advance_receipt(  # noqa: PLR0911, PLR0912 - reject hostile fields dir
     dossier_checkpoint = parse_research_checkpoint(payload["dossier_checkpoint"])
     research_checkpoint = parse_research_checkpoint(payload["research_checkpoint"])
     memory_checkpoint = parse_research_checkpoint(payload["memory_checkpoint"])
+    portfolio_checkpoint = parse_portfolio_checkpoint(payload["portfolio_checkpoint"])
     if any(
         value is not None and parsed is None
         for value, parsed in (
             (payload["dossier_checkpoint"], dossier_checkpoint),
             (payload["research_checkpoint"], research_checkpoint),
             (payload["memory_checkpoint"], memory_checkpoint),
+            (payload["portfolio_checkpoint"], portfolio_checkpoint),
         )
     ):
         return None
@@ -1190,6 +1362,7 @@ def parse_advance_receipt(  # noqa: PLR0911, PLR0912 - reject hostile fields dir
             dossier_checkpoint=dossier_checkpoint,
             research_checkpoint=research_checkpoint,
             memory_checkpoint=memory_checkpoint,
+            portfolio_checkpoint=portfolio_checkpoint,
             research_refusal_id=research_refusal_id,
             no_action_reason=no_action_reason,
         )
@@ -1212,11 +1385,12 @@ class LifecycleProgress:
     dossier_checkpoint: ResearchCheckpoint | None = None
     research_checkpoint: ResearchCheckpoint | None = None
     memory_checkpoint: ResearchCheckpoint | None = None
+    portfolio_checkpoint: PortfolioCheckpoint | None = None
     no_action_reason: NoActionReason | None = None
 
     @property
     def is_complete(self) -> bool:
-        return self.completed_phase is LifecyclePhase.UPDATE_MEMORY
+        return self.completed_phase is LifecyclePhase.CONSTRUCT_PORTFOLIO
 
     def require_prepared_universe_snapshot(self) -> UniverseSnapshot:
         """Return the pinned snapshot or reject access before its durable checkpoint."""
@@ -1257,6 +1431,12 @@ class LifecycleProgress:
             raise InvalidLifecycleStateError(_INVALID_CHECKPOINT_ORDER)
         return checkpoint
 
+    def require_portfolio_checkpoint(self) -> PortfolioCheckpoint:
+        checkpoint = self.portfolio_checkpoint
+        if checkpoint is None:
+            raise InvalidLifecycleStateError(_INVALID_CHECKPOINT_ORDER)
+        return checkpoint
+
 
 @dataclass(frozen=True, slots=True)
 class LifecycleEvent:
@@ -1274,6 +1454,7 @@ class LifecycleEvent:
     evidence_capture: EvidenceCaptureCheckpoint | None = None
     attention_artifact: AttentionArtifact | None = None
     research_checkpoint: ResearchCheckpoint | None = None
+    portfolio_checkpoint: PortfolioCheckpoint | None = None
     no_action_reason: NoActionReason | None = None
 
     @property
@@ -1307,6 +1488,8 @@ class LifecycleEvent:
                 "instrument_snapshot": identity.instrument_snapshot_hash,
                 "position_snapshot": identity.position_snapshot_hash,
                 "eligibility_policy": identity.eligibility_policy_hash,
+                "portfolio_policy": identity.portfolio_policy_hash,
+                "portfolio_input": identity.portfolio_input_hash,
             },
             "payload": {
                 "stream_id": self.stream_id,
@@ -1338,6 +1521,11 @@ class LifecycleEvent:
                     else self.attention_artifact.to_payload()
                 ),
                 "research_checkpoint": _research_checkpoint_payload(self.research_checkpoint),
+                "portfolio_checkpoint": (
+                    None
+                    if self.portfolio_checkpoint is None
+                    else self.portfolio_checkpoint.to_payload()
+                ),
                 "no_action_reason": (
                     None if self.no_action_reason is None else self.no_action_reason.value
                 ),
@@ -1353,12 +1541,14 @@ class AdvanceCommand:
     request: AdvanceRequest
     pinned_run_identity: PinnedRunIdentity
     universe_snapshot: UniverseSnapshot
+    portfolio_inputs: object
     constitution: ConstitutionArtifact | None = None
     evidence_capture: EvidenceCaptureCheckpoint | None = None
     attention_selection: AttentionArtifact | AttentionRefusalReason | None = None
     dossier_build: ResearchCheckpoint | ResearchRefusal | None = None
     research_run: ResearchCheckpoint | ResearchRefusal | None = None
     memory_update: ResearchCheckpoint | ResearchRefusal | None = None
+    portfolio_construction: PortfolioCheckpoint | None = None
     no_action_reason: NoActionReason | None = None
 
 
@@ -1409,6 +1599,18 @@ class PerformMemoryUpdate:
 
 
 @dataclass(frozen=True, slots=True)
+class PerformPortfolioConstruction:
+    """Return control for deterministic HouseView and Target Band construction."""
+
+    pinned_run_identity: PinnedRunIdentity
+    dossier_checkpoint: ResearchCheckpoint
+    research_checkpoint: ResearchCheckpoint
+    memory_checkpoint: ResearchCheckpoint
+    attention_artifact: AttentionArtifact
+    no_action_reason: NoActionReason | None
+
+
+@dataclass(frozen=True, slots=True)
 class AdvanceAttempt:
     """Track only progress observed or appended during one Advance call."""
 
@@ -1431,6 +1633,7 @@ class LifecycleStatus:
     attention_artifact_id: str | None = None
     constitution_governance: ConstitutionGovernanceStatus | None = None
     no_action_reason: NoActionReason | None = None
+    portfolio_checkpoint: PortfolioCheckpoint | None = None
 
     @classmethod
     def not_started(cls) -> LifecycleStatus:
@@ -1531,6 +1734,7 @@ LifecycleDecision = (
     | PerformDossierBuild
     | PerformResearch
     | PerformMemoryUpdate
+    | PerformPortfolioConstruction
     | AdvanceReceipt
 )
 
@@ -1545,6 +1749,12 @@ _EVENT_SEQUENCE = (
     (LifecycleEventKind.DOSSIERS_BUILT, LifecyclePhase.BUILD_DOSSIERS, False, False),
     (LifecycleEventKind.RESEARCH_RUN, LifecyclePhase.RUN_RESEARCH, False, False),
     (LifecycleEventKind.MEMORY_UPDATED, LifecyclePhase.UPDATE_MEMORY, False, False),
+    (
+        LifecycleEventKind.PORTFOLIO_CONSTRUCTED,
+        LifecyclePhase.CONSTRUCT_PORTFOLIO,
+        False,
+        False,
+    ),
 )
 
 
@@ -1950,6 +2160,22 @@ def reconstruct_memory_event_ids(history: LifecycleHistory) -> tuple[str, ...]:
     )
 
 
+def reconstruct_portfolio_checkpoints(
+    history: LifecycleHistory,
+) -> tuple[PortfolioCheckpointReference, ...]:
+    """Return every portfolio result reference in validated lifecycle order."""
+    reconstruct_lifecycle(history)
+    return tuple(
+        PortfolioCheckpointReference(
+            event.pinned_run_identity.run_id,
+            event.portfolio_checkpoint,
+            event.recorded_at,
+        )
+        for event in history.events
+        if event.portfolio_checkpoint is not None
+    )
+
+
 def reconstruct_constitution_uses(
     history: LifecycleHistory,
 ) -> tuple[ConstitutionUse, ...]:
@@ -2120,11 +2346,17 @@ def _reconstruct_stream(  # noqa: PLR0912, PLR0915 - validate each checkpoint in
             identity.instrument_snapshot_hash,
             identity.position_snapshot_hash,
             identity.eligibility_policy_hash,
+            identity.portfolio_policy_hash,
+            identity.portfolio_input_hash,
         )
     )
     if identity.configuration_version != 1:
         raise InvalidLifecycleStateError(_UNSUPPORTED_CONFIGURATION_VERSION)
     if not is_sha256(identity.research_policy_hash):
+        raise InvalidLifecycleStateError(_INVALID_DERIVED_IDENTITY)
+    if not is_sha256(identity.portfolio_policy_hash) or not is_sha256(
+        identity.portfolio_input_hash
+    ):
         raise InvalidLifecycleStateError(_INVALID_DERIVED_IDENTITY)
     if identity.constitution_version < 1 or not is_sha256(identity.constitution_hash):
         raise InvalidLifecycleStateError(_INVALID_DERIVED_IDENTITY)
@@ -2140,6 +2372,7 @@ def _reconstruct_stream(  # noqa: PLR0912, PLR0915 - validate each checkpoint in
     dossier_checkpoint: ResearchCheckpoint | None = None
     research_checkpoint: ResearchCheckpoint | None = None
     memory_checkpoint: ResearchCheckpoint | None = None
+    portfolio_checkpoint: PortfolioCheckpoint | None = None
     no_action_reason: NoActionReason | None = None
     for sequence, event in enumerate(events):
         if event.sequence != sequence:
@@ -2223,6 +2456,16 @@ def _reconstruct_stream(  # noqa: PLR0912, PLR0915 - validate each checkpoint in
                 # The research-phase association above leaves UpdateMemory as the only case.
                 memory_checkpoint = event.research_checkpoint
                 no_action_reason = event.no_action_reason
+        constructs_portfolio = expected_phase is LifecyclePhase.CONSTRUCT_PORTFOLIO
+        if (event.portfolio_checkpoint is not None) is not constructs_portfolio:
+            raise InvalidLifecycleStateError(_INVALID_CHECKPOINT_ORDER)
+        if event.portfolio_checkpoint is not None:
+            if (
+                event.portfolio_checkpoint.policy_id != identity.portfolio_policy_hash
+                or event.portfolio_checkpoint.input_id != identity.portfolio_input_hash
+            ):
+                raise InvalidLifecycleStateError(_CHANGED_PINNED_FACTS)
+            portfolio_checkpoint = event.portfolio_checkpoint
         if (event.no_action_reason is not None) is not (
             expected_phase is LifecyclePhase.UPDATE_MEMORY
             and not event.research_checkpoint.artifact_ids
@@ -2241,6 +2484,7 @@ def _reconstruct_stream(  # noqa: PLR0912, PLR0915 - validate each checkpoint in
         dossier_checkpoint,
         research_checkpoint,
         memory_checkpoint,
+        portfolio_checkpoint,
         no_action_reason,
     )
 
@@ -2285,6 +2529,7 @@ def _decide_valid_advance(
             progress.require_dossier_checkpoint(),
             progress.require_research_checkpoint(),
             progress.require_memory_checkpoint(),
+            progress.require_portfolio_checkpoint(),
             progress.no_action_reason,
         )
     return _append_next_event(history, progress, command, recovery, recorded_at)
@@ -2362,7 +2607,9 @@ def _decide_input_refusal(
     return _decide_idempotency_conflict(history, progress, key, refusal.cycle, recorded_at)
 
 
-def _input_failure_reason(code: InputRefusalCode) -> AdvanceFailureReason:
+def _input_failure_reason(  # noqa: PLR0912 - exhaust the closed refusal code set.
+    code: InputRefusalCode,
+) -> AdvanceFailureReason:
     if code is InputRefusalCode.INVALID_SESSION:
         reason = AdvanceFailureReason.INVALID_SESSION
     elif code is InputRefusalCode.INVALID_MODE:
@@ -2379,6 +2626,14 @@ def _input_failure_reason(code: InputRefusalCode) -> AdvanceFailureReason:
         reason = AdvanceFailureReason.STALE_UNIVERSE_INPUT
     elif code is InputRefusalCode.CONTRADICTORY_UNIVERSE_INPUT:
         reason = AdvanceFailureReason.CONTRADICTORY_UNIVERSE_INPUT
+    elif code is InputRefusalCode.MISSING_PORTFOLIO_INPUT:
+        reason = AdvanceFailureReason.MISSING_PORTFOLIO_INPUT
+    elif code is InputRefusalCode.INVALID_PORTFOLIO_INPUT:
+        reason = AdvanceFailureReason.INVALID_PORTFOLIO_INPUT
+    elif code is InputRefusalCode.STALE_PORTFOLIO_INPUT:
+        reason = AdvanceFailureReason.STALE_PORTFOLIO_INPUT
+    elif code is InputRefusalCode.CONTRADICTORY_PORTFOLIO_INPUT:
+        reason = AdvanceFailureReason.CONTRADICTORY_PORTFOLIO_INPUT
     elif code is InputRefusalCode.INVALID_DURABLE_STATE:
         reason = AdvanceFailureReason.INVALID_DURABLE_STATE
     else:
@@ -2430,6 +2685,7 @@ def _append_next_event(  # noqa: PLR0911, PLR0912 - exhaust each lifecycle phase
     | PerformDossierBuild
     | PerformResearch
     | PerformMemoryUpdate
+    | PerformPortfolioConstruction
 ):
     sequence = progress.sequence + 1
     event_kind, phase, prepares_snapshot, publishes_snapshot = _EVENT_SEQUENCE[sequence]
@@ -2522,6 +2778,15 @@ def _append_next_event(  # noqa: PLR0911, PLR0912 - exhaust each lifecycle phase
             command.request.session,
             research_refusal=command.memory_update,
         )
+    if phase is LifecyclePhase.CONSTRUCT_PORTFOLIO and command.portfolio_construction is None:
+        return PerformPortfolioConstruction(
+            progress.pinned_run_identity,
+            progress.require_dossier_checkpoint(),
+            progress.require_research_checkpoint(),
+            progress.require_memory_checkpoint(),
+            progress.require_attention_artifact(),
+            progress.no_action_reason,
+        )
     prepared_snapshot = command.universe_snapshot if prepares_snapshot else None
     published_snapshot = (
         progress.require_prepared_universe_snapshot() if publishes_snapshot else None
@@ -2557,6 +2822,9 @@ def _append_next_event(  # noqa: PLR0911, PLR0912 - exhaust each lifecycle phase
             if phase is LifecyclePhase.UPDATE_MEMORY
             and isinstance(command.memory_update, ResearchCheckpoint)
             else None
+        ),
+        portfolio_checkpoint=(
+            command.portfolio_construction if phase is LifecyclePhase.CONSTRUCT_PORTFOLIO else None
         ),
         no_action_reason=(
             command.no_action_reason if phase is LifecyclePhase.UPDATE_MEMORY else None
@@ -2614,13 +2882,21 @@ def _append_next_event(  # noqa: PLR0911, PLR0912 - exhaust each lifecycle phase
     if phase is LifecyclePhase.RUN_RESEARCH:
         return AppendLifecycleRecord(event, next_attempt)
     if phase is LifecyclePhase.UPDATE_MEMORY:
-        dossier_checkpoint = progress.require_dossier_checkpoint()
-        research_checkpoint = progress.require_research_checkpoint()
         memory_checkpoint = command.memory_update
         if not isinstance(memory_checkpoint, ResearchCheckpoint):
             raise InvalidLifecycleStateError(_INVALID_CHECKPOINT_ORDER)
         if (not memory_checkpoint.artifact_ids) != (command.no_action_reason is not None):
             raise InvalidLifecycleStateError(_INVALID_CHECKPOINT_ORDER)
+        return AppendLifecycleRecord(event, next_attempt)
+    if phase is LifecyclePhase.CONSTRUCT_PORTFOLIO:
+        portfolio_checkpoint = command.portfolio_construction
+        if not isinstance(portfolio_checkpoint, PortfolioCheckpoint):
+            raise InvalidLifecycleStateError(_INVALID_CHECKPOINT_ORDER)
+        if (
+            portfolio_checkpoint.policy_id != progress.pinned_run_identity.portfolio_policy_hash
+            or portfolio_checkpoint.input_id != progress.pinned_run_identity.portfolio_input_hash
+        ):
+            raise InvalidLifecycleStateError(_CHANGED_PINNED_FACTS)
         return AppendTerminalLifecycleRecord(
             event,
             AdvanceReceipt.advanced(
@@ -2630,9 +2906,10 @@ def _append_next_event(  # noqa: PLR0911, PLR0912 - exhaust each lifecycle phase
                 recorded_at,
                 progress.require_evidence_capture(),
                 progress.require_attention_artifact(),
-                dossier_checkpoint,
-                research_checkpoint,
-                memory_checkpoint,
+                progress.require_dossier_checkpoint(),
+                progress.require_research_checkpoint(),
+                progress.require_memory_checkpoint(),
+                portfolio_checkpoint,
                 command.no_action_reason,
             ),
         )
@@ -2763,6 +3040,7 @@ def derive_lifecycle_status(history: LifecycleHistory) -> LifecycleStatus:
         attention_artifact_cycle=attention_artifact_cycle,
         attention_artifact_id=attention_artifact_id,
         no_action_reason=(current.no_action_reason if current.is_complete else None),
+        portfolio_checkpoint=(current.portfolio_checkpoint if current.is_complete else None),
     )
 
 
@@ -2780,6 +3058,7 @@ def _latest_universe_progress(
             LifecyclePhase.BUILD_DOSSIERS,
             LifecyclePhase.RUN_RESEARCH,
             LifecyclePhase.UPDATE_MEMORY,
+            LifecyclePhase.CONSTRUCT_PORTFOLIO,
         )
     )
     if not published:
@@ -2852,6 +3131,8 @@ class LifecycleStatusProjection(Protocol):
     ) -> tuple[ProductionResearchReference, ...]: ...
 
     def rebuild_memory_event_ids(self) -> tuple[str, ...]: ...
+
+    def rebuild_portfolio_checkpoints(self) -> tuple[PortfolioCheckpointReference, ...]: ...
 
     def rebuild_constitution_uses(self) -> tuple[ConstitutionUse, ...]: ...
 
@@ -3098,6 +3379,8 @@ def _pinned_identity_payload(identity: PinnedRunIdentity) -> dict[str, object]:
         "instrument_snapshot_hash": identity.instrument_snapshot_hash,
         "position_snapshot_hash": identity.position_snapshot_hash,
         "eligibility_policy_hash": identity.eligibility_policy_hash,
+        "portfolio_policy_hash": identity.portfolio_policy_hash,
+        "portfolio_input_hash": identity.portfolio_input_hash,
     }
 
 
@@ -3109,6 +3392,8 @@ def _material_fingerprints(identity: PinnedRunIdentity) -> dict[str, object]:
         "instrument_snapshot": identity.instrument_snapshot_hash,
         "position_snapshot": identity.position_snapshot_hash,
         "eligibility_policy": identity.eligibility_policy_hash,
+        "portfolio_policy": identity.portfolio_policy_hash,
+        "portfolio_input": identity.portfolio_input_hash,
     }
 
 
@@ -3134,6 +3419,8 @@ def _parse_pinned_identity(value: object) -> PinnedRunIdentity | None:
         or not is_sha256(fields["instrument_snapshot_hash"])
         or not is_sha256(fields["position_snapshot_hash"])
         or not is_sha256(fields["eligibility_policy_hash"])
+        or not is_sha256(fields["portfolio_policy_hash"])
+        or not is_sha256(fields["portfolio_input_hash"])
     ):
         return None
     identity = PinnedRunIdentity(
@@ -3149,6 +3436,8 @@ def _parse_pinned_identity(value: object) -> PinnedRunIdentity | None:
         instrument_snapshot_hash=fields["instrument_snapshot_hash"],
         position_snapshot_hash=fields["position_snapshot_hash"],
         eligibility_policy_hash=fields["eligibility_policy_hash"],
+        portfolio_policy_hash=fields["portfolio_policy_hash"],
+        portfolio_input_hash=fields["portfolio_input_hash"],
     )
     expected_run_id = _fingerprint(
         (
@@ -3164,6 +3453,8 @@ def _parse_pinned_identity(value: object) -> PinnedRunIdentity | None:
             identity.instrument_snapshot_hash,
             identity.position_snapshot_hash,
             identity.eligibility_policy_hash,
+            identity.portfolio_policy_hash,
+            identity.portfolio_input_hash,
         )
     )
     return identity if identity.run_id == expected_run_id else None

@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, assert_never
 
 from agentic_investment_os.adapters.filesystem_evidence import FilesystemEvidenceVault
 from agentic_investment_os.adapters.recorded_evidence import RecordedEvidenceSource
+from agentic_investment_os.adapters.recorded_portfolio import RecordedPortfolioSource
 from agentic_investment_os.adapters.recorded_universe import RecordedUniverseSource
 from agentic_investment_os.adapters.sqlite_lifecycle import (
     PreparedRuntimeDatabase,
@@ -18,6 +19,7 @@ from agentic_investment_os.adapters.sqlite_lifecycle import (
     prepare_runtime_database,
 )
 from agentic_investment_os.adapters.sqlite_memory import SQLiteBeliefLedger
+from agentic_investment_os.adapters.sqlite_portfolio import SQLitePortfolioLedger
 from agentic_investment_os.adapters.sqlite_production_research import (
     SQLiteProductionCallLedger,
 )
@@ -60,6 +62,7 @@ def configure_advance(  # noqa: PLR0913 - composition names each untrusted bound
     *,
     repository_root: Path,
     recorded_universe: object,
+    recorded_portfolio: object,
     recorded_evidence: object,
     session_eligibility: MarketSessionEligibility,
     recorded_model: ResearchRoleModel,
@@ -129,6 +132,9 @@ def configure_advance(  # noqa: PLR0913 - composition names each untrusted bound
                 trusted_clock,
             ),
             memory_refusal_ledger=belief_ledger,
+            portfolio_policy=resolution.portfolio_policy,
+            portfolio_input_source=RecordedPortfolioSource(recorded_portfolio),
+            portfolio_ledger=SQLitePortfolioLedger(database.path),
         )
     # Strict mypy proves this line unreachable; removing it is runtime-equivalent.
     assert_never(database)  # pragma: no cover
@@ -181,6 +187,7 @@ def configure_status(
                 evidence_vault,
                 SystemClock(),
             ),
+            SQLitePortfolioLedger.open_existing(database.path),
         )
     # Strict mypy proves this line unreachable; removing it is runtime-equivalent.
     assert_never(database)  # pragma: no cover

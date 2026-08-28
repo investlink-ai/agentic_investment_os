@@ -19,6 +19,7 @@ flowchart TD
     entrypoints --> adapters
     entrypoints --> evidence
     entrypoints --> research
+    entrypoints --> portfolio
 
     application --> evidence
     application --> memory
@@ -38,6 +39,7 @@ flowchart TD
     adapters --> evidence
     adapters --> memory
     adapters --> research
+    adapters --> portfolio
     adapters --> execution
 ```
 
@@ -74,9 +76,11 @@ the dependency. Prefer passing typed values and ports over adding an edge.
   stateless role context from validated artifacts and the role's declared contract; adapters receive
   only the research-owned model-call request.
 - Production `Advance` follows the same ownership direction: `application` coordinates lifecycle,
-  evidence, research, and memory through their public contracts; `research` owns production role
-  policy and model-call ports; and the SQLite and recorded-model adapters implement those ports without
-  gaining lifecycle, belief-admission, portfolio, packet, or execution authority.
+  evidence, research, memory, and deterministic portfolio construction through public contracts;
+  `research` owns production role policy and model-call ports; `portfolio` owns HouseView admission,
+  sizing, clamps, Target Bands, and its input and result ports. Recorded and SQLite adapters translate
+  or persist those owner-defined contracts without gaining lifecycle, belief-admission, sizing,
+  packet, broker, or execution authority.
 - A cycle, a reverse edge into adapters, or a new cross-capability edge requires an architecture
   review. Record a durable exception in an ADR.
 

@@ -186,8 +186,8 @@ Entrypoints expose complete capabilities, never individual research stages:
 
 | Capability | Architectural contract |
 | --- | --- |
-| `Advance` | Resolve or resume one supported cycle; validate governance and pinned inputs; build bounded Dossiers; run the fixed stateless production research roles; admit validated CIO resolutions to memory; and return an explicit fresh, resumed, replayed, no-action, conflict, or failed-closed disposition. V0 accepts only `MarketSession`. |
-| `Status` | Validate authoritative lifecycle, evidence, Constitution, and production model-call history; rebuild disposable projections; and report the durable checkpoint, liveness, terminal reason, pins, and cycle-qualified references. Only `Complete` advances the completed cycle. |
+| `Advance` | Resolve or resume one supported cycle; validate governance and pinned inputs; build bounded Dossiers; run the fixed stateless production research roles; admit validated CIO resolutions to memory; construct and persist one deterministic HouseView, cash-preserving Balanced target set, and Target Bands; and return an explicit fresh, resumed, replayed, no-action, conflict, or failed-closed disposition. V0 accepts only `MarketSession`. |
+| `Status` | Validate authoritative lifecycle, evidence, Constitution, production model-call, memory, and portfolio-construction history; rebuild disposable projections; and report the durable checkpoint, liveness, terminal reason, pins, and cycle-qualified references. Only `Complete` advances the completed cycle. |
 | `Record` | Atomically append or replay evidence-bound belief and outcome facts; rebuild bounded as-of views without changing ex-ante decisions. |
 | `Govern` | Schedule an immutable, signed, operator-approved Constitution for one exact eligible future session. Exact retry replays; changed material conflicts. |
 | `Apply` | Independently validate one published packet, manage only its authorized paper orders, and return an execution receipt. |
@@ -252,6 +252,14 @@ stateDiagram-v2
   predecessor artifacts; no role inherits conversation state. `UpdateMemory` invokes `Record` only
   for validated non-abstaining CIO resolutions and advances only after every required append or replay
   is observed.
+- `ConstructPortfolio` reconstructs the exact terminal production resolution set from persisted
+  production intents and observations without invoking the model again. It creates one schema-
+  versioned HouseView bound to the session, cutoff, governance, configuration, research, memory,
+  universe, policy, and as-of portfolio inputs; deterministic `portfolio` then produces targets,
+  cash, and Target Bands. A construction refusal is persisted as data. Lifecycle history references
+  the portfolio row by exact run identity, checkpoint content, and canonical recorded instant so an
+  identical result from another run cannot substitute. The implemented lifecycle currently
+  terminates at this checkpoint; packet publication and later phases remain scaffolded.
 - `NoAction` is an expected durable outcome; `FailedClosed` records why progress is unsafe. Neither
   publishes a discretionary order. No admitted attention, Skeptic rejection, and CIO abstention are
   durable no-action reasons. Missing reconciliation obligations require `FailedClosed`.
@@ -265,6 +273,7 @@ stateDiagram-v2
 | Evidence | Content-addressed Vault; immutable content and appended observations, mappings, availability, and refusals |
 | Production ledgers | Belief, decision, outcome, governance, lifecycle, and attention facts appended under their owner contracts |
 | Production research calls | Effect-local intent before each model call, followed by one raw-response identity and validated role artifact or bounded refusal |
+| Portfolio constructions | One immutable HouseView, target set, cash remainder, Target Bands, policy identity, input identity, or typed refusal per run; exact replay only |
 | Published packets | Atomic store; complete, validated, immutable packets only |
 | Execution | Executor ledger; intent first, then independent broker observations and receipts |
 | Research Lab | Namespace-local ledger; role intent first, then observation or bounded refusal |
@@ -303,7 +312,10 @@ stateDiagram-v2
   events are absent. The refusal instant may follow the prior research checkpoint after a process
   interruption and retry. For an identity conflict, `Status` instead proves that the failed identity
   exists with different canonical material while later expected events remain absent. Belief
-  transaction time remains bounded by the lifecycle checkpoint. SQLite
+  transaction time remains bounded by the lifecycle checkpoint. Portfolio construction separately
+  reparses its complete canonical result, reconstructs every target-band identity, validates its
+  lifecycle reference and canonical recorded instant, and treats the status projection as disposable.
+  Exact process retry returns the same result; changed or corrupt run material fails closed. SQLite
   initializes or validates one exact current physical schema; other non-empty shapes fail before writes.
   [ADR 0004](adr/0004-require-current-sqlite-schema.md) owns that decision. Runtime stores use explicit
   ignored roots; source directories never hold runtime state.

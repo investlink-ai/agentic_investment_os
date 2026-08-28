@@ -54,7 +54,7 @@ from tests._production_research import (
     production_recorded_evidence,
     production_recorded_official_evidence,
 )
-from tests._universe import recorded_universe, runtime_configuration
+from tests._universe import recorded_portfolio, recorded_universe, runtime_configuration
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 AMENDMENT_VERSION = 2
@@ -161,6 +161,7 @@ def test_govern_advance_and_status_schedule_activate_pin_and_replay_exactly_once
         _sources(state_root),
         repository_root=REPOSITORY_ROOT,
         recorded_universe=recorded_universe(),
+        recorded_portfolio=recorded_portfolio(),
         recorded_evidence=production_recorded_evidence(),
         recorded_official_evidence=production_recorded_official_evidence(),
         recorded_model=ValidProductionModel(),
@@ -246,6 +247,7 @@ def test_changed_identity_ineligible_session_and_missed_boundary_fail_closed(
         _sources(state_root),
         repository_root=REPOSITORY_ROOT,
         recorded_universe=recorded_universe(),
+        recorded_portfolio=recorded_portfolio(),
         recorded_evidence=production_recorded_evidence(),
         recorded_official_evidence=production_recorded_official_evidence(),
         recorded_model=ValidProductionModel(),
@@ -459,6 +461,7 @@ def test_interrupted_run_keeps_its_pin_after_a_later_constitution_activates(
         _sources(state_root),
         repository_root=REPOSITORY_ROOT,
         recorded_universe=recorded_universe(),
+        recorded_portfolio=recorded_portfolio(),
         recorded_evidence=production_recorded_evidence(),
         recorded_official_evidence=production_recorded_official_evidence(),
         recorded_model=ValidProductionModel(),
@@ -485,6 +488,9 @@ def test_interrupted_run_keeps_its_pin_after_a_later_constitution_activates(
         evidence_vault=initial.evidence_vault,
         memory=initial.memory,
         memory_refusal_ledger=initial.memory_refusal_ledger,
+        portfolio_policy=initial.portfolio_policy,
+        portfolio_input_source=initial.portfolio_input_source,
+        portfolio_ledger=initial.portfolio_ledger,
     )
     with pytest.raises(SimulatedInterruptionError):
         interrupted(
@@ -504,6 +510,7 @@ def test_interrupted_run_keeps_its_pin_after_a_later_constitution_activates(
         _sources(state_root),
         repository_root=REPOSITORY_ROOT,
         recorded_universe=recorded_universe(),
+        recorded_portfolio=recorded_portfolio(),
         recorded_evidence=production_recorded_evidence(),
         recorded_official_evidence=production_recorded_official_evidence(),
         recorded_model=ValidProductionModel(),
@@ -555,6 +562,7 @@ def test_overdue_governance_blocks_a_historical_pin_before_downstream_work(
         _sources(state_root),
         repository_root=REPOSITORY_ROOT,
         recorded_universe=recorded_universe(),
+        recorded_portfolio=recorded_portfolio(),
         recorded_evidence=production_recorded_evidence(),
         recorded_official_evidence=production_recorded_official_evidence(),
         recorded_model=ValidProductionModel(),
@@ -581,6 +589,9 @@ def test_overdue_governance_blocks_a_historical_pin_before_downstream_work(
         evidence_vault=initial.evidence_vault,
         memory=initial.memory,
         memory_refusal_ledger=initial.memory_refusal_ledger,
+        portfolio_policy=initial.portfolio_policy,
+        portfolio_input_source=initial.portfolio_input_source,
+        portfolio_ledger=initial.portfolio_ledger,
     )
     with pytest.raises(SimulatedInterruptionError):
         interrupted(
@@ -598,6 +609,7 @@ def test_overdue_governance_blocks_a_historical_pin_before_downstream_work(
         _sources(state_root),
         repository_root=REPOSITORY_ROOT,
         recorded_universe=recorded_universe(),
+        recorded_portfolio=recorded_portfolio(),
         recorded_evidence=production_recorded_evidence(),
         recorded_official_evidence=production_recorded_official_evidence(),
         recorded_model=ValidProductionModel(),
@@ -622,6 +634,9 @@ def test_overdue_governance_blocks_a_historical_pin_before_downstream_work(
         evidence_vault=configured_retry.evidence_vault,
         memory=configured_retry.memory,
         memory_refusal_ledger=configured_retry.memory_refusal_ledger,
+        portfolio_policy=configured_retry.portfolio_policy,
+        portfolio_input_source=configured_retry.portfolio_input_source,
+        portfolio_ledger=configured_retry.portfolio_ledger,
     )
 
     with pytest.raises(GovernanceStateError, match="missed Constitution activation boundary"):
@@ -650,6 +665,7 @@ def test_lifecycle_pins_fail_closed_if_governance_history_is_removed(
         _sources(state_root),
         repository_root=REPOSITORY_ROOT,
         recorded_universe=recorded_universe(),
+        recorded_portfolio=recorded_portfolio(),
         recorded_evidence=production_recorded_evidence(),
         recorded_official_evidence=production_recorded_official_evidence(),
         recorded_model=ValidProductionModel(),
@@ -689,6 +705,7 @@ def test_lifecycle_pins_fail_closed_if_governance_history_is_removed(
         _sources(state_root),
         repository_root=REPOSITORY_ROOT,
         recorded_universe=recorded_universe(),
+        recorded_portfolio=recorded_portfolio(),
         recorded_evidence=production_recorded_evidence(),
         recorded_official_evidence=production_recorded_official_evidence(),
         recorded_model=ValidProductionModel(),

@@ -17,6 +17,7 @@ Each ADR header is authoritative for status and supersession metadata.
 | [0005: Share core contracts with typed asset variants](0005-share-core-contracts-with-typed-asset-variants.md) | Accepted | — | Shared core, asset-owned variants, adapter translation, and entrypoint composition |
 | [0006: Separate absolute instants from market time](0006-separate-absolute-instants-from-market-time.md) | Accepted | — | Durable instants and exchange-calendar time |
 | [0007: Enforce bounded capability effects](0007-enforce-bounded-capability-effects.md) | Accepted | — | Every production capability except effect-owning adapters and entrypoints |
+| [0008: Bind portfolio construction to a durable HouseView](0008-bind-portfolio-construction-to-durable-house-view.md) | Accepted | — | Production research-to-portfolio authority, replay, and persistence |
 
 Agent Notes under `.agents/notes/` own durable feature, simplification, testing, bug-prevention, and
 development-process reasoning below this threshold. Issues own work state. Do not create an Agent Note

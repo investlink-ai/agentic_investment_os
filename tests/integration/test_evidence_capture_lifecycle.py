@@ -38,8 +38,10 @@ from tests._universe import (
     mutable_mapping,
     mutable_mapping_list,
     pinned_run_identity,
+    recorded_portfolio,
     recorded_universe,
     runtime_configuration,
+    typed_portfolio_inputs,
     universe_snapshot,
 )
 
@@ -64,6 +66,7 @@ def test_advance_captures_market_and_news_after_the_pinned_universe(
         (ConfigurationSource("test", runtime_configuration(state_root)),),
         repository_root=REPOSITORY_ROOT,
         recorded_universe=recorded_universe(),
+        recorded_portfolio=recorded_portfolio(),
         recorded_evidence=production_recorded_evidence(),
         recorded_official_evidence=production_recorded_official_evidence(),
         recorded_model=ValidProductionModel(),
@@ -80,7 +83,7 @@ def test_advance_captures_market_and_news_after_the_pinned_universe(
 
     assert receipt.disposition is AdvanceDisposition.ADVANCED
     assert receipt.completed_phase is not None
-    assert receipt.completed_phase.phase is LifecyclePhase.UPDATE_MEMORY
+    assert receipt.completed_phase.phase is LifecyclePhase.CONSTRUCT_PORTFOLIO
     assert len(receipt.evidence_artifact_ids) == REQUIRED_EVIDENCE_ARTIFACTS
     assert receipt.evidence_refusal_ids == ()
     assert receipt.attention_artifact is not None
@@ -95,7 +98,7 @@ def test_advance_captures_market_and_news_after_the_pinned_universe(
         events = connection.execute(
             "SELECT event_kind FROM lifecycle_events ORDER BY sequence"
         ).fetchall()
-    assert events[-1] == ("memory_updated",)
+    assert events[-1] == ("portfolio_constructed",)
     assert sorted(path.name for path in state_root.iterdir()) == [
         "evidence-vault",
         "lifecycle.sqlite3",
@@ -113,6 +116,7 @@ def test_completed_lifecycle_replay_revalidates_referenced_vault_content(
         sources,
         repository_root=REPOSITORY_ROOT,
         recorded_universe=recorded_universe(),
+        recorded_portfolio=recorded_portfolio(),
         recorded_evidence=production_recorded_evidence(),
         recorded_official_evidence=production_recorded_official_evidence(),
         recorded_model=ValidProductionModel(cio_stance="abstain"),
@@ -132,6 +136,7 @@ def test_completed_lifecycle_replay_revalidates_referenced_vault_content(
             sources,
             repository_root=REPOSITORY_ROOT,
             recorded_universe=recorded_universe(),
+            recorded_portfolio=recorded_portfolio(),
             recorded_evidence=production_recorded_evidence(),
             recorded_official_evidence=production_recorded_official_evidence(),
             recorded_model=ValidProductionModel(),
@@ -162,6 +167,7 @@ def test_status_requires_each_artifact_to_resolve_to_its_pinned_capture_intent(
         sources,
         repository_root=REPOSITORY_ROOT,
         recorded_universe=recorded_universe(),
+        recorded_portfolio=recorded_portfolio(),
         recorded_evidence=production_recorded_evidence(),
         recorded_official_evidence=production_recorded_official_evidence(),
         recorded_model=ValidProductionModel(),
@@ -182,6 +188,7 @@ def test_status_requires_each_artifact_to_resolve_to_its_pinned_capture_intent(
         sources,
         repository_root=REPOSITORY_ROOT,
         recorded_universe=recorded_universe(),
+        recorded_portfolio=recorded_portfolio(),
         recorded_evidence=later_evidence,
         recorded_model=ValidProductionModel(),
         session_eligibility=RecordedSessionEligibility(),
@@ -225,6 +232,7 @@ def test_status_reconstructs_each_run_with_its_pinned_historical_evidence_policy
         first_sources,
         repository_root=REPOSITORY_ROOT,
         recorded_universe=recorded_universe(),
+        recorded_portfolio=recorded_portfolio(),
         recorded_evidence=production_recorded_evidence(),
         recorded_official_evidence=production_recorded_official_evidence(),
         recorded_model=ValidProductionModel(cio_stance="abstain"),
@@ -248,6 +256,7 @@ def test_status_reconstructs_each_run_with_its_pinned_historical_evidence_policy
         changed_sources,
         repository_root=REPOSITORY_ROOT,
         recorded_universe=recorded_universe(),
+        recorded_portfolio=recorded_portfolio(),
         recorded_evidence=production_recorded_evidence(),
         recorded_official_evidence=production_recorded_official_evidence(),
         recorded_model=ValidProductionModel(cio_stance="abstain"),
@@ -294,6 +303,7 @@ def test_required_evidence_refusal_is_durable_and_replays_without_recapture(
         (ConfigurationSource("test", runtime_configuration(state_root)),),
         repository_root=REPOSITORY_ROOT,
         recorded_universe=recorded_universe(),
+        recorded_portfolio=recorded_portfolio(),
         recorded_evidence=unavailable,
         recorded_model=ValidProductionModel(),
         session_eligibility=RecordedSessionEligibility(),
@@ -327,6 +337,7 @@ def test_required_evidence_refusal_is_durable_and_replays_without_recapture(
         (ConfigurationSource("test", runtime_configuration(state_root)),),
         repository_root=REPOSITORY_ROOT,
         recorded_universe=recorded_universe(),
+        recorded_portfolio=recorded_portfolio(),
         recorded_evidence=production_recorded_evidence(),
         recorded_official_evidence=production_recorded_official_evidence(),
         recorded_model=ValidProductionModel(),
@@ -365,6 +376,7 @@ def test_evidence_refusal_retry_with_changed_pinned_inputs_returns_a_typed_confl
         sources,
         repository_root=REPOSITORY_ROOT,
         recorded_universe=recorded_universe(),
+        recorded_portfolio=recorded_portfolio(),
         recorded_evidence=unavailable,
         recorded_model=ValidProductionModel(),
         session_eligibility=RecordedSessionEligibility(),
@@ -384,6 +396,7 @@ def test_evidence_refusal_retry_with_changed_pinned_inputs_returns_a_typed_confl
         sources,
         repository_root=REPOSITORY_ROOT,
         recorded_universe=changed_universe,
+        recorded_portfolio=recorded_portfolio(changed_universe),
         recorded_evidence=production_recorded_evidence(),
         recorded_official_evidence=production_recorded_official_evidence(),
         recorded_model=ValidProductionModel(),
@@ -425,6 +438,7 @@ def test_evidence_refusal_retry_rejects_a_changed_durable_policy_reference(
         sources,
         repository_root=REPOSITORY_ROOT,
         recorded_universe=recorded_universe(),
+        recorded_portfolio=recorded_portfolio(),
         recorded_evidence=unavailable,
         recorded_model=ValidProductionModel(),
         session_eligibility=RecordedSessionEligibility(),
@@ -442,6 +456,7 @@ def test_evidence_refusal_retry_rejects_a_changed_durable_policy_reference(
         sources,
         repository_root=REPOSITORY_ROOT,
         recorded_universe=recorded_universe(),
+        recorded_portfolio=recorded_portfolio(),
         recorded_evidence=production_recorded_evidence(),
         recorded_official_evidence=production_recorded_official_evidence(),
         recorded_model=ValidProductionModel(),
@@ -473,6 +488,7 @@ def test_changed_evidence_refusal_retry_ignores_unrelated_corrupt_history(
         sources,
         repository_root=REPOSITORY_ROOT,
         recorded_universe=recorded_universe(),
+        recorded_portfolio=recorded_portfolio(),
         recorded_evidence=production_recorded_evidence(),
         recorded_official_evidence=production_recorded_official_evidence(),
         recorded_model=ValidProductionModel(),
@@ -502,6 +518,7 @@ def test_changed_evidence_refusal_retry_ignores_unrelated_corrupt_history(
         sources,
         repository_root=REPOSITORY_ROOT,
         recorded_universe=recorded_universe(),
+        recorded_portfolio=recorded_portfolio(),
         recorded_evidence=unavailable,
         recorded_model=ValidProductionModel(),
         session_eligibility=RecordedSessionEligibility(),
@@ -519,6 +536,7 @@ def test_changed_evidence_refusal_retry_ignores_unrelated_corrupt_history(
         sources,
         repository_root=REPOSITORY_ROOT,
         recorded_universe=changed_universe,
+        recorded_portfolio=recorded_portfolio(changed_universe),
         recorded_evidence=production_recorded_evidence(),
         recorded_official_evidence=production_recorded_official_evidence(),
         recorded_model=ValidProductionModel(),
@@ -563,6 +581,7 @@ def test_evidence_refusal_retry_fails_closed_when_its_own_history_is_corrupt(
         sources,
         repository_root=REPOSITORY_ROOT,
         recorded_universe=recorded_universe(),
+        recorded_portfolio=recorded_portfolio(),
         recorded_evidence=unavailable,
         recorded_model=ValidProductionModel(),
         session_eligibility=RecordedSessionEligibility(),
@@ -578,6 +597,7 @@ def test_evidence_refusal_retry_fails_closed_when_its_own_history_is_corrupt(
         sources,
         repository_root=REPOSITORY_ROOT,
         recorded_universe=recorded_universe(),
+        recorded_portfolio=recorded_portfolio(),
         recorded_evidence=production_recorded_evidence(),
         recorded_official_evidence=production_recorded_official_evidence(),
         recorded_model=ValidProductionModel(),
@@ -608,6 +628,7 @@ def test_evidence_refusal_retry_fails_closed_when_its_own_history_is_corrupt(
             request,
             identity,
             universe_snapshot(identity),
+            typed_portfolio_inputs(),
         ),
         AdvanceAttempt(),
         UtcInstant.from_datetime(_FixedClock().now()),
@@ -646,6 +667,7 @@ def test_evidence_failure_row_cannot_claim_a_complete_capture(tmp_path: Path) ->
         (ConfigurationSource("test", runtime_configuration(state_root)),),
         repository_root=REPOSITORY_ROOT,
         recorded_universe=recorded_universe(),
+        recorded_portfolio=recorded_portfolio(),
         recorded_evidence=unavailable,
         recorded_model=ValidProductionModel(),
         session_eligibility=RecordedSessionEligibility(),

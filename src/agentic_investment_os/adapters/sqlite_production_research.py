@@ -71,6 +71,7 @@ from agentic_investment_os.research.model import (
 from agentic_investment_os.research.production import (
     ProductionCallIntent,
     ProductionCallPreparation,
+    ProductionCallReplay,
     ProductionModelResponseRecord,
     ProductionResearchEvidence,
     production_call_refusal_identity,
@@ -240,6 +241,30 @@ class SQLiteProductionCallLedger:
                 return observation
         except sqlite3.Error as error:
             raise LifecyclePersistenceError(_WRITE_FAILED) from error
+
+    def replay_calls(self, call_ids: tuple[str, ...]) -> tuple[ProductionCallReplay, ...]:
+        """Load exact validated observations for a canonical durable call set."""
+        if tuple(sorted(set(call_ids))) != call_ids:
+            raise LifecyclePersistenceError(_CORRUPT)
+        try:
+            with closing(self._connect()) as connection:
+                records: list[ProductionCallReplay] = []
+                for call_id in call_ids:
+                    row = connection.execute(
+                        "SELECT call_id, run_id, request_id, role, intent_json, intent_hash, "
+                        "recorded_at FROM production_research_call_intents WHERE call_id = ?",
+                        (call_id,),
+                    ).fetchone()
+                    if row is None:
+                        raise LifecyclePersistenceError(_CORRUPT)
+                    intent = _parse_intent_row(row)
+                    observed = self._load_observation(connection, intent)
+                    if observed is None:
+                        raise LifecyclePersistenceError(_CORRUPT)
+                    records.append(ProductionCallReplay(intent, observed[0]))
+                return tuple(records)
+        except sqlite3.Error as error:
+            raise LifecyclePersistenceError(_CORRUPT) from error
 
     def validate_history(self, references: tuple[ProductionResearchReference, ...]) -> None:
         """Revalidate production rows against their exact lifecycle and authority owners."""

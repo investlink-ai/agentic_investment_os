@@ -5,6 +5,7 @@ import json
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, TypeGuard
 
+from agentic_investment_os.adapters.recorded_portfolio import RecordedPortfolioSource
 from agentic_investment_os.adapters.recorded_universe import RecordedUniverseSource
 from agentic_investment_os.domain.governance import ACTIVE_CONSTITUTION
 from agentic_investment_os.domain.identity import AssetClass, EquityInstrumentIdentity
@@ -21,8 +22,13 @@ from agentic_investment_os.domain.universe import (
     UniverseSnapshot,
     build_universe_snapshot,
 )
+from agentic_investment_os.portfolio.construction import (
+    BalancedPortfolioPolicy,
+    PortfolioInputSet,
+)
 from agentic_investment_os.research.policy import ProductionResearchPolicy
 from tests._evidence import evidence_policy
+from tests._portfolio import recorded_portfolio_inputs
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -118,7 +124,7 @@ def _equity_position(symbol: str, venue: str, quantity: str) -> dict[str, object
             "quantity": quantity,
             "unit": "share",
             "valuation": {
-                "amount": "36",
+                "amount": "108",
                 "currency": "USD",
                 "source": "alpaca-paper-market-value",
             },
@@ -207,6 +213,35 @@ def research_policy() -> dict[str, object]:
     }
 
 
+def portfolio_policy() -> dict[str, object]:
+    """Return the complete mechanics-calibrated Balanced policy used by tests."""
+    return {
+        "schema_version": 1,
+        "policy_type": "balanced_inverse_volatility",
+        "asset_class": "us_equity",
+        "risk_profile": "balanced",
+        "realized_volatility": {
+            "estimator": "sample_standard_deviation",
+            "lookback_days": 20,
+            "annualization_periods": 252,
+            "floor": "0.1",
+            "price_adjustment": "split_adjusted_close",
+        },
+        "maximum_input_age_seconds": 7200,
+        "maximum_gross_weight": "0.8",
+        "maximum_name_weight": "0.08",
+        "maximum_sector_weight": "0.25",
+        "maximum_common_cause_weight": "0.25",
+        "maximum_correlation_cluster_weight": "0.25",
+        "maximum_fraction_of_median_dollar_volume": "0.01",
+        "target_band_width": "0.01",
+        "minimum_executable_notional": "100",
+        "partial_adjustment_fraction": "0.5",
+        "reduce_multiplier": "0.5",
+        "uncertainty_multipliers": {"low": "1", "medium": "0.75", "high": "0.5"},
+    }
+
+
 def runtime_configuration(state_root: Path) -> dict[str, object]:
     return {
         "schema_version": 1,
@@ -216,6 +251,7 @@ def runtime_configuration(state_root: Path) -> dict[str, object]:
         "evidence_policy": evidence_policy(),
         "attention_policy": attention_policy(),
         "research_policy": research_policy(),
+        "portfolio_policy": portfolio_policy(),
     }
 
 
@@ -321,6 +357,28 @@ def typed_research_policy() -> ProductionResearchPolicy:
     return parsed
 
 
+def typed_portfolio_policy() -> BalancedPortfolioPolicy:
+    parsed = BalancedPortfolioPolicy.parse(portfolio_policy())
+    assert isinstance(parsed, BalancedPortfolioPolicy)
+    return parsed
+
+
+def recorded_portfolio(payload: object | None = None) -> dict[str, object]:
+    """Return portfolio inputs bound to the fixture's exact position snapshot."""
+    parsed = RecordedUniverseSource(recorded_universe() if payload is None else payload).load()
+    inputs = parsed if isinstance(parsed, UniverseInputs) else typed_universe_inputs()
+    return recorded_portfolio_inputs(inputs.position_snapshot)
+
+
+def typed_portfolio_inputs(payload: object | None = None) -> PortfolioInputSet:
+    inputs = typed_universe_inputs(payload)
+    parsed = RecordedPortfolioSource(recorded_portfolio_inputs(inputs.position_snapshot)).load(
+        inputs.position_snapshot
+    )
+    assert isinstance(parsed, PortfolioInputSet)
+    return parsed
+
+
 def typed_universe_inputs(payload: object | None = None) -> UniverseInputs:
     parsed = RecordedUniverseSource(recorded_universe() if payload is None else payload).load()
     assert isinstance(parsed, UniverseInputs)
@@ -339,11 +397,14 @@ def pinned_run_identity(
     input_identity = UniverseInputIdentity.from_inputs(inputs, policy)
     assert isinstance(input_identity, UniverseInputIdentity)
     typed_policy = typed_research_policy()
+    portfolio_inputs = typed_portfolio_inputs(payload)
     return PinnedRunIdentity.create(
         request,
         configuration_version=configuration_version,
         configuration_hash=configuration_hash,
         research_policy_hash=typed_policy.fingerprint,
+        portfolio_policy_hash=typed_portfolio_policy().policy_id,
+        portfolio_input_hash=portfolio_inputs.input_id,
         universe_inputs=input_identity,
         constitution=ACTIVE_CONSTITUTION.reference,
     )
@@ -379,4 +440,9 @@ def advance_command(
         configuration_hash=configuration_hash,
         payload=payload,
     )
-    return AdvanceCommand(request, identity, universe_snapshot(identity, payload=payload))
+    return AdvanceCommand(
+        request,
+        identity,
+        universe_snapshot(identity, payload=payload),
+        typed_portfolio_inputs(payload),
+    )

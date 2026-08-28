@@ -70,8 +70,10 @@ from agentic_investment_os.domain.lifecycle import (
     PerformDossierBuild,
     PerformEvidenceCapture,
     PerformMemoryUpdate,
+    PerformPortfolioConstruction,
     PerformResearch,
     PinnedRunIdentity,
+    PortfolioCheckpoint,
     ResearchCheckpoint,
     ResearchRefusal,
 )
@@ -94,6 +96,7 @@ from tests._evidence import (
     materialized_evidence_capture_checkpoint,
 )
 from tests._governance import RecordedSessionEligibility
+from tests._portfolio import recorded_portfolio_inputs
 from tests._production_research import (
     ValidProductionModel,
     production_recorded_evidence,
@@ -104,6 +107,8 @@ from tests._universe import (
     pinned_run_identity,
     recorded_universe,
     runtime_configuration,
+    typed_portfolio_inputs,
+    typed_portfolio_policy,
     typed_research_policy,
     universe_policy,
     universe_snapshot,
@@ -117,7 +122,7 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 SHA256_HEX_LENGTH = 64
 PRIVATE_DIRECTORY_MODE = 0o700
 PRIVATE_FILE_MODE = 0o600
-PINNED_EVENT_COUNT = 9
+PINNED_EVENT_COUNT = 10
 ATTENTION_REFUSAL_EVENT_COUNT = 5
 ATTENTION_PUBLISHED_EVENT_COUNT = 6
 RECEIPT_FIELD_COUNT = 4
@@ -242,11 +247,12 @@ CORRUPTIONS = {
                    constitution_version, constitution_hash, run_id,
                    data_regime, evidence_cutoff, instrument_snapshot_hash,
                    position_snapshot_hash, eligibility_policy_hash,
+                   portfolio_policy_hash, portfolio_input_hash,
                    event_kind, completed_phase, universe_snapshot_id,
                    universe_snapshot, evidence_policy_id,
                    evidence_artifact_ids, evidence_refusal_ids,
                    attention_artifact_id, attention_artifact,
-                   research_checkpoint, no_action_reason,
+                   research_checkpoint, portfolio_checkpoint, no_action_reason,
                    event_envelope, recorded_at
             FROM lifecycle_events WHERE sequence = 2
             """,
@@ -285,6 +291,28 @@ CORRUPTIONS = {
     ),
     "invalid_research_checkpoint": (
         (INVALID_RESEARCH_CHECKPOINT_SQL,),
+        "lifecycle stream checkpoint order is invalid",
+    ),
+    "portfolio_checkpoint_on_wrong_event": (
+        ("UPDATE lifecycle_events SET portfolio_checkpoint = '{}' WHERE sequence = 0",),
+        "lifecycle stream checkpoint order is invalid",
+    ),
+    "malformed_portfolio_checkpoint": (
+        (
+            (
+                "UPDATE lifecycle_events SET portfolio_checkpoint = '{' "
+                "WHERE event_kind = 'portfolio_constructed'"
+            ),
+        ),
+        "lifecycle stream checkpoint order is invalid",
+    ),
+    "invalid_portfolio_checkpoint": (
+        (
+            (
+                "UPDATE lifecycle_events SET portfolio_checkpoint = '{}' "
+                "WHERE event_kind = 'portfolio_constructed'"
+            ),
+        ),
         "lifecycle stream checkpoint order is invalid",
     ),
     "no_action_on_wrong_research_event": (
@@ -706,6 +734,12 @@ ROLLBACK_TRIGGERS = {
         WHEN NEW.event_kind = 'memory_updated'
         BEGIN SELECT RAISE(ABORT, 'injected memory checkpoint failure'); END
     """,
+    "portfolio_constructed": """
+        CREATE TRIGGER fail_portfolio_constructed_before_insert
+        BEFORE INSERT ON lifecycle_events
+        WHEN NEW.event_kind = 'portfolio_constructed'
+        BEGIN SELECT RAISE(ABORT, 'injected portfolio checkpoint failure'); END
+    """,
     "advance_refusal": """
         CREATE TRIGGER fail_advance_refusal_before_insert
         BEFORE INSERT ON advance_refusals
@@ -953,7 +987,8 @@ def _attempt_operation(command: LifecycleCommand, attempt: AdvanceAttempt) -> st
         5: "dossier",
         6: "research",
         7: "memory",
-    }.get(attempt.last_sequence, "memory")
+        8: "portfolio",
+    }.get(attempt.last_sequence, "portfolio")
 
 
 def _decision_operation(decision: LifecycleDecision, fallback: str) -> str:
@@ -967,6 +1002,8 @@ def _decision_operation(decision: LifecycleDecision, fallback: str) -> str:
         operation = "research_effect"
     elif isinstance(decision, PerformMemoryUpdate):
         operation = "memory_effect"
+    elif isinstance(decision, PerformPortfolioConstruction):
+        operation = "portfolio_effect"
     elif not isinstance(decision, (AppendLifecycleRecord, AppendTerminalLifecycleRecord)):
         operation = fallback
     elif isinstance(decision.record, DurableAdvanceRefusal):
@@ -985,6 +1022,7 @@ def _decision_operation(decision: LifecycleDecision, fallback: str) -> str:
             6: "dossier",
             7: "research",
             8: "memory",
+            9: "portfolio",
         }[decision.record.sequence]
     return operation
 
@@ -1348,6 +1386,13 @@ class _LifecycleReferenceModel:
             DOSSIER_CHECKPOINT,
             RESEARCH_CHECKPOINT,
             MEMORY_CHECKPOINT,
+            PortfolioCheckpoint(
+                "4" * SHA256_HEX_LENGTH,
+                "5" * SHA256_HEX_LENGTH,
+                identity.portfolio_policy_hash,
+                identity.portfolio_input_hash,
+                ("6" * SHA256_HEX_LENGTH,),
+            ),
             None,
         )
 
@@ -1375,6 +1420,8 @@ class _LifecycleReferenceModel:
             raise AssertionError
         eligibility_policy_hash = _reference_fingerprint(policy)
         research_policy_hash = typed_research_policy().fingerprint
+        portfolio_policy_hash = typed_portfolio_policy().policy_id
+        portfolio_input_hash = typed_portfolio_inputs().input_id
         cycle = MarketSession(date.fromisoformat(session))
         cycle_text = json.dumps(cycle.to_payload(), sort_keys=True, separators=(",", ":"))
         encoded = json.dumps(
@@ -1391,6 +1438,8 @@ class _LifecycleReferenceModel:
                 instrument_snapshot_hash,
                 position_snapshot_hash,
                 eligibility_policy_hash,
+                portfolio_policy_hash,
+                portfolio_input_hash,
             )
         ).encode()
         return PinnedRunIdentity(
@@ -1406,6 +1455,8 @@ class _LifecycleReferenceModel:
             instrument_snapshot_hash=instrument_snapshot_hash,
             position_snapshot_hash=position_snapshot_hash,
             eligibility_policy_hash=eligibility_policy_hash,
+            portfolio_policy_hash=portfolio_policy_hash,
+            portfolio_input_hash=portfolio_input_hash,
         )
 
     @staticmethod
@@ -1446,6 +1497,7 @@ def _configure(
         ),
         repository_root=REPOSITORY_ROOT,
         recorded_universe=recorded_universe(),
+        recorded_portfolio=recorded_portfolio_inputs(typed_portfolio_inputs().position_snapshot),
         recorded_evidence=production_recorded_evidence(),
         recorded_official_evidence=production_recorded_official_evidence(),
         recorded_model=ValidProductionModel(cio_stance=cio_stance),
@@ -1670,7 +1722,7 @@ def test_advance_pins_one_stream_and_reconstructs_its_receipt_after_reopen(
     assert first.pinned_run_identity == replay.pinned_run_identity
     assert first.disposition is AdvanceDisposition.ADVANCED
     assert first.completed_phase is not None
-    assert first.completed_phase.phase is LifecyclePhase.UPDATE_MEMORY
+    assert first.completed_phase.phase is LifecyclePhase.CONSTRUCT_PORTFOLIO
     assert first.pinned_run_identity is not None
     assert len(first.pinned_run_identity.run_id) == SHA256_HEX_LENGTH
     assert len(first.pinned_run_identity.configuration_hash) == SHA256_HEX_LENGTH
@@ -1685,6 +1737,7 @@ def test_advance_pins_one_stream_and_reconstructs_its_receipt_after_reopen(
         ("dossiers_built", "BuildDossiers"),
         ("research_run", "RunResearch"),
         ("memory_updated", "UpdateMemory"),
+        ("portfolio_constructed", "ConstructPortfolio"),
     ]
     assert stat.S_IMODE(state_root.stat().st_mode) == PRIVATE_DIRECTORY_MODE
     assert stat.S_IMODE((state_root / "lifecycle.sqlite3").stat().st_mode) == PRIVATE_FILE_MODE
@@ -1698,6 +1751,7 @@ def test_advance_captures_all_recorded_official_sources_without_network_access(
         (ConfigurationSource("test", runtime_configuration(state_root)),),
         repository_root=REPOSITORY_ROOT,
         recorded_universe=recorded_universe(),
+        recorded_portfolio=recorded_portfolio_inputs(typed_portfolio_inputs().position_snapshot),
         recorded_evidence=production_recorded_evidence(),
         recorded_model=ValidProductionModel(),
         session_eligibility=RecordedSessionEligibility(),
@@ -1736,6 +1790,7 @@ def test_optional_official_artifact_after_cutoff_is_not_published_as_admitted_ev
         (ConfigurationSource("test", runtime_configuration(state_root)),),
         repository_root=REPOSITORY_ROOT,
         recorded_universe=recorded_universe(),
+        recorded_portfolio=recorded_portfolio_inputs(typed_portfolio_inputs().position_snapshot),
         recorded_evidence=production_recorded_evidence(),
         recorded_model=ValidProductionModel(),
         session_eligibility=RecordedSessionEligibility(),
@@ -1778,6 +1833,7 @@ def test_advance_fails_closed_when_a_required_official_source_is_absent(
         (ConfigurationSource("test", configuration),),
         repository_root=REPOSITORY_ROOT,
         recorded_universe=recorded_universe(),
+        recorded_portfolio=recorded_portfolio_inputs(typed_portfolio_inputs().position_snapshot),
         recorded_evidence=production_recorded_evidence(),
         recorded_model=ValidProductionModel(),
         session_eligibility=RecordedSessionEligibility(),
@@ -1845,7 +1901,9 @@ def test_disabled_crypto_cycle_is_refused_before_authoritative_state_changes(
         ("research", "before", 7, AdvanceRecovery.RESUMED),
         ("research", "after", 8, AdvanceRecovery.RESUMED),
         ("memory", "before", 8, AdvanceRecovery.RESUMED),
-        ("memory", "after", 9, AdvanceRecovery.PREVIOUSLY_COMPLETED),
+        ("memory", "after", 9, AdvanceRecovery.RESUMED),
+        ("portfolio", "before", 9, AdvanceRecovery.RESUMED),
+        ("portfolio", "after", 10, AdvanceRecovery.PREVIOUSLY_COMPLETED),
     ],
 )
 def test_fresh_process_resumes_at_every_universe_snapshot_write_boundary(
@@ -1875,6 +1933,9 @@ def test_fresh_process_resumes_at_every_universe_snapshot_write_boundary(
         evidence_vault=capability.evidence_vault,
         memory=capability.memory,
         memory_refusal_ledger=capability.memory_refusal_ledger,
+        portfolio_policy=capability.portfolio_policy,
+        portfolio_input_source=capability.portfolio_input_source,
+        portfolio_ledger=capability.portfolio_ledger,
     )
 
     with pytest.raises(SimulatedInterruptionError):
@@ -1891,7 +1952,7 @@ def test_fresh_process_resumes_at_every_universe_snapshot_write_boundary(
     )
 
     assert disposition == AdvanceDisposition.ADVANCED.value
-    assert phase == LifecyclePhase.UPDATE_MEMORY.value
+    assert phase == LifecyclePhase.CONSTRUCT_PORTFOLIO.value
     assert recovery == expected_recovery.value
     assert len(run_id) == SHA256_HEX_LENGTH
     assert len(_events(database)) == PINNED_EVENT_COUNT
@@ -2029,6 +2090,9 @@ def test_fresh_process_recovers_at_each_refusal_write_boundary(
         evidence_vault=capability.evidence_vault,
         memory=capability.memory,
         memory_refusal_ledger=capability.memory_refusal_ledger,
+        portfolio_policy=capability.portfolio_policy,
+        portfolio_input_source=capability.portfolio_input_source,
+        portfolio_ledger=capability.portfolio_ledger,
     )
 
     with pytest.raises(SimulatedInterruptionError):
@@ -2092,6 +2156,9 @@ def test_fresh_process_recovers_at_each_completed_conflict_write_boundary(
         evidence_vault=capability.evidence_vault,
         memory=capability.memory,
         memory_refusal_ledger=capability.memory_refusal_ledger,
+        portfolio_policy=capability.portfolio_policy,
+        portfolio_input_source=capability.portfolio_input_source,
+        portfolio_ledger=capability.portfolio_ledger,
     )
 
     with pytest.raises(SimulatedInterruptionError):
@@ -2151,6 +2218,9 @@ def test_duplicate_delivery_reports_progress_committed_by_the_winner_as_resumed(
         evidence_vault=capability.evidence_vault,
         memory=capability.memory,
         memory_refusal_ledger=capability.memory_refusal_ledger,
+        portfolio_policy=capability.portfolio_policy,
+        portfolio_input_source=capability.portfolio_input_source,
+        portfolio_ledger=capability.portfolio_ledger,
     )
 
     receipt = raced(
@@ -2256,6 +2326,7 @@ class LifecycleStateMachine(RuleBasedStateMachine):
                 dossier_checkpoint=observed.dossier_checkpoint,
                 research_checkpoint=observed.research_checkpoint,
                 memory_checkpoint=observed.memory_checkpoint,
+                portfolio_checkpoint=observed.portfolio_checkpoint,
                 disposition=observed.disposition,
                 no_action_reason=observed.no_action_reason,
             )
@@ -2341,7 +2412,8 @@ class LifecycleStateMachine(RuleBasedStateMachine):
                 ("attention", 6),
                 ("dossier", 7),
                 ("research", 8),
-                ("memory", PINNED_EVENT_COUNT),
+                ("memory", 9),
+                ("portfolio", PINNED_EVENT_COUNT),
             )
         )
     )
@@ -2366,6 +2438,9 @@ class LifecycleStateMachine(RuleBasedStateMachine):
             evidence_vault=self.capability.evidence_vault,
             memory=self.capability.memory,
             memory_refusal_ledger=self.capability.memory_refusal_ledger,
+            portfolio_policy=self.capability.portfolio_policy,
+            portfolio_input_source=self.capability.portfolio_input_source,
+            portfolio_ledger=self.capability.portfolio_ledger,
         )
         try:
             observed = interrupted(
@@ -2380,7 +2455,7 @@ class LifecycleStateMachine(RuleBasedStateMachine):
                 committed_events=committed_events,
             )
         else:
-            assert operation in ("dossier", "research", "memory")
+            assert operation in ("dossier", "research", "memory", "portfolio")
             assert observed == self._record_research_refusal(
                 session=session,
                 key=key,
@@ -2475,6 +2550,9 @@ def test_resuming_an_older_partial_cycle_after_a_later_selection_fails_closed(
         evidence_vault=capability.evidence_vault,
         memory=capability.memory,
         memory_refusal_ledger=capability.memory_refusal_ledger,
+        portfolio_policy=capability.portfolio_policy,
+        portfolio_input_source=capability.portfolio_input_source,
+        portfolio_ledger=capability.portfolio_ledger,
     )
 
     with pytest.raises(SimulatedInterruptionError):
@@ -2836,6 +2914,9 @@ def test_conflicting_pinned_identity_fails_without_rewriting_completed_work(
         evidence_vault=capability.evidence_vault,
         memory=capability.memory,
         memory_refusal_ledger=capability.memory_refusal_ledger,
+        portfolio_policy=capability.portfolio_policy,
+        portfolio_input_source=capability.portfolio_input_source,
+        portfolio_ledger=capability.portfolio_ledger,
     )
 
     conflict = conflicting_capability(
@@ -2880,6 +2961,9 @@ def test_terminal_conflict_refusal_prevents_partial_stream_resumption(tmp_path: 
         evidence_vault=capability.evidence_vault,
         memory=capability.memory,
         memory_refusal_ledger=capability.memory_refusal_ledger,
+        portfolio_policy=capability.portfolio_policy,
+        portfolio_input_source=capability.portfolio_input_source,
+        portfolio_ledger=capability.portfolio_ledger,
     )
     with pytest.raises(SimulatedInterruptionError):
         interrupted(
@@ -2922,6 +3006,7 @@ def test_terminal_conflict_refusal_prevents_partial_stream_resumption(tmp_path: 
         ("dossiers_built", 6, AdvanceRecovery.RESUMED),
         ("research_run", 7, AdvanceRecovery.RESUMED),
         ("memory_updated", 8, AdvanceRecovery.RESUMED),
+        ("portfolio_constructed", 9, AdvanceRecovery.RESUMED),
     ],
 )
 def test_advance_resumes_after_each_checkpoint_transaction_rolls_back(
@@ -2969,13 +3054,16 @@ def test_advance_resumes_after_each_checkpoint_transaction_rolls_back(
             "fail_dossiers_built_before_insert": ("DROP TRIGGER fail_dossiers_built_before_insert"),
             "fail_research_run_before_insert": "DROP TRIGGER fail_research_run_before_insert",
             "fail_memory_updated_before_insert": ("DROP TRIGGER fail_memory_updated_before_insert"),
+            "fail_portfolio_constructed_before_insert": (
+                "DROP TRIGGER fail_portfolio_constructed_before_insert"
+            ),
         }
         connection.execute(known_drop_statements[str(trigger_name[0])])
 
     disposition, phase, recovery, run_id = _advance_in_fresh_process(state_root, "rollback-key")
 
     assert disposition == AdvanceDisposition.ADVANCED.value
-    assert phase == LifecyclePhase.UPDATE_MEMORY.value
+    assert phase == LifecyclePhase.CONSTRUCT_PORTFOLIO.value
     assert recovery == expected_recovery.value
     assert len(run_id) == SHA256_HEX_LENGTH
     assert len(_events(database)) == PINNED_EVENT_COUNT
@@ -3088,6 +3176,7 @@ def test_runtime_state_root_cannot_point_into_source_directories(tmp_path: Path)
         ),
         repository_root=repository,
         recorded_universe=recorded_universe(),
+        recorded_portfolio=recorded_portfolio_inputs(typed_portfolio_inputs().position_snapshot),
         recorded_evidence=production_recorded_evidence(),
         recorded_model=ValidProductionModel(),
         session_eligibility=RecordedSessionEligibility(),
@@ -3134,6 +3223,7 @@ def test_malformed_universe_policy_is_refused_before_state_creation(
         (ConfigurationSource("test", configuration),),
         repository_root=REPOSITORY_ROOT,
         recorded_universe=recorded_universe(),
+        recorded_portfolio=recorded_portfolio_inputs(typed_portfolio_inputs().position_snapshot),
         recorded_evidence=production_recorded_evidence(),
         recorded_model=ValidProductionModel(),
         session_eligibility=RecordedSessionEligibility(),
@@ -3156,6 +3246,7 @@ def test_hostile_asset_activation_is_refused_before_state_creation(tmp_path: Pat
         (ConfigurationSource("test", configuration),),
         repository_root=REPOSITORY_ROOT,
         recorded_universe=recorded_universe(),
+        recorded_portfolio=recorded_portfolio_inputs(typed_portfolio_inputs().position_snapshot),
         recorded_evidence=production_recorded_evidence(),
         recorded_model=ValidProductionModel(),
         session_eligibility=RecordedSessionEligibility(),
@@ -3181,6 +3272,7 @@ def test_hostile_top_level_configuration_key_is_refused_before_state_creation(
         (ConfigurationSource("test", configuration),),
         repository_root=REPOSITORY_ROOT,
         recorded_universe=recorded_universe(),
+        recorded_portfolio=recorded_portfolio_inputs(typed_portfolio_inputs().position_snapshot),
         recorded_evidence=production_recorded_evidence(),
         recorded_model=ValidProductionModel(),
         session_eligibility=RecordedSessionEligibility(),
@@ -3241,6 +3333,9 @@ def test_runtime_state_storage_refuses_links_public_modes_and_unsafe_shapes(
             ),
             repository_root=REPOSITORY_ROOT,
             recorded_universe=recorded_universe(),
+            recorded_portfolio=recorded_portfolio_inputs(
+                typed_portfolio_inputs().position_snapshot
+            ),
             recorded_evidence=production_recorded_evidence(),
             recorded_model=ValidProductionModel(),
             session_eligibility=RecordedSessionEligibility(),
@@ -3275,6 +3370,7 @@ def test_equivalent_clock_offsets_persist_identically_after_reopen(
         (ConfigurationSource("test", runtime_configuration(state_root)),),
         repository_root=REPOSITORY_ROOT,
         recorded_universe=recorded_universe(),
+        recorded_portfolio=recorded_portfolio_inputs(typed_portfolio_inputs().position_snapshot),
         recorded_evidence=production_recorded_evidence(),
         recorded_model=ValidProductionModel(),
         session_eligibility=RecordedSessionEligibility(),
@@ -3497,7 +3593,9 @@ def test_pinned_constitution_reader_rejects_a_substituted_stream(
         ledger.pinned_constitution_use(request.idempotency_key)
 
 
-def test_lifecycle_ledger_appends_generic_checkpoint_records(tmp_path: Path) -> None:
+def test_lifecycle_ledger_appends_generic_checkpoint_records(  # noqa: PLR0915
+    tmp_path: Path,
+) -> None:
     capability = _configure(tmp_path / "runtime")
     ledger = capability.ledger
     assert isinstance(ledger, SQLiteLifecycleLedger)
@@ -3512,7 +3610,14 @@ def test_lifecycle_ledger_appends_generic_checkpoint_records(tmp_path: Path) -> 
 
     snapshot = universe_snapshot(identity)
     capture = evidence_capture_checkpoint()
-    command = AdvanceCommand(request, identity, snapshot)
+    portfolio = PortfolioCheckpoint(
+        "4" * SHA256_HEX_LENGTH,
+        "5" * SHA256_HEX_LENGTH,
+        identity.portfolio_policy_hash,
+        identity.portfolio_input_hash,
+        ("6" * SHA256_HEX_LENGTH,),
+    )
+    command = AdvanceCommand(request, identity, snapshot, typed_portfolio_inputs())
     attempt = AdvanceAttempt()
     terminal: AppendTerminalLifecycleRecord | None = None
     for expected_sequence in range(PINNED_EVENT_COUNT):
@@ -3541,12 +3646,16 @@ def test_lifecycle_ledger_appends_generic_checkpoint_records(tmp_path: Path) -> 
         if isinstance(decision, PerformMemoryUpdate):
             command = replace(command, memory_update=MEMORY_CHECKPOINT)
             decision = ledger.advance_step(command, attempt, now)
+        if isinstance(decision, PerformPortfolioConstruction):
+            command = replace(command, portfolio_construction=portfolio)
+            decision = ledger.advance_step(command, attempt, now)
         assert not isinstance(decision, AdvanceReceipt)
         assert not isinstance(decision, PerformEvidenceCapture)
         assert not isinstance(decision, PerformAttentionSelection)
         assert not isinstance(decision, PerformDossierBuild)
         assert not isinstance(decision, PerformResearch)
         assert not isinstance(decision, PerformMemoryUpdate)
+        assert not isinstance(decision, PerformPortfolioConstruction)
         assert isinstance(decision.record, LifecycleEvent)
         assert decision.record.sequence == expected_sequence
         if isinstance(decision, AppendTerminalLifecycleRecord):
@@ -3564,6 +3673,7 @@ def test_lifecycle_ledger_appends_generic_checkpoint_records(tmp_path: Path) -> 
         DOSSIER_CHECKPOINT,
         RESEARCH_CHECKPOINT,
         MEMORY_CHECKPOINT,
+        portfolio,
         None,
     )
     assert ledger.advance_step(command, AdvanceAttempt(), now) == AdvanceReceipt.advanced(
@@ -3576,6 +3686,7 @@ def test_lifecycle_ledger_appends_generic_checkpoint_records(tmp_path: Path) -> 
         DOSSIER_CHECKPOINT,
         RESEARCH_CHECKPOINT,
         MEMORY_CHECKPOINT,
+        portfolio,
         None,
     )
 
@@ -3584,7 +3695,12 @@ def test_lifecycle_ledger_appends_generic_checkpoint_records(tmp_path: Path) -> 
         configuration_hash="d" * SHA256_HEX_LENGTH,
     )
     concurrent_conflict = ledger.advance_step(
-        AdvanceCommand(request, conflicting_identity, universe_snapshot(conflicting_identity)),
+        AdvanceCommand(
+            request,
+            conflicting_identity,
+            universe_snapshot(conflicting_identity),
+            typed_portfolio_inputs(),
+        ),
         AdvanceAttempt(),
         now,
     )
@@ -3596,7 +3712,12 @@ def test_lifecycle_ledger_appends_generic_checkpoint_records(tmp_path: Path) -> 
     )
     assert (
         ledger.advance_step(
-            AdvanceCommand(request, conflicting_identity, universe_snapshot(conflicting_identity)),
+            AdvanceCommand(
+                request,
+                conflicting_identity,
+                universe_snapshot(conflicting_identity),
+                typed_portfolio_inputs(),
+            ),
             AdvanceAttempt(),
             now,
         )
@@ -3672,6 +3793,9 @@ def test_universe_source_rejects_a_forged_utc_instant_before_append(tmp_path: Pa
         evidence_vault=capability.evidence_vault,
         memory=capability.memory,
         memory_refusal_ledger=capability.memory_refusal_ledger,
+        portfolio_policy=capability.portfolio_policy,
+        portfolio_input_source=capability.portfolio_input_source,
+        portfolio_ledger=capability.portfolio_ledger,
     )
 
     with pytest.raises(
@@ -3693,6 +3817,7 @@ def test_naive_clock_cannot_create_a_checkpoint(tmp_path: Path) -> None:
         (ConfigurationSource("test", runtime_configuration(state_root)),),
         repository_root=REPOSITORY_ROOT,
         recorded_universe=recorded_universe(),
+        recorded_portfolio=recorded_portfolio_inputs(typed_portfolio_inputs().position_snapshot),
         recorded_evidence=production_recorded_evidence(),
         recorded_model=ValidProductionModel(),
         session_eligibility=RecordedSessionEligibility(),
@@ -3720,6 +3845,7 @@ def test_out_of_range_aware_clock_cannot_create_a_checkpoint(tmp_path: Path) -> 
         (ConfigurationSource("test", runtime_configuration(state_root)),),
         repository_root=REPOSITORY_ROOT,
         recorded_universe=recorded_universe(),
+        recorded_portfolio=recorded_portfolio_inputs(typed_portfolio_inputs().position_snapshot),
         recorded_evidence=production_recorded_evidence(),
         recorded_model=ValidProductionModel(),
         session_eligibility=RecordedSessionEligibility(),
@@ -3826,6 +3952,9 @@ def test_missing_refusal_sequence_row_fails_closed(tmp_path: Path) -> None:
         evidence_vault=capability.evidence_vault,
         memory=capability.memory,
         memory_refusal_ledger=capability.memory_refusal_ledger,
+        portfolio_policy=capability.portfolio_policy,
+        portfolio_input_source=capability.portfolio_input_source,
+        portfolio_ledger=capability.portfolio_ledger,
     )
 
     with pytest.raises(
@@ -3858,6 +3987,9 @@ def test_invalid_refusal_sequence_row_has_a_bounded_diagnostic(tmp_path: Path) -
         evidence_vault=capability.evidence_vault,
         memory=capability.memory,
         memory_refusal_ledger=capability.memory_refusal_ledger,
+        portfolio_policy=capability.portfolio_policy,
+        portfolio_input_source=capability.portfolio_input_source,
+        portfolio_ledger=capability.portfolio_ledger,
     )
 
     with pytest.raises(
@@ -4226,7 +4358,12 @@ def test_corrupt_checkpoint_history_uses_the_call_timestamp_for_its_refusal(
     identity = pinned_run_identity(request)
     started_at = datetime(2026, 8, 21, 22, 0, tzinfo=UTC)
     refused_at = datetime(2026, 8, 22, 23, 30, tzinfo=UTC)
-    command = AdvanceCommand(request, identity, universe_snapshot(identity))
+    command = AdvanceCommand(
+        request,
+        identity,
+        universe_snapshot(identity),
+        typed_portfolio_inputs(),
+    )
     started = ledger.advance_step(
         command,
         AdvanceAttempt(),
@@ -4259,6 +4396,9 @@ def test_corrupt_checkpoint_history_uses_the_call_timestamp_for_its_refusal(
         evidence_vault=capability.evidence_vault,
         memory=capability.memory,
         memory_refusal_ledger=capability.memory_refusal_ledger,
+        portfolio_policy=capability.portfolio_policy,
+        portfolio_input_source=capability.portfolio_input_source,
+        portfolio_ledger=capability.portfolio_ledger,
     )
     receipt = refused(
         cycle=_cycle_payload(request.session.isoformat()),
@@ -4562,11 +4702,12 @@ def _replace_with_corrupt_events(
                    constitution_version, constitution_hash, run_id,
                    data_regime, evidence_cutoff, instrument_snapshot_hash,
                    position_snapshot_hash, eligibility_policy_hash,
+                   portfolio_policy_hash, portfolio_input_hash,
                    event_kind, completed_phase, universe_snapshot_id,
                    universe_snapshot, evidence_policy_id,
                    evidence_artifact_ids, evidence_refusal_ids,
                    attention_artifact_id, attention_artifact,
-                   research_checkpoint, no_action_reason,
+                   research_checkpoint, portfolio_checkpoint, no_action_reason,
                    event_envelope, recorded_at
             FROM lifecycle_events ORDER BY sequence
             """
@@ -4581,11 +4722,12 @@ def _replace_with_corrupt_events(
                 constitution_version, constitution_hash, run_id,
                 data_regime, evidence_cutoff, instrument_snapshot_hash,
                 position_snapshot_hash, eligibility_policy_hash,
+                portfolio_policy_hash, portfolio_input_hash,
                 event_kind, completed_phase, universe_snapshot_id,
                 universe_snapshot, evidence_policy_id,
                 evidence_artifact_ids, evidence_refusal_ids,
                 attention_artifact_id, attention_artifact,
-                research_checkpoint, no_action_reason,
+                research_checkpoint, portfolio_checkpoint, no_action_reason,
                 event_envelope, recorded_at
             )
             """
@@ -4593,7 +4735,7 @@ def _replace_with_corrupt_events(
         connection.executemany(
             "INSERT INTO lifecycle_events VALUES "
             "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
-            "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             rows,
         )
         for statement in statements:
