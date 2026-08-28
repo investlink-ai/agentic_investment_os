@@ -1487,6 +1487,7 @@ def _configure(
     *,
     clock: FixedClock | None = None,
     cio_stance: Literal["hold", "abstain"] = "hold",
+    include_optional_official_evidence: bool = True,
 ) -> Advance:
     configured = configure_advance(
         (
@@ -1499,7 +1500,9 @@ def _configure(
         recorded_universe=recorded_universe(),
         recorded_portfolio=recorded_portfolio_inputs(typed_portfolio_inputs().position_snapshot),
         recorded_evidence=production_recorded_evidence(),
-        recorded_official_evidence=production_recorded_official_evidence(),
+        recorded_official_evidence=(
+            production_recorded_official_evidence() if include_optional_official_evidence else None
+        ),
         recorded_model=ValidProductionModel(cio_stance=cio_stance),
         session_eligibility=RecordedSessionEligibility(),
         clock=(FixedClock(datetime(2026, 8, 21, 22, 0, tzinfo=UTC)) if clock is None else clock),
@@ -2268,7 +2271,13 @@ class LifecycleStateMachine(RuleBasedStateMachine):
             prefix="agentic-investment-os-lifecycle-state-machine-"
         )
         self.state_root = Path(self._temporary_directory.name).resolve() / "runtime"
-        self.capability = _configure(self.state_root, cio_stance="abstain")
+        # Focused evidence tests own optional official-source breadth; generated lifecycle sequences
+        # retain the required market/news evidence and real persistence boundaries.
+        self.capability = _configure(
+            self.state_root,
+            cio_stance="abstain",
+            include_optional_official_evidence=False,
+        )
         self.reference = _LifecycleReferenceModel(
             self.capability.configuration_version,
             self.capability.configuration_hash,
@@ -2464,7 +2473,11 @@ class LifecycleStateMachine(RuleBasedStateMachine):
 
     @rule()
     def reopen_database(self) -> None:
-        self.capability = _configure(self.state_root, cio_stance="abstain")
+        self.capability = _configure(
+            self.state_root,
+            cio_stance="abstain",
+            include_optional_official_evidence=False,
+        )
 
     @invariant()
     def authoritative_counts_match_reference_model(self) -> None:
