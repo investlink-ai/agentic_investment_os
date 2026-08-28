@@ -87,6 +87,7 @@ def _portfolio_checkpoint(command: AdvanceCommand) -> PortfolioCheckpoint:
         identity.portfolio_policy_hash,
         identity.portfolio_input_hash,
         ("6" * SHA256_HEX_LENGTH,),
+        KERNEL_RECORDED_AT,
     )
 
 

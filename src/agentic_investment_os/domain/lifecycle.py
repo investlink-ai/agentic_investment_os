@@ -614,13 +614,14 @@ class ResearchCheckpoint:
 
 @dataclass(frozen=True, slots=True)
 class PortfolioCheckpoint:
-    """Bind one durable portfolio result to its HouseView, policy, and as-of inputs."""
+    """Bind one durable portfolio result to its material and original append instant."""
 
     result_id: str
     house_view_id: str | None
     policy_id: str
     input_id: str
     target_band_ids: tuple[str, ...]
+    recorded_at: UtcInstant
     refusal_reason: PortfolioCheckpointRefusalReason | None = None
 
     def __post_init__(self) -> None:
@@ -630,6 +631,7 @@ class PortfolioCheckpoint:
             or not is_sha256(self.policy_id)
             or not is_sha256(self.input_id)
             or not _valid_optional_hash_references(self.target_band_ids)
+            or type(self.recorded_at) is not UtcInstant
             or (self.refusal_reason is None and self.house_view_id is None)
             or (
                 self.refusal_reason is not None
@@ -651,6 +653,7 @@ class PortfolioCheckpoint:
             "input_id": self.input_id,
             "target_band_ids": list(self.target_band_ids),
             "refusal_reason": (None if self.refusal_reason is None else self.refusal_reason.value),
+            "recorded_at": self.recorded_at.isoformat(),
         }
 
 
@@ -667,6 +670,7 @@ class PortfolioCheckpointReference:
             not is_sha256(self.run_id)
             or type(self.checkpoint) is not PortfolioCheckpoint
             or type(self.recorded_at) is not UtcInstant
+            or self.checkpoint.recorded_at != self.recorded_at
         ):
             raise ValueError(_INVALID_CHECKPOINT_ORDER)
 
@@ -684,10 +688,11 @@ def parse_portfolio_checkpoint(value: object) -> PortfolioCheckpoint | None:
                 "input_id",
                 "target_band_ids",
                 "refusal_reason",
+                "recorded_at",
             }
         ),
     )
-    if fields is None or fields["schema_version"] != 1:
+    if fields is None or type(fields["schema_version"]) is not int or fields["schema_version"] != 1:
         return None
     target_band_ids = _parse_hash_tuple(fields["target_band_ids"])
     result_id = fields["result_id"]
@@ -698,6 +703,10 @@ def parse_portfolio_checkpoint(value: object) -> PortfolioCheckpoint | None:
         PortfolioCheckpointRefusalReason,
         fields["refusal_reason"],
     )
+    try:
+        recorded_at = UtcInstant.parse(fields["recorded_at"])
+    except InvalidUtcInstantError:
+        return None
     if (
         target_band_ids is None
         or not valid_refusal
@@ -715,6 +724,7 @@ def parse_portfolio_checkpoint(value: object) -> PortfolioCheckpoint | None:
             input_id=input_id,
             target_band_ids=target_band_ids,
             refusal_reason=refusal,
+            recorded_at=recorded_at,
         )
     except (TypeError, ValueError):
         return None
@@ -2169,7 +2179,7 @@ def reconstruct_portfolio_checkpoints(
         PortfolioCheckpointReference(
             event.pinned_run_identity.run_id,
             event.portfolio_checkpoint,
-            event.recorded_at,
+            event.portfolio_checkpoint.recorded_at,
         )
         for event in history.events
         if event.portfolio_checkpoint is not None
@@ -2463,6 +2473,8 @@ def _reconstruct_stream(  # noqa: PLR0912, PLR0915 - validate each checkpoint in
             if (
                 event.portfolio_checkpoint.policy_id != identity.portfolio_policy_hash
                 or event.portfolio_checkpoint.input_id != identity.portfolio_input_hash
+                or event.portfolio_checkpoint.recorded_at.value < identity.evidence_cutoff.value
+                or event.portfolio_checkpoint.recorded_at.value > event.recorded_at.value
             ):
                 raise InvalidLifecycleStateError(_CHANGED_PINNED_FACTS)
             portfolio_checkpoint = event.portfolio_checkpoint
@@ -2895,6 +2907,9 @@ def _append_next_event(  # noqa: PLR0911, PLR0912 - exhaust each lifecycle phase
         if (
             portfolio_checkpoint.policy_id != progress.pinned_run_identity.portfolio_policy_hash
             or portfolio_checkpoint.input_id != progress.pinned_run_identity.portfolio_input_hash
+            or portfolio_checkpoint.recorded_at.value
+            < progress.pinned_run_identity.evidence_cutoff.value
+            or portfolio_checkpoint.recorded_at.value > recorded_at.value
         ):
             raise InvalidLifecycleStateError(_CHANGED_PINNED_FACTS)
         return AppendTerminalLifecycleRecord(

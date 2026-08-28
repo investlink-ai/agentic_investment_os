@@ -255,8 +255,9 @@ The V0 champion uses capped inverse-volatility risk budgeting:
 - Accepted longs begin with equal standalone risk budgets.
 - Raw notional is proportional to inverse realized volatility computed from twenty daily returns over
   twenty-one split-adjusted closes. The estimator is sample standard deviation, annualized over 252
-  periods with a 10% floor. Inputs older than two hours, future-available material, duplicate or
-  unordered observations, or insufficient history reject sizing.
+  periods with a 10% floor. Every close must belong to one consecutive regular session under the
+  code-pinned `xnys-regular-2026a` calendar. Inputs older than two hours, future-available material,
+  duplicate, unordered, gapped, holiday, unsupported-year, or insufficient histories reject sizing.
 - All allocation arithmetic runs under the portfolio-owned decimal context: precision 28,
   round-half-even, with invalid operation, division by zero, and overflow trapped. Ambient process
   decimal settings cannot change targets, cash, bands, or their hashes.
@@ -309,11 +310,13 @@ weekly rebalance and capped exposure is never redistributed.
 The complete known material company and macro release set blocks a new `long` or `hold` position
 until every release is captured in the Evidence Vault and cited by the exact fresh terminal research
 resolution for its request. Claimed booleans, an earlier cycle, or one cleared event cannot clear
-another pending event. Event risk does not suppress a deterministic reduction or exit for an existing
-position. Target Bands retain the target, bounds, current weight, permitted adjustment, eligibility,
-and the exact entry, exit, reduction, band, minimum-notional, event, or hard-risk reason. Weekly
-maintenance reconciles stale state, configuration, upcoming events, and long-dormant beliefs without
-creating a calendar-driven trade requirement.
+another pending event. An official schedule identifies upcoming risk but does not clear that risk;
+only the validated publication subtype can satisfy a macro release. Event risk does not suppress a
+deterministic reduction or exit for an existing position. Target Bands retain the target, bounds,
+current weight, permitted adjustment, eligibility, and the exact entry, exit, reduction, band,
+minimum-notional, event, or hard-risk reason. Weekly maintenance reconciles stale state,
+configuration, upcoming events, and long-dormant beliefs without creating a calendar-driven trade
+requirement.
 
 The pre-open DecisionPacket freezes fifteen
 minutes before the regular session. Five minutes after open, execution rechecks quote freshness,

@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass
+from datetime import date, timedelta
 from decimal import (
     ROUND_HALF_EVEN,
     Context,
@@ -15,6 +16,7 @@ from decimal import (
     localcontext,
 )
 from enum import StrEnum
+from itertools import pairwise
 from typing import TYPE_CHECKING, Protocol, Self, TypeGuard
 
 from agentic_investment_os.domain.identity import (
@@ -44,6 +46,7 @@ __all__ = (
     "BalancedPortfolioPolicy",
     "HouseView",
     "HouseViewResolution",
+    "MaterialEventEvidence",
     "MaterialEventRisk",
     "PortfolioConstructionRequest",
     "PortfolioConstructionResult",
@@ -64,6 +67,24 @@ __all__ = (
 _HASH_LENGTH = 64
 _MINIMUM_LOOKBACK_DAYS = 2
 _MAXIMUM_DECIMAL_TEXT_LENGTH = 64
+_MAXIMUM_SOURCE_IDENTITY_LENGTH = 256
+_WEEKEND_START_DAY = 5
+_SESSION_CALENDAR_ID = "xnys-regular-2026a"
+_SESSION_CALENDAR_YEAR = 2026
+_SESSION_CALENDAR_HOLIDAYS = frozenset(
+    {
+        date(2026, 1, 1),
+        date(2026, 1, 19),
+        date(2026, 2, 16),
+        date(2026, 4, 3),
+        date(2026, 5, 25),
+        date(2026, 6, 19),
+        date(2026, 7, 3),
+        date(2026, 9, 7),
+        date(2026, 11, 26),
+        date(2026, 12, 25),
+    }
+)
 _PORTFOLIO_DECIMAL_CONTEXT = Context(
     prec=28,
     rounding=ROUND_HALF_EVEN,
@@ -73,6 +94,7 @@ _UNAVAILABLE_POLICY_ID = "e8330921e97c6b1482ec9aa35b078a0faf00b2ae5af23e5d1d727b
 _UNAVAILABLE_INPUT_ID = "882c53691ad360cf565f4a11bf79418e747dad07abcba8da67c0c536fd6b9099"
 _INVALID_ADJUSTED_CLOSE = "invalid adjusted close"
 _INVALID_EVENT_RISK = "invalid material event risk"
+_INVALID_EVENT_EVIDENCE = "invalid material event evidence"
 _INVALID_RISK_INPUT = "invalid portfolio risk input"
 _INVALID_INPUT_SET = "invalid portfolio input set"
 _INVALID_POLICY = "invalid Balanced portfolio policy"
@@ -118,14 +140,24 @@ class PortfolioTradeReason(StrEnum):
 
 @dataclass(frozen=True, slots=True)
 class AdjustedClose:
-    """Carry one split-adjusted USD-per-share close at an Absolute Instant."""
+    """Carry one canonical daily close with its session, source, and availability."""
 
+    session: MarketSession
     observed_at: UtcInstant
+    available_at: UtcInstant
+    source_identity: str
     price: Decimal
 
     def __post_init__(self) -> None:
         if (
-            type(self.observed_at) is not UtcInstant
+            type(self.session) is not MarketSession
+            or not _is_pinned_regular_session(self.session.trading_date)
+            or type(self.observed_at) is not UtcInstant
+            or self.observed_at.value.date() != self.session.trading_date
+            or type(self.available_at) is not UtcInstant
+            or self.available_at.value < self.observed_at.value
+            or type(self.source_identity) is not str
+            or not 1 <= len(self.source_identity) <= _MAXIMUM_SOURCE_IDENTITY_LENGTH
             or type(self.price) is not Decimal
             or not self.price.is_finite()
             or self.price <= 0
@@ -135,17 +167,13 @@ class AdjustedClose:
 
 @dataclass(frozen=True, slots=True)
 class MaterialEventRisk:
-    """Describe one known company or macro release and its research freshness."""
+    """Describe one independently recorded company or macro release calendar entry."""
 
     event_id: str
     event_type: str
     releases_at: UtcInstant
     source_identity: str
     calendar_available_at: UtcInstant
-    release_artifact_id: str | None = None
-    release_available_at: UtcInstant | None = None
-    fresh_research_request_id: str | None = None
-    fresh_research_resolution_id: str | None = None
 
     def __post_init__(self) -> None:
         if (
@@ -156,35 +184,38 @@ class MaterialEventRisk:
             or type(self.source_identity) is not str
             or not self.source_identity
             or type(self.calendar_available_at) is not UtcInstant
-            or (self.release_artifact_id is not None and not _is_hash(self.release_artifact_id))
-            or (
-                self.release_available_at is not None
-                and type(self.release_available_at) is not UtcInstant
-            )
-            or ((self.release_artifact_id is None) != (self.release_available_at is None))
-            or (
-                self.release_available_at is not None
-                and self.release_available_at.value < self.releases_at.value
-            )
-            or (
-                self.fresh_research_request_id is not None
-                and not _is_hash(self.fresh_research_request_id)
-            )
-            or (
-                self.fresh_research_resolution_id is not None
-                and not _is_hash(self.fresh_research_resolution_id)
-            )
-            or (
-                (self.fresh_research_request_id is None)
-                != (self.fresh_research_resolution_id is None)
-            )
-            or (self.fresh_research_request_id is not None and self.release_artifact_id is None)
         ):
             raise ValueError(_INVALID_EVENT_RISK)
 
-    @property
-    def blocks_new_position(self) -> bool:
-        return self.fresh_research_resolution_id is None
+
+@dataclass(frozen=True, slots=True)
+class MaterialEventEvidence:
+    """Carry typed official release provenance resolved from the current Evidence Vault."""
+
+    artifact_id: str
+    evidence_kind: str
+    source_identity: str
+    released_at: UtcInstant
+    available_at: UtcInstant
+    mapped_identities: tuple[EquityInstrumentIdentity, ...]
+
+    def __post_init__(self) -> None:
+        canonical_mappings = tuple(sorted(self.mapped_identities, key=canonical_instrument_bytes))
+        if (
+            not _is_hash(self.artifact_id)
+            or self.evidence_kind not in ("issuer_release", "official_macro")
+            or type(self.source_identity) is not str
+            or not self.source_identity
+            or type(self.released_at) is not UtcInstant
+            or type(self.available_at) is not UtcInstant
+            or self.available_at.value < self.released_at.value
+            or type(self.mapped_identities) is not tuple
+            or any(type(item) is not EquityInstrumentIdentity for item in self.mapped_identities)
+            or canonical_mappings != self.mapped_identities
+            or len({canonical_instrument_bytes(item) for item in self.mapped_identities})
+            != len(self.mapped_identities)
+        ):
+            raise ValueError(_INVALID_EVENT_EVIDENCE)
 
 
 @dataclass(frozen=True, slots=True)
@@ -212,10 +243,12 @@ class PortfolioRiskInput:
             or type(self.adjusted_closes) is not tuple
             or not self.adjusted_closes
             or any(type(item) is not AdjustedClose for item in self.adjusted_closes)
-            or tuple(item.observed_at.value for item in self.adjusted_closes)
-            != tuple(sorted(item.observed_at.value for item in self.adjusted_closes))
-            or len({item.observed_at.value for item in self.adjusted_closes})
+            or tuple(item.session.trading_date for item in self.adjusted_closes)
+            != tuple(sorted(item.session.trading_date for item in self.adjusted_closes))
+            or len({item.session.trading_date for item in self.adjusted_closes})
             != len(self.adjusted_closes)
+            or not _close_sessions_are_consecutive(self.adjusted_closes)
+            or len({item.source_identity for item in self.adjusted_closes}) != 1
             or type(self.sector) is not str
             or not self.sector
             or type(self.median_dollar_volume) is not Decimal
@@ -247,6 +280,11 @@ class PortfolioInputSet:
     data_regime: str
     risk_inputs: tuple[PortfolioRiskInput, ...]
     input_id: str
+
+    @property
+    def session_calendar_id(self) -> str:
+        """Identify the code-pinned exchange calendar used to admit daily closes."""
+        return _SESSION_CALENDAR_ID
 
     def __post_init__(self) -> None:
         if (
@@ -399,7 +437,8 @@ class BalancedPortfolioPolicy:
             *uncertainty.values(),
         )
         if (
-            self.schema_version != 1
+            type(self.schema_version) is not int
+            or self.schema_version != 1
             or self.estimator != "sample_standard_deviation"
             or type(self.lookback_days) is not int
             or self.lookback_days < _MINIMUM_LOOKBACK_DAYS
@@ -658,7 +697,8 @@ class HouseView:
             sorted(self.items, key=lambda item: canonical_instrument_bytes(item.identity))
         )
         if (
-            self.schema_version != 1
+            type(self.schema_version) is not int
+            or self.schema_version != 1
             or not _is_hash(self.run_id)
             or type(self.cycle) is not MarketSession
             or type(self.evidence_cutoff) is not UtcInstant
@@ -707,6 +747,7 @@ class PortfolioConstructionRequest:
     resolutions: tuple[HouseViewResolution, ...]
     inputs: PortfolioInputSet
     policy: BalancedPortfolioPolicy
+    material_event_evidence: tuple[MaterialEventEvidence, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -878,19 +919,21 @@ def _construct_balanced_portfolio(  # noqa: PLR0911,PLR0912,PLR0915 - each refus
         canonical_instrument_bytes(item.identity): item for item in request.inputs.risk_inputs
     }
     if any(
-        any(
-            close.observed_at.value > request.evidence_cutoff.value
-            for close in item.adjusted_closes
-        )
-        or any(
-            event.calendar_available_at.value > request.evidence_cutoff.value
-            or (
-                event.release_available_at is not None
-                and event.release_available_at.value > request.evidence_cutoff.value
-            )
-            for event in item.material_events
-        )
+        close.observed_at.value > request.evidence_cutoff.value
         for item in request.inputs.risk_inputs
+        for close in item.adjusted_closes
+    ):
+        return _refused(request, PortfolioRefusalReason.CONTRADICTORY_INPUT)
+    if any(
+        close.available_at.value > request.evidence_cutoff.value
+        for item in request.inputs.risk_inputs
+        for close in item.adjusted_closes
+    ):
+        return _refused(request, PortfolioRefusalReason.CONTRADICTORY_INPUT)
+    if any(
+        event.calendar_available_at.value > request.evidence_cutoff.value
+        for item in request.inputs.risk_inputs
+        for event in item.material_events
     ):
         return _refused(request, PortfolioRefusalReason.CONTRADICTORY_INPUT)
     if any(
@@ -923,11 +966,24 @@ def _construct_balanced_portfolio(  # noqa: PLR0911,PLR0912,PLR0915 - each refus
         if _exact_product(position.quantity, risk.price) != position.valuation.amount:
             return _refused(request, PortfolioRefusalReason.CONTRADICTORY_INPUT)
         positions[key] = position
+    resolution_positions = {
+        canonical_instrument_bytes(item.identity): item
+        for item in request.resolutions
+        if item.is_position
+    }
+    if set(positions) != set(resolution_positions):
+        return _refused(request, PortfolioRefusalReason.INCOMPLETE_INPUT)
     ordered_resolutions = tuple(
         sorted(request.resolutions, key=lambda item: canonical_instrument_bytes(item.identity))
     )
     items = tuple(
-        _house_view_item(resolution, positions, risk_by_identity)
+        _house_view_item(
+            resolution,
+            positions,
+            risk_by_identity,
+            request.material_event_evidence,
+            request.evidence_cutoff,
+        )
         for resolution in ordered_resolutions
     )
     house_view = HouseView(
@@ -1072,6 +1128,13 @@ def parse_portfolio_construction_result(  # noqa: PLR0911 - reject each hostile 
     )
     if root is None:
         return None
+    if (
+        type(root["schema_version"]),
+        root["schema_version"],
+        type(root["record_kind"]),
+        root["record_kind"],
+    ) != (int, 1, str, "balanced_portfolio_construction"):
+        return None
     policy_id = root["policy_id"]
     input_id = root["input_id"]
     content_hash = root["content_hash"]
@@ -1147,6 +1210,10 @@ def _request_is_valid(request: object) -> bool:
         and type(request.constitution_version) is int
         and request.constitution_version >= 1
         and type(request.resolutions) is tuple
+        and type(request.material_event_evidence) is tuple
+        and all(type(item) is MaterialEventEvidence for item in request.material_event_evidence)
+        and tuple(item.artifact_id for item in request.material_event_evidence)
+        == tuple(sorted({item.artifact_id for item in request.material_event_evidence}))
         and type(request.expected_research_request_ids) is tuple
         and tuple(sorted(set(request.expected_research_request_ids)))
         == request.expected_research_request_ids
@@ -1287,6 +1354,8 @@ def _house_view_item(
     resolution: HouseViewResolution,
     positions: dict[bytes, EquityPosition],
     risks: dict[bytes, PortfolioRiskInput],
+    release_evidence: tuple[MaterialEventEvidence, ...],
+    evidence_cutoff: UtcInstant,
 ) -> HouseViewItem:
     key = canonical_instrument_bytes(resolution.identity)
     risk = risks.get(key)
@@ -1294,7 +1363,10 @@ def _house_view_item(
         resolution.stance in (PortfolioStance.LONG, PortfolioStance.HOLD)
         and key not in positions
         and risk is not None
-        and any(not _event_is_cleared(event, resolution) for event in risk.material_events)
+        and any(
+            not _event_is_cleared(event, resolution, release_evidence, evidence_cutoff)
+            for event in risk.material_events
+        )
     )
     direction_eligible = (
         resolution.eligible_for_new_entry
@@ -1317,15 +1389,23 @@ def _house_view_item(
 def _event_is_cleared(
     event: MaterialEventRisk,
     resolution: HouseViewResolution,
+    release_evidence: tuple[MaterialEventEvidence, ...],
+    evidence_cutoff: UtcInstant,
 ) -> bool:
-    """Require release evidence and the exact current terminal research resolution."""
-    if event.blocks_new_position:
-        return False
-    if event.release_artifact_id not in resolution.evidence_artifact_ids:
-        return False
-    return (
-        event.fresh_research_request_id == resolution.request_id
-        and event.fresh_research_resolution_id == resolution.resolution_id
+    """Require typed release evidence cited by this current terminal resolution."""
+    expected_kind = "issuer_release" if event.event_type == "company_release" else "official_macro"
+    identity = canonical_instrument_bytes(resolution.identity)
+    return any(
+        evidence.artifact_id in resolution.evidence_artifact_ids
+        and evidence.evidence_kind == expected_kind
+        and evidence.source_identity == event.source_identity
+        and evidence.released_at == event.releases_at
+        and evidence.available_at.value <= evidence_cutoff.value
+        and (
+            expected_kind == "official_macro"
+            or identity in {canonical_instrument_bytes(item) for item in evidence.mapped_identities}
+        )
+        for evidence in release_evidence
     )
 
 
@@ -1565,6 +1645,10 @@ def _parse_house_view(value: object) -> HouseView | None:  # noqa: PLR0911,PLR09
     )
     if fields is None:
         return None
+    if type(fields["schema_version"]) is not int:
+        return None
+    if type(fields["constitution_version"]) is not int:
+        return None
     match fields:
         case {
             "schema_version": int() as schema_version,
@@ -1776,7 +1860,13 @@ def _risk_input_payload(item: PortfolioRiskInput) -> dict[str, object]:
         "price": _decimal_text(item.price),
         "price_unit": item.price_unit,
         "adjusted_closes": [
-            {"observed_at": close.observed_at.isoformat(), "price": _decimal_text(close.price)}
+            {
+                "session": close.session.isoformat(),
+                "observed_at": close.observed_at.isoformat(),
+                "available_at": close.available_at.isoformat(),
+                "source_identity": close.source_identity,
+                "price": _decimal_text(close.price),
+            }
             for close in item.adjusted_closes
         ],
         "sector": item.sector,
@@ -1791,14 +1881,6 @@ def _risk_input_payload(item: PortfolioRiskInput) -> dict[str, object]:
                 "releases_at": event.releases_at.isoformat(),
                 "source_identity": event.source_identity,
                 "calendar_available_at": event.calendar_available_at.isoformat(),
-                "release_artifact_id": event.release_artifact_id,
-                "release_available_at": (
-                    None
-                    if event.release_available_at is None
-                    else event.release_available_at.isoformat()
-                ),
-                "fresh_research_request_id": event.fresh_research_request_id,
-                "fresh_research_resolution_id": event.fresh_research_resolution_id,
             }
             for event in item.material_events
         ],
@@ -1823,8 +1905,28 @@ def _input_set_material(  # noqa: PLR0913,PLR0917 - every input authority pin is
         "observed_at": observed_at.isoformat(),
         "available_at": available_at.isoformat(),
         "data_regime": data_regime,
+        "session_calendar_id": _SESSION_CALENDAR_ID,
         "risk_inputs": [_risk_input_payload(item) for item in risk_inputs],
     }
+
+
+def _is_pinned_regular_session(trading_date: date) -> bool:
+    return (
+        trading_date.year == _SESSION_CALENDAR_YEAR
+        and trading_date.weekday() < _WEEKEND_START_DAY
+        and trading_date not in _SESSION_CALENDAR_HOLIDAYS
+    )
+
+
+def _close_sessions_are_consecutive(closes: tuple[AdjustedClose, ...]) -> bool:
+    sessions = tuple(close.session.trading_date for close in closes)
+    for earlier, later in pairwise(sessions):
+        expected = earlier + timedelta(days=1)
+        while expected.year == _SESSION_CALENDAR_YEAR and not _is_pinned_regular_session(expected):
+            expected += timedelta(days=1)
+        if expected != later:
+            return False
+    return True
 
 
 def _input_set_fields_are_valid(  # noqa: PLR0913,PLR0917 - validate every explicit authority pin.
@@ -1852,6 +1954,11 @@ def _input_set_fields_are_valid(  # noqa: PLR0913,PLR0917 - validate every expli
         and bool(data_regime)
         and type(risk_inputs) is tuple
         and all(type(item) is PortfolioRiskInput for item in risk_inputs)
+        and all(
+            close.available_at.value <= available_at.value
+            for risk in risk_inputs
+            for close in risk.adjusted_closes
+        )
         and tuple(canonical_instrument_bytes(item.identity) for item in risk_inputs)
         == tuple(sorted({canonical_instrument_bytes(item.identity) for item in risk_inputs}))
     )

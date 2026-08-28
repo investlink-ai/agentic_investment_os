@@ -24,7 +24,7 @@ from agentic_investment_os.adapters.sqlite_lifecycle import (
     SQLiteLifecycleLedger,
     prepare_runtime_database,
 )
-from agentic_investment_os.application.lifecycle import Advance
+from agentic_investment_os.application.lifecycle import Advance, Status
 from agentic_investment_os.domain.attention import (
     AttentionArtifact,
     AttentionRefusalReason,
@@ -84,7 +84,11 @@ from agentic_investment_os.entrypoints.configuration import (
     ConfigurationRefusalCode,
     ConfigurationSource,
 )
-from agentic_investment_os.entrypoints.lifecycle import SystemClock, configure_advance
+from agentic_investment_os.entrypoints.lifecycle import (
+    SystemClock,
+    configure_advance,
+    configure_status,
+)
 from agentic_investment_os.evidence.capture import EvidencePersistenceError
 from agentic_investment_os.memory.beliefs import (
     BeliefGraphRefusal,
@@ -116,7 +120,7 @@ from tests._universe import (
 
 if TYPE_CHECKING:
     from agentic_investment_os.application.memory import Record
-    from agentic_investment_os.evidence.capture import EvidenceVault
+    from agentic_investment_os.evidence.capture import EvidenceStoredRecord, EvidenceVault
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 SHA256_HEX_LENGTH = 64
@@ -893,6 +897,13 @@ class InterruptingLedger:
         attempt: AdvanceAttempt,
         recorded_at: UtcInstant,
     ) -> LifecycleDecision:
+        if (
+            self.operation == "portfolio_persisted"
+            and self.timing == "before"
+            and isinstance(command, AdvanceCommand)
+            and command.portfolio_construction is not None
+        ):
+            raise SimulatedInterruptionError
         expected_operation = _attempt_operation(command, attempt)
         if self.operation == expected_operation and self.timing == "before":
             raise SimulatedInterruptionError
@@ -936,6 +947,25 @@ class OneDecisionLedger:
 class _FailingProductionEvidenceVault:
     def stored_records_for_artifacts(self, _artifact_ids: tuple[str, ...]) -> Never:
         raise EvidencePersistenceError(SIMULATED_INVALID_PRODUCTION_EVIDENCE)
+
+
+@dataclass(frozen=True, slots=True)
+class _MissingReleaseTimeEvidenceVault:
+    delegate: EvidenceVault
+
+    def stored_records_for_artifacts(
+        self,
+        artifact_ids: tuple[str, ...],
+    ) -> tuple[EvidenceStoredRecord, ...]:
+        records = deepcopy(self.delegate.stored_records_for_artifacts(artifact_ids))
+        official = next(
+            record
+            for record in records
+            if record.artifact.kind.value in ("issuer_release", "official_macro")
+        )
+        object.__setattr__(official.artifact, "published_at", None)
+        object.__setattr__(official.artifact, "source_event_at", None)
+        return records
 
 
 @dataclass(frozen=True, slots=True)
@@ -1392,6 +1422,7 @@ class _LifecycleReferenceModel:
                 identity.portfolio_policy_hash,
                 identity.portfolio_input_hash,
                 ("6" * SHA256_HEX_LENGTH,),
+                UtcInstant.from_datetime(RECORDED_AT),
             ),
             None,
         )
@@ -1646,6 +1677,57 @@ def test_advance_rejects_invalid_production_context_material(
                 mode="champion",
                 idempotency_key="invalid-production-context",
             )
+
+
+@pytest.mark.parametrize("corruption", ["vault", "release_time"])
+def test_portfolio_construction_rejects_invalid_current_evidence_provenance(
+    tmp_path: Path,
+    corruption: str,
+) -> None:
+    state_root = tmp_path / "runtime"
+    capability = _configure(state_root)
+    receipt = capability(
+        cycle=_cycle_payload("2026-08-21"),
+        mode="champion",
+        idempotency_key="invalid-portfolio-evidence",
+    )
+    assert receipt.pinned_run_identity is not None
+    assert receipt.dossier_checkpoint is not None
+    assert receipt.research_checkpoint is not None
+    assert receipt.memory_checkpoint is not None
+    assert receipt.attention_artifact is not None
+    decision = PerformPortfolioConstruction(
+        receipt.pinned_run_identity,
+        receipt.dossier_checkpoint,
+        receipt.research_checkpoint,
+        receipt.memory_checkpoint,
+        receipt.attention_artifact,
+        receipt.no_action_reason,
+    )
+    invalid = replace(capability, ledger=OneDecisionLedger(decision))
+    if corruption == "vault":
+        invalid = replace(
+            invalid,
+            evidence_vault=cast("EvidenceVault", _FailingProductionEvidenceVault()),
+        )
+    else:
+        invalid = replace(
+            invalid,
+            evidence_vault=cast(
+                "EvidenceVault",
+                _MissingReleaseTimeEvidenceVault(capability.evidence_vault),
+            ),
+        )
+
+    with pytest.raises(
+        InvalidLifecycleStateError,
+        match="lifecycle ledger returned an incomplete checkpoint result",
+    ):
+        invalid(
+            cycle=_cycle_payload("2026-08-21"),
+            mode="champion",
+            idempotency_key="invalid-portfolio-evidence",
+        )
 
 
 def _events(database: Path) -> list[tuple[str, str | None]]:
@@ -1959,6 +2041,54 @@ def test_fresh_process_resumes_at_every_universe_snapshot_write_boundary(
     assert recovery == expected_recovery.value
     assert len(run_id) == SHA256_HEX_LENGTH
     assert len(_events(database)) == PINNED_EVENT_COUNT
+
+
+def test_portfolio_retry_preserves_the_original_durable_timestamp_across_reopen(
+    tmp_path: Path,
+) -> None:
+    state_root = tmp_path / "runtime"
+    first_time = RECORDED_AT
+    resumed_time = RECORDED_AT + timedelta(seconds=1)
+    capability = _configure(state_root, clock=FixedClock(first_time))
+    ledger = capability.ledger
+    assert isinstance(ledger, SQLiteLifecycleLedger)
+    interrupted = replace(
+        capability,
+        ledger=InterruptingLedger(ledger, "portfolio_persisted", "before"),
+    )
+    cycle = _cycle_payload("2026-08-21")
+
+    with pytest.raises(SimulatedInterruptionError):
+        interrupted(
+            cycle=cycle,
+            mode="champion",
+            idempotency_key="portfolio-timestamp-retry",
+        )
+
+    database = state_root / "lifecycle.sqlite3"
+    with sqlite3.connect(database) as connection:
+        durable_row = connection.execute(
+            "SELECT recorded_at FROM portfolio_constructions"
+        ).fetchone()
+    assert durable_row == (UtcInstant.from_datetime(first_time).isoformat(),)
+    assert len(_events(database)) == PINNED_EVENT_COUNT - 1
+
+    resumed = _configure(state_root, clock=FixedClock(resumed_time))(
+        cycle=cycle,
+        mode="champion",
+        idempotency_key="portfolio-timestamp-retry",
+    )
+
+    assert resumed.disposition is AdvanceDisposition.ADVANCED
+    assert resumed.recovery is AdvanceRecovery.RESUMED
+    assert resumed.portfolio_checkpoint is not None
+    assert resumed.portfolio_checkpoint.recorded_at == UtcInstant.from_datetime(first_time)
+    status = configure_status(
+        (ConfigurationSource("test", runtime_configuration(state_root)),),
+        repository_root=REPOSITORY_ROOT,
+    )
+    assert isinstance(status, Status)
+    assert status().portfolio_checkpoint == resumed.portfolio_checkpoint
 
 
 def test_attention_retry_keeps_selection_identity_when_publication_time_changes(
@@ -3629,6 +3759,7 @@ def test_lifecycle_ledger_appends_generic_checkpoint_records(  # noqa: PLR0915
         identity.portfolio_policy_hash,
         identity.portfolio_input_hash,
         ("6" * SHA256_HEX_LENGTH,),
+        now,
     )
     command = AdvanceCommand(request, identity, snapshot, typed_portfolio_inputs())
     attempt = AdvanceAttempt()

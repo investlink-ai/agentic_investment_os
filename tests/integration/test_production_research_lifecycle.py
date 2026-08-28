@@ -55,6 +55,7 @@ from agentic_investment_os.memory.beliefs import (
     RecordReceipt,
 )
 from agentic_investment_os.portfolio.construction import (
+    PortfolioRefusalReason,
     PortfolioTradeReason,
     construct_balanced_portfolio,
     parse_portfolio_construction_result,
@@ -77,6 +78,7 @@ from agentic_investment_os.research.resolution import (
     parse_skeptic_result,
     parse_thesis,
 )
+from tests._evidence import recorded_official_evidence
 from tests._governance import RecordedSessionEligibility
 from tests._portfolio import recorded_portfolio_inputs
 from tests._production_research import (
@@ -102,6 +104,8 @@ from tests._universe import (
     reseal_recorded_snapshot,
     runtime_configuration,
 )
+
+type _EventClearanceCase = tuple[str, str, str, str, str | None, bool]
 
 if TYPE_CHECKING:
     from agentic_investment_os.application.memory import Record
@@ -144,6 +148,7 @@ class _AdvancingClock:
 @dataclass(slots=True)
 class _ValidProductionModel:
     unique_effect_count: int = 0
+    preferred_evidence_discriminator: str | None = None
 
     def call(self, request: ModelCallRequest) -> ModelCallResponse:
         self.unique_effect_count += 1
@@ -152,10 +157,22 @@ class _ValidProductionModel:
         evidence = model_input["evidence"]
         assert isinstance(evidence, list)
         assert evidence
-        first_evidence = evidence[0]
-        assert isinstance(first_evidence, dict)
-        artifact_id = first_evidence["artifact_id"]
-        available_at = first_evidence["available_at"]
+        selected_evidence = evidence[0]
+        if self.preferred_evidence_discriminator is not None:
+            selected_evidence = next(
+                (
+                    item
+                    for item in evidence
+                    if isinstance(item, dict)
+                    and isinstance(item.get("provenance"), dict)
+                    and item["provenance"].get("payload_discriminator")
+                    == self.preferred_evidence_discriminator
+                ),
+                selected_evidence,
+            )
+        assert isinstance(selected_evidence, dict)
+        artifact_id = selected_evidence["artifact_id"]
+        available_at = selected_evidence["available_at"]
         subject = model_input["subject"]
         assert isinstance(artifact_id, str)
         assert isinstance(available_at, str)
@@ -546,14 +563,22 @@ def _configuration(state_root: Path) -> dict[str, object]:
     return {**runtime_configuration(state_root), "research_policy": _research_policy()}
 
 
+@dataclass(frozen=True, slots=True)
+class _RecordedInputOverrides:
+    portfolio: dict[str, object] | None = None
+    official_evidence: object | None = None
+
+
 def _configure(
     state_root: Path,
     *,
     universe: dict[str, object],
     model: ResearchRoleModel,
     clock: _FixedClock | _ClockAt | _AdvancingClock | None = None,
-    portfolio: dict[str, object] | None = None,
+    overrides: _RecordedInputOverrides | None = None,
 ) -> Advance:
+    portfolio = None if overrides is None else overrides.portfolio
+    official_evidence = None if overrides is None else overrides.official_evidence
     universe_inputs = RecordedUniverseSource(universe).load()
     assert not isinstance(universe_inputs, UniverseRefusal)
     capability = configure_advance(
@@ -566,7 +591,11 @@ def _configure(
             else portfolio
         ),
         recorded_evidence=production_recorded_evidence(),
-        recorded_official_evidence=production_recorded_official_evidence(),
+        recorded_official_evidence=(
+            production_recorded_official_evidence()
+            if official_evidence is None
+            else official_evidence
+        ),
         recorded_model=model,
         session_eligibility=RecordedSessionEligibility(),
         clock=_FixedClock() if clock is None else clock,
@@ -617,6 +646,18 @@ def test_advance_constructs_and_status_rebuilds_one_portfolio_checkpoint(
     assert result is not None
     assert receipt.pinned_run_identity is not None
     ledger = SQLitePortfolioLedger.open_existing(state_root / "lifecycle.sqlite3")
+    mismatched_run_id = "f" * 64
+    with pytest.raises(InvalidLifecycleStateError, match="durable portfolio construction"):
+        ledger.record(
+            mismatched_run_id,
+            result,
+            receipt.pinned_run_identity.evidence_cutoff,
+        )
+    with sqlite3.connect(state_root / "lifecycle.sqlite3") as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM portfolio_constructions WHERE run_id = ?",
+            (mismatched_run_id,),
+        ).fetchone() == (0,)
     assert (
         ledger.record(
             row[0],
@@ -638,17 +679,20 @@ def test_advance_constructs_and_status_rebuilds_one_portfolio_checkpoint(
                 PortfolioCheckpointReference(
                     row[0],
                     replace(receipt.portfolio_checkpoint, result_id="f" * 64),
-                    receipt.recorded_at,
+                    receipt.portfolio_checkpoint.recorded_at,
                 ),
             )
         )
+    changed_recorded_at = UtcInstant.from_datetime(
+        receipt.recorded_at.value + timedelta(microseconds=1)
+    )
     with pytest.raises(InvalidLifecycleStateError, match="durable portfolio construction"):
         ledger.validate_history(
             (
                 PortfolioCheckpointReference(
                     row[0],
-                    receipt.portfolio_checkpoint,
-                    UtcInstant.from_datetime(receipt.recorded_at.value + timedelta(microseconds=1)),
+                    replace(receipt.portfolio_checkpoint, recorded_at=changed_recorded_at),
+                    changed_recorded_at,
                 ),
             )
         )
@@ -691,10 +735,6 @@ def test_advance_and_status_persist_in_band_event_block_and_hard_risk_outcomes(
             "releases_at": "2026-08-22T20:00:00.000000+00:00",
             "source_identity": "issuer-calendar-v1",
             "calendar_available_at": "2026-08-21T19:40:00.000000+00:00",
-            "release_artifact_id": None,
-            "release_available_at": None,
-            "fresh_research_request_id": None,
-            "fresh_research_resolution_id": None,
         }
     ]
     scenarios.append(
@@ -718,14 +758,11 @@ def test_advance_and_status_persist_in_band_event_block_and_hard_risk_outcomes(
     hard_risk_portfolio["cash"] = "1000"
     holding_risk = _portfolio_risk(hard_risk_portfolio, "equity-hold")
     holding_risk["price"] = "3000"
+    holding_closes = holding_risk["adjusted_closes"]
+    assert isinstance(holding_closes, list)
     holding_risk["adjusted_closes"] = [
-        {
-            "observed_at": (
-                datetime(2026, 8, 21, 20, tzinfo=UTC) - timedelta(days=21 - index)
-            ).isoformat(timespec="microseconds"),
-            "price": str(2980 + index),
-        }
-        for index in range(21)
+        {**mutable_mapping(close), "price": str(2980 + index)}
+        for index, close in enumerate(holding_closes)
     ]
     scenarios.append(
         (
@@ -763,7 +800,7 @@ def test_advance_and_status_persist_in_band_event_block_and_hard_risk_outcomes(
             state_root,
             universe=universe,
             model=model,
-            portfolio=portfolio,
+            overrides=_RecordedInputOverrides(portfolio=portfolio),
         )
 
         receipt = _advance(capability, f"portfolio-{name}")
@@ -784,6 +821,122 @@ def test_advance_and_status_persist_in_band_event_block_and_hard_risk_outcomes(
             name,
             tuple((band.identity.catalog_id, band.trade_reason) for band in result.target_bands),
         )
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        (
+            "company_release",
+            "issuer-release-1",
+            "2026-08-21T18:10:00.000000+00:00",
+            "issuer_release_evidence",
+            None,
+            False,
+        ),
+        (
+            "macro_release",
+            "fed-release-1",
+            "2026-08-21T16:00:00.000000+00:00",
+            "official_macro_evidence",
+            "schedule",
+            True,
+        ),
+    ],
+)
+def test_advance_requires_a_typed_release_and_current_citation_to_clear_an_event(
+    tmp_path: Path,
+    case: _EventClearanceCase,
+) -> None:
+    (
+        event_type,
+        source_identity,
+        releases_at,
+        preferred_evidence_discriminator,
+        macro_artifact_type,
+        expected_blocked,
+    ) = case
+    universe = recorded_universe()
+    positions = mutable_mapping(universe["positions"])
+    mutable_mapping(positions["payload"])["items"] = []
+    reseal_recorded_snapshot(universe, "positions")
+    portfolio = _portfolio_payload(universe)
+    _portfolio_risk(portfolio, "equity-aapl")["material_events"] = [
+        {
+            "event_id": "aapl-issuer-release",
+            "event_type": event_type,
+            "releases_at": releases_at,
+            "source_identity": source_identity,
+            "calendar_available_at": "2026-08-21T17:00:00.000000+00:00",
+        }
+    ]
+    state_root = tmp_path / "state"
+    official_evidence = recorded_official_evidence()
+    if macro_artifact_type is not None:
+        official_items = mutable_mapping_list(official_evidence["items"])
+        macro_content = mutable_mapping(official_items[2]["content"])
+        macro_content["artifact_type"] = macro_artifact_type
+    discovery_universe = deepcopy(universe)
+    discovery_positions = mutable_mapping(discovery_universe["positions"])
+    mutable_mapping(discovery_positions["payload"])["items"] = []
+    reseal_recorded_snapshot(discovery_universe, "positions")
+    discovery_instruments = mutable_mapping(discovery_universe["instruments"])
+    discovery_instrument_items = mutable_mapping_list(
+        mutable_mapping(discovery_instruments["payload"])["items"]
+    )
+    discovery_instrument_items[:] = [
+        item
+        for item in discovery_instrument_items
+        if mutable_mapping(item["identity"])["catalog_id"] != "equity-spy"
+    ]
+    reseal_recorded_snapshot(discovery_universe, "instruments")
+    for day in (19, 20):
+        discovery = _configure(
+            state_root,
+            universe=discovery_universe,
+            overrides=_RecordedInputOverrides(official_evidence=official_evidence),
+            model=_ValidProductionModel(),
+        )
+        assert (
+            _advance_on(discovery, f"typed-release-discovery-{day}", date(2026, 8, day)).disposition
+            is AdvanceDisposition.NO_ACTION
+        )
+    capability = _configure(
+        state_root,
+        universe=universe,
+        overrides=_RecordedInputOverrides(
+            portfolio=portfolio,
+            official_evidence=official_evidence,
+        ),
+        model=_ValidProductionModel(
+            preferred_evidence_discriminator=preferred_evidence_discriminator
+        ),
+    )
+
+    receipt = _advance(capability, "typed-released-event")
+
+    assert receipt.disposition is AdvanceDisposition.ADVANCED
+    assert receipt.pinned_run_identity is not None
+    with sqlite3.connect(state_root / "lifecycle.sqlite3") as connection:
+        row = connection.execute(
+            "SELECT result_json FROM portfolio_constructions WHERE run_id = ?",
+            (receipt.pinned_run_identity.run_id,),
+        ).fetchone()
+    assert row is not None
+    result = parse_portfolio_construction_result(json.loads(row[0]))
+    assert result is not None
+    assert result.house_view is not None
+    aapl = next(
+        item for item in result.house_view.items if item.identity.catalog_id == "equity-aapl"
+    )
+    assert aapl.event_blocked is expected_blocked
+    trade_reason = next(
+        band for band in result.target_bands if band.identity.catalog_id == "equity-aapl"
+    ).trade_reason
+    if expected_blocked:
+        assert trade_reason is PortfolioTradeReason.EVENT_BLOCKED
+    else:
+        assert trade_reason is not PortfolioTradeReason.EVENT_BLOCKED
 
 
 def test_advance_never_constructs_from_a_disabled_asset_holding(tmp_path: Path) -> None:
@@ -827,7 +980,9 @@ def test_portfolio_refusal_rows_cannot_substitute_across_runs(tmp_path: Path) ->
     first_run = "a" * 64
     second_run = "b" * 64
     checkpoint = ledger.record(first_run, result, first_time)
-    assert ledger.record(second_run, result, second_time) == checkpoint
+    second_checkpoint = ledger.record(second_run, result, second_time)
+    assert second_checkpoint.recorded_at == second_time
+    assert second_checkpoint != checkpoint
 
     with sqlite3.connect(state_root / "lifecycle.sqlite3") as connection, connection:
         connection.execute("DROP TRIGGER portfolio_constructions_are_append_only_delete")
@@ -1490,10 +1645,9 @@ def test_skeptic_rejection_is_durable_no_action_without_memory(tmp_path: Path) -
     assert row is not None
     result = parse_portfolio_construction_result(json.loads(row[0]))
     assert result is not None
-    assert result.refusal is None
-    assert result.house_view is not None
-    assert result.house_view.items == ()
-    assert result.targets == ()
+    assert result.refusal is PortfolioRefusalReason.INCOMPLETE_INPUT
+    assert result.house_view is None
+    assert result.target_bands == ()
     assert result.cash_weight == 1
 
 

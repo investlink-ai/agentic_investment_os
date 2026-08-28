@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from datetime import date
 from decimal import Decimal
 from typing import TYPE_CHECKING, TypeGuard
 
 from agentic_investment_os.domain.identity import (
     EquityInstrumentIdentity,
+    MarketSession,
     parse_instrument_identity,
 )
 from agentic_investment_os.domain.temporal import InvalidUtcInstantError, UtcInstant
@@ -36,6 +38,7 @@ _ROOT_FIELDS = frozenset(
         "position_snapshot_hash",
         "cash",
         "cash_currency",
+        "session_calendar_id",
         "risk_inputs",
     }
 )
@@ -53,22 +56,11 @@ _RISK_FIELDS = frozenset(
         "material_events",
     }
 )
-_CLOSE_FIELDS = frozenset({"observed_at", "price"})
+_CLOSE_FIELDS = frozenset({"session", "observed_at", "available_at", "source_identity", "price"})
 _EVENT_FIELDS = frozenset(
-    {
-        "event_id",
-        "event_type",
-        "releases_at",
-        "source_identity",
-        "calendar_available_at",
-        "release_artifact_id",
-        "release_available_at",
-        "fresh_research_request_id",
-        "fresh_research_resolution_id",
-    }
+    {"event_id", "event_type", "releases_at", "source_identity", "calendar_available_at"}
 )
 _BOUNDED_ID = re.compile(r"[a-z0-9][a-z0-9._/-]{0,127}")
-_SHA256 = re.compile(r"[0-9a-f]{64}")
 _PLAIN_DECIMAL = re.compile(r"(?:0|[1-9][0-9]*)(?:\.[0-9]+)?")
 _MAXIMUM_RISK_INPUTS = 100
 _MINIMUM_ADJUSTED_CLOSES = 3
@@ -92,12 +84,14 @@ class RecordedPortfolioSource:
         if root["position_snapshot_hash"] != position_snapshot.fingerprint:
             return PortfolioRefusalReason.CONTRADICTORY_INPUT
         if (
-            root["schema_version"] != 1
+            type(root["schema_version"]) is not int
+            or root["schema_version"] != 1
             or root["record_kind"] != "portfolio_input_set"
             or type(root["data_regime"]) is not str
             or root["data_regime"] != position_snapshot.data_regime
             or not _is_bounded_id(root["source_identity"])
             or root["cash_currency"] != "USD"
+            or root["session_calendar_id"] != "xnys-regular-2026a"
             or type(root["risk_inputs"]) is not list
             or not 1 <= len(root["risk_inputs"]) <= _MAXIMUM_RISK_INPUTS
         ):
@@ -177,11 +171,22 @@ def _adjusted_close(value: object) -> AdjustedClose | None:
     fields = _mapping(value, _CLOSE_FIELDS)
     if fields is None:
         return None
+    session = _market_session(fields["session"])
     instant = _instant(fields["observed_at"])
+    available_at = _instant(fields["available_at"])
     price = _decimal(fields["price"], allow_zero=False)
-    if instant is None or price is None:
+    if (
+        session is None
+        or instant is None
+        or available_at is None
+        or not _is_bounded_id(fields["source_identity"])
+        or price is None
+    ):
         return None
-    return AdjustedClose(instant, price)
+    try:
+        return AdjustedClose(session, instant, available_at, fields["source_identity"], price)
+    except ValueError:
+        return None
 
 
 def _material_event(value: object) -> MaterialEventRisk | None:
@@ -190,24 +195,12 @@ def _material_event(value: object) -> MaterialEventRisk | None:
         return None
     releases_at = _instant(fields["releases_at"])
     calendar_available_at = _instant(fields["calendar_available_at"])
-    release_available_at = (
-        None if fields["release_available_at"] is None else _instant(fields["release_available_at"])
-    )
-    release_valid, release_artifact_id = _optional_sha256(fields["release_artifact_id"])
-    request_valid, fresh_research_request_id = _optional_sha256(fields["fresh_research_request_id"])
-    resolution_valid, fresh_research_resolution_id = _optional_sha256(
-        fields["fresh_research_resolution_id"]
-    )
     if (
         not _is_bounded_id(fields["event_id"])
         or not _is_bounded_id(fields["source_identity"])
         or type(fields["event_type"]) is not str
         or releases_at is None
         or calendar_available_at is None
-        or not release_valid
-        or not request_valid
-        or not resolution_valid
-        or (fields["release_available_at"] is not None and release_available_at is None)
     ):
         return None
     try:
@@ -217,10 +210,6 @@ def _material_event(value: object) -> MaterialEventRisk | None:
             releases_at,
             fields["source_identity"],
             calendar_available_at,
-            release_artifact_id,
-            release_available_at,
-            fresh_research_request_id,
-            fresh_research_resolution_id,
         )
     except (TypeError, ValueError):
         return None
@@ -243,6 +232,15 @@ def _instant(value: object) -> UtcInstant | None:
         return None
 
 
+def _market_session(value: object) -> MarketSession | None:
+    if type(value) is not str:
+        return None
+    try:
+        return MarketSession(date.fromisoformat(value))
+    except ValueError:
+        return None
+
+
 def _decimal(value: object, *, allow_zero: bool) -> Decimal | None:
     if (
         type(value) is not str
@@ -261,11 +259,3 @@ def _decimal(value: object, *, allow_zero: bool) -> Decimal | None:
 
 def _is_bounded_id(value: object) -> TypeGuard[str]:
     return type(value) is str and _BOUNDED_ID.fullmatch(value) is not None
-
-
-def _optional_sha256(value: object) -> tuple[bool, str | None]:
-    if value is None:
-        return True, None
-    if type(value) is str and _SHA256.fullmatch(value) is not None:
-        return True, value
-    return False, None

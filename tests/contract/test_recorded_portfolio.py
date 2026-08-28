@@ -23,6 +23,7 @@ def test_recorded_portfolio_source_validates_complete_canonical_as_of_inputs() -
     assert isinstance(loaded, PortfolioInputSet)
     assert loaded.position_snapshot is position_snapshot
     assert loaded.cash_currency == "USD"
+    assert loaded.session_calendar_id == "xnys-regular-2026a"
     assert len(loaded.risk_inputs) == _EXPECTED_RISK_INPUTS
     assert len(loaded.input_id) == _HASH_LENGTH
 
@@ -33,6 +34,8 @@ def test_recorded_portfolio_source_refuses_noncanonical_or_mismatched_material()
     noncanonical["cash"] = "1e5"
     mismatched = deepcopy(recorded_portfolio_inputs(position_snapshot))
     mismatched["position_snapshot_hash"] = "f" * 64
+    boolean_schema = deepcopy(recorded_portfolio_inputs(position_snapshot))
+    boolean_schema["schema_version"] = True
 
     assert (
         RecordedPortfolioSource(noncanonical).load(position_snapshot)
@@ -41,6 +44,10 @@ def test_recorded_portfolio_source_refuses_noncanonical_or_mismatched_material()
     assert (
         RecordedPortfolioSource(mismatched).load(position_snapshot)
         is PortfolioRefusalReason.CONTRADICTORY_INPUT
+    )
+    assert (
+        RecordedPortfolioSource(boolean_schema).load(position_snapshot)
+        is PortfolioRefusalReason.INVALID_REQUEST
     )
 
 
@@ -129,10 +136,20 @@ def test_recorded_portfolio_source_rejects_contradictory_typed_material() -> Non
     _closes(duplicate_close)[1] = deepcopy(_closes(duplicate_close)[0])
     backwards_availability = deepcopy(payload)
     backwards_availability["available_at"] = "2026-08-21T19:00:00.000000+00:00"
+    gapped_history = deepcopy(payload)
+    del _closes(gapped_history)[5]
+    holiday_history = deepcopy(payload)
+    holiday_close = _closes(holiday_history)[0]
+    holiday_close["session"] = "2026-09-07"
+    holiday_close["observed_at"] = "2026-09-07T20:00:00.000000+00:00"
+    holiday_close["available_at"] = "2026-09-07T20:01:00.000000+00:00"
+    wrong_calendar = deepcopy(payload)
+    wrong_calendar["session_calendar_id"] = "weekday-calendar-v1"
 
-    assert (
-        RecordedPortfolioSource(duplicate_close).load(position_snapshot)
+    assert all(
+        RecordedPortfolioSource(item).load(position_snapshot)
         is PortfolioRefusalReason.INVALID_REQUEST
+        for item in (duplicate_close, gapped_history, holiday_history, wrong_calendar)
     )
     assert all(
         RecordedPortfolioSource(item).load(position_snapshot)
@@ -151,10 +168,6 @@ def test_recorded_portfolio_source_admits_a_complete_fresh_event_record() -> Non
             "releases_at": "2026-08-20T20:00:00.000000+00:00",
             "source_identity": "issuer-calendar-v1",
             "calendar_available_at": "2026-08-19T19:40:00.000000+00:00",
-            "release_artifact_id": "a" * 64,
-            "release_available_at": "2026-08-20T20:01:00.000000+00:00",
-            "fresh_research_request_id": "b" * 64,
-            "fresh_research_resolution_id": "c" * 64,
         }
     ]
 
@@ -162,7 +175,7 @@ def test_recorded_portfolio_source_admits_a_complete_fresh_event_record() -> Non
 
     assert isinstance(loaded, PortfolioInputSet)
     assert len(loaded.risk_inputs[0].material_events) == 1
-    assert loaded.risk_inputs[0].material_events[0].blocks_new_position is False
+    assert loaded.risk_inputs[0].material_events[0].source_identity == "issuer-calendar-v1"
 
 
 def _risk_items(payload: dict[str, object]) -> list[dict[str, object]]:

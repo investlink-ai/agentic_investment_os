@@ -27,6 +27,7 @@ from agentic_investment_os.portfolio.construction import (
     AdjustedClose,
     BalancedPortfolioPolicy,
     HouseViewResolution,
+    MaterialEventEvidence,
     MaterialEventRisk,
     PortfolioConstructionRequest,
     PortfolioInputSet,
@@ -157,6 +158,9 @@ def test_balanced_policy_parser_requires_the_complete_approved_risk_envelope() -
 
     assert BalancedPortfolioPolicy.parse(payload) == _policy()
     assert BalancedPortfolioPolicy.parse({**payload, "maximum_gross_weight": "0.81"}) is None
+    assert BalancedPortfolioPolicy.parse({**payload, "schema_version": True}) is None
+    with pytest.raises(ValueError, match="Balanced portfolio policy"):
+        replace(_policy(), schema_version=True)
 
 
 def test_v0_policy_cannot_exceed_its_approved_clamp_envelope() -> None:
@@ -233,19 +237,21 @@ def test_pending_material_event_blocks_only_a_new_position(
     assert result.target_bands[0].trade_reason.value == "event_blocked"
 
 
-def test_future_release_cannot_self_certify_capture_and_fresh_research() -> None:
-    with pytest.raises(ValueError, match="material event risk"):
-        MaterialEventRisk(
-            event_id="aapl-earnings-2026q3",
-            event_type="company_release",
-            releases_at=UtcInstant.from_datetime(_CUTOFF.value + timedelta(days=1)),
-            source_identity="issuer-calendar-v1",
-            calendar_available_at=_CUTOFF,
-            release_artifact_id=_HASH_A,
-            release_available_at=_CUTOFF,
-            fresh_research_request_id=_HASH_A,
-            fresh_research_resolution_id=_HASH_A,
-        )
+def test_a_bare_cited_artifact_id_cannot_masquerade_as_official_release_evidence() -> None:
+    event = MaterialEventRisk(
+        event_id="aapl-earnings-2026q3",
+        event_type="company_release",
+        releases_at=UtcInstant.from_datetime(_CUTOFF.value - timedelta(hours=1)),
+        source_identity="issuer-release-1",
+        calendar_available_at=UtcInstant.from_datetime(_CUTOFF.value - timedelta(days=1)),
+    )
+    risk = replace(_risk_input(_AAPL, "technology"), material_events=(event,))
+    resolution = replace(_resolution(_AAPL, _HASH_A), evidence_artifact_ids=(_HASH_A,))
+
+    result = construct_balanced_portfolio(_request((resolution,), inputs=_inputs_for((risk,))))
+
+    assert result.house_view is not None
+    assert result.house_view.items[0].event_blocked is True
 
 
 def test_portfolio_result_round_trips_only_through_its_canonical_hashed_envelope() -> None:
@@ -273,6 +279,22 @@ def test_portfolio_result_round_trips_only_through_its_canonical_hashed_envelope
     assert parse_portfolio_construction_result({**payload, "cash_weight": "0.99"}) is None
 
 
+@pytest.mark.parametrize("location", ["root", "house_view", "constitution"])
+def test_portfolio_result_rejects_boolean_integer_schema_fields(location: str) -> None:
+    payload = construct_balanced_portfolio(_request((_resolution(_AAPL, _HASH_A),))).to_payload()
+    if location == "root":
+        payload["schema_version"] = True
+    else:
+        house = _house_view_payload(payload)
+        house["schema_version" if location == "house_view" else "constitution_version"] = True
+        house_material = {key: value for key, value in house.items() if key != "house_view_id"}
+        house["house_view_id"] = _test_content_hash(house_material)
+    material = {key: value for key, value in payload.items() if key != "content_hash"}
+    payload["content_hash"] = _test_content_hash(material)
+
+    assert parse_portfolio_construction_result(payload) is None
+
+
 @pytest.mark.parametrize("corruption", ["policy_binding", "target_weight", "target_identity"])
 def test_hostile_resealed_result_must_bind_every_component(corruption: str) -> None:
     payload = construct_balanced_portfolio(_request((_resolution(_AAPL, _HASH_A),))).to_payload()
@@ -297,14 +319,14 @@ def test_canonical_portfolio_material_has_stable_content_identities() -> None:
     policy = _policy()
     result = construct_balanced_portfolio(_request((_resolution(_AAPL, _HASH_A),)))
 
-    assert inputs.input_id == "0ad54545d8394f11c3730999d7fad2ae76b9e2517ce0f728674cd7edf6ec0619"
+    assert inputs.input_id == "98e69eac483ad140d159dc53d0df78b0d4384a2ec346feee9117250b373a3662"
     assert policy.policy_id == "3152f4e63b33ef63f7a0d6298dc33942b91b351560c83ad526ebce36c27533f7"
     assert result.house_view is not None
     assert (
         result.house_view.house_view_id
-        == "00a2c96a1d5fd25a66838b8edcc30dfd912b64c5cc1df6aa6170e30550667f95"
+        == "c542176233606aa778fa1d243311980d8e879b82c205a06da3492e409d3ab7cf"
     )
-    assert result.content_hash == "a8b3d03849e09ca91d3344cd7799bfa26f2d78c239b1743edb45de8f395caef9"
+    assert result.content_hash == "3da26afef8e9acc943925e1567f2c69c2df49c5dd2cfebeb670ca8794c7e0e34"
     assert (
         result.target_bands[0].target_band_id
         == "19bb8f2b0c9c37e13cc7909e77abe8bcc936d9c85d926319c46d035d577d2d3f"
@@ -337,7 +359,7 @@ def test_material_event_fields_are_bound_into_the_canonical_input_identity() -> 
     )
 
     assert (
-        event_inputs.input_id == "766fae5a8728ea7e8df3ad408cb9c92b978f303bffdf924688b94b6328588a0e"
+        event_inputs.input_id == "61d818e08507c5c357ca0bed888cd18fd0cb1f34a48766e456a8f442bf6e9e04"
     )
 
 
@@ -347,7 +369,7 @@ def test_refusal_round_trips_with_a_stable_canonical_identity() -> None:
     result = construct_balanced_portfolio(request)
 
     assert result.refusal is PortfolioRefusalReason.INVALID_REQUEST
-    assert result.content_hash == "fbaca8d4d262e419e4cd4dff103f0067dfe1308a86c5425ad6d8a13ad03fd3b7"
+    assert result.content_hash == "36b6b689568d2332b8febcedb5c29a50b847290205a84d65397e8a04aa2b785d"
     assert parse_portfolio_construction_result(result.to_payload()) == result
 
 
@@ -359,6 +381,25 @@ def test_missing_terminal_resolution_and_lab_authority_fail_closed() -> None:
 
     assert construct_balanced_portfolio(missing).refusal is PortfolioRefusalReason.INCOMPLETE_INPUT
     assert construct_balanced_portfolio(lab).refusal is PortfolioRefusalReason.AUTHORITY_VIOLATION
+
+
+def test_every_held_position_requires_one_position_marked_terminal_resolution() -> None:
+    held_without_resolution = _request(
+        (),
+        expected=(),
+        inputs=_inputs_with_position(Decimal("0.50")),
+    )
+    mixed = _request(
+        (_resolution(_SPY, _HASH_A),),
+        expected=(_HASH_A,),
+        inputs=_inputs_with_position(Decimal("0.50")),
+    )
+
+    assert (
+        construct_balanced_portfolio(held_without_resolution).refusal
+        is PortfolioRefusalReason.INCOMPLETE_INPUT
+    )
+    assert construct_balanced_portfolio(mixed).refusal is PortfolioRefusalReason.INCOMPLETE_INPUT
 
 
 def test_empty_terminal_resolution_set_returns_full_cash_without_targets() -> None:
@@ -569,7 +610,7 @@ def test_inverse_volatility_estimator_has_an_exact_hand_oracle_and_lookback() ->
         _resolution(identity, _hash(f"request-{index}"))
         for index, identity in enumerate(identities)
     )
-    extra_old_close = AdjustedClose(_days_before_cutoff(4), Decimal(1000))
+    extra_old_close = _close(_days_before_cutoff(4), Decimal(1000))
     changed_old_close = replace(extra_old_close, price=Decimal(1))
     with_first_history = (
         replace(risks[0], adjusted_closes=(extra_old_close, *risks[0].adjusted_closes)),
@@ -620,7 +661,7 @@ def test_sample_variance_divisor_changes_a_three_return_allocation() -> None:
         replace(
             risk,
             adjusted_closes=(
-                AdjustedClose(_days_before_cutoff(4), Decimal(95 + index)),
+                _close(_days_before_cutoff(4), Decimal(95 + index)),
                 *risk.adjusted_closes,
             ),
         )
@@ -666,6 +707,29 @@ def test_sector_common_cause_correlation_and_liquidity_clamps_leave_cash() -> No
     assert sum((item.target_weight for item in result.targets), Decimal(0)) <= Decimal("0.25")
     assert result.targets[0].target_weight <= Decimal("0.01")
     assert result.cash_weight >= Decimal("0.75")
+
+
+@pytest.mark.parametrize("shared_group", ["sector", "common", "cluster"])
+def test_each_group_clamp_has_an_exact_hand_calculated_oracle(shared_group: str) -> None:
+    identities = tuple(_identity(index) for index in range(4))
+    risks = tuple(
+        _risk_input(
+            identity,
+            "shared" if shared_group == "sector" else f"sector-{index}",
+            common="shared" if shared_group == "common" else f"cause-{index}",
+            cluster="shared" if shared_group == "cluster" else f"cluster-{index}",
+        )
+        for index, identity in enumerate(identities)
+    )
+    resolutions = tuple(
+        _resolution(identity, _hash(f"request-{index}"))
+        for index, identity in enumerate(identities)
+    )
+
+    result = construct_balanced_portfolio(_request(resolutions, inputs=_inputs_for(risks)))
+
+    assert tuple(target.target_weight for target in result.targets) == (Decimal("0.0625"),) * 4
+    assert result.cash_weight == Decimal("0.7500")
 
 
 @given(
@@ -751,16 +815,9 @@ def test_stale_future_or_insufficient_as_of_material_refuses_construction() -> N
         inputs.risk_inputs,
         observed_at=UtcInstant.from_datetime(_CUTOFF.value - timedelta(hours=3)),
     )
-    future_close = replace(
-        inputs.risk_inputs[0],
-        adjusted_closes=(
-            *inputs.risk_inputs[0].adjusted_closes[:-1],
-            AdjustedClose(
-                UtcInstant.from_datetime(_CUTOFF.value + timedelta(seconds=1)), Decimal(100)
-            ),
-        ),
+    contradictory_cutoff = UtcInstant.from_datetime(
+        inputs.available_at.value - timedelta(seconds=1)
     )
-    future = _inputs_for((future_close, inputs.risk_inputs[1]))
     insufficient = replace(
         inputs.risk_inputs[0], adjusted_closes=inputs.risk_inputs[0].adjusted_closes[:2]
     )
@@ -770,7 +827,12 @@ def test_stale_future_or_insufficient_as_of_material_refuses_construction() -> N
         is PortfolioRefusalReason.STALE_INPUT
     )
     assert (
-        construct_balanced_portfolio(_request((_resolution(_SPY, _HASH_A),), inputs=future)).refusal
+        construct_balanced_portfolio(
+            replace(
+                _request((_resolution(_SPY, _HASH_A),), inputs=inputs),
+                evidence_cutoff=contradictory_cutoff,
+            )
+        ).refusal
         is PortfolioRefusalReason.CONTRADICTORY_INPUT
     )
     assert (
@@ -784,22 +846,35 @@ def test_stale_future_or_insufficient_as_of_material_refuses_construction() -> N
     )
 
 
+def test_adjusted_closes_require_one_exchange_session_per_daily_observation() -> None:
+    risk = _risk_input(_AAPL, "technology")
+    same_day = (
+        _close(UtcInstant.from_datetime(datetime(2026, 8, 18, 19, tzinfo=UTC)), Decimal(100)),
+        _close(UtcInstant.from_datetime(datetime(2026, 8, 18, 20, tzinfo=UTC)), Decimal(101)),
+        _close(UtcInstant.from_datetime(datetime(2026, 8, 19, 20, tzinfo=UTC)), Decimal(100)),
+    )
+
+    with pytest.raises(ValueError, match="portfolio risk input"):
+        replace(risk, adjusted_closes=same_day)
+    with pytest.raises(ValueError, match="adjusted close"):
+        _close(UtcInstant.from_datetime(datetime(2026, 8, 15, 20, tzinfo=UTC)), Decimal(100))
+    late_close = replace(risk.adjusted_closes[-1], available_at=_CUTOFF)
+    with pytest.raises(ValueError, match="portfolio input set"):
+        _inputs_for((replace(risk, adjusted_closes=(*risk.adjusted_closes[:-1], late_close)),))
+
+
 def test_exact_cutoff_and_maximum_age_boundaries_are_admissible() -> None:
     risk = _risk_input(_AAPL, "technology")
     event = MaterialEventRisk(
         event_id="aapl-earnings-2026q3",
         event_type="company_release",
         releases_at=UtcInstant.from_datetime(_CUTOFF.value - timedelta(hours=1)),
-        source_identity="issuer-calendar-v1",
+        source_identity="issuer-release-1",
         calendar_available_at=UtcInstant.from_datetime(_CUTOFF.value - timedelta(days=1)),
-        release_artifact_id=_HASH_A,
-        release_available_at=_CUTOFF,
-        fresh_research_request_id=_HASH_A,
-        fresh_research_resolution_id=_HASH_A,
     )
     boundary_risk = replace(
         risk,
-        adjusted_closes=(*risk.adjusted_closes[:-1], AdjustedClose(_CUTOFF, Decimal(100))),
+        adjusted_closes=(*risk.adjusted_closes[1:], _close(_CUTOFF, Decimal(100))),
         material_events=(event,),
     )
     inputs = _inputs_for(
@@ -809,7 +884,13 @@ def test_exact_cutoff_and_maximum_age_boundaries_are_admissible() -> None:
     )
 
     resolution = replace(_resolution(_AAPL, _HASH_A), evidence_artifact_ids=(_HASH_A,))
-    result = construct_balanced_portfolio(_request((resolution,), inputs=inputs))
+    result = construct_balanced_portfolio(
+        _request(
+            (resolution,),
+            inputs=inputs,
+            event_evidence=(_release_evidence(),),
+        )
+    )
 
     assert result.refusal is None
     assert result.house_view is not None
@@ -828,50 +909,77 @@ def test_exact_cutoff_and_maximum_age_boundaries_are_admissible() -> None:
     assert same_instant_result.refusal is None
 
 
-@pytest.mark.parametrize(
-    ("fresh_request_id", "fresh_resolution_id", "evidence_artifact_ids"),
-    [
-        (_HASH_A, _HASH_A, ()),
-        (_HASH_B, _HASH_A, (_HASH_A,)),
-        (_HASH_A, _HASH_B, (_HASH_A,)),
-    ],
-)
-def test_event_clearance_binds_evidence_and_exact_terminal_research(
-    fresh_request_id: str,
-    fresh_resolution_id: str,
-    evidence_artifact_ids: tuple[str, ...],
+@pytest.mark.parametrize("corruption", ["missing_citation", "kind", "source", "time", "mapping"])
+def test_event_clearance_binds_typed_release_provenance_and_current_citation(
+    corruption: str,
 ) -> None:
     event = MaterialEventRisk(
         event_id="aapl-earnings-2026q3",
         event_type="company_release",
         releases_at=UtcInstant.from_datetime(_CUTOFF.value - timedelta(hours=1)),
-        source_identity="issuer-calendar-v1",
+        source_identity="issuer-release-1",
         calendar_available_at=UtcInstant.from_datetime(_CUTOFF.value - timedelta(days=1)),
-        release_artifact_id=_HASH_A,
-        release_available_at=_CUTOFF,
-        fresh_research_request_id=_HASH_A,
-        fresh_research_resolution_id=_HASH_A,
     )
-    risk = replace(
-        _risk_input(_AAPL, "technology"),
-        material_events=(
-            replace(
-                event,
-                fresh_research_request_id=fresh_request_id,
-                fresh_research_resolution_id=fresh_resolution_id,
-            ),
-        ),
-    )
+    risk = replace(_risk_input(_AAPL, "technology"), material_events=(event,))
     resolution = replace(
         _resolution(_AAPL, _HASH_A),
-        evidence_artifact_ids=evidence_artifact_ids,
+        evidence_artifact_ids=() if corruption == "missing_citation" else (_HASH_A,),
     )
+    evidence = _release_evidence()
+    if corruption == "kind":
+        evidence = replace(evidence, evidence_kind="official_macro")
+    elif corruption == "source":
+        evidence = replace(evidence, source_identity="another-release")
+    elif corruption == "time":
+        evidence = replace(evidence, released_at=UtcInstant.from_datetime(_CUTOFF.value))
+    elif corruption == "mapping":
+        evidence = replace(evidence, mapped_identities=(_SPY,))
 
-    result = construct_balanced_portfolio(_request((resolution,), inputs=_inputs_for((risk,))))
+    result = construct_balanced_portfolio(
+        _request(
+            (resolution,),
+            inputs=_inputs_for((risk,)),
+            event_evidence=(evidence,),
+        )
+    )
 
     assert result.house_view is not None
     assert result.house_view.items[0].event_blocked is True
     assert result.target_bands[0].trade_reason is PortfolioTradeReason.EVENT_BLOCKED
+
+
+def test_macro_event_clearance_accepts_matching_current_official_release() -> None:
+    released_at = UtcInstant.from_datetime(_CUTOFF.value - timedelta(hours=1))
+    event = MaterialEventRisk(
+        event_id="fed-rate-decision-2026-08",
+        event_type="macro_release",
+        releases_at=released_at,
+        source_identity="federal-reserve-release",
+        calendar_available_at=UtcInstant.from_datetime(_CUTOFF.value - timedelta(days=1)),
+    )
+    risk = replace(_risk_input(_AAPL, "technology"), material_events=(event,))
+    resolution = replace(_resolution(_AAPL, _HASH_A), evidence_artifact_ids=(_HASH_A,))
+    evidence = MaterialEventEvidence(
+        artifact_id=_HASH_A,
+        evidence_kind="official_macro",
+        source_identity="federal-reserve-release",
+        released_at=released_at,
+        available_at=_CUTOFF,
+        mapped_identities=(),
+    )
+
+    result = construct_balanced_portfolio(
+        _request(
+            (resolution,),
+            inputs=_inputs_for((risk,)),
+            event_evidence=(evidence,),
+        )
+    )
+
+    assert result.refusal is None
+    assert result.house_view is not None
+    assert result.house_view.items[0].event_blocked is False
+    assert result.target_bands[0].trade_reason is not PortfolioTradeReason.EVENT_BLOCKED
 
 
 def test_every_simultaneous_material_event_must_be_cleared_for_a_new_position() -> None:
@@ -879,12 +987,8 @@ def test_every_simultaneous_material_event_must_be_cleared_for_a_new_position() 
         event_id="a-cleared-release",
         event_type="company_release",
         releases_at=UtcInstant.from_datetime(_CUTOFF.value - timedelta(hours=1)),
-        source_identity="issuer-calendar-v1",
+        source_identity="issuer-release-1",
         calendar_available_at=UtcInstant.from_datetime(_CUTOFF.value - timedelta(days=1)),
-        release_artifact_id=_HASH_A,
-        release_available_at=_CUTOFF,
-        fresh_research_request_id=_HASH_A,
-        fresh_research_resolution_id=_HASH_A,
     )
     pending = MaterialEventRisk(
         event_id="z-pending-release",
@@ -897,7 +1001,13 @@ def test_every_simultaneous_material_event_must_be_cleared_for_a_new_position() 
     inputs = _inputs_for((risk,))
     resolution = replace(_resolution(_AAPL, _HASH_A), evidence_artifact_ids=(_HASH_A,))
 
-    result = construct_balanced_portfolio(_request((resolution,), inputs=inputs))
+    result = construct_balanced_portfolio(
+        _request(
+            (resolution,),
+            inputs=inputs,
+            event_evidence=(_release_evidence(),),
+        )
+    )
 
     assert result.house_view is not None
     assert result.house_view.items[0].event_blocked is True
@@ -920,19 +1030,43 @@ def test_typed_portfolio_values_reject_invalid_or_duplicate_material() -> None:
     risk = _risk_input(_AAPL, "technology")
 
     with pytest.raises(ValueError, match="invalid adjusted close"):
-        AdjustedClose(_CUTOFF, Decimal(0))
+        AdjustedClose(
+            MarketSession(_CUTOFF.value.date()),
+            _CUTOFF,
+            _CUTOFF,
+            "alpaca-iex-adjusted-daily-v1",
+            Decimal(0),
+        )
+    holiday = UtcInstant.from_datetime(datetime(2026, 9, 7, 20, tzinfo=UTC))
+    with pytest.raises(ValueError, match="invalid adjusted close"):
+        AdjustedClose(
+            MarketSession(holiday.value.date()),
+            holiday,
+            holiday,
+            "alpaca-iex-adjusted-daily-v1",
+            Decimal(100),
+        )
     with pytest.raises(ValueError, match="invalid material event risk"):
         MaterialEventRisk(
-            event_id="earnings",
-            event_type="company_release",
-            releases_at=_CUTOFF,
-            source_identity="issuer-calendar-v1",
-            calendar_available_at=_CUTOFF,
-            fresh_research_request_id=_HASH_A,
-            fresh_research_resolution_id=_HASH_A,
+            "",
+            "company_release",
+            _CUTOFF,
+            "issuer-calendar-v1",
+            _CUTOFF,
+        )
+    with pytest.raises(ValueError, match="invalid material event evidence"):
+        MaterialEventEvidence(
+            _HASH_A,
+            "market",
+            "alpaca-iex-v1",
+            _CUTOFF,
+            _CUTOFF,
+            (_AAPL,),
         )
     with pytest.raises(ValueError, match="invalid portfolio risk input"):
         replace(risk, adjusted_closes=(risk.adjusted_closes[0], risk.adjusted_closes[0]))
+    with pytest.raises(ValueError, match="invalid portfolio risk input"):
+        replace(risk, adjusted_closes=risk.adjusted_closes[::2])
     with pytest.raises(ValueError, match="invalid portfolio input set"):
         PortfolioInputSet.create(
             position_snapshot=_inputs().position_snapshot,
@@ -948,6 +1082,24 @@ def test_typed_portfolio_values_reject_invalid_or_duplicate_material() -> None:
         _inputs_for((risk, risk))
     with pytest.raises(ValueError, match="invalid portfolio input set"):
         replace(_inputs(), input_id="f" * 64)
+
+
+def test_pinned_session_calendar_crosses_weekend_and_exchange_holiday() -> None:
+    closes = tuple(
+        _close(
+            UtcInstant.from_datetime(datetime(2026, 9, day, 20, tzinfo=UTC)),
+            Decimal(100 + index),
+        )
+        for index, day in enumerate((3, 4, 8))
+    )
+
+    risk = replace(_risk_input(_AAPL, "technology"), adjusted_closes=closes)
+
+    assert tuple(close.session.trading_date for close in risk.adjusted_closes) == (
+        date(2026, 9, 3),
+        date(2026, 9, 4),
+        date(2026, 9, 8),
+    )
 
 
 def test_immutable_result_values_reject_internally_inconsistent_states() -> None:
@@ -1026,6 +1178,21 @@ def test_invalid_request_future_availability_and_zero_equity_fail_closed() -> No
         ).refusal
         is PortfolioRefusalReason.CONTRADICTORY_INPUT
     )
+
+
+@pytest.mark.parametrize("field", ["observed_at", "available_at"])
+def test_forged_future_adjusted_close_timestamp_fails_closed(field: str) -> None:
+    inputs = _inputs_for((_risk_input(_AAPL, "technology"),))
+    close = inputs.risk_inputs[0].adjusted_closes[-1]
+    object.__setattr__(
+        close,
+        field,
+        UtcInstant.from_datetime(_CUTOFF.value + timedelta(seconds=1)),
+    )
+
+    result = construct_balanced_portfolio(_request((_resolution(_AAPL, _HASH_A),), inputs=inputs))
+
+    assert result.refusal is PortfolioRefusalReason.CONTRADICTORY_INPUT
 
 
 @pytest.mark.parametrize(
@@ -1230,7 +1397,7 @@ def test_one_share_with_consistent_positive_valuation_is_admissible() -> None:
 
     result = construct_balanced_portfolio(
         _request(
-            (_resolution(_AAPL, _HASH_A),),
+            (replace(_resolution(_AAPL, _HASH_A), is_position=True),),
             inputs=_inputs_for((_risk_input(_AAPL, "technology"),), positions=(position,)),
         )
     )
@@ -1249,7 +1416,7 @@ def test_sub_dollar_consistent_positive_valuation_is_admissible() -> None:
 
     result = construct_balanced_portfolio(
         _request(
-            (_resolution(_AAPL, _HASH_A),),
+            (replace(_resolution(_AAPL, _HASH_A), is_position=True),),
             inputs=_inputs_for((risk,), positions=(position,)),
         )
     )
@@ -1274,7 +1441,7 @@ def test_high_precision_position_consistency_is_exact_and_context_independent() 
         context.prec = 8
         result = construct_balanced_portfolio(
             _request(
-                (_resolution(_AAPL, _HASH_A),),
+                (replace(_resolution(_AAPL, _HASH_A), is_position=True),),
                 inputs=_inputs_for((risk,), positions=(position,)),
             )
         )
@@ -1290,7 +1457,9 @@ def test_abstention_is_never_direction_eligible() -> None:
         is_position=True,
     )
 
-    result = construct_balanced_portfolio(_request((resolution,)))
+    result = construct_balanced_portfolio(
+        _request((resolution,), inputs=_inputs_with_position(Decimal("0.05")))
+    )
 
     assert result.house_view is not None
     assert result.house_view.items[0].eligible is False
@@ -1864,6 +2033,7 @@ def _request(
     inputs: PortfolioInputSet | None = None,
     policy: BalancedPortfolioPolicy | None = None,
     expected: tuple[str, ...] | None = None,
+    event_evidence: tuple[MaterialEventEvidence, ...] = (),
 ) -> PortfolioConstructionRequest:
     request_ids = tuple(sorted(item.request_id for item in resolutions))
     return PortfolioConstructionRequest(
@@ -1882,6 +2052,18 @@ def _request(
         resolutions=resolutions,
         inputs=_inputs() if inputs is None else inputs,
         policy=_policy() if policy is None else policy,
+        material_event_evidence=event_evidence,
+    )
+
+
+def _release_evidence() -> MaterialEventEvidence:
+    return MaterialEventEvidence(
+        _HASH_A,
+        "issuer_release",
+        "issuer-release-1",
+        UtcInstant.from_datetime(_CUTOFF.value - timedelta(hours=1)),
+        _CUTOFF,
+        (_AAPL,),
     )
 
 
@@ -2013,9 +2195,9 @@ def _risk_input(  # noqa: PLR0913 - make each group and liquidity fact explicit.
         price=Decimal(100),
         price_unit="usd_per_share",
         adjusted_closes=(
-            AdjustedClose(_days_before_cutoff(3), Decimal(100)),
-            AdjustedClose(_days_before_cutoff(2), Decimal(100 + amplitude)),
-            AdjustedClose(_days_before_cutoff(1), Decimal(100)),
+            _close(_days_before_cutoff(3), Decimal(100)),
+            _close(_days_before_cutoff(2), Decimal(100 + amplitude)),
+            _close(_days_before_cutoff(1), Decimal(100)),
         ),
         sector=sector,
         median_dollar_volume=liquidity,
@@ -2028,6 +2210,21 @@ def _risk_input(  # noqa: PLR0913 - make each group and liquidity fact explicit.
 
 def _days_before_cutoff(days: int) -> UtcInstant:
     return UtcInstant.from_datetime(_CUTOFF.value - timedelta(days=days))
+
+
+def _close(
+    observed_at: UtcInstant,
+    price: Decimal,
+    *,
+    available_at: UtcInstant | None = None,
+) -> AdjustedClose:
+    return AdjustedClose(
+        MarketSession(observed_at.value.date()),
+        observed_at,
+        observed_at if available_at is None else available_at,
+        "alpaca-iex-adjusted-daily-v1",
+        price,
+    )
 
 
 def _identity(index: int) -> EquityInstrumentIdentity:

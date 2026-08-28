@@ -51,9 +51,10 @@ class SQLitePortfolioLedger:
         """Append one result, or replay only byte-identical run material."""
         if not is_sha256(run_id) or type(recorded_at) is not UtcInstant:
             raise LifecyclePersistenceError(_CHECKPOINT_FAILED)
+        if result.house_view is not None and result.house_view.run_id != run_id:
+            raise InvalidLifecycleStateError(_INVALID_HISTORY)
         payload = result.to_payload()
         encoded = _canonical_json(payload)
-        checkpoint = _checkpoint(result)
         try:
             with closing(sqlite3.connect(self.database, timeout=5.0)) as connection, connection:
                 connection.execute("PRAGMA foreign_keys = ON")
@@ -66,13 +67,14 @@ class SQLitePortfolioLedger:
                     (run_id,),
                 ).fetchone()
                 if existing is not None:
-                    if (
-                        existing[0] != checkpoint.result_id
-                        or existing[1] != encoded
-                        or _recorded_at(existing[2]) is None
-                    ):
+                    stored_recorded_at = _recorded_at(existing[2])
+                    if stored_recorded_at is None:
+                        raise InvalidLifecycleStateError(_INVALID_HISTORY)
+                    checkpoint = _checkpoint(result, stored_recorded_at)
+                    if existing[0] != checkpoint.result_id or existing[1] != encoded:
                         raise InvalidLifecycleStateError(_INVALID_HISTORY)
                     return checkpoint
+                checkpoint = _checkpoint(result, recorded_at)
                 connection.execute(
                     """
                     INSERT INTO portfolio_constructions (
@@ -120,8 +122,12 @@ class SQLitePortfolioLedger:
                         raise InvalidLifecycleStateError(_INVALID_HISTORY)
                     decoded: object = json.loads(row[7])
                     result = parse_portfolio_construction_result(decoded)
-                    rebuilt = None if result is None else _checkpoint(result)
                     parsed_recorded_at = _recorded_at(row[8])
+                    rebuilt = (
+                        None
+                        if result is None or parsed_recorded_at is None
+                        else _checkpoint(result, parsed_recorded_at)
+                    )
                     if (
                         rebuilt is None
                         or result is None
@@ -153,7 +159,10 @@ class SQLitePortfolioLedger:
             raise InvalidLifecycleStateError(_INVALID_HISTORY) from error
 
 
-def _checkpoint(result: PortfolioConstructionResult) -> PortfolioCheckpoint:
+def _checkpoint(
+    result: PortfolioConstructionResult,
+    recorded_at: UtcInstant,
+) -> PortfolioCheckpoint:
     refusal = (
         None if result.refusal is None else PortfolioCheckpointRefusalReason(result.refusal.value)
     )
@@ -164,6 +173,7 @@ def _checkpoint(result: PortfolioConstructionResult) -> PortfolioCheckpoint:
         input_id=result.input_id,
         target_band_ids=tuple(sorted(band.target_band_id for band in result.target_bands)),
         refusal_reason=refusal,
+        recorded_at=recorded_at,
     )
 
 

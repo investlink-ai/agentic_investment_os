@@ -66,8 +66,10 @@ from agentic_investment_os.domain.universe import (
 )
 from agentic_investment_os.evidence.capture import (
     EvidenceFeed,
+    EvidenceKind,
     EvidencePersistenceError,
     InvalidEvidenceError,
+    is_official_macro_release,
 )
 from agentic_investment_os.memory.admission import (
     BeliefClaimKind,
@@ -84,6 +86,7 @@ from agentic_investment_os.memory.beliefs import (
 from agentic_investment_os.portfolio.construction import (
     BalancedPortfolioPolicy,
     HouseViewResolution,
+    MaterialEventEvidence,
     PortfolioConstructionRequest,
     PortfolioHistoryValidator,
     PortfolioInputSet,
@@ -869,9 +872,53 @@ class Advance:
         attention = command.attention_selection
         if not isinstance(attention, AttentionArtifact):
             raise InvalidLifecycleStateError(_INCOMPLETE_CHECKPOINT_RESULT)
-        expected_request_ids = tuple(sorted(item.request_id for item in resolutions))
+        expected_request_ids = tuple(
+            sorted(
+                {
+                    *(item.request_id for item in attention.dossier_requests),
+                    *(
+                        item.refresh_id
+                        for item in attention.holding_refreshes
+                        if item.disposition is HoldingRefreshDisposition.REQUIRED
+                    ),
+                }
+            )
+        )
         if not isinstance(command.portfolio_inputs, PortfolioInputSet):
             raise InvalidLifecycleStateError(_INCOMPLETE_CHECKPOINT_RESULT)
+        try:
+            evidence_records = self.evidence_vault.stored_records_for_artifacts(
+                attention.evidence_artifact_ids
+            )
+        except (EvidencePersistenceError, InvalidEvidenceError) as error:
+            raise InvalidLifecycleStateError(_INCOMPLETE_CHECKPOINT_RESULT) from error
+        material_event_evidence: list[MaterialEventEvidence] = []
+        for record in evidence_records:
+            artifact = record.artifact
+            if artifact.kind not in (EvidenceKind.ISSUER_RELEASE, EvidenceKind.OFFICIAL_MACRO):
+                continue
+            if artifact.kind is EvidenceKind.OFFICIAL_MACRO and not is_official_macro_release(
+                record
+            ):
+                continue
+            released_at = artifact.source_event_at or artifact.published_at
+            if released_at is None:
+                raise InvalidLifecycleStateError(_INCOMPLETE_CHECKPOINT_RESULT)
+            material_event_evidence.append(
+                MaterialEventEvidence(
+                    artifact.artifact_id,
+                    artifact.kind.value,
+                    artifact.source_identity,
+                    released_at,
+                    artifact.available_at,
+                    tuple(
+                        sorted(
+                            (mapping.identity for mapping in artifact.entity_mappings),
+                            key=canonical_instrument_bytes,
+                        )
+                    ),
+                )
+            )
         return PortfolioConstructionRequest(
             run_id=identity.run_id,
             cycle=command.request.session,
@@ -888,6 +935,9 @@ class Advance:
             resolutions=tuple(resolutions),
             inputs=command.portfolio_inputs,
             policy=self.portfolio_policy,
+            material_event_evidence=tuple(
+                sorted(material_event_evidence, key=lambda item: item.artifact_id)
+            ),
         )
 
 

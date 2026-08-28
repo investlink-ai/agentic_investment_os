@@ -178,11 +178,14 @@ HouseView.
 The runtime additionally requires an explicit recorded portfolio-input object bound to the exact
 position snapshot. It contains canonical cash, positions, prices, split-adjusted histories, sectors,
 liquidity, common-cause and correlation groups, material events, source identity, Data Regime,
-observed time, and available time. That object is hostile adapter input, not configuration; its
-content hash is pinned into the run and HouseView. Each known event records calendar provenance;
-clearing it also requires the captured release artifact and exact fresh terminal research request
-and resolution identities. No model, packet store, broker port, account credential, or live data
-fallback is part of portfolio composition.
+observed time, available time, and the exact `xnys-regular-2026a` session-calendar identity. That
+object is hostile adapter input, not configuration; its content hash is pinned into the run and
+HouseView. The calendar identity is a code-owned safety constant, not a tunable default. It admits
+only consecutive regular 2026 NYSE sessions and fails closed for another version or year. Each known
+event records calendar provenance; clearing it also requires the captured release artifact and exact
+fresh terminal research request and resolution identities. A schedule remains evidence about a
+future event but cannot substitute for the publication. No model, packet store, broker port, account
+credential, or live data fallback is part of portfolio composition.
 
 ## Constitution governance composition
 

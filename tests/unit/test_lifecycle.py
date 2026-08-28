@@ -279,6 +279,7 @@ def _advanced_receipt(
             identity.portfolio_policy_hash,
             identity.portfolio_input_hash,
             ("6" * SHA256_HEX_LENGTH,),
+            recorded_at,
         ),
         None,
     )
@@ -638,7 +639,7 @@ def test_advance_request_validates_the_complete_boundary() -> None:
         request,
         configuration_hash="a" * SHA256_HEX_LENGTH,
     )
-    assert identity.run_id == "c1df33ff901d9bd190e673315a4a3bf9ec13bb50a740beddc91d5e6002cb9733"
+    assert identity.run_id == "16e7342cac5d962debc0cf9ff891364d91e77be82c22bb2827a3e0884cf9643f"
 
     invalid_cases = (
         (
@@ -960,9 +961,12 @@ def test_portfolio_checkpoint_rejects_invalid_and_inconsistent_material() -> Non
         "3" * SHA256_HEX_LENGTH,
         "4" * SHA256_HEX_LENGTH,
         ("5" * SHA256_HEX_LENGTH,),
+        RECEIPT_RECORDED_AT,
     )
     invalid_hash = {**valid.to_payload(), "result_id": "invalid"}
     missing_success_house_view = {**valid.to_payload(), "house_view_id": None}
+    boolean_schema = {**valid.to_payload(), "schema_version": True}
+    invalid_recorded_at = {**valid.to_payload(), "recorded_at": "invalid"}
 
     with pytest.raises(ValueError, match="lifecycle stream checkpoint order is invalid"):
         PortfolioCheckpoint(
@@ -971,12 +975,15 @@ def test_portfolio_checkpoint_rejects_invalid_and_inconsistent_material() -> Non
             "3" * SHA256_HEX_LENGTH,
             "4" * SHA256_HEX_LENGTH,
             (),
+            RECEIPT_RECORDED_AT,
         )
     with pytest.raises(ValueError, match="lifecycle stream checkpoint order is invalid"):
         PortfolioCheckpointReference("invalid", valid, RECEIPT_RECORDED_AT)
 
     assert parse_portfolio_checkpoint(invalid_hash) is None
     assert parse_portfolio_checkpoint(missing_success_house_view) is None
+    assert parse_portfolio_checkpoint(boolean_schema) is None
+    assert parse_portfolio_checkpoint(invalid_recorded_at) is None
     assert (
         parse_portfolio_checkpoint(
             PortfolioCheckpoint(
@@ -985,6 +992,7 @@ def test_portfolio_checkpoint_rejects_invalid_and_inconsistent_material() -> Non
                 "3" * SHA256_HEX_LENGTH,
                 "4" * SHA256_HEX_LENGTH,
                 (),
+                RECEIPT_RECORDED_AT,
                 PortfolioCheckpointRefusalReason.INCOMPLETE_INPUT,
             ).to_payload()
         )

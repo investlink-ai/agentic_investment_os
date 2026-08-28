@@ -497,10 +497,12 @@ evidence. A scenario becomes mandatory when its owning behavior is implemented.
   and cash remainder. Property tests vary volatility, sector, common-cause, correlation,
   uncertainty, order, and portfolio breadth without changing the result under canonical reordering
   or ambient decimal-context changes.
-- Recorded portfolio contracts reject malformed nested identities, decimals, units, histories,
-  availability, events, and duplicate material before domain admission. Durable retries append one
-  result, and `Status` rejects missing, altered, malformed, noncanonical, cross-run, or
-  recorded-instant-substituted portfolio history.
+- Recorded portfolio contracts reject malformed nested identities, decimals, units, calendar
+  versions, non-session or gapped daily histories, availability, events, and duplicate material
+  before domain admission. Portfolio journeys prove an official macro schedule remains event-blocked
+  even when the current research resolution cites it. Durable retries append one result, and `Status`
+  rejects missing, altered, malformed, noncanonical, cross-run, or recorded-instant-substituted
+  portfolio history.
 - Equal-weight and Risk Profile shadows consume the same HouseView, eligibility, Evidence Cutoff, and
   available-at-time prices as the Champion.
 - Target Bands create no trade inside the band and apply only the approved partial adjustment outside

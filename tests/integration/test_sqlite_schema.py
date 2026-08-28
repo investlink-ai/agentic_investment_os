@@ -139,6 +139,7 @@ def _populate_current_history(database: Path) -> tuple[AdvanceRequest, PinnedRun
                     identity.portfolio_policy_hash,
                     identity.portfolio_input_hash,
                     ("6" * 64,),
+                    recorded_at,
                 ),
             )
             decision = ledger.advance_step(command, attempt, recorded_at)
