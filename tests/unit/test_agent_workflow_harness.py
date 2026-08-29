@@ -1087,6 +1087,7 @@ def test_trace_evaluation_observes_each_trusted_reviewer_digest() -> None:
 
 
 def test_trace_evaluation_observes_trusted_base_reviewer_reads() -> None:
+    expected_base = "a" * 40
     raw = _scenario_data()
     raw["permitted_effects"] = [
         "repository.read",
@@ -1105,7 +1106,7 @@ def test_trace_evaluation_observes_trusted_base_reviewer_reads() -> None:
             "type": "item.completed",
             "item": {
                 "type": "command_execution",
-                "command": "git show HEAD^:.agents/skills/code-review/SKILL.md",
+                "command": f"git show {expected_base}:.agents/skills/code-review/SKILL.md",
                 "status": "completed",
                 "exit_code": 0,
             },
@@ -1115,7 +1116,7 @@ def test_trace_evaluation_observes_trusted_base_reviewer_reads() -> None:
             "item": {
                 "type": "command_execution",
                 "command": (
-                    f"git show {'a' * 40}:.agents/skills/investment-safety-review/SKILL.md"
+                    f"git show {expected_base}:.agents/skills/investment-safety-review/SKILL.md"
                 ),
                 "status": "completed",
                 "exit_code": 0,
@@ -1124,13 +1125,47 @@ def test_trace_evaluation_observes_trusted_base_reviewer_reads() -> None:
         {"type": "turn.completed", "usage": {}},
     )
 
-    evaluation = evaluate_trace(scenario, trace)
+    evaluation = evaluate_trace(scenario, trace, expected_reviewer_base=expected_base)
 
     assert {effect.category for effect in evaluation.observed_effects} == {
         "repository.read",
         "reviewer.general_identity.read",
         "reviewer.safety_identity.read",
     }
+
+
+@pytest.mark.parametrize(
+    "revision",
+    ["HEAD", "HEAD^", "", "b" * 40],
+)
+def test_trace_evaluation_rejects_non_base_reviewer_reads(revision: str) -> None:
+    expected_base = "a" * 40
+    raw = _scenario_data()
+    raw["permitted_effects"] = ["repository.read", "reviewer.general_identity.read"]
+    raw["required_effects"] = ["reviewer.general_identity.read"]
+    scenario = parse_scenario(raw, source="scenario.json")
+    trace = _trace(
+        {"type": "thread.started", "thread_id": "thread-1"},
+        {"type": "turn.started"},
+        _skill_read_event(),
+        {
+            "type": "item.completed",
+            "item": {
+                "type": "command_execution",
+                "command": f"git show {revision}:.agents/skills/code-review/SKILL.md",
+                "status": "completed",
+                "exit_code": 0,
+            },
+        },
+        {"type": "item.completed", "item": {"type": "agent_message", "text": _final_output()}},
+        {"type": "turn.completed", "usage": {}},
+    )
+
+    evaluation = evaluate_trace(scenario, trace, expected_reviewer_base=expected_base)
+
+    assert evaluation.outcome is Outcome.FAILED
+    assert evaluation.failure_classification is FailureClassification.CONTRACT_MISMATCH
+    assert "reviewer.general_identity.read" in evaluation.diagnostics[0]
 
 
 @pytest.mark.parametrize(

@@ -977,7 +977,13 @@ def _validate_fixture_repository(fixture_root: Path, *, expected: str | None) ->
         raise HarnessValidationError(message)
 
 
-def _validate_reviewer_contract(raw: object, *, source: str) -> None:
+def _validate_reviewer_contract(
+    raw: object,
+    *,
+    axis: str,
+    pinned_base: str,
+    source: str,
+) -> None:
     contract = _mapping(raw, field=source)
     contract_source = _string(contract.get("source"), field=f"{source}.source")
     expected_fields = {
@@ -994,6 +1000,23 @@ def _validate_reviewer_contract(raw: object, *, source: str) -> None:
         raise HarnessValidationError(message)
     for field in expected_fields - {"source"}:
         _string(contract[field], field=f"{source}.{field}")
+    reviewer = "investment-safety-review" if axis == "investment_safety" else "code-review"
+    repository_path = f".agents/skills/{reviewer}/SKILL.md"
+    if contract_source == "trusted_installed":
+        expected_path = f"$WORKSPACE/.agent-harness/trusted-reviewers/{reviewer}/SKILL.md"
+        if contract["resolved_path"] != expected_path:
+            message = f"{source}.resolved_path does not identify the axis reviewer"
+            raise HarnessValidationError(message)
+        if re.fullmatch(r"[0-9a-f]{64}", str(contract["sha256"])) is None:
+            message = f"{source}.sha256 must be a lower-case SHA-256 digest"
+            raise HarnessValidationError(message)
+    elif (
+        contract["repository_path"] != repository_path
+        or contract["base_object_id"] != pinned_base
+        or re.fullmatch(r"[0-9a-f]{40}", str(contract["git_blob_id"])) is None
+    ):
+        message = f"{source} verified-base identity does not match the review plan"
+        raise HarnessValidationError(message)
 
 
 def _validate_review_axes(raw: object, *, plan: ReviewPlan, source: str) -> None:
@@ -1014,11 +1037,20 @@ def _validate_review_axes(raw: object, *, plan: ReviewPlan, source: str) -> None
             message = f"{axis_source} selection must agree with the review plan"
             raise HarnessValidationError(message)
         disposition = _string(axis_data["disposition"], field=f"{axis_source}.disposition")
+        if disposition not in {"passed", "missing", "not_applicable"}:
+            message = f"{axis_source}.disposition is not a review disposition"
+            raise HarnessValidationError(message)
+        if expected_selection == "selected" and disposition == "not_applicable":
+            message = f"{axis_source} selected disposition cannot be not_applicable"
+            raise HarnessValidationError(message)
         if expected_selection == "not_selected" and disposition != "not_applicable":
             message = f"{axis_source} not-selected disposition must be not_applicable"
             raise HarnessValidationError(message)
         _validate_reviewer_contract(
-            axis_data["reviewer_contract"], source=f"{axis_source}.reviewer_contract"
+            axis_data["reviewer_contract"],
+            axis=axis,
+            pinned_base=plan.pinned_base,
+            source=f"{axis_source}.reviewer_contract",
         )
 
 
@@ -2026,6 +2058,8 @@ def _reviewer_digest_effects(words: tuple[str, ...], classified: Effect) -> tupl
 def _git_read_effects(
     words: tuple[str, ...],
     classified: Effect,
+    *,
+    expected_reviewer_base: str | None,
 ) -> tuple[Effect, ...]:
     specialized_reads: list[Effect] = []
     subcommand_index = _skip_global_options(
@@ -2064,12 +2098,12 @@ def _git_read_effects(
             specialized_reads.append(Effect("git.head_ref.read", classified.detail))
     elif subcommand == "show" and len(arguments) == 1:
         revision_path = arguments[0]
-        _revision, separator, repository_path = revision_path.partition(":")
+        revision, separator, repository_path = revision_path.partition(":")
         reviewer_effects = {
             ".agents/skills/code-review/SKILL.md": "reviewer.general_identity.read",
             ".agents/skills/investment-safety-review/SKILL.md": "reviewer.safety_identity.read",
         }
-        if separator and repository_path in reviewer_effects:
+        if separator and revision == expected_reviewer_base and repository_path in reviewer_effects:
             specialized_reads.append(Effect(reviewer_effects[repository_path], classified.detail))
     return tuple(specialized_reads)
 
@@ -2206,6 +2240,7 @@ def _specialized_read_effects(
     classified: Effect,
     *,
     scenario: Scenario,
+    expected_reviewer_base: str | None,
 ) -> tuple[Effect, ...]:
     executable = PurePosixPath(words[0]).name if words else ""
     if (
@@ -2215,7 +2250,11 @@ def _specialized_read_effects(
     ):
         return (Effect("delivery.ledger.read", classified.detail),)
     if classified.category == "repository.read" and executable == "git":
-        return _git_read_effects(words, classified)
+        return _git_read_effects(
+            words,
+            classified,
+            expected_reviewer_base=expected_reviewer_base,
+        )
     if classified.category == "github.read" and executable == "gh":
         return _github_read_effects(words, classified, scenario=scenario)
     return ()
@@ -2252,6 +2291,7 @@ def _classify_command_effects(
     command: str,
     *,
     scenario: Scenario,
+    expected_reviewer_base: str | None = None,
 ) -> tuple[Effect, ...]:
     if _contains_nested_shell_execution(command):
         return (Effect("unknown.tool", _redact_detail(command)),)
@@ -2262,6 +2302,7 @@ def _classify_command_effects(
             _classify_command_effects(
                 payload,
                 scenario=scenario,
+                expected_reviewer_base=expected_reviewer_base,
             )
             if payload
             else (Effect("unknown.tool", _redact_detail(command)),)
@@ -2274,6 +2315,7 @@ def _classify_command_effects(
             for effect in _classify_command_effects(
                 segment,
                 scenario=scenario,
+                expected_reviewer_base=expected_reviewer_base,
             )
         )
     classified = _classify_command(
@@ -2290,7 +2332,15 @@ def _classify_command_effects(
     reviewer_effects = _reviewer_digest_effects(words, classified)
     if reviewer_effects:
         return reviewer_effects
-    return (classified, *_specialized_read_effects(words, classified, scenario=scenario))
+    return (
+        classified,
+        *_specialized_read_effects(
+            words,
+            classified,
+            scenario=scenario,
+            expected_reviewer_base=expected_reviewer_base,
+        ),
+    )
 
 
 def _contains_nested_shell_execution(command: str) -> bool:
@@ -2580,6 +2630,7 @@ def _observe_item(
     item: dict[str, object],
     *,
     scenario: Scenario,
+    expected_reviewer_base: str | None,
 ) -> tuple[tuple[Effect, ...], frozenset[str], str | None]:
     effects: tuple[Effect, ...] = ()
     routes: frozenset[str] = frozenset()
@@ -2599,6 +2650,7 @@ def _observe_item(
                 for effect in _classify_command_effects(
                     command_value,
                     scenario=scenario,
+                    expected_reviewer_base=expected_reviewer_base,
                 )
             )
             routes = _skill_reads(command_value, scenario=scenario, succeeded=item_succeeded)
@@ -2636,6 +2688,7 @@ def _observe_trace(
     external_effects: tuple[Effect, ...],
     *,
     scenario: Scenario,
+    expected_reviewer_base: str | None,
 ) -> _TraceObservation:
     model = _find_model(events)
     effects = list(external_effects)
@@ -2666,7 +2719,11 @@ def _observe_trace(
                 effects.append(Effect("unknown.tool", "item event without an object item"))
             continue
         item = _mapping(item_value, field="trace item")
-        item_effects, item_routes, final_message = _observe_item(item, scenario=scenario)
+        item_effects, item_routes, final_message = _observe_item(
+            item,
+            scenario=scenario,
+            expected_reviewer_base=expected_reviewer_base,
+        )
         effects.extend(item_effects)
         observed_skill_routes.update(item_routes)
         if final_message is not None and event_type_value == "item.completed":
@@ -2790,6 +2847,7 @@ def evaluate_trace(
     trace: str,
     *,
     external_effects: tuple[Effect, ...] = (),
+    expected_reviewer_base: str | None = None,
 ) -> Evaluation:
     """Classify a Codex JSONL trace without trusting its prose or self-reported effects."""
     try:
@@ -2797,6 +2855,7 @@ def evaluate_trace(
             _decode_trace(trace),
             external_effects,
             scenario=scenario,
+            expected_reviewer_base=expected_reviewer_base,
         )
     except HarnessValidationError as error:
         classification = (
@@ -3947,6 +4006,14 @@ def run_scenario(
             active_delivery_context_materialization,
             pull_request_view_materialization,
         ) = _prepare_workspace(suite, scenario, temporary_root)
+        reviewer_base_result = _run_git(workspace, "rev-parse", "HEAD^")
+        reviewer_base = reviewer_base_result.stdout.strip()
+        expected_reviewer_base = (
+            reviewer_base
+            if reviewer_base_result.returncode == 0
+            and re.fullmatch(r"[0-9a-f]{40}", reviewer_base) is not None
+            else None
+        )
         before_files = _workspace_snapshot(workspace)
         before_git = _git_snapshot(workspace)
         shell_path = f"{fake_bin}:/usr/bin:/bin:/usr/sbin:/sbin"
@@ -3998,6 +4065,7 @@ def run_scenario(
                 scenario,
                 completed.stdout,
                 external_effects=external_effects,
+                expected_reviewer_base=expected_reviewer_base,
             )
             if completed.returncode != 0 and evaluation.outcome is not Outcome.FAILED:
                 authentication_failed = any(
@@ -4026,6 +4094,7 @@ def run_scenario(
                 scenario,
                 _timeout_output(error.stdout),
                 external_effects=external_effects,
+                expected_reviewer_base=expected_reviewer_base,
             )
             if partial.outcome is Outcome.FAILED:
                 evaluation = partial
