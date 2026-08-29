@@ -13,6 +13,7 @@ REPOSITORY_ROOT = Path(__file__).parents[2]
 STATE_MACHINE_NODE = (
     "tests/integration/test_advance_lifecycle.py::TestLifecycleStateMachine::runTest"
 )
+PYTEST_TIMING_ARGUMENTS = ("--durations=20", "--durations-min=1.0")
 FAKE_GATE_COMMAND = """\
 import os
 import sys
@@ -126,8 +127,12 @@ def test_test_gate_runs_exact_partition_in_parallel(tmp_path: Path) -> None:
     assert starts["coverage"].timestamp_ns < ends["state-machine"].timestamp_ns
     assert starts["state-machine"].timestamp_ns < ends["coverage"].timestamp_ns
     assert starts["coverage-tiers"].timestamp_ns > ends["coverage"].timestamp_ns
-    assert starts["coverage"].arguments == (f"--deselect={STATE_MACHINE_NODE}",)
+    assert starts["coverage"].arguments == (
+        *PYTEST_TIMING_ARGUMENTS,
+        f"--deselect={STATE_MACHINE_NODE}",
+    )
     assert starts["state-machine"].arguments == (
+        *PYTEST_TIMING_ARGUMENTS,
         "-o",
         "addopts=--strict-config --strict-markers -ra",
         "-p",

@@ -67,6 +67,18 @@ and printed replay blobs. Generated tests remain credential-free and network-fre
 and shrink a failure to a reproducible counterexample; neither Hypothesis shrinking nor replay may
 turn a failure into a passing retry.
 
+Generated tests vary only the behavioral dimension they own. A state machine uses the smallest
+canonical fixture that preserves its transition, persistence, interruption, retry, reopen, corruption,
+and reference-model seams. Orthogonal provider, source-kind, schema, or payload breadth belongs to
+focused contract or integration tests and does not enter every generated sequence. Removing a variant
+from a generated fixture is valid only when direct deterministic evidence retains its accepted and
+refused forms; never reduce the Hypothesis example or step budget to hide fixture amplification.
+
+Both parallel pytest legs report their slowest tests and wall time. These timings are diagnostic rather
+than a hard shared-runner performance threshold. A material increase, especially a near doubling of
+one leg or encroachment on the hosted-CI timeout, requires a test-cost investigation before increasing
+the timeout, reducing exploration, or moving evidence out of the handoff gate.
+
 ## Static architecture gates
 
 `make architecture` verifies both the production import graph and the bounded

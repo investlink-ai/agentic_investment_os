@@ -13,7 +13,7 @@ from decimal import Decimal
 from pathlib import Path
 from shutil import copytree
 from tempfile import TemporaryDirectory
-from typing import TYPE_CHECKING, Literal, Never, cast, override
+from typing import TYPE_CHECKING, Literal, Never, assert_never, cast, override
 
 import pytest
 from hypothesis import strategies as st
@@ -1518,8 +1518,14 @@ def _configure(
     *,
     clock: FixedClock | None = None,
     cio_stance: Literal["hold", "abstain"] = "hold",
-    include_optional_official_evidence: bool = True,
+    evidence_fixture: Literal["complete", "required"] = "complete",
 ) -> Advance:
+    if evidence_fixture == "complete":
+        recorded_official_evidence: object = production_recorded_official_evidence()
+    elif evidence_fixture == "required":
+        recorded_official_evidence = None
+    else:
+        assert_never(evidence_fixture)
     configured = configure_advance(
         (
             ConfigurationSource(
@@ -1531,15 +1537,18 @@ def _configure(
         recorded_universe=recorded_universe(),
         recorded_portfolio=recorded_portfolio_inputs(typed_portfolio_inputs().position_snapshot),
         recorded_evidence=production_recorded_evidence(),
-        recorded_official_evidence=(
-            production_recorded_official_evidence() if include_optional_official_evidence else None
-        ),
+        recorded_official_evidence=recorded_official_evidence,
         recorded_model=ValidProductionModel(cio_stance=cio_stance),
         session_eligibility=RecordedSessionEligibility(),
         clock=(FixedClock(datetime(2026, 8, 21, 22, 0, tzinfo=UTC)) if clock is None else clock),
     )
     assert isinstance(configured, Advance)
     return configured
+
+
+def _configure_minimal_generated_lifecycle(state_root: Path) -> Advance:
+    """Compose the generated state machine with only its required evidence dimension."""
+    return _configure(state_root, cio_stance="abstain", evidence_fixture="required")
 
 
 def _receipt_evidence_checkpoint(receipt: AdvanceReceipt) -> EvidenceCaptureCheckpoint:
@@ -2401,13 +2410,7 @@ class LifecycleStateMachine(RuleBasedStateMachine):
             prefix="agentic-investment-os-lifecycle-state-machine-"
         )
         self.state_root = Path(self._temporary_directory.name).resolve() / "runtime"
-        # Focused evidence tests own optional official-source breadth; generated lifecycle sequences
-        # retain the required market/news evidence and real persistence boundaries.
-        self.capability = _configure(
-            self.state_root,
-            cio_stance="abstain",
-            include_optional_official_evidence=False,
-        )
+        self.capability = _configure_minimal_generated_lifecycle(self.state_root)
         self.reference = _LifecycleReferenceModel(
             self.capability.configuration_version,
             self.capability.configuration_hash,
@@ -2603,11 +2606,7 @@ class LifecycleStateMachine(RuleBasedStateMachine):
 
     @rule()
     def reopen_database(self) -> None:
-        self.capability = _configure(
-            self.state_root,
-            cio_stance="abstain",
-            include_optional_official_evidence=False,
-        )
+        self.capability = _configure_minimal_generated_lifecycle(self.state_root)
 
     @invariant()
     def authoritative_counts_match_reference_model(self) -> None:
