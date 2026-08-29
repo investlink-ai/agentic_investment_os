@@ -1,0 +1,20 @@
+{
+  "_fixture": {
+    "source_type": "synthetic completed correction batch",
+    "synthetic": true,
+    "timestamps": "not applicable",
+    "entitlement": "not applicable",
+    "redactions": "none"
+  },
+  "correction_batch": {
+    "initial_review_complete": true,
+    "recorded_findings": ["STD-001", "SPEC-002", "SAFE-001"],
+    "only_recorded_findings_corrected": true,
+    "changed_semantic_surfaces": [],
+    "focused_checks": "passed",
+    "full_gate": "passed",
+    "affected_axes": ["standards", "spec", "investment_safety"],
+    "review_epoch": 1,
+    "delivery_remediation_rounds_used": 1
+  }
+}

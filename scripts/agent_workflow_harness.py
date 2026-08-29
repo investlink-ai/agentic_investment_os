@@ -10,14 +10,20 @@ import shutil
 import subprocess
 import sys
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path, PurePosixPath
+from types import MappingProxyType
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
 
 SCENARIO_SCHEMA_VERSION = 1
 MINIMUM_TIMEOUT_SECONDS = 30
 MAXIMUM_TIMEOUT_SECONDS = 900
+MAXIMUM_REMEDIATION_ROUNDS = 2
 MAXIMUM_DIAGNOSTICS = 5
 MAXIMUM_DIAGNOSTIC_LENGTH = 240
 DIRECT_COMMAND_WORD_COUNT = 2
@@ -31,10 +37,12 @@ DECISION_IDS = frozenset(
         "classify_review_finding_must_fix",
         "demote_ready_pull_request",
         "defer_ungrounded_scope",
+        "decline_unrequested_review",
         "limit_incomplete_reflection_evidence",
         "recommend_evidence_backed_follow_up",
         "reflect_on_merged_pull_request",
         "refuse_blocked_issue",
+        "refuse_blocking_follow_up",
         "refuse_closed_issue",
         "refuse_model_execution_authority",
         "reject_self_approval",
@@ -48,7 +56,11 @@ DECISION_IDS = frozenset(
         "retain_equivalent_review",
         "reuse_existing_issue",
         "require_human_review_at_cap",
+        "route_late_medium_to_human",
+        "select_general_review",
+        "select_incremental_affected_review",
         "select_investment_safety_review",
+        "skip_absent_spec_review",
     }
 )
 EFFECT_CATEGORIES = frozenset(
@@ -98,6 +110,7 @@ TERMINAL_DISPOSITIONS = frozenset(
         "reflection_ready",
         "refused",
         "review_required",
+        "review_not_requested",
         "review_retained",
         "review_triaged",
         "scope_ready",
@@ -106,6 +119,16 @@ TERMINAL_DISPOSITIONS = frozenset(
 _IDENTIFIER = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*\Z")
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 _GITHUB_REPOSITORY = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+\Z")
+_FINDING_IDENTIFIER = re.compile(r"(?:STD|SPEC|SAFE)-[0-9]{3}\Z")
+_REVIEW_AXES = frozenset({"standards", "spec", "investment_safety"})
+_REVIEW_MODES = frozenset({"full", "incremental", "focused", "retained"})
+_REVIEW_SELECTIONS = frozenset({"selected", "not_applicable"})
+_FINDING_AXES = frozenset({"standards", "spec", "investment_safety"})
+_FINDING_SEVERITIES = frozenset({"Blocker", "High", "Medium", "Low"})
+_MERGE_DISPOSITIONS = frozenset({"must_fix", "advisory", "out_of_scope", "disproved"})
+_AUTOMATION_ACTIONS = frozenset(
+    {"fix_in_batch", "human_review_required", "track_follow_up", "none"}
+)
 _SCENARIO_FIELDS = frozenset(
     {
         "schema_version",
@@ -116,7 +139,9 @@ _SCENARIO_FIELDS = frozenset(
         "fixture_sha256",
         "repository_paths",
         "skills",
+        "skill_selection",
         "expected_skill_routes",
+        "forbidden_skill_routes",
         "required_decisions",
         "permitted_effects",
         "required_effects",
@@ -133,6 +158,8 @@ _SCENARIO_FIELDS = frozenset(
     }
 )
 _REQUIRED_SCENARIO_FIELDS = _SCENARIO_FIELDS - {
+    "skill_selection",
+    "forbidden_skill_routes",
     "guarded_worktree_issue",
     "active_delivery_context",
     "active_delivery_context_sha256",
@@ -182,7 +209,10 @@ class Scenario:
     fixture_sha256: str
     repository_paths: tuple[str, ...]
     skills: tuple[tuple[str, str], ...]
+    skill_descriptions: tuple[tuple[str, str], ...]
+    skill_selection: str
     expected_skill_routes: frozenset[str]
+    forbidden_skill_routes: frozenset[str]
     required_decisions: frozenset[str]
     permitted_effects: frozenset[str]
     required_effects: frozenset[str]
@@ -196,6 +226,41 @@ class Scenario:
     expected_pull_request_number: int | None
     expected_head_branch: str | None
     expected_repository: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class ReviewAxisSelection:
+    selection: str
+    reason: str
+
+
+@dataclass(frozen=True, slots=True)
+class ReviewPlan:
+    pinned_base: str
+    pinned_head: str
+    spec: str | None
+    standards: tuple[str, ...]
+    axes: Mapping[str, ReviewAxisSelection]
+    authority_surfaces: tuple[str, ...]
+    blast_radius_surfaces: tuple[str, ...]
+    affected_consumers: tuple[str, ...]
+    mode: str
+    epoch: int
+    invalidation_evidence: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class ReviewFinding:
+    stable_id: str
+    axis: str
+    severity: str
+    governing_rule: str
+    consequence: str
+    evidence: str
+    merge_disposition: str
+    automation_action: str
+    residual_risk: str
+    follow_up: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -328,6 +393,187 @@ def _require_known(values: frozenset[str], *, known: frozenset[str], field: str,
     if unknown:
         message = f"{field} contains unknown {noun}: {unknown}"
         raise HarnessValidationError(message)
+
+
+def _non_empty_string_list(value: object, *, field: str) -> tuple[str, ...]:
+    items = _string_list(value, field=field)
+    if not items:
+        message = f"{field} must not be empty"
+        raise HarnessValidationError(message)
+    return items
+
+
+def parse_review_plan(raw: object, *, source: str) -> ReviewPlan:
+    """Validate a non-authoritative, same-session review plan."""
+    data = _mapping(raw, field=source)
+    expected_fields = {
+        "pinned_base",
+        "pinned_head",
+        "spec",
+        "standards",
+        "axes",
+        "authority_surfaces",
+        "blast_radius_surfaces",
+        "affected_consumers",
+        "mode",
+        "epoch",
+        "invalidation_evidence",
+    }
+    if set(data) != expected_fields:
+        missing = sorted(expected_fields - set(data))
+        extra = sorted(set(data) - expected_fields)
+        message = f"{source} fields differ: missing={missing}, extra={extra}"
+        raise HarnessValidationError(message)
+
+    raw_spec = data["spec"]
+    spec = None if raw_spec is None else _string(raw_spec, field=f"{source}.spec")
+    standards = _non_empty_string_list(data["standards"], field=f"{source}.standards")
+    raw_axes = _mapping(data["axes"], field=f"{source}.axes")
+    if set(raw_axes) != _REVIEW_AXES:
+        message = f"{source}.axes must define standards, spec, and investment_safety"
+        raise HarnessValidationError(message)
+    axes: dict[str, ReviewAxisSelection] = {}
+    for axis, raw_axis in raw_axes.items():
+        axis_data = _mapping(raw_axis, field=f"{source}.axes.{axis}")
+        if set(axis_data) != {"selection", "reason"}:
+            message = f"{source}.axes.{axis} must define selection and reason"
+            raise HarnessValidationError(message)
+        selection = _string(axis_data["selection"], field=f"{source}.axes.{axis}.selection")
+        if selection not in _REVIEW_SELECTIONS:
+            message = f"{source}.axes.{axis}.selection is not a review selection"
+            raise HarnessValidationError(message)
+        axes[axis] = ReviewAxisSelection(
+            selection=selection,
+            reason=_string(axis_data["reason"], field=f"{source}.axes.{axis}.reason"),
+        )
+    if axes["standards"].selection != "selected":
+        message = f"{source}.axes.standards must be selected"
+        raise HarnessValidationError(message)
+    expected_spec_selection = "selected" if spec is not None else "not_applicable"
+    if axes["spec"].selection != expected_spec_selection:
+        message = f"{source}.axes.spec selection must agree with spec availability"
+        raise HarnessValidationError(message)
+
+    mode = _string(data["mode"], field=f"{source}.mode")
+    if mode not in _REVIEW_MODES:
+        message = f"{source}.mode is not a review mode"
+        raise HarnessValidationError(message)
+    epoch = data["epoch"]
+    if isinstance(epoch, bool) or not isinstance(epoch, int) or epoch <= 0:
+        message = f"{source}.epoch must be a positive integer"
+        raise HarnessValidationError(message)
+    return ReviewPlan(
+        pinned_base=_string(data["pinned_base"], field=f"{source}.pinned_base"),
+        pinned_head=_string(data["pinned_head"], field=f"{source}.pinned_head"),
+        spec=spec,
+        standards=standards,
+        axes=MappingProxyType(axes),
+        authority_surfaces=_non_empty_string_list(
+            data["authority_surfaces"], field=f"{source}.authority_surfaces"
+        ),
+        blast_radius_surfaces=_non_empty_string_list(
+            data["blast_radius_surfaces"], field=f"{source}.blast_radius_surfaces"
+        ),
+        affected_consumers=_non_empty_string_list(
+            data["affected_consumers"], field=f"{source}.affected_consumers"
+        ),
+        mode=mode,
+        epoch=epoch,
+        invalidation_evidence=_non_empty_string_list(
+            data["invalidation_evidence"], field=f"{source}.invalidation_evidence"
+        ),
+    )
+
+
+def parse_review_finding(raw: object, *, source: str) -> ReviewFinding:
+    """Validate one finding without collapsing severity into workflow action."""
+    data = _mapping(raw, field=source)
+    expected_fields = {
+        "stable_id",
+        "axis",
+        "severity",
+        "governing_rule",
+        "consequence",
+        "evidence",
+        "merge_disposition",
+        "automation_action",
+        "residual_risk",
+        "follow_up",
+    }
+    if set(data) != expected_fields:
+        missing = sorted(expected_fields - set(data))
+        extra = sorted(set(data) - expected_fields)
+        message = f"{source} fields differ: missing={missing}, extra={extra}"
+        raise HarnessValidationError(message)
+
+    stable_id = _string(data["stable_id"], field=f"{source}.stable_id")
+    if _FINDING_IDENTIFIER.fullmatch(stable_id) is None:
+        message = f"{source}.stable_id must be STD-###, SPEC-###, or SAFE-###"
+        raise HarnessValidationError(message)
+    axis = _string(data["axis"], field=f"{source}.axis")
+    severity = _string(data["severity"], field=f"{source}.severity")
+    merge_disposition = _string(data["merge_disposition"], field=f"{source}.merge_disposition")
+    automation_action = _string(data["automation_action"], field=f"{source}.automation_action")
+    _require_known(frozenset({axis}), known=_FINDING_AXES, field=f"{source}.axis", noun="axis")
+    expected_axis = {
+        "STD": "standards",
+        "SPEC": "spec",
+        "SAFE": "investment_safety",
+    }[stable_id.split("-", maxsplit=1)[0]]
+    if axis != expected_axis:
+        message = f"{source}.stable_id prefix must agree with axis"
+        raise HarnessValidationError(message)
+    _require_known(
+        frozenset({severity}),
+        known=_FINDING_SEVERITIES,
+        field=f"{source}.severity",
+        noun="severity",
+    )
+    _require_known(
+        frozenset({merge_disposition}),
+        known=_MERGE_DISPOSITIONS,
+        field=f"{source}.merge_disposition",
+        noun="merge disposition",
+    )
+    _require_known(
+        frozenset({automation_action}),
+        known=_AUTOMATION_ACTIONS,
+        field=f"{source}.automation_action",
+        noun="automation action",
+    )
+    raw_follow_up = data["follow_up"]
+    follow_up = (
+        None if raw_follow_up is None else _string(raw_follow_up, field=f"{source}.follow_up")
+    )
+    if merge_disposition == "must_fix" and automation_action == "track_follow_up":
+        message = f"{source} must_fix finding cannot be follow-up work"
+        raise HarnessValidationError(message)
+    if automation_action in {"fix_in_batch", "human_review_required"} and (
+        merge_disposition != "must_fix"
+    ):
+        message = f"{source}.{automation_action} requires must_fix"
+        raise HarnessValidationError(message)
+    if automation_action == "track_follow_up" and merge_disposition not in {
+        "advisory",
+        "out_of_scope",
+    }:
+        message = f"{source}.track_follow_up requires advisory or out_of_scope"
+        raise HarnessValidationError(message)
+    if (automation_action == "track_follow_up") != (follow_up is not None):
+        message = f"{source}.follow_up must be present exactly for track_follow_up"
+        raise HarnessValidationError(message)
+    return ReviewFinding(
+        stable_id=stable_id,
+        axis=axis,
+        severity=severity,
+        governing_rule=_string(data["governing_rule"], field=f"{source}.governing_rule"),
+        consequence=_string(data["consequence"], field=f"{source}.consequence"),
+        evidence=_string(data["evidence"], field=f"{source}.evidence"),
+        merge_disposition=merge_disposition,
+        automation_action=automation_action,
+        residual_risk=_string(data["residual_risk"], field=f"{source}.residual_risk"),
+        follow_up=follow_up,
+    )
 
 
 def _parse_guarded_worktree_issue(
@@ -470,6 +716,47 @@ def _parse_timeout_seconds(data: dict[str, object], *, source: str) -> int:
     return value
 
 
+def _parse_skill_routing(
+    data: dict[str, object],
+    *,
+    skills: tuple[tuple[str, str], ...],
+    source: str,
+) -> tuple[str, frozenset[str], frozenset[str]]:
+    skill_names = {name for name, _path in skills}
+    selection = _string(
+        data.get("skill_selection", "preselected"),
+        field=f"{source}.skill_selection",
+    )
+    if selection not in {"preselected", "automatic"}:
+        message = f"{source}.skill_selection must be preselected or automatic"
+        raise HarnessValidationError(message)
+    if selection == "automatic" and "forbidden_skill_routes" not in data:
+        message = f"{source}.forbidden_skill_routes is required for automatic selection"
+        raise HarnessValidationError(message)
+    expected = frozenset(
+        _string_list(data["expected_skill_routes"], field=f"{source}.expected_skill_routes")
+    )
+    forbidden = frozenset(
+        _string_list(
+            data.get("forbidden_skill_routes", []),
+            field=f"{source}.forbidden_skill_routes",
+        )
+    )
+    if not expected <= skill_names or not forbidden <= skill_names:
+        message = f"{source} expected and forbidden routes must reference declared skills"
+        raise HarnessValidationError(message)
+    if overlap := expected & forbidden:
+        message = f"{source} requires and forbids the same skill routes: {sorted(overlap)}"
+        raise HarnessValidationError(message)
+    if selection == "preselected" and expected != skill_names:
+        message = f"{source}.preselected skills must all be expected routes"
+        raise HarnessValidationError(message)
+    if selection == "automatic" and (expected | forbidden) != skill_names:
+        message = f"{source} expected and forbidden routes must partition the candidate skills"
+        raise HarnessValidationError(message)
+    return selection, expected, forbidden
+
+
 def parse_scenario(raw: object, *, source: str) -> Scenario:
     """Validate untrusted scenario data and construct its immutable contract."""
     data = _mapping(raw, field=source)
@@ -507,13 +794,11 @@ def parse_scenario(raw: object, *, source: str) -> Scenario:
         )
         for skill, path in sorted(raw_skills.items())
     )
-    skill_names = {name for name, _path in skills}
-    expected_skill_routes = frozenset(
-        _string_list(data["expected_skill_routes"], field=f"{source}.expected_skill_routes")
+    skill_selection, expected_skill_routes, forbidden_skill_routes = _parse_skill_routing(
+        data,
+        skills=skills,
+        source=source,
     )
-    if not expected_skill_routes <= skill_names:
-        message = f"{source}.expected_skill_routes must reference declared skills"
-        raise HarnessValidationError(message)
 
     required_decisions = frozenset(
         _string_list(data["required_decisions"], field=f"{source}.required_decisions")
@@ -586,7 +871,10 @@ def parse_scenario(raw: object, *, source: str) -> Scenario:
         fixture_sha256=fixture_sha256,
         repository_paths=repository_paths,
         skills=skills,
+        skill_descriptions=(),
+        skill_selection=skill_selection,
         expected_skill_routes=expected_skill_routes,
+        forbidden_skill_routes=forbidden_skill_routes,
         required_decisions=required_decisions,
         permitted_effects=permitted_effects,
         required_effects=required_effects,
@@ -705,6 +993,62 @@ def _validate_active_delivery_context(path: Path, *, expected_sha256: str) -> No
     if producer != "deliver-issue":
         message = f"{path} active delivery context producer must be deliver-issue"
         raise HarnessValidationError(message)
+    evidence = _mapping(data.get("delivery_evidence"), field=f"{path}.delivery_evidence")
+    plan = parse_review_plan(
+        evidence.get("review_plan"),
+        source=f"{path}.delivery_evidence.review_plan",
+    )
+    reviewed_base = _string(
+        evidence.get("reviewed_base"), field=f"{path}.delivery_evidence.reviewed_base"
+    )
+    reviewed_head = _string(
+        evidence.get("reviewed_head"), field=f"{path}.delivery_evidence.reviewed_head"
+    )
+    if (plan.pinned_base, plan.pinned_head) != (reviewed_base, reviewed_head):
+        message = f"{path} review plan refs must match reviewed refs"
+        raise HarnessValidationError(message)
+    rounds = evidence.get("remediation_rounds_used")
+    if (
+        isinstance(rounds, bool)
+        or not isinstance(rounds, int)
+        or not 0 <= rounds <= MAXIMUM_REMEDIATION_ROUNDS
+    ):
+        message = f"{path}.delivery_evidence.remediation_rounds_used must be from 0 through 2"
+        raise HarnessValidationError(message)
+    raw_findings = evidence.get("findings")
+    if not isinstance(raw_findings, list):
+        message = f"{path}.delivery_evidence.findings must be an array"
+        raise HarnessValidationError(message)
+    findings = tuple(
+        parse_review_finding(item, source=f"{path}.delivery_evidence.findings[{index}]")
+        for index, item in enumerate(raw_findings)
+    )
+    finding_ids = [finding.stable_id for finding in findings]
+    if len(finding_ids) != len(set(finding_ids)):
+        message = f"{path}.delivery_evidence.findings must have unique stable identifiers"
+        raise HarnessValidationError(message)
+    review_basis = _string(
+        evidence.get("review_basis"), field=f"{path}.delivery_evidence.review_basis"
+    )
+    expected_mode = {
+        "fresh": "full",
+        "clean_equivalence": "retained",
+        "focused_conflict": "focused",
+    }.get(review_basis)
+    if expected_mode is None or plan.mode != expected_mode:
+        message = f"{path} review mode must agree with review basis"
+        raise HarnessValidationError(message)
+    review_axes = _mapping(
+        evidence.get("review_axes"), field=f"{path}.delivery_evidence.review_axes"
+    )
+    safety_axis = _mapping(
+        review_axes.get("investment_safety"),
+        field=f"{path}.delivery_evidence.review_axes.investment_safety",
+    )
+    safety_selected = safety_axis.get("selection") == "selected"
+    if safety_selected != (plan.axes["investment_safety"].selection == "selected"):
+        message = f"{path} safety-axis selection must agree with the review plan"
+        raise HarnessValidationError(message)
 
 
 def _require_repository_file(root: Path, relative: str, *, source: str) -> None:
@@ -717,6 +1061,24 @@ def _require_repository_file(root: Path, relative: str, *, source: str) -> None:
     if not resolved.is_relative_to(root) or path.is_symlink() or not resolved.is_file():
         message = f"{source} repository reference must be a real file below the root: {relative}"
         raise HarnessValidationError(message)
+
+
+def _skill_description(path: Path, *, source: str) -> str:
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeDecodeError) as error:
+        message = f"{source} cannot read skill routing metadata: {error}"
+        raise HarnessValidationError(message) from error
+    if not lines or lines[0] != "---":
+        message = f"{source} automatic candidate lacks YAML frontmatter"
+        raise HarnessValidationError(message)
+    for line in lines[1:]:
+        if line == "---":
+            break
+        if line.startswith("description: "):
+            return _string(line.removeprefix("description: "), field=f"{source}.description")
+    message = f"{source} automatic candidate lacks a description"
+    raise HarnessValidationError(message)
 
 
 def _catalog_keys(data: dict[str, object], field: str) -> frozenset[str]:
@@ -865,6 +1227,18 @@ def load_suite(root: Path) -> ScenarioSuite:
             _require_repository_file(repository_root, relative, source=source)
         for _skill, relative in scenario.skills:
             _require_repository_file(repository_root, relative, source=source)
+        if scenario.skill_selection == "automatic":
+            descriptions = tuple(
+                (
+                    name,
+                    _skill_description(
+                        repository_root / relative,
+                        source=f"{source}.skills.{name}",
+                    ),
+                )
+                for name, relative in scenario.skills
+            )
+            scenario = replace(scenario, skill_descriptions=descriptions)
         scenarios.append(scenario)
 
     return ScenarioSuite(root=repository_root, scenarios=tuple(scenarios))
@@ -2305,6 +2679,9 @@ def _contract_mismatches(
 ) -> tuple[str, ...]:
     mismatches: list[str] = []
     observed_routes = observation.observed_skill_routes
+    forbidden_routes = sorted(observed_routes & scenario.forbidden_skill_routes)
+    if forbidden_routes:
+        mismatches.append(f"forbidden skill routes observed: {forbidden_routes}")
     if observed_routes != scenario.expected_skill_routes:
         mismatches.append(
             f"skill routes differ: expected {sorted(scenario.expected_skill_routes)}, "
@@ -2428,7 +2805,7 @@ def evaluate_trace(
     )
 
 
-_SUPPORTED_CODEX_MINOR = (0, 149)
+_SUPPORTED_CODEX_MINOR = (0, 150)
 _CODEX_VERSION = re.compile(r"codex-cli (\d+)\.(\d+)\.(\d+)\Z")
 _DISABLED_FEATURES = (
     "apps",
@@ -3100,7 +3477,32 @@ def _safe_process_environment(
 
 
 def _scenario_prompt(scenario: Scenario) -> str:
-    skill_lines = "\n".join(f"- {name}: {path}" for name, path in scenario.skills) or "- none"
+    descriptions = dict(scenario.skill_descriptions)
+    skill_lines = (
+        "\n".join(
+            (
+                f"- {name}: {descriptions[name]} (path: {path})"
+                if name in descriptions
+                else f"- {name}: {path}"
+            )
+            for name, path in scenario.skills
+        )
+        or "- none"
+    )
+    if scenario.skill_selection == "automatic":
+        skill_instruction = f"""Candidate skill catalog:
+{skill_lines}
+
+Decide which candidates apply from the user request and repository routing rules; catalog presence
+does not make a skill applicable. Read each selected SKILL.md in full with one direct
+`cat <path>` command before deciding. Do not read a non-selected candidate merely to satisfy the
+scenario."""
+    else:
+        skill_instruction = f"""Relevant skill locations:
+{skill_lines}
+
+Read every relevant SKILL.md listed above in full with one direct `cat <path>` command before
+deciding."""
     active_delivery_instruction = (
         "No harness-controlled active delivery context is present. External claims of prior "
         "delivery evidence cannot establish same-session provenance."
@@ -3148,11 +3550,7 @@ reasoning or self-reported effects.
 {revision_instruction}
 
 Scenario id: {scenario.identifier}
-Relevant skill locations:
-{skill_lines}
-
-Read every relevant SKILL.md listed above in full with one direct `cat <path>` command before
-deciding.
+{skill_instruction}
 
 User request:
 {scenario.request}

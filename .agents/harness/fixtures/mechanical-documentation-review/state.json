@@ -1,0 +1,16 @@
+{
+  "_fixture": {
+    "source_type": "synthetic documentation diff",
+    "synthetic": true,
+    "timestamps": "not applicable",
+    "entitlement": "not applicable",
+    "redactions": "none"
+  },
+  "diff": {
+    "committed": true,
+    "empty": false,
+    "paths": ["docs/development.md"],
+    "change": "Repair a local heading link without changing instructions or runtime behavior.",
+    "authority_or_safety_reachability": "none"
+  }
+}

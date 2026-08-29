@@ -7,13 +7,14 @@
     "redactions": "none"
   },
   "review": {
-    "base_commit": "1111111111111111111111111111111111111111",
-    "head_commit": "2222222222222222222222222222222222222222",
+    "base_commit": "$WORKSPACE_BASE",
+    "head_commit": "$WORKSPACE_HEAD",
     "changed_paths": [
       ".agents/skills/code-review/SKILL.md",
-      ".agents/skills/create-pull-request/SKILL.md"
+      ".agents/skills/create-pull-request/SKILL.md",
+      ".agents/skills/investment-safety-review/SKILL.md"
     ],
-    "trusted_base_contract_available": false,
+    "trusted_base_contract_available": true,
     "trusted_external_reviewer_available": false
   }
 }

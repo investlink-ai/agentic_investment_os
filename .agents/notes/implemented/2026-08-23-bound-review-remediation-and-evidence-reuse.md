@@ -12,16 +12,24 @@ same shortcut because resolving it makes a semantic choice even when most of the
 
 ## Decision
 
-[Code review](../../skills/code-review/SKILL.md) gives each finding a stable identity, severity,
-governing rule, consequence, and blocking disposition. Severity prioritizes repair without overriding
-contractual obligations. Blocker and High findings, reachable Medium defects, and every unmet
-acceptance, gate, repository, or safety obligation are must-fix. Only a Low non-contractual judgment
-call may remain advisory.
+[Code review](../../skills/code-review/SKILL.md) begins from a pinned review plan and gives each finding
+a stable identity, severity, governing rule, consequence, merge disposition, and automation action.
+Severity prioritizes repair without overriding contractual obligations. Blocker and High findings,
+reachable Medium defects, and every unmet acceptance, gate, repository, or safety obligation are
+must-fix. Only a Low non-contractual judgment call may remain advisory. A late Medium blocker may stop
+at `human_review_required` without becoming advisory or opening another autonomous round.
 
 [Issue delivery](../../skills/deliver-issue/SKILL.md) batches all known must-fix findings and permits at
 most two remediation-and-verification rounds after the initial review without explicit human
 direction. A capped unresolved finding produces `human_review_required`; an existing ready pull
 request is demoted rather than treated as approved.
+
+The first pass is full for every selected axis. A correction-only batch receives incremental
+verification from affected axes when it changes no scope, authority, reviewer contract, review
+selection, public contract, dependency, schema, configuration, persistence, external effect, blast
+surface, consumer, or unresolved semantic conclusion. A change to any such input requires full review
+from affected axes. Both modes retain one epoch's finding ledger and delivery-wide round count; a new
+epoch records a material contract change without resetting the autonomous budget.
 
 Review may be retained across a clean base update only when a same-session, pinned record proves the
 patch, authority, reviewer instructions, review selection, blast radius, consumers, and checks remain
@@ -44,10 +52,16 @@ is rebound to the new exact refs and is never persisted as a reusable cache.
 
 - Review work has a default finite budget while must-fix obligations remain fail-closed.
 - Advisory, out-of-scope, and disproved findings stay visible without forcing automatic edits.
-- A novel post-initial finding restarts blocking remediation only for severe impact, an explicit or
-  safety obligation, or evidence materially unavailable to the initial review.
+- A novel post-initial finding enters automated remediation only for severe impact, an explicit or
+  safety obligation, or evidence materially unavailable to the initial review; other blockers fail
+  closed to human direction.
 - Equivalence checks do not consume remediation rounds; semantic corrections do.
 - Patch IDs, range-diff, changed paths, and blast triggers support but never decide review reuse.
+- Oversized required corrections cause scope reduction or a human split decision, not follow-up
+  deferral. Follow-up tracking remains separate from merge disposition and requires independent
+  publication authority.
+- Bounded reviewer telemetry explains cost and escalation without becoming approval or a persistent
+  review cache.
 - Human merge control, trusted-base reviewer independence, hooks, pre-push checks, and CI remain
   unchanged.
 
@@ -62,6 +76,6 @@ contract, and counter-scenarios proving that unresolved must-fix findings still 
 
 [The testing policy](../../../docs/testing.md#agent-workflow-scenarios) owns deterministic validation
 and explicit model-backed scenarios for finding triage, batching, cap exhaustion, remediation
-regressions, clean base updates, focused conflict review, and failed equivalence. The publication
-fixtures also preserve exact-commit reuse and reviewer-identity invalidation under the expanded
-delivery ledger.
+regressions, incremental and full affected-axis selection, late findings, route selection, clean base
+updates, focused conflict review, and failed equivalence. The publication fixtures also preserve
+exact-commit reuse and reviewer-identity invalidation under the expanded delivery ledger.

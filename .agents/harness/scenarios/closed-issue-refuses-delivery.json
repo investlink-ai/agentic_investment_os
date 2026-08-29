@@ -13,8 +13,12 @@
     "deliver-issue": ".agents/skills/deliver-issue/SKILL.md",
     "start-issue-worktree": ".agents/skills/start-issue-worktree/SKILL.md"
   },
+  "skill_selection": "automatic",
   "expected_skill_routes": [
     "deliver-issue"
+  ],
+  "forbidden_skill_routes": [
+    "start-issue-worktree"
   ],
   "required_decisions": [
     "refuse_closed_issue"

@@ -2,7 +2,7 @@
   "schema_version": 1,
   "id": "safety-uncertainty-refuses-review-reuse",
   "title": "Safety uncertainty invalidates review reuse",
-  "request": "Assess review equivalence after the base update. The feature patch appears unchanged, but safety reachability through a new consumer cannot be resolved from the available evidence. Select investment-safety review, reject equivalence, and require every affected full review axis. Do not edit, verify, publish, or execute reviewers in this scenario.",
+  "request": "Assess review equivalence after the base update. The feature patch appears unchanged, but transitive reachability through a new consumer cannot be resolved from the available evidence. Decide the necessary next review action without editing, verifying, publishing, or executing reviewers.",
   "fixture": "safety-uncertainty-refuses-review-reuse",
   "fixture_sha256": "ff5774fd7b9233f621b0b08e34f8ccaee3a3a095e8e116117343c93dc8e50627",
   "repository_paths": [
@@ -11,12 +11,17 @@
     "docs/testing.md"
   ],
   "skills": {
+    "code-review": ".agents/skills/code-review/SKILL.md",
     "deliver-issue": ".agents/skills/deliver-issue/SKILL.md",
     "investment-safety-review": ".agents/skills/investment-safety-review/SKILL.md"
   },
+  "skill_selection": "automatic",
   "expected_skill_routes": [
-    "deliver-issue",
     "investment-safety-review"
+  ],
+  "forbidden_skill_routes": [
+    "code-review",
+    "deliver-issue"
   ],
   "required_decisions": [
     "require_fresh_affected_review",

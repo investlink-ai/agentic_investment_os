@@ -26,9 +26,15 @@ without allowing one axis to mask the other.
    pull-request workflow changes.
 5. Read every changed file and enough callers, consumers, tests, and owned documentation to give both
    reviewers a self-contained brief.
+6. Record the review plan before invoking or reusing a reviewer: pinned base and head, Spec or its
+   explicit absence, applicable Standards, selected axes and reasons, authority and blast-radius
+   surfaces, affected consumers, review mode, review epoch, and evidence that invalidates the plan.
+   Standards is always selected for a committed non-empty diff. Select Spec whenever one exists;
+   absence skips only that axis. The caller separately records why investment safety is selected or
+   not applicable.
 
-The contract is pinned only when the base, head, commit list, Spec source or explicit absence, and
-Standards sources are immutable inputs to the reviewers.
+The contract is pinned only when these review-plan inputs and the commit list are immutable inputs to
+the reviewers. The first review in an epoch is `full` for every selected axis.
 
 ## Run independent reviewers
 
@@ -71,13 +77,13 @@ report to 400 words.
 
 Do not ask either reviewer for an investment-safety verdict or select the supplemental safety review
 from this skill. Its caller applies
-[investment-safety-review](../investment-safety-review/SKILL.md) independently when that skill's
-description matches the same pinned diff.
+[investment-safety-review](../investment-safety-review/SKILL.md) independently when the caller's
+review plan selects that axis for the same pinned diff.
 
 ## Substantiate and disposition
 
-1. Reproduce or trace each candidate finding against the pinned diff and assign exactly one delivery
-   disposition without changing its severity:
+1. Reproduce or trace each candidate finding against the pinned diff. Preserve severity, then assign
+   exactly one merge disposition and one automation action:
 
    - `disproved` requires concrete evidence that the claimed condition or consequence does not exist;
    - `out_of_scope` requires evidence that the condition was pre-existing and the diff neither
@@ -88,31 +94,58 @@ description matches the same pinned diff.
    - `advisory` is limited to a Low judgment call that violates no documented obligation, acceptance
      criterion, gate, or safety invariant.
 
+   Automation actions are `fix_in_batch`, `human_review_required`, `track_follow_up`, or `none`.
+   `fix_in_batch` is available only while an authorized remediation round can safely correct the
+   finding without widening scope. `human_review_required` preserves a blocking disposition when the
+   round cap, uncertainty, or smallest safe correction requires a human decision. `track_follow_up`
+   is limited to an independent pre-existing condition that the diff does not introduce, worsen, rely
+   upon, or make newly reachable, or to a non-contractual advisory improvement. Follow-up tracking
+   never changes merge disposition and requires separate authority to publish an issue.
+
    Precedence matters: an explicit obligation cannot become advisory because its estimated impact is
-   Low. Keep unresolved evidence or reviewer uncertainty explicit; do not use it to manufacture a
-   pass.
+   Low or its correction is large. Keep unresolved evidence or reviewer uncertainty explicit; do not
+   use it to manufacture a pass.
 2. Preserve the axes under separate `Standards` and `Spec` headings. Order findings by severity within
    each axis, without merging or reranking findings across axes. For each finding report its stable
-   identifier, axis, severity, rule or requirement, reachable consequence, and disposition with the
-   evidence supporting that disposition.
+   identifier, axis, severity, rule or requirement, reachable consequence, evidence, merge
+   disposition, automation action, residual risk, and follow-up reference or explicit absence.
 3. State questions, assumptions, skipped axes, advisories, and residual risks under their owning
    axis. An axis may pass with advisories but cannot pass with a `must_fix` finding.
-4. End with finding and disposition counts and the highest severity within each axis. Passing one axis
-   never implies that the other passed.
+4. End with finding, disposition, and action counts and the highest severity within each axis. Passing
+   one axis never implies that the other passed.
 
 ## Verify a remediation batch
 
-For a caller-requested verification round, keep the original finding ledger and identifiers. Inspect
-the pinned remediation delta and the complete current diff, verify every correction and regression
-test, and report all remaining findings as one batch. Do not reissue an equivalent finding under a new
-identifier.
+For a correction batch that addresses only recorded findings and changes no scope, authority,
+reviewer contract, review selection, public interface, dependency, schema, configuration,
+persistence behavior, external effect, blast-radius surface, or affected consumer, use `incremental`
+verification from the affected axes. Keep the original ledger and identifiers, inspect the pinned
+remediation delta, verify every correction and regression test, and scan the complete current diff for
+remediation regressions. A changed HEAD alone does not make unrelated axes repeat full review.
 
-A novel post-initial finding can restart blocking remediation only when it is Blocker or High, proves
-an unmet explicit obligation or safety invariant, or results from evidence that was materially
-unavailable to the initial review. Other new Low judgment calls are advisory. A regression introduced
-by remediation is not pre-existing and follows the normal disposition rules. The caller owns the
-round budget and decides whether another remediation round is authorized.
+Use `full` review from every affected axis when the Spec, applicable Standard, reviewer contract,
+review selection, public interface, dependency, schema, configuration, persistence behavior,
+authority path, external effect, blast-radius surface, affected consumer, or unresolved semantic
+uncertainty changes. Record which invalidator selected each full axis. Clean equivalence and focused
+manual-conflict review retain their separate fail-closed evidence contracts.
+
+Keep one review epoch across incremental and full affected-axis passes: preserve its ledger,
+identifiers, novel-finding rules, and delivery-wide round count. A material reviewer-contract change
+starts a new epoch with an explicit reason, but cannot reset the delivery's two-round autonomous
+budget or expand its scope.
+
+A novel post-initial finding can enter automated remediation only when it is Blocker or High, proves
+an unmet explicit obligation or safety invariant, or results from evidence materially unavailable to
+the initial review. Other new Low judgment calls are advisory. Classify a new Medium finding normally;
+when it remains `must_fix` but another autonomous round is not authorized, assign
+`human_review_required` without converting it to advisory. A regression introduced by remediation is
+not pre-existing and follows the normal disposition rules. The caller owns the round budget.
+
+After each pass, emit a bounded, non-authoritative summary: reviewer model and effort when exposed,
+reviewer-contract identity, per-axis elapsed time, candidate, disposition, and action counts,
+remediation rounds used, novel-finding reasons, and any cap or escalation reason. This telemetry does
+not approve the diff and is not a persistent review cache.
 
 The review is complete when every reported finding is tied to the pinned diff and its owning standard
-or requirement, every finding has an explicit delivery disposition, and both axes have an explicit
-pass, pass-with-advisories, or must-fix disposition.
+or requirement, every finding has an explicit merge disposition and automation action, and both axes
+have an explicit pass, pass-with-advisories, or must-fix disposition.

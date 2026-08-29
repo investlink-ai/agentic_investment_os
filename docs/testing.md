@@ -623,6 +623,12 @@ files and skills, binds an isolated fixture by SHA-256, and uses the decision an
 the exact issue number accepted at that boundary. `make harness` validates the schemas, references,
 fixture integrity, and evaluator deterministically; it never invokes a model.
 
+Automatic-routing scenarios declare a candidate skill catalog plus required and forbidden routes. The
+runner presents candidates without identifying the expected subset, and the user request does not
+name or instruct the expected route. The evaluator derives routes from successful full-file reads and
+fails for either a missing required route or a forbidden route. Preselected scenarios remain available
+when the workflow under test begins after routing and every declared skill is intentionally required.
+
 Delivery scenarios distinguish a complete same-session handoff for an unchanged exact base and head
 from direct claims and absent, incomplete, stale, or mismatched evidence. The harness places simulated
 same-execution delivery state in its reserved control context rather than the untrusted external
@@ -641,9 +647,14 @@ resolve that pull request from the expected issue branch, invoke the demotion-on
 same pull request, and read back its draft state in order. Only a complete handoff whose scope,
 exact refs, checks, review selection, and immutable per-axis reviewer identities still match may
 satisfy publication prerequisites without repeating them; stale live refs remain a refusal.
-Review-remediation scenarios separately exercise Low advisory judgment calls, Low contractual
-must-fix findings, complete finding batches, one full gate per batch, cap exhaustion and ready-pull-
-request demotion, and regressions introduced during remediation. Review-equivalence scenarios require
+Review-plan fixtures bind exact refs, Spec availability, applicable Standards, selected axes and
+reasons, authority and blast surfaces, consumers, mode, epoch, and invalidation evidence. Finding
+fixtures keep severity, merge disposition, automation action, residual risk, and follow-up routing
+separate. Review-remediation scenarios separately exercise Low advisory judgment calls, Low
+contractual must-fix findings, correction-only incremental verification, full affected-axis
+counterexamples, complete finding batches, one full gate per batch, late Medium escalation, oversized
+safe corrections, cap exhaustion and ready-pull-request demotion, and regressions introduced during
+remediation. Review-equivalence scenarios require
 the final disposition to distinguish clean conflict-free base updates, independently reviewed manual
 conflicts, and isolated counterexamples for changed patches, authority, reviewer content, review
 selection, consumers, blast surfaces, unresolved safety reachability, and uncertainty reported while
@@ -668,7 +679,7 @@ make agent-workflow SCENARIO=issue-publication-awaits-approval
 ```
 
 The runner copies only scenario-declared repository files into a temporary Git repository and
-supplies fake GitHub and disabled external commands. Supported Codex CLI 0.149.x runs with `exec
+supplies fake GitHub and disabled external commands. Supported Codex CLI 0.150.x runs with `exec
 --ephemeral --json`, a structured final-output schema, and a granular permission profile that denies
 the filesystem root, admits only Codex's minimal runtime paths and the disposable workspace as
 read-only, denies temporary-directory and command-network access, and disables approval escalation.
@@ -679,7 +690,8 @@ authentication or executables, unsupported CLI versions, timeouts, nonzero proce
 incomplete JSONL, and ambiguous effects are explicit non-passing outcomes.
 
 Evaluation derives skill routes only from successful, direct, top-level full-file reads of the
-declared `SKILL.md` files and compares them with the final-output claim. It requires the exact scenario
+declared `SKILL.md` files and compares them with the required and forbidden route contract and the
+final-output claim. It requires the exact scenario
 decision set, checks dispositions, every observed tool attempt, directly proven successful required
 effects, and final filesystem and Git state, and records the accepted decisions in the result.
 Compound or wrapped commands still expose forbidden attempts but cannot supply positive route or

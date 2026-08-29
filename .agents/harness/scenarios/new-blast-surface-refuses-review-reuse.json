@@ -2,7 +2,7 @@
   "schema_version": 1,
   "id": "new-blast-surface-refuses-review-reuse",
   "title": "A new blast trigger invalidates review reuse",
-  "request": "Assess review equivalence after the base update. Patch identity and changed paths match, but the integrated tree newly reaches the configured review-routing blast surface. Treat the Git signals as supporting evidence only, reject equivalence, and require every affected full review axis. Do not edit, verify, publish, or execute reviewers in this scenario.",
+  "request": "Assess review equivalence after the base update. Patch identity and changed paths match, but the integrated tree newly reaches the configured review-routing blast surface. Treat the Git signals as supporting evidence and decide the necessary review mode. Do not edit, verify, publish, or execute reviewers in this scenario.",
   "fixture": "new-blast-surface-refuses-review-reuse",
   "fixture_sha256": "d5aa33699332cb245e3aca40c9b654aac9c0ce813d6fb1aa3a0e34bc884f531b",
   "repository_paths": [

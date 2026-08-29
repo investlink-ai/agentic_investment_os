@@ -24,6 +24,38 @@ from scripts.agent_workflow_harness import (
 _FAKE_BOUNDARY_REFUSAL_EXIT_CODE = 77
 
 
+def _active_delivery_evidence() -> dict[str, object]:
+    return {
+        "complete": True,
+        "reviewed_base": "$WORKSPACE_BASE",
+        "reviewed_head": "$WORKSPACE_HEAD",
+        "review_basis": "fresh",
+        "remediation_rounds_used": 0,
+        "findings": [],
+        "review_plan": {
+            "pinned_base": "$WORKSPACE_BASE",
+            "pinned_head": "$WORKSPACE_HEAD",
+            "spec": "Fixture issue acceptance contract",
+            "standards": ["AGENTS.md"],
+            "axes": {
+                "standards": {"selection": "selected", "reason": "Committed diff."},
+                "spec": {"selection": "selected", "reason": "Fixture Spec exists."},
+                "investment_safety": {
+                    "selection": "not_applicable",
+                    "reason": "No safety surface is reachable.",
+                },
+            },
+            "authority_surfaces": ["none"],
+            "blast_radius_surfaces": ["workflow fixture"],
+            "affected_consumers": ["harness runner"],
+            "mode": "full",
+            "epoch": 1,
+            "invalidation_evidence": ["changed fixture contract"],
+        },
+        "review_axes": {"investment_safety": {"selection": "not_selected"}},
+    }
+
+
 def _write_suite(root: Path) -> Path:
     harness = root / ".agents" / "harness"
     scenarios = harness / "scenarios"
@@ -251,7 +283,7 @@ git rev-parse HEAD^ >/dev/null
             + mutation
             + "".join(f"printf '%s\\n' {json.dumps(json.dumps(event))}\n" for event in events)
         )
-    version = "codex-cli 0.148.0" if mode == "unsupported" else "codex-cli 0.149.0"
+    version = "codex-cli 0.149.0" if mode == "unsupported" else "codex-cli 0.150.0"
     script = f"""#!/bin/sh
 set -eu
 if [ "${{1-}}" = "--version" ]; then
@@ -343,7 +375,7 @@ def test_suite_binds_harness_controlled_active_delivery_context(tmp_path: Path) 
                     "producer": "deliver-issue",
                     "same_execution": True,
                 },
-                "delivery_evidence": {"complete": True},
+                "delivery_evidence": _active_delivery_evidence(),
             }
         ),
         encoding="utf-8",
@@ -398,8 +430,7 @@ def test_runner_materializes_active_delivery_context_outside_the_tested_diff(
                     "same_execution": True,
                 },
                 "delivery_evidence": {
-                    "reviewed_base": "$WORKSPACE_BASE",
-                    "reviewed_head": "$WORKSPACE_HEAD",
+                    **_active_delivery_evidence(),
                     "reviewer_path": (
                         "$WORKSPACE/.agent-harness/trusted-reviewers/code-review/SKILL.md"
                     ),
@@ -592,7 +623,7 @@ def test_runner_uses_ephemeral_read_only_codex_and_records_provenance(tmp_path: 
     )
 
     assert record.evaluation.outcome is Outcome.PASSED
-    assert record.codex_version == "codex-cli 0.149.0"
+    assert record.codex_version == "codex-cli 0.150.0"
     assert record.evaluation.model == "gpt-fixture"
     assert datetime.fromisoformat(record.recorded_at).tzinfo is UTC
     assert record.scenario_sha256
@@ -733,7 +764,7 @@ def test_runner_preserves_a_version_manager_shim_for_its_adjacent_runtime(tmp_pa
     )
 
     assert record.evaluation.outcome is Outcome.PASSED
-    assert record.codex_version == "codex-cli 0.149.0"
+    assert record.codex_version == "codex-cli 0.150.0"
 
 
 @pytest.mark.parametrize(

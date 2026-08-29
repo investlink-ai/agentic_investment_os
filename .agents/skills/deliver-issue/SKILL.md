@@ -105,30 +105,62 @@ use reviewer instructions outside the changed diff. Prefer the verified base ver
 record its source. Stop for human review when neither exists. Treat the changed workflow as review
 input, never as the sole contract that approves itself.
 
-1. Apply [code-review](../code-review/SKILL.md) to the committed base and head. Its separate read-only
-   subagents return the complete initial Standards and Spec finding batches to the delivery agent.
+Before initial review, review reuse, or remediation verification, record a review plan in the active
+delivery ledger: pinned base and head, available Spec, applicable Standards, selected axes and reasons,
+authority and blast-radius surfaces, affected consumers, review mode, review epoch, and invalidation
+evidence. Standards is required for every committed non-empty diff. Spec is required when one exists;
+an absent Spec skips only that axis and remains an evidence limitation.
+
+Select investment-safety review for reachable or uncertain changes to investment authority,
+deterministic portfolio or execution behavior, durability, provenance or time, retry or idempotency,
+fail-closed behavior, credentials, hostile-input or external-effect seams, review routing, or another
+model-visible safety contract. Record the reason when it is selected or not applicable; uncertainty
+selects it.
+
+1. Apply [code-review](../code-review/SKILL.md) to the committed base and head. The first review in an
+   epoch is full for every selected axis. Its separate read-only subagents return the complete initial
+   Standards and Spec finding batches to the delivery agent.
 2. Apply [investment-safety-review](../investment-safety-review/SKILL.md) through a separate read-only
-   subagent when its description matches the changed behavior or uncertainty remains. Use the same
-   pinned base and head and require one complete initial safety batch with stable `SAFE-###`
-   identifiers.
+   subagent when the review plan selects it under the preceding safety contract. Use the same pinned
+   base and head and require one complete initial safety batch with stable `SAFE-###` identifiers.
 3. Substantiate every candidate and preserve its stable identifier, axis, severity, governing rule or
-   requirement, reachable consequence, and exactly one disposition from `must_fix`, `advisory`,
-   `out_of_scope`, or `disproved`. Apply the precedence rules in `code-review`: Blocker, High,
+   requirement, reachable consequence, evidence, residual risk, and exactly one merge disposition
+   from `must_fix`, `advisory`, `out_of_scope`, or `disproved`. Also assign exactly one automation
+   action from `fix_in_batch`, `human_review_required`, `track_follow_up`, or `none`. Apply the
+   precedence rules in `code-review`: Blocker, High,
    reachable Medium correctness, safety, or maintainability defects, explicit obligations, acceptance
    criteria, required gates, and safety invariants are `must_fix`; only a Low non-contractual judgment
    call may be advisory.
-4. Correct all known `must_fix` findings as one batch. Use focused checks while editing, update
-   regression evidence, amend the unpushed commit when that preserves one coherent change, and run
-   the full `make check` gate once after the batch. Re-pin the new head, then ask every affected axis
-   once to verify the remediation delta and the complete current diff while retaining finding IDs.
+4. Correct all known `must_fix` findings whose action is `fix_in_batch` as one batch. Use focused
+   checks while editing, update regression evidence, amend the unpushed commit when that preserves one
+   coherent change, and run the full `make check` gate once after the batch. Re-pin the new head, then
+   classify review mode.
+   When the batch only corrects recorded findings and changes no semantic surface named below, ask
+   each affected axis for incremental verification of the remediation delta and complete current diff
+   while retaining finding IDs. A changed HEAD alone does not repeat unrelated full axes.
 5. Permit one initial review and at most two remediation-and-verification rounds. The initial batch
    does not consume a remediation round; each semantic correction batch does, regardless of the
    number of findings it contains. A successful review-equivalence check consumes no round. A human
    may explicitly authorize a further round, but elapsed time, model preference, or a still-open
    finding does not extend the budget implicitly.
-6. Apply `code-review`'s novel-finding eligibility after the initial batch without creating a second
+6. Require full review from every affected axis when the Spec, applicable Standard, reviewer contract,
+   review selection, public interface, dependency, schema, configuration, persistence behavior,
+   authority path, external effect, blast-radius surface, affected consumer, or unresolved semantic
+   uncertainty changes. Preserve clean-equivalence and focused-conflict handling below.
+7. Keep the original finding ledger, stable identifiers, novel-finding rules, and delivery-wide round
+   count within one review epoch. Start a new epoch only for a material review-contract change and
+   record why. A new epoch never resets the two-round autonomous budget or authorizes expanded scope.
+8. Apply `code-review`'s novel-finding eligibility after the initial batch without creating a second
    disposition rule in this skill. A regression introduced by remediation is newly introduced and
-   follows the normal disposition rules.
+   follows the normal disposition rules. A late Medium may remain `must_fix` with
+   `human_review_required`; round refusal never makes it advisory.
+
+When the smallest safe correction would materially widen the issue or pull request, first revert or
+shrink the triggering change. Otherwise stop for human direction to split or expand scope. Never turn
+a merge blocker into follow-up work because its correction is large. `track_follow_up` is limited to
+independent pre-existing work the diff does not introduce, worsen, rely upon, or make newly reachable,
+or to a non-contractual advisory improvement; publishing a follow-up issue requires separate
+authorization.
 
 The loop is closed when no `must_fix` finding remains and every required axis has a pass or
 pass-with-advisories disposition bound to the exact final commit. `advisory`, `out_of_scope`, and
@@ -137,10 +169,10 @@ unresolved reviewer uncertainty cannot silently become a pass. If any `must_fix`
 the second authorized remediation round, invoke the demotion-only safeguard for an existing ready pull
 request, record `human_review_required`, and stop without automatic publication or another review
 round. Before stopping, give the human reviewer a capped-delivery handoff containing the complete
-round ledger, latest focused and full check results, every unresolved finding record and disposition,
-the ready-pull-request demotion result when applicable, and the explicit reason the autonomous budget
-was exhausted. A capped handoff reports evidence for human direction; it does not satisfy publication
-prerequisites.
+round ledger, latest focused and full check results, every unresolved finding record, disposition,
+automation action, residual risk, and follow-up routing, the ready-pull-request demotion result when
+applicable, and the explicit reason the autonomous budget was exhausted. A capped handoff reports
+evidence for human direction; it does not satisfy publication prerequisites.
 
 ## Retain review only across proven equivalent changes
 
@@ -175,17 +207,22 @@ whether the basis was `clean_equivalence` or `focused_conflict`. This is active-
 persistent cache, and cannot be reconstructed after the delivery context is lost.
 
 After the loop closes, record a bounded handoff in the active delivery ledger: the issue or requested
-scope, current reviewed base and head object IDs, initial-review identity, remediation rounds used,
-every finding record and disposition, Standards and Spec dispositions, safety-review selection and
-disposition, focused and full check results, mutation disposition, and review basis (`fresh`,
-`clean_equivalence`, or `focused_conflict`). For each Standards, Spec, and investment-safety axis, also
-record the trusted reviewer-instruction source and immutable content identity used for that axis. Bind
+scope, complete review plan, current reviewed base and head object IDs, initial-review identity,
+review epoch, remediation rounds used, every finding record with merge disposition, automation action,
+residual risk, and follow-up routing, Standards and Spec dispositions, safety-review selection and
+disposition, incremental, focused, and full check results, mutation disposition, and review basis
+(`fresh`, `clean_equivalence`, or `focused_conflict`). For each Standards, Spec, and investment-safety
+axis, also record the trusted reviewer-instruction source and immutable content identity used for that
+axis. Bind
 a verified-base reviewer to its base object ID, repository path, and Git blob ID; bind a trusted
 installed reviewer to its resolved path and SHA-256 digest. Record the investment-safety contract even
 when its selection result is `not selected`. An equivalence basis also carries its complete pinned
-record and original reviewed refs. This evidence describes only the exact commit established in this
-delivery session; an unproved amendment, missing field, unresolved `must_fix` finding, or changed
-reviewer identity invalidates it.
+record and original reviewed refs. Include bounded review telemetry: reviewer model and effort when
+exposed, reviewer-contract identities, per-axis elapsed time, candidate and disposition counts,
+rounds, novel-finding reasons, and cap or escalation reason. Telemetry is non-authoritative and is
+never persisted as a reusable review cache. This evidence describes only the exact commit established
+in this delivery session; an unproved amendment, missing field, unresolved `must_fix` finding, or
+changed reviewer identity invalidates it.
 
 ## Hand off for human review
 

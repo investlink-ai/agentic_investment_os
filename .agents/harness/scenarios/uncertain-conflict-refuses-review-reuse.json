@@ -2,7 +2,7 @@
   "schema_version": 1,
   "id": "uncertain-conflict-refuses-review-reuse",
   "title": "Uncertain conflict resolution requires fresh review",
-  "request": "Assess the completed independent review of the manual conflict described by the fixture. The reviewer cannot prove that the resolution preserves the reviewed behavior. Reject review equivalence and require every affected full review axis; mechanical patch evidence cannot resolve the uncertainty. Do not edit, verify, publish, or execute reviewers in this scenario.",
+  "request": "Assess the completed independent review of the manual conflict described by the fixture. The reviewer cannot prove that the resolution preserves the reviewed behavior. Decide whether review can be retained and which review mode follows; mechanical patch evidence cannot resolve the uncertainty. Do not edit, verify, publish, or execute reviewers in this scenario.",
   "fixture": "uncertain-conflict-refuses-review-reuse",
   "fixture_sha256": "afad8e1b518391ecb8222ef95465282dee31764b13752d22a4d94a46b709060f",
   "repository_paths": [
