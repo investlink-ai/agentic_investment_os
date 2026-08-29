@@ -8,7 +8,7 @@ from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal, localcontext
 
 import pytest
-from hypothesis import given
+from hypothesis import example, given
 from hypothesis import strategies as st
 
 from agentic_investment_os.domain.identity import (
@@ -44,6 +44,8 @@ from agentic_investment_os.portfolio.construction import (
     parse_portfolio_construction_result,
 )
 from agentic_investment_os.portfolio.shadows import (
+    PortfolioCycleResult,
+    PortfolioShadowAccount,
     ShadowCostInput,
     ShadowTargetBand,
     construct_portfolio_cycle,
@@ -138,6 +140,7 @@ def test_shadow_accounts_bind_the_exact_house_view_inputs_and_cost_facts() -> No
         assert shadow.evidence_cutoff == request.evidence_cutoff
         assert shadow.position_snapshot_id == request.inputs.position_snapshot.fingerprint
         assert shadow.starting_cash == request.inputs.cash
+        assert shadow.starting_equity == request.inputs.cash
         assert shadow.cost_input_policy_id == request.policy.cost_input_policy.policy_id
         assert shadow.cost_input_source == request.inputs.source_identity
         assert shadow.cost_inputs_available_at == request.inputs.available_at
@@ -145,6 +148,7 @@ def test_shadow_accounts_bind_the_exact_house_view_inputs_and_cost_facts() -> No
             Decimal(100),
             Decimal(100),
         )
+        assert all(item.median_dollar_volume == Decimal(100000000) for item in shadow.cost_inputs)
         assert dict(shadow.material_fingerprints) == {
             "configuration": request.configuration_hash,
             "constitution": request.constitution_hash,
@@ -305,6 +309,180 @@ def test_shadow_account_parser_rejects_hostile_nested_material() -> None:
     assert all(parse_portfolio_shadow_account(value) is None for value in invalid_payloads)
 
 
+def test_shadow_cycle_rejects_resealed_policy_and_same_input_substitutions() -> None:
+    cycle = construct_portfolio_cycle(
+        _request((_resolution(_AAPL, _HASH_A), _resolution(_SPY, _HASH_B)))
+    )
+    account = cycle.shadows[0]
+
+    invalid_profile_payloads: list[dict[str, object]] = []
+    changed_method = deepcopy(account.to_payload())
+    changed_method["sizing_method"] = "equal_weight"
+    invalid_profile_payloads.append(changed_method)
+
+    changed_target = deepcopy(account.to_payload())
+    targets = mutable_mapping_list(changed_target["targets"])
+    bands = mutable_mapping_list(changed_target["target_bands"])
+    mutable_mapping(targets[0])["target_weight"] = "0.9"
+    mutable_mapping(bands[0]).update(
+        {"target_weight": "0.9", "lower_weight": "0.9", "upper_weight": "0.9"}
+    )
+    changed_target["retained_cash_weight"] = "0.05"
+    invalid_profile_payloads.append(changed_target)
+    changed_liquidity = deepcopy(account.to_payload())
+    mutable_mapping(mutable_mapping_list(changed_liquidity["cost_inputs"])[0])[
+        "median_dollar_volume"
+    ] = "1000"
+    invalid_profile_payloads.append(changed_liquidity)
+
+    for payload in invalid_profile_payloads:
+        _reseal_shadow_payload(payload)
+        assert parse_portfolio_shadow_account(payload) is None
+
+    same_input_substitutions: list[dict[str, object]] = []
+    changed_cycle = deepcopy(account.to_payload())
+    changed_cycle["cycle"] = MarketSession(date.fromisoformat("2026-08-20")).to_payload()
+    same_input_substitutions.append(changed_cycle)
+    changed_snapshot = deepcopy(account.to_payload())
+    changed_snapshot["position_snapshot_id"] = "f" * 64
+    same_input_substitutions.append(changed_snapshot)
+    changed_fingerprint = deepcopy(account.to_payload())
+    mutable_mapping(changed_fingerprint["material_fingerprints"])["configuration"] = "f" * 64
+    same_input_substitutions.append(changed_fingerprint)
+    changed_price = deepcopy(account.to_payload())
+    mutable_mapping(mutable_mapping_list(changed_price["cost_inputs"])[0])["price"] = "101"
+    same_input_substitutions.append(changed_price)
+
+    for payload in same_input_substitutions:
+        _reseal_shadow_payload(payload)
+        substituted = parse_portfolio_shadow_account(payload)
+        assert substituted is not None
+        with pytest.raises(ValueError, match="invalid portfolio cycle result"):
+            PortfolioCycleResult(
+                cycle.balanced,
+                (substituted, cycle.shadows[1], cycle.shadows[2]),
+            )
+
+    changed_middle_payload = deepcopy(cycle.shadows[1].to_payload())
+    changed_middle_payload["cost_input_source"] = "substituted-source"
+    _reseal_shadow_payload(changed_middle_payload)
+    changed_middle = parse_portfolio_shadow_account(changed_middle_payload)
+    assert changed_middle is not None
+    with pytest.raises(ValueError, match="invalid portfolio cycle result"):
+        PortfolioCycleResult(
+            cycle.balanced,
+            (cycle.shadows[0], changed_middle, cycle.shadows[2]),
+        )
+
+
+def test_shadow_parser_rejects_resealed_gross_and_group_limit_breaches() -> None:
+    gross_identities = tuple(_identity(index) for index in range(11))
+    gross_cycle = construct_portfolio_cycle(
+        _request(
+            tuple(
+                _resolution(identity, _hash(f"gross-{index}"))
+                for index, identity in enumerate(gross_identities)
+            ),
+            inputs=_inputs_for(
+                tuple(
+                    _risk_input(
+                        identity,
+                        f"sector-{index}",
+                        common=f"cause-{index}",
+                        cluster=f"cluster-{index}",
+                    )
+                    for index, identity in enumerate(gross_identities)
+                )
+            ),
+        )
+    )
+    gross_payload = deepcopy(gross_cycle.shadows[2].to_payload())
+    _replace_all_shadow_targets(gross_payload, Decimal("0.08"), Decimal("0.12"))
+    _reseal_shadow_payload(gross_payload)
+    assert parse_portfolio_shadow_account(gross_payload) is None
+
+    group_identities = tuple(_identity(index) for index in range(6))
+    group_cycle = construct_portfolio_cycle(
+        _request(
+            tuple(
+                _resolution(identity, _hash(f"group-{index}"))
+                for index, identity in enumerate(group_identities)
+            ),
+            inputs=_inputs_for(
+                tuple(
+                    _risk_input(
+                        identity,
+                        "shared-sector",
+                        common=f"cause-{index}",
+                        cluster=f"cluster-{index}",
+                    )
+                    for index, identity in enumerate(group_identities)
+                )
+            ),
+        )
+    )
+    group_payload = deepcopy(group_cycle.shadows[0].to_payload())
+    _replace_all_shadow_targets(group_payload, Decimal("0.05"), Decimal("0.70"))
+    _reseal_shadow_payload(group_payload)
+    assert parse_portfolio_shadow_account(group_payload) is None
+
+
+def test_shadow_cycle_rejects_targets_incompatible_with_house_view_authority() -> None:
+    event = MaterialEventRisk(
+        "scheduled-event",
+        "company_release",
+        UtcInstant.from_datetime(_CUTOFF.value + timedelta(days=1)),
+        "issuer-calendar-v1",
+        UtcInstant.from_datetime(_CUTOFF.value - timedelta(hours=1)),
+    )
+    event_cycle = construct_portfolio_cycle(
+        _request(
+            (_resolution(_AAPL, _HASH_A),),
+            inputs=_inputs_for(
+                (
+                    replace(
+                        _risk_input(_AAPL, "technology"),
+                        material_events=(event,),
+                    ),
+                )
+            ),
+        )
+    )
+    ineligible_cycle = construct_portfolio_cycle(
+        _request(
+            (replace(_resolution(_AAPL, _HASH_A), eligible_for_new_entry=False),),
+            inputs=_inputs_for((_risk_input(_AAPL, "technology"),)),
+        )
+    )
+    held_ineligible_cycle = construct_portfolio_cycle(
+        _request(
+            (
+                replace(
+                    _resolution(_AAPL, _HASH_A),
+                    eligible_for_new_entry=False,
+                    is_position=True,
+                ),
+            ),
+            inputs=_inputs_with_position(Decimal("0.03")),
+        )
+    )
+
+    for cycle, substituted_weight in (
+        (event_cycle, Decimal("0.01")),
+        (ineligible_cycle, Decimal("0.01")),
+        (held_ineligible_cycle, Decimal("0.04")),
+    ):
+        substituted = _shadow_with_substituted_target(
+            cycle.shadows[0],
+            substituted_weight,
+        )
+        with pytest.raises(ValueError, match="invalid portfolio cycle result"):
+            PortfolioCycleResult(
+                cycle.balanced,
+                (substituted, cycle.shadows[1], cycle.shadows[2]),
+            )
+
+
 def test_shadow_value_types_reject_invalid_direct_construction() -> None:
     account = construct_portfolio_cycle(
         _request((_resolution(_AAPL, _HASH_A), _resolution(_SPY, _HASH_B)))
@@ -323,7 +501,16 @@ def test_shadow_value_types_reject_invalid_direct_construction() -> None:
             band.accounting_reason,
         )
     with pytest.raises(ValueError, match="invalid portfolio shadow account"):
-        ShadowCostInput(cost.identity, Decimal(0), cost.current_weight, cost.adjustment_weight)
+        ShadowCostInput(
+            cost.identity,
+            Decimal(0),
+            cost.median_dollar_volume,
+            cost.sector,
+            cost.common_cause_group,
+            cost.correlation_cluster,
+            cost.current_weight,
+            cost.adjustment_weight,
+        )
 
 
 def test_equal_weight_changes_only_sizing_over_the_same_admitted_subjects() -> None:
@@ -394,23 +581,42 @@ def test_shadow_calculation_is_independent_of_the_ambient_decimal_context() -> N
     assert actual == expected
 
 
-@given(st.integers(min_value=1, max_value=30))
+@given(st.integers(min_value=2, max_value=30))
+@example(14)
 def test_shadow_profiles_preserve_caps_cash_and_canonical_order(count: int) -> None:
     identities = tuple(_identity(index) for index in range(count))
     resolutions = tuple(
-        _resolution(identity, _hash(str(index))) for index, identity in enumerate(identities)
+        replace(
+            _resolution(identity, _hash(str(index))),
+            is_position=(index == 0),
+        )
+        for index, identity in enumerate(identities)
     )
-    inputs = _inputs_for(
-        tuple(
+    event = MaterialEventRisk(
+        "scheduled-event",
+        "company_release",
+        UtcInstant.from_datetime(_CUTOFF.value + timedelta(days=1)),
+        "issuer-calendar-v1",
+        UtcInstant.from_datetime(_CUTOFF.value - timedelta(hours=1)),
+    )
+    risks = tuple(
+        replace(
             _risk_input(
                 identity,
-                f"sector-{index}",
-                common=f"cause-{index}",
-                cluster=f"cluster-{index}",
+                f"sector-{index % 3}",
+                common=f"cause-{index % 2}",
+                cluster=f"cluster-{index % 4}",
+                liquidity=Decimal(100000 + index * 100000),
                 amplitude=index + 1,
-            )
-            for index, identity in enumerate(identities)
+            ),
+            material_events=((event,) if index == count - 1 else ()),
         )
+        for index, identity in enumerate(identities)
+    )
+    inputs = _inputs_for(
+        risks,
+        positions=(_position(identities[0], Decimal("0.03")),),
+        cash=Decimal(97000),
     )
     request = _request(resolutions, inputs=inputs)
 
@@ -420,9 +626,30 @@ def test_shadow_profiles_preserve_caps_cash_and_canonical_order(count: int) -> N
     for account, policy in zip(cycle.shadows, request.policy.shadow_policies, strict=True):
         assert sum(item.target_weight for item in account.targets) <= policy.maximum_gross_weight
         assert all(item.target_weight <= policy.maximum_name_weight for item in account.targets)
+        assert all(
+            target.target_weight
+            <= cost.median_dollar_volume
+            * request.policy.maximum_fraction_of_median_dollar_volume
+            / account.starting_equity
+            for target, cost in zip(account.targets, account.cost_inputs, strict=True)
+        )
+        for attribute, cap in (
+            ("sector", policy.maximum_sector_weight),
+            ("common_cause_group", request.policy.maximum_common_cause_weight),
+            ("correlation_cluster", request.policy.maximum_correlation_cluster_weight),
+        ):
+            totals: dict[str, Decimal] = {}
+            for target, cost in zip(account.targets, account.cost_inputs, strict=True):
+                group = str(getattr(cost, attribute))
+                totals[group] = totals.get(group, Decimal(0)) + target.target_weight
+            assert all(total <= cap for total in totals.values())
         assert (
             sum(item.target_weight for item in account.targets) + account.retained_cash_weight == 1
         )
+        assert account.cost_inputs[0].current_weight == Decimal("0.03")
+        assert account.target_bands[0].current_weight == Decimal("0.03")
+        assert account.targets[-1].target_weight == 0
+        assert account.target_bands[-1].accounting_reason is PortfolioTradeReason.EVENT_BLOCKED
     assert tuple(item.to_payload() for item in cycle.shadows) == tuple(
         item.to_payload() for item in reordered.shadows
     )
@@ -2625,6 +2852,54 @@ def _test_content_hash(value: object) -> str:
     return hashlib.sha256(
         json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
+
+
+def _reseal_shadow_payload(payload: dict[str, object]) -> None:
+    material = {key: value for key, value in payload.items() if key != "content_hash"}
+    payload["content_hash"] = _test_content_hash(material)
+
+
+def _shadow_with_substituted_target(
+    account: PortfolioShadowAccount,
+    target_weight: Decimal,
+) -> PortfolioShadowAccount:
+    payload = deepcopy(account.to_payload())
+    target = mutable_mapping(mutable_mapping_list(payload["targets"])[0])
+    band = mutable_mapping(mutable_mapping_list(payload["target_bands"])[0])
+    previous = Decimal(str(target["target_weight"]))
+    target["target_weight"] = str(target_weight)
+    band.update(
+        {
+            "target_weight": str(target_weight),
+            "lower_weight": str(target_weight),
+            "upper_weight": str(target_weight),
+        }
+    )
+    payload["retained_cash_weight"] = str(
+        Decimal(str(payload["retained_cash_weight"])) - (target_weight - previous)
+    )
+    _reseal_shadow_payload(payload)
+    parsed = parse_portfolio_shadow_account(payload)
+    assert parsed is not None
+    return parsed
+
+
+def _replace_all_shadow_targets(
+    payload: dict[str, object],
+    target_weight: Decimal,
+    retained_cash_weight: Decimal,
+) -> None:
+    for target in mutable_mapping_list(payload["targets"]):
+        mutable_mapping(target)["target_weight"] = str(target_weight)
+    for band in mutable_mapping_list(payload["target_bands"]):
+        mutable_mapping(band).update(
+            {
+                "target_weight": str(target_weight),
+                "lower_weight": str(target_weight),
+                "upper_weight": str(target_weight),
+            }
+        )
+    payload["retained_cash_weight"] = format(retained_cash_weight.normalize(), "f")
 
 
 def _policy() -> BalancedPortfolioPolicy:

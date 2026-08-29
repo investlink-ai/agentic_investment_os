@@ -30,14 +30,17 @@ The versioned portfolio policy declares all three shadows and one frozen ex-ante
 The cost-input policy fixes available-at-time prices and absolute hypothetical adjustment weight as
 the reconstructable turnover inputs; it does not infer a fill, apply a later outcome, or implement the
 official evaluation cost overlay. Each shadow record binds its run, cycle, account and algorithm
-identity, shared HouseView, policy and input identities, cutoff, starting position-snapshot identity
-and cash, targets, accounting bands, retained cash, modeled turnover inputs, source availability,
-material fingerprints, and content hash.
+identity, shared HouseView, policy and input identities, cutoff, starting position-snapshot identity,
+cash and equity, targets, accounting bands, retained cash, available-at-time prices,
+median-dollar-volume and risk-group inputs, modeled turnover inputs, source availability, material
+fingerprints, and content hash.
 
 The portfolio ledger appends Balanced and every required shadow in one SQLite transaction. Exact
 redelivery returns the prior identities. Changed material conflicts, an incomplete shadow set is
-invalid authoritative history, and `Status` reparses every record before accepting the lifecycle
-checkpoint. `Advance` and `Status` expose only the fixed account kind and content hash for each shadow.
+invalid authoritative history, and concurrent first delivery serializes before checking for a
+winning append. `Advance` revalidates terminal replay, while `Status` reparses every record before
+accepting the lifecycle checkpoint. Both expose only the fixed account kind and content hash for each
+shadow.
 The shadow schema has no Champion, packet, order, fill, outcome, broker, credential, or trade-
 eligibility field, and no shadow type crosses into `execution`.
 

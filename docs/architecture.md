@@ -258,9 +258,10 @@ stateDiagram-v2
   universe, policy, and as-of portfolio inputs; deterministic `portfolio` then produces Balanced
   targets, cash, and Target Bands plus Conservative, Growth, and capped equal-weight accounting from
   that same HouseView and input identity. The portfolio ledger appends the Balanced result and every
-  required shadow atomically. A construction refusal is persisted as data. Lifecycle history
-  references the Balanced row, the fixed shadow kind-and-hash set, exact run identity, checkpoint
-  content, and canonical recorded instant so another run or incomplete account set cannot
+  required shadow atomically. A construction refusal is persisted as data. First delivery serializes
+  before checking for an existing append. Lifecycle history references the Balanced row, the fixed
+  shadow kind-and-hash set, exact run identity, checkpoint content, and canonical recorded instant so
+  another run or incomplete account set cannot
   substitute. [ADR 0009](adr/0009-account-for-required-same-input-portfolio-shadows.md) owns this
   authority and persistence seam. The implemented lifecycle currently terminates at this checkpoint;
   packet publication and later phases remain scaffolded.
@@ -319,8 +320,9 @@ stateDiagram-v2
   exists with different canonical material while later expected events remain absent. Belief
   transaction time remains bounded by the lifecycle checkpoint. Portfolio construction separately
   reparses its complete canonical Balanced result and every required shadow account, reconstructs
-  target-band and shadow identities, validates the shared HouseView and input pins, lifecycle
-  reference, and canonical recorded instant, and treats the status projection as disposable. Exact
+  target-band and shadow identities, validates the approved envelopes plus shared HouseView, cutoff,
+  input pins, source availability, position state, cost facts and risk groups, lifecycle reference,
+  and canonical recorded instant, and treats the status projection as disposable. Exact
   process retry returns the same result set; missing, changed, or corrupt run material fails closed. SQLite
   initializes or validates one exact current physical schema; other non-empty shapes fail before writes.
   [ADR 0004](adr/0004-require-current-sqlite-schema.md) owns that decision. Runtime stores use explicit

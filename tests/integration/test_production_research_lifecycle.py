@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import shutil
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
@@ -10,6 +9,7 @@ from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
+from threading import Barrier
 from typing import TYPE_CHECKING, cast
 
 import pytest
@@ -635,6 +635,9 @@ class _WriteThenInterruptPortfolioLedger:
             raise _SimulatedPortfolioInterruptionError
         return checkpoint
 
+    def validate_history(self, references: tuple[PortfolioCheckpointReference, ...]) -> None:
+        self.delegate.validate_history(references)
+
 
 def _configure(
     state_root: Path,
@@ -872,16 +875,10 @@ def test_concurrent_shadow_redelivery_returns_one_exact_account_set(tmp_path: Pa
     ).hexdigest()
     changed_growth = parse_portfolio_shadow_account(changed_payload)
     assert changed_growth is not None
-    changed_cycle = PortfolioCycleResult(
-        balanced,
-        (cycle.shadows[0], changed_growth, cycle.shadows[2]),
-    )
-
-    with pytest.raises(InvalidLifecycleStateError, match="durable portfolio construction"):
-        ledger.record_cycle(
-            run_id,
-            changed_cycle,
-            recorded_at,
+    with pytest.raises(ValueError, match="invalid portfolio cycle result"):
+        PortfolioCycleResult(
+            balanced,
+            (cycle.shadows[0], changed_growth, cycle.shadows[2]),
         )
 
     with ThreadPoolExecutor(max_workers=4) as executor:
@@ -904,27 +901,64 @@ def test_concurrent_shadow_redelivery_returns_one_exact_account_set(tmp_path: Pa
         )
 
 
-def test_status_rejects_missing_or_changed_shadow_authority(tmp_path: Path) -> None:
-    state_root = tmp_path / "state"
-    capability = _configure(
-        state_root,
+def test_concurrent_first_shadow_delivery_replays_the_winning_account_set(tmp_path: Path) -> None:
+    source_root = tmp_path / "source"
+    source = _configure(
+        source_root,
         universe=recorded_universe(),
         model=_ValidProductionModel(),
     )
-    receipt = _advance(capability, "corrupt-shadow-history")
+    receipt = _advance(source, "concurrent-first-shadow-delivery")
     assert receipt.portfolio_checkpoint is not None
+    assert receipt.pinned_run_identity is not None
+    run_id = receipt.pinned_run_identity.run_id
+    recorded_at = receipt.portfolio_checkpoint.recorded_at
+    with sqlite3.connect(source_root / "lifecycle.sqlite3") as connection:
+        row = connection.execute("SELECT result_json FROM portfolio_constructions").fetchone()
+    assert row is not None
+    balanced = parse_portfolio_construction_result(json.loads(row[0]))
+    assert balanced is not None
+    cycle = _stored_cycle(source_root, balanced)
 
+    destination_root = tmp_path / "destination"
+    _configure(
+        destination_root,
+        universe=recorded_universe(),
+        model=_ValidProductionModel(),
+    )
+    ledger = SQLitePortfolioLedger.open_existing(destination_root / "lifecycle.sqlite3")
+    barrier = Barrier(8)
+
+    def record_after_barrier(_: int) -> PortfolioCheckpoint:
+        barrier.wait()
+        return ledger.record_cycle(
+            run_id,
+            cycle,
+            recorded_at,
+        )
+
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        checkpoints = tuple(executor.map(record_after_barrier, range(8)))
+
+    assert checkpoints == (receipt.portfolio_checkpoint,) * 8
+    with sqlite3.connect(destination_root / "lifecycle.sqlite3") as connection:
+        assert connection.execute("SELECT COUNT(*) FROM portfolio_constructions").fetchone() == (1,)
+        assert connection.execute("SELECT COUNT(*) FROM portfolio_shadow_accounts").fetchone() == (
+            SHADOW_ACCOUNT_COUNT,
+        )
+
+
+def test_status_rejects_missing_or_changed_shadow_authority(tmp_path: Path) -> None:
     for corruption in ("missing", "changed"):
-        copied_root = tmp_path / corruption
-        copied_root.mkdir()
-        copied_root.chmod(0o700)
-        source = state_root / "lifecycle.sqlite3"
-        database = copied_root / "lifecycle.sqlite3"
-        database.write_bytes(source.read_bytes())
-        database.chmod(0o600)
-        evidence_source = state_root / "evidence-vault"
-        evidence_copy = copied_root / "evidence-vault"
-        shutil.copytree(evidence_source, evidence_copy)
+        state_root = tmp_path / corruption
+        capability = _configure(
+            state_root,
+            universe=recorded_universe(),
+            model=_ValidProductionModel(),
+        )
+        receipt = _advance(capability, f"corrupt-shadow-history-{corruption}")
+        assert receipt.portfolio_checkpoint is not None
+        database = state_root / "lifecycle.sqlite3"
         with sqlite3.connect(database) as connection, connection:
             if corruption == "missing":
                 connection.execute("DROP TRIGGER portfolio_shadow_accounts_are_append_only_delete")
@@ -965,8 +999,16 @@ def test_status_rejects_missing_or_changed_shadow_authority(tmp_path: Path) -> N
                     """
                 )
 
+        replay = _configure(
+            state_root,
+            universe=recorded_universe(),
+            model=_ValidProductionModel(),
+        )
         with pytest.raises(InvalidLifecycleStateError, match="durable portfolio construction"):
-            _configured_status(copied_root)()
+            _advance(replay, f"corrupt-shadow-history-{corruption}")
+
+        with pytest.raises(InvalidLifecycleStateError, match="durable portfolio construction"):
+            _configured_status(state_root)()
 
 
 def test_advance_and_status_persist_in_band_event_block_and_hard_risk_outcomes(

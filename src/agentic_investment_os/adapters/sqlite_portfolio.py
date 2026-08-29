@@ -67,6 +67,7 @@ class SQLitePortfolioLedger:
             with closing(sqlite3.connect(self.database, timeout=5.0)) as connection, connection:
                 connection.execute("PRAGMA foreign_keys = ON")
                 connection.execute("PRAGMA busy_timeout = 5000")
+                connection.execute("BEGIN IMMEDIATE")
                 existing = connection.execute(
                     """
                     SELECT result_id, result_json, recorded_at

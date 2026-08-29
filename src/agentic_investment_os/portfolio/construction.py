@@ -1557,10 +1557,14 @@ def _scale_to_cap(
 ) -> None:
     if total <= cap:
         return
+    positive_keys = tuple(key for key in keys if weights[key] > 0)
     scale = cap / total
-    for key in keys[:-1]:
-        weights[key] *= scale
-    weights[keys[-1]] = cap - sum(weights[key] for key in keys[:-1])
+    allocated = Decimal(0)
+    for key in positive_keys[:-1]:
+        weight = weights[key] * scale
+        weights[key] = weight
+        allocated += weight
+    weights[positive_keys[-1]] = cap - allocated
 
 
 def _hard_risk_breaches(  # noqa: PLR0913,PLR0917 - evaluate each frozen risk envelope.

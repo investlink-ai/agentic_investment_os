@@ -229,7 +229,18 @@ def _request(key: str = "concurrent-request") -> AdvanceRequest:
     return parsed
 
 
-def _advance(ledger: LifecycleLedger) -> Advance:
+@dataclass
+class _FixturePortfolioHistory:
+    references: tuple[PortfolioCheckpointReference, ...] = ()
+
+    def validate_history(self, references: tuple[PortfolioCheckpointReference, ...]) -> None:
+        self.references = references
+
+
+def _advance(
+    ledger: LifecycleLedger,
+    portfolio_history: _FixturePortfolioHistory | None = None,
+) -> Advance:
     return Advance(
         ledger=ledger,
         configuration_version=1,
@@ -254,7 +265,10 @@ def _advance(ledger: LifecycleLedger) -> Advance:
         portfolio_input_source=RecordedPortfolioSource(
             recorded_portfolio_inputs(typed_portfolio_inputs().position_snapshot)
         ),
-        portfolio_ledger=cast("PortfolioCycleResultLedger", None),
+        portfolio_ledger=cast(
+            "PortfolioCycleResultLedger",
+            _FixturePortfolioHistory() if portfolio_history is None else portfolio_history,
+        ),
     )
 
 
@@ -1844,7 +1858,11 @@ def test_advance_returns_a_concurrent_checkpoint_receipt(completion_point: str) 
         AdvanceRecovery.PREVIOUSLY_COMPLETED,
         RECEIPT_RECORDED_AT,
     )
-    capability = _advance(ConcurrentCompletionLedger(completion_point, receipt))
+    portfolio_history = _FixturePortfolioHistory()
+    capability = _advance(
+        ConcurrentCompletionLedger(completion_point, receipt),
+        portfolio_history,
+    )
 
     observed = capability(
         cycle=_cycle(),
@@ -1856,6 +1874,14 @@ def test_advance_returns_a_concurrent_checkpoint_receipt(completion_point: str) 
     assert observed.completed_phase is receipt.completed_phase
     assert observed.pinned_run_identity is receipt.pinned_run_identity
     assert observed.recovery is AdvanceRecovery.PREVIOUSLY_COMPLETED
+    assert observed.portfolio_checkpoint is not None
+    assert portfolio_history.references == (
+        PortfolioCheckpointReference(
+            identity.run_id,
+            observed.portfolio_checkpoint,
+            observed.portfolio_checkpoint.recorded_at,
+        ),
+    )
 
 
 @pytest.mark.parametrize("failure_point", ["reconcile_failure", "pin_failure"])
@@ -1886,6 +1912,7 @@ def test_advance_returns_a_durable_checkpoint_failure(failure_point: str) -> Non
 def test_advance_reports_a_checkpoint_completed_during_pinning() -> None:
     identity = pinned_run_identity(_request())
     snapshot = universe_snapshot(identity)
+    portfolio_history = _FixturePortfolioHistory()
     capability = _advance(
         ConcurrentCompletionLedger(
             "pin_observed",
@@ -1895,7 +1922,8 @@ def test_advance_reports_a_checkpoint_completed_during_pinning() -> None:
                 AdvanceRecovery.PREVIOUSLY_COMPLETED,
                 RECEIPT_RECORDED_AT,
             ),
-        )
+        ),
+        portfolio_history,
     )
 
     observed = capability(
@@ -1910,6 +1938,37 @@ def test_advance_reports_a_checkpoint_completed_during_pinning() -> None:
         AdvanceRecovery.PREVIOUSLY_COMPLETED,
         RECEIPT_RECORDED_AT,
     )
+    assert observed.portfolio_checkpoint is not None
+    assert portfolio_history.references == (
+        PortfolioCheckpointReference(
+            identity.run_id,
+            observed.portfolio_checkpoint,
+            observed.portfolio_checkpoint.recorded_at,
+        ),
+    )
+
+
+def test_advance_rejects_a_portfolio_checkpoint_without_its_pinned_identity() -> None:
+    identity = pinned_run_identity(_request())
+    snapshot = universe_snapshot(identity)
+    forged = _advanced_receipt(
+        identity,
+        snapshot,
+        AdvanceRecovery.PREVIOUSLY_COMPLETED,
+        RECEIPT_RECORDED_AT,
+    )
+    object.__setattr__(forged, "pinned_run_identity", None)
+    capability = _advance(ConcurrentCompletionLedger("start", forged))
+
+    with pytest.raises(
+        InvalidLifecycleStateError,
+        match="lifecycle ledger returned an incomplete checkpoint result",
+    ):
+        capability(
+            cycle=_cycle(),
+            mode="champion",
+            idempotency_key="concurrent-request",
+        )
 
 
 def test_advance_rejects_an_incomplete_checkpoint_result() -> None:

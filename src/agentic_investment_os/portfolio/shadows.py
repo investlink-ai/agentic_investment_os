@@ -26,6 +26,7 @@ from agentic_investment_os.portfolio.construction import (
     PortfolioConstructionRequest,
     PortfolioConstructionResult,
     PortfolioSizingMethod,
+    PortfolioStance,
     PortfolioTarget,
     PortfolioTradeReason,
     ShadowPortfolioPolicy,
@@ -53,6 +54,29 @@ __all__ = (
 
 _INVALID_SHADOW = "invalid portfolio shadow account"
 _INVALID_CYCLE = "invalid portfolio cycle result"
+_SHADOW_ENVELOPES = {
+    PortfolioShadowKind.CONSERVATIVE: (
+        PortfolioSizingMethod.INVERSE_VOLATILITY,
+        Decimal("0.60"),
+        Decimal("0.05"),
+        Decimal("0.20"),
+    ),
+    PortfolioShadowKind.GROWTH: (
+        PortfolioSizingMethod.INVERSE_VOLATILITY,
+        Decimal("1.00"),
+        Decimal("0.12"),
+        Decimal("0.30"),
+    ),
+    PortfolioShadowKind.EQUAL_WEIGHT: (
+        PortfolioSizingMethod.EQUAL_WEIGHT,
+        Decimal("0.80"),
+        Decimal("0.08"),
+        Decimal("0.25"),
+    ),
+}
+_MAXIMUM_COMMON_CAUSE_WEIGHT = Decimal("0.25")
+_MAXIMUM_CORRELATION_CLUSTER_WEIGHT = Decimal("0.25")
+_MAXIMUM_FRACTION_OF_MEDIAN_DOLLAR_VOLUME = Decimal("0.01")
 
 
 @dataclass(frozen=True, slots=True)
@@ -92,6 +116,10 @@ class ShadowCostInput:
 
     identity: EquityInstrumentIdentity
     price: Decimal
+    median_dollar_volume: Decimal
+    sector: str
+    common_cause_group: str
+    correlation_cluster: str
     current_weight: Decimal
     adjustment_weight: Decimal
 
@@ -101,6 +129,13 @@ class ShadowCostInput:
             or type(self.price) is not Decimal
             or not self.price.is_finite()
             or self.price <= 0
+            or type(self.median_dollar_volume) is not Decimal
+            or not self.median_dollar_volume.is_finite()
+            or self.median_dollar_volume <= 0
+            or any(
+                type(item) is not str or not item
+                for item in (self.sector, self.common_cause_group, self.correlation_cluster)
+            )
             or any(
                 type(item) is not Decimal or not item.is_finite() or item < 0
                 for item in (self.current_weight, self.adjustment_weight)
@@ -125,6 +160,7 @@ class PortfolioShadowAccount:
     evidence_cutoff: UtcInstant
     position_snapshot_id: str
     starting_cash: Decimal
+    starting_equity: Decimal
     cash_currency: str
     targets: tuple[PortfolioTarget, ...]
     target_bands: tuple[ShadowTargetBand, ...]
@@ -165,6 +201,10 @@ class PortfolioShadowAccount:
             or type(self.starting_cash) is not Decimal
             or not self.starting_cash.is_finite()
             or self.starting_cash < 0
+            or type(self.starting_equity) is not Decimal
+            or not self.starting_equity.is_finite()
+            or self.starting_equity <= 0
+            or self.starting_cash > self.starting_equity
             or self.cash_currency != "USD"
             or type(self.targets) is not tuple
             or any(type(item) is not PortfolioTarget for item in self.targets)
@@ -196,6 +236,7 @@ class PortfolioShadowAccount:
             or self.modeled_turnover_notional < 0
             or self.modeled_turnover_weight
             != sum(abs(item.adjustment_weight - item.current_weight) for item in self.cost_inputs)
+            or self.modeled_turnover_notional != self.modeled_turnover_weight * self.starting_equity
             or type(self.cost_input_source) is not str
             or not self.cost_input_source
             or type(self.cost_inputs_available_at) is not UtcInstant
@@ -212,6 +253,10 @@ class PortfolioShadowAccount:
                 "house_view",
             )
             or any(not _is_hash(value) for _, value in self.material_fingerprints)
+            or dict(self.material_fingerprints)["portfolio_policy"] != self.policy_id
+            or dict(self.material_fingerprints)["portfolio_input"] != self.input_id
+            or dict(self.material_fingerprints)["house_view"] != self.house_view_id
+            or not _shadow_constraints_are_valid(self)
             or (self.content_hash != "" and not _is_hash(self.content_hash))
         ):
             raise ValueError(_INVALID_SHADOW)
@@ -228,6 +273,121 @@ class PortfolioShadowAccount:
         return {**material, "content_hash": self.content_hash}
 
 
+def _shadow_constraints_are_valid(account: PortfolioShadowAccount) -> bool:
+    sizing_method, maximum_gross, maximum_name, maximum_sector = _SHADOW_ENVELOPES[
+        account.account_kind
+    ]
+    if (
+        account.sizing_method is not sizing_method
+        or sum(item.target_weight for item in account.targets) > maximum_gross
+        or any(
+            max(target.target_weight, account.target_bands[index].upper_weight) > maximum_name
+            for index, target in enumerate(account.targets)
+        )
+    ):
+        return False
+    for index, target in enumerate(account.targets):
+        cost = account.cost_inputs[index]
+        liquidity_cap = (
+            cost.median_dollar_volume
+            * _MAXIMUM_FRACTION_OF_MEDIAN_DOLLAR_VOLUME
+            / account.starting_equity
+        )
+        if target.target_weight > liquidity_cap:
+            return False
+    return all(
+        _group_targets_within(account, attribute, cap)
+        for attribute, cap in (
+            ("sector", maximum_sector),
+            ("common_cause_group", _MAXIMUM_COMMON_CAUSE_WEIGHT),
+            ("correlation_cluster", _MAXIMUM_CORRELATION_CLUSTER_WEIGHT),
+        )
+    )
+
+
+def _group_targets_within(
+    account: PortfolioShadowAccount,
+    attribute: str,
+    cap: Decimal,
+) -> bool:
+    totals: dict[str, Decimal] = {}
+    for index, target in enumerate(account.targets):
+        cost = account.cost_inputs[index]
+        group = str(getattr(cost, attribute))
+        totals[group] = totals.get(group, Decimal(0)) + target.target_weight
+    return all(total <= cap for total in totals.values())
+
+
+def _house_view_fingerprints(house_view: HouseView) -> tuple[tuple[str, str], ...]:
+    return (
+        ("configuration", house_view.configuration_hash),
+        ("constitution", house_view.constitution_hash),
+        ("research_policy", house_view.research_policy_hash),
+        ("universe_snapshot", house_view.universe_snapshot_id),
+        ("portfolio_policy", house_view.policy_id),
+        ("portfolio_input", house_view.input_id),
+        ("house_view", house_view.house_view_id),
+    )
+
+
+def _targets_match_house_view(account: PortfolioShadowAccount, house_view: HouseView) -> bool:
+    for index, view_item in enumerate(house_view.items):
+        target = account.targets[index]
+        cost = account.cost_inputs[index]
+        if (
+            view_item.event_blocked
+            or view_item.stance in (PortfolioStance.EXIT, PortfolioStance.ABSTAIN)
+        ) and target.target_weight != 0:
+            return False
+        if not view_item.eligible and target.target_weight > cost.current_weight:
+            return False
+    return True
+
+
+def _shadows_share_input_material(shadows: tuple[PortfolioShadowAccount, ...]) -> bool:
+    if not shadows:
+        return True
+    expected = shadows[0]
+    expected_costs = tuple(_shared_cost_input(item) for item in expected.cost_inputs)
+    return all(
+        (
+            item.position_snapshot_id,
+            item.starting_cash,
+            item.starting_equity,
+            item.cash_currency,
+            item.cost_input_policy_id,
+            item.cost_input_source,
+            item.cost_inputs_available_at,
+            item.material_fingerprints,
+            tuple(_shared_cost_input(cost) for cost in item.cost_inputs),
+        )
+        == (
+            expected.position_snapshot_id,
+            expected.starting_cash,
+            expected.starting_equity,
+            expected.cash_currency,
+            expected.cost_input_policy_id,
+            expected.cost_input_source,
+            expected.cost_inputs_available_at,
+            expected.material_fingerprints,
+            expected_costs,
+        )
+        for item in shadows[1:]
+    )
+
+
+def _shared_cost_input(item: ShadowCostInput) -> tuple[object, ...]:
+    return (
+        item.identity,
+        item.price,
+        item.median_dollar_volume,
+        item.sector,
+        item.common_cause_group,
+        item.correlation_cluster,
+        item.current_weight,
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class PortfolioCycleResult:
     """Carry Balanced and every required non-executable shadow as one lifecycle result."""
@@ -236,6 +396,7 @@ class PortfolioCycleResult:
     shadows: tuple[PortfolioShadowAccount, ...]
 
     def __post_init__(self) -> None:
+        house_view = self.balanced.house_view
         if (
             type(self.balanced) is not PortfolioConstructionResult
             or type(self.shadows) is not tuple
@@ -251,12 +412,20 @@ class PortfolioCycleResult:
             )
             or (self.balanced.refusal is not None and self.shadows)
             or any(
-                self.balanced.house_view is None
-                or item.house_view_id != self.balanced.house_view.house_view_id
+                house_view is None
+                or item.run_id != house_view.run_id
+                or item.cycle != house_view.cycle
+                or item.evidence_cutoff != house_view.evidence_cutoff
+                or item.house_view_id != house_view.house_view_id
                 or item.policy_id != self.balanced.policy_id
                 or item.input_id != self.balanced.input_id
+                or item.material_fingerprints != _house_view_fingerprints(house_view)
+                or tuple(target.identity for target in item.targets)
+                != tuple(view_item.identity for view_item in house_view.items)
+                or not _targets_match_house_view(item, house_view)
                 for item in self.shadows
             )
+            or not _shadows_share_input_material(self.shadows)
         ):
             raise ValueError(_INVALID_CYCLE)
 
@@ -270,6 +439,8 @@ class PortfolioCycleResultLedger(Protocol):
         result: PortfolioCycleResult,
         recorded_at: UtcInstant,
     ) -> PortfolioCheckpoint: ...
+
+    def validate_history(self, references: tuple[PortfolioCheckpointReference, ...]) -> None: ...
 
 
 class PortfolioCycleHistoryValidator(Protocol):
@@ -307,6 +478,10 @@ def _shadow_account(
         ShadowCostInput(
             band.identity,
             risks[canonical_instrument_bytes(band.identity)].price,
+            risks[canonical_instrument_bytes(band.identity)].median_dollar_volume,
+            risks[canonical_instrument_bytes(band.identity)].sector,
+            risks[canonical_instrument_bytes(band.identity)].common_cause_group,
+            risks[canonical_instrument_bytes(band.identity)].correlation_cluster,
             band.current_weight,
             band.adjustment_weight,
         )
@@ -333,6 +508,7 @@ def _shadow_account(
         request.evidence_cutoff,
         request.inputs.position_snapshot.fingerprint,
         request.inputs.cash,
+        equity,
         request.inputs.cash_currency,
         variant.targets,
         bands,
@@ -378,6 +554,7 @@ def parse_portfolio_shadow_account(  # noqa: PLR0911 - refuse each hostile schem
             "evidence_cutoff",
             "position_snapshot_id",
             "starting_cash",
+            "starting_equity",
             "cash_currency",
             "targets",
             "target_bands",
@@ -436,6 +613,7 @@ def parse_portfolio_shadow_account(  # noqa: PLR0911 - refuse each hostile schem
         root["content_hash"],
         _parse_material_fingerprints(fingerprint_values),
         _plain_decimal(root["starting_cash"]),
+        _plain_decimal(root["starting_equity"]),
         _plain_decimal(root["retained_cash_weight"]),
         _plain_decimal(root["modeled_turnover_weight"]),
         _plain_decimal(root["modeled_turnover_notional"]),
@@ -457,6 +635,7 @@ def parse_portfolio_shadow_account(  # noqa: PLR0911 - refuse each hostile schem
             str() as content_hash,
             tuple() as fingerprints,
             Decimal() as starting_cash,
+            Decimal() as starting_equity,
             Decimal() as retained_cash_weight,
             Decimal() as modeled_turnover_weight,
             Decimal() as modeled_turnover_notional,
@@ -478,6 +657,7 @@ def parse_portfolio_shadow_account(  # noqa: PLR0911 - refuse each hostile schem
             evidence_cutoff=UtcInstant.parse(root["evidence_cutoff"]),
             position_snapshot_id=position_snapshot_id,
             starting_cash=starting_cash,
+            starting_equity=starting_equity,
             cash_currency=cash_currency,
             targets=tuple(item for item in targets if item is not None),
             target_bands=tuple(item for item in bands if item is not None),
@@ -524,6 +704,7 @@ def _shadow_material(account: PortfolioShadowAccount) -> dict[str, object]:
         "evidence_cutoff": account.evidence_cutoff.isoformat(),
         "position_snapshot_id": account.position_snapshot_id,
         "starting_cash": _decimal_text(account.starting_cash),
+        "starting_equity": _decimal_text(account.starting_equity),
         "cash_currency": account.cash_currency,
         "targets": [_target_payload(item) for item in account.targets],
         "target_bands": [_shadow_band_payload(item) for item in account.target_bands],
@@ -561,6 +742,10 @@ def _cost_input_payload(item: ShadowCostInput) -> dict[str, object]:
     return {
         "identity": item.identity.to_payload(),
         "price": _decimal_text(item.price),
+        "median_dollar_volume": _decimal_text(item.median_dollar_volume),
+        "sector": item.sector,
+        "common_cause_group": item.common_cause_group,
+        "correlation_cluster": item.correlation_cluster,
         "current_weight": _decimal_text(item.current_weight),
         "adjustment_weight": _decimal_text(item.adjustment_weight),
     }
@@ -641,19 +826,36 @@ def _parse_shadow_band(value: object) -> ShadowTargetBand | None:
 def _parse_cost_input(value: object) -> ShadowCostInput | None:
     fields = _exact_mapping(
         value,
-        {"identity", "price", "current_weight", "adjustment_weight"},
+        {
+            "identity",
+            "price",
+            "median_dollar_volume",
+            "sector",
+            "common_cause_group",
+            "correlation_cluster",
+            "current_weight",
+            "adjustment_weight",
+        },
     )
     if fields is None:
         return None
     match (
         parse_instrument_identity(fields["identity"]),
         _plain_decimal(fields["price"]),
+        _plain_decimal(fields["median_dollar_volume"]),
+        fields["sector"],
+        fields["common_cause_group"],
+        fields["correlation_cluster"],
         _plain_decimal(fields["current_weight"]),
         _plain_decimal(fields["adjustment_weight"]),
     ):
         case (
             EquityInstrumentIdentity() as identity,
             Decimal() as price,
+            Decimal() as median_dollar_volume,
+            str() as sector,
+            str() as common_cause_group,
+            str() as correlation_cluster,
             Decimal() as current_weight,
             Decimal() as adjustment_weight,
         ):
@@ -664,6 +866,10 @@ def _parse_cost_input(value: object) -> ShadowCostInput | None:
         return ShadowCostInput(
             identity,
             price,
+            median_dollar_volume,
+            sector,
+            common_cause_group,
+            correlation_cluster,
             current_weight,
             adjustment_weight,
         )

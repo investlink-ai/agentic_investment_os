@@ -50,6 +50,7 @@ from agentic_investment_os.domain.lifecycle import (
     PerformPortfolioConstruction,
     PerformResearch,
     PinnedRunIdentity,
+    PortfolioCheckpointReference,
     ResearchCheckpoint,
     ResearchRefusal,
 )
@@ -227,9 +228,11 @@ class Advance:
             decision = self.ledger.advance_step(command, attempt, recorded_at)
             if isinstance(decision, AdvanceReceipt):
                 self._validate_evidence_receipt(command, decision)
+                self._validate_portfolio_receipt(decision)
                 return decision
             if isinstance(decision, AppendTerminalLifecycleRecord):
                 self._validate_evidence_receipt(command, decision.receipt)
+                self._validate_portfolio_receipt(decision.receipt)
                 return decision.receipt
             if isinstance(decision, AppendLifecycleRecord):
                 if decision.attempt.last_sequence is None or (
@@ -699,6 +702,7 @@ class Advance:
             ):
                 return
             raise
+
         attention_artifact = receipt.attention_artifact
         if attention_artifact is None:
             return
@@ -720,6 +724,23 @@ class Advance:
             or not attention_artifact.matches_inputs(attention_inputs, self.attention_policy)
         ):
             raise InvalidLifecycleStateError(_INCOMPLETE_CHECKPOINT_RESULT)
+
+    def _validate_portfolio_receipt(self, receipt: AdvanceReceipt) -> None:
+        checkpoint = receipt.portfolio_checkpoint
+        identity = receipt.pinned_run_identity
+        if checkpoint is None:
+            return
+        if identity is None:
+            raise InvalidLifecycleStateError(_INCOMPLETE_CHECKPOINT_RESULT)
+        self.portfolio_ledger.validate_history(
+            (
+                PortfolioCheckpointReference(
+                    identity.run_id,
+                    checkpoint,
+                    checkpoint.recorded_at,
+                ),
+            )
+        )
 
     def _prepare_command(  # noqa: PLR0911 - map each hostile input refusal explicitly.
         self,
