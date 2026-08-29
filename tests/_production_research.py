@@ -109,7 +109,7 @@ def production_recorded_official_evidence() -> dict[str, object]:
 class ValidProductionModel:
     """Return subject-bound valid fixtures for every production research role."""
 
-    cio_stance: Literal["hold", "abstain"] = "hold"
+    cio_stance: Literal["long", "hold", "abstain"] = "hold"
     skeptic_decision: Literal["accept", "reject"] = "accept"
     unique_effect_count: int = 0
 
@@ -158,7 +158,7 @@ class ValidProductionModel:
 def _role_output(
     role: ResearchRole,
     model_input: dict[str, object],
-    cio_stance: Literal["hold", "abstain"],
+    cio_stance: Literal["long", "hold", "abstain"],
     skeptic_decision: Literal["accept", "reject"],
 ) -> dict[str, object]:
     if role is ResearchRole.EVIDENCE_COLLECTOR:

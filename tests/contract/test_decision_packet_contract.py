@@ -28,21 +28,19 @@ from tests._portfolio import (
 
 _ISSUED_AT = UtcInstant.from_datetime(datetime(2026, 8, 21, 20, 30, tzinfo=UTC))
 _SYNTHETIC_VERIFIER_FAILURE = "synthetic verifier failure"
-_EXPECTED_DECISION_RECORD_ID = "63e76881a225e4873bcca90cee8a461172ac827de7c1dd47e53d6eea0a21d49c"
+_EXPECTED_DECISION_RECORD_ID = "941d9ac80ee47f50de4951298ab03cb870d6b2c4b6d50fff3aed3946b845cdbb"
 _EXPECTED_BENCHMARK_STATE_ID = "8ea61f31ad62764e998529210ebd3cf728d54a9f06f1a383bf0b395a99ff0059"
 _EXPECTED_SOURCE_FINGERPRINT = "3d0dddbcf34ed07d35ada7aeb5bba0e4f0e181216f5d91144f9d08ce1ddffa05"
-_EXPECTED_PACKET_ID = "5124c958caaa6c5df60f9b9262d34681a051cf3f95485e66f474a81c9415f481"
-_EXPECTED_PACKET_CONTENT_HASH = "af066985063c110a23e70cb0e09c9050aa561a83c769564e4f3b8d1c450db909"
-_EXPECTED_SIGNATURE = "55ca6ae3d522779aec566fa7cef9eeab6c2d47532e6edd2df9cd036d2acc3726"
-_EXPECTED_SIGNING_BYTES_HASH = "49b22ffd086ed69815630570fbe1b83ac529f1a82b2af5a41a87557af8d42090"
+_EXPECTED_PACKET_ID = "8bd4ccffc0529bd6ffdaee10cb8a82fe0b8e39f61f6b2fb90817ec1153bb9974"
+_EXPECTED_PACKET_CONTENT_HASH = "575c2b55f1fc4231d188f1d07fe8b3f501bd16b212d81f5a90a41a41c23b6084"
+_EXPECTED_SIGNATURE = "061bb6944ec7d8f31eb4cb9cab2d0335d4206a483ac880a2780c0965bcbde45f"
+_EXPECTED_SIGNING_BYTES_HASH = "e1e0f29c93407336e3ce408b09564a79ee3fe65c383883430604bf821b88b567"
 
 
 def _publication() -> DecisionPublicationResult:
     cycle_result = synthetic_portfolio_cycle()
     result = construct_decision_publication(
         cycle_result,
-        forecast_ids=SYNTHETIC_FORECAST_IDS,
-        model_fingerprint="c" * 64,
         benchmark_identity=SYNTHETIC_SPY,
         account_scope=TEST_DECISION_ACCOUNT_SCOPE,
         validity_window=DecisionPacketValidityWindow(
@@ -108,8 +106,6 @@ def test_no_action_publication_reconstructs_without_packet_authority() -> None:
     cycle = synthetic_portfolio_cycle(with_authorized_adjustments=False)
     result = construct_decision_publication(
         cycle,
-        forecast_ids=(),
-        model_fingerprint="c" * 64,
         benchmark_identity=SYNTHETIC_SPY,
         account_scope=TEST_DECISION_ACCOUNT_SCOPE,
         validity_window=DecisionPacketValidityWindow(
@@ -140,8 +136,6 @@ def test_packet_preserves_one_authorized_balanced_reduction() -> None:
     cycle = synthetic_portfolio_cycle(with_authorized_decrease=True)
     result = construct_decision_publication(
         cycle,
-        forecast_ids=SYNTHETIC_FORECAST_IDS,
-        model_fingerprint="c" * 64,
         benchmark_identity=SYNTHETIC_SPY,
         account_scope=TEST_DECISION_ACCOUNT_SCOPE,
         validity_window=DecisionPacketValidityWindow(

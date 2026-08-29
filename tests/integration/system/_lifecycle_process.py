@@ -10,11 +10,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from agentic_investment_os.application.lifecycle import Advance, Status
-from agentic_investment_os.domain.identity import (
-    EquityInstrumentIdentity,
-    MarketSession,
-    canonical_cycle_bytes,
-)
+from agentic_investment_os.domain.identity import MarketSession, canonical_cycle_bytes
 from agentic_investment_os.domain.lifecycle import (
     AdvanceAttempt,
     AppendLifecycleRecord,
@@ -34,9 +30,8 @@ from tests._production_research import (
     production_recorded_official_evidence,
 )
 from tests._universe import (
+    recorded_packet_universe,
     recorded_portfolio,
-    recorded_universe,
-    reseal_recorded_snapshot,
     runtime_configuration,
 )
 
@@ -111,7 +106,7 @@ def _sources(state_root: Path) -> tuple[ConfigurationSource, ...]:
 
 
 def _advance(state_root: Path) -> Advance:
-    universe = _packet_universe()
+    universe = recorded_packet_universe()
     capability = configure_advance(
         _sources(state_root),
         repository_root=REPOSITORY_ROOT,
@@ -126,31 +121,6 @@ def _advance(state_root: Path) -> Advance:
     if not isinstance(capability, Advance):
         raise RuntimeError(ADVANCE_CONFIGURATION_REFUSED)
     return capability
-
-
-def _packet_universe() -> dict[str, object]:
-    """Make the process journey's retained holding an active researched equity."""
-    payload = recorded_universe()
-    positions = payload["positions"]
-    assert isinstance(positions, dict)
-    position_payload = positions["payload"]
-    assert isinstance(position_payload, dict)
-    items = position_payload["items"]
-    assert isinstance(items, list)
-    position = items[0]
-    assert isinstance(position, dict)
-    position["identity"] = EquityInstrumentIdentity(
-        "alpaca-paper",
-        "equity-aapl",
-        "NASDAQ",
-    ).to_payload()
-    variant = position["payload"]
-    assert isinstance(variant, dict)
-    valuation = variant["valuation"]
-    assert isinstance(valuation, dict)
-    valuation["amount"] = "660"
-    reseal_recorded_snapshot(payload, "positions")
-    return payload
 
 
 def _status(state_root: Path) -> Status:

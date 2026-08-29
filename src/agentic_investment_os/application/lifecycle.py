@@ -238,10 +238,7 @@ class Advance:
             mode=mode,
             idempotency_key=idempotency_key,
         )
-        try:
-            recorded_at = UtcInstant.from_datetime(self.clock.now())
-        except InvalidUtcInstantError as error:
-            raise LifecyclePersistenceError(_CLOCK_INVALID) from error
+        recorded_at = _clock_instant(self.clock)
         command = self._prepare_command(parsed, recorded_at)
         attempt = AdvanceAttempt()
         while True:
@@ -422,13 +419,7 @@ class Advance:
                 )
                 if replayed_run is None:
                     raise InvalidLifecycleStateError(_INCOMPLETE_CHECKPOINT_RESULT)
-                forecast_ids = tuple(
-                    sorted(
-                        resolution.forecast.content_hash
-                        for resolution in replayed_run.resolutions
-                        if resolution.forecast is not None
-                    )
-                )
+                recorded_at = _clock_instant(self.clock)
                 validity_window = self.decision_window_source.window_for(
                     command.request.session,
                     recorded_at,
@@ -439,18 +430,6 @@ class Advance:
                 else:
                     publication = construct_decision_publication(
                         cycle_result,
-                        forecast_ids=forecast_ids,
-                        model_fingerprint=_content_hash(
-                            [
-                                {
-                                    "role": contract.role.value,
-                                    "model_configuration": (
-                                        contract.model_configuration.to_payload()
-                                    ),
-                                }
-                                for contract in self.production_research.policy.role_contracts
-                            ]
-                        ),
                         benchmark_identity=self.benchmark_identity,
                         account_scope=self.decision_account_scope,
                         validity_window=validity_window,
@@ -968,6 +947,9 @@ class Advance:
             cio = resolution.cio
             if cio is None:
                 continue
+            forecast = resolution.forecast
+            if forecast is None:
+                raise InvalidLifecycleStateError(_INCOMPLETE_CHECKPOINT_RESULT)
             subject = subjects.get(canonical_instrument_bytes(cio.subject))
             if subject is None:
                 raise InvalidLifecycleStateError(_INCOMPLETE_CHECKPOINT_RESULT)
@@ -976,6 +958,7 @@ class Advance:
                     identity=cio.subject,
                     request_id=resolution.request_id,
                     resolution_id=cio.content_hash,
+                    forecast_id=forecast.content_hash,
                     stance=PortfolioStance(cio.stance.value),
                     uncertainty=cio.uncertainty,
                     production_authority=(
@@ -1067,6 +1050,22 @@ class Advance:
                     }
                 )
             ),
+            forecast_ids=tuple(
+                sorted(
+                    resolution.forecast.content_hash
+                    for resolution in run.resolutions
+                    if resolution.forecast is not None
+                )
+            ),
+            model_fingerprint=_content_hash(
+                [
+                    {
+                        "role": contract.role.value,
+                        "model_configuration": contract.model_configuration.to_payload(),
+                    }
+                    for contract in self.production_research.policy.role_contracts
+                ]
+            ),
             memory_event_ids=memory_checkpoint.artifact_ids,
             universe_snapshot_id=command.universe_snapshot.snapshot_id,
             expected_research_request_ids=expected_request_ids,
@@ -1085,6 +1084,13 @@ def _research_refusal(memory_refusal: MemoryUpdateRefusal) -> ResearchRefusal:
         ResearchCheckpoint(memory_refusal.accepted_event_ids),
         memory_update_refusal=memory_refusal,
     )
+
+
+def _clock_instant(clock: Clock) -> UtcInstant:
+    try:
+        return UtcInstant.from_datetime(clock.now())
+    except InvalidUtcInstantError as error:
+        raise LifecyclePersistenceError(_CLOCK_INVALID) from error
 
 
 def _content_hash(value: object) -> str:

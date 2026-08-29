@@ -838,6 +838,7 @@ class HouseViewResolution:
     identity: EquityInstrumentIdentity
     request_id: str
     resolution_id: str
+    forecast_id: str
     stance: PortfolioStance
     uncertainty: str
     production_authority: bool
@@ -882,6 +883,8 @@ class HouseView:
     constitution_hash: str
     research_policy_hash: str
     research_artifact_ids: tuple[str, ...]
+    forecast_ids: tuple[str, ...]
+    model_fingerprint: str
     memory_event_ids: tuple[str, ...]
     universe_snapshot_id: str
     policy_id: str
@@ -913,6 +916,11 @@ class HouseView:
             or type(self.research_artifact_ids) is not tuple
             or any(not _is_hash(item) for item in self.research_artifact_ids)
             or tuple(sorted(set(self.research_artifact_ids))) != self.research_artifact_ids
+            or type(self.forecast_ids) is not tuple
+            or any(not _is_hash(item) for item in self.forecast_ids)
+            or tuple(sorted(set(self.forecast_ids))) != self.forecast_ids
+            or not set(self.forecast_ids).issubset(self.research_artifact_ids)
+            or not _is_hash(self.model_fingerprint)
             or type(self.memory_event_ids) is not tuple
             or any(not _is_hash(item) for item in self.memory_event_ids)
             or tuple(sorted(set(self.memory_event_ids))) != self.memory_event_ids
@@ -942,6 +950,8 @@ class PortfolioConstructionRequest:
     constitution_hash: str
     research_policy_hash: str
     research_artifact_ids: tuple[str, ...]
+    forecast_ids: tuple[str, ...]
+    model_fingerprint: str
     memory_event_ids: tuple[str, ...]
     universe_snapshot_id: str
     expected_research_request_ids: tuple[str, ...]
@@ -1214,6 +1224,8 @@ def _construct_balanced_portfolio(  # noqa: PLR0911,PLR0912 - each refusal is di
         request.constitution_hash,
         request.research_policy_hash,
         request.research_artifact_ids,
+        request.forecast_ids,
+        request.model_fingerprint,
         request.memory_event_ids,
         request.universe_snapshot_id,
         request.policy.policy_id,
@@ -1510,11 +1522,16 @@ def _request_is_valid(request: object) -> bool:
                 request.constitution_hash,
                 request.research_policy_hash,
                 request.universe_snapshot_id,
+                request.model_fingerprint,
                 *request.research_artifact_ids,
+                *request.forecast_ids,
                 *request.memory_event_ids,
             )
         )
         and tuple(sorted(set(request.research_artifact_ids))) == request.research_artifact_ids
+        and tuple(sorted(set(request.forecast_ids))) == request.forecast_ids
+        and request.forecast_ids == tuple(sorted(item.forecast_id for item in request.resolutions))
+        and set(request.forecast_ids).issubset(request.research_artifact_ids)
         and tuple(sorted(set(request.memory_event_ids))) == request.memory_event_ids
         and type(request.constitution_version) is int
         and request.constitution_version >= 1
@@ -1535,6 +1552,7 @@ def _request_is_valid(request: object) -> bool:
         and all(
             _is_hash(item.request_id)
             and _is_hash(item.resolution_id)
+            and _is_hash(item.forecast_id)
             and type(item.stance) is PortfolioStance
             and item.uncertainty in ("low", "medium", "high")
             and type(item.production_authority) is bool
@@ -1816,6 +1834,8 @@ def _house_view_id(request: PortfolioConstructionRequest, items: tuple[HouseView
             "constitution_hash": request.constitution_hash,
             "research_policy_hash": request.research_policy_hash,
             "research_artifact_ids": list(request.research_artifact_ids),
+            "forecast_ids": list(request.forecast_ids),
+            "model_fingerprint": request.model_fingerprint,
             "memory_event_ids": list(request.memory_event_ids),
             "universe_snapshot_id": request.universe_snapshot_id,
             "policy_id": request.policy.policy_id,
@@ -1848,6 +1868,8 @@ def _house_view_material(house_view: HouseView) -> dict[str, object]:
         "constitution_hash": house_view.constitution_hash,
         "research_policy_hash": house_view.research_policy_hash,
         "research_artifact_ids": list(house_view.research_artifact_ids),
+        "forecast_ids": list(house_view.forecast_ids),
+        "model_fingerprint": house_view.model_fingerprint,
         "memory_event_ids": list(house_view.memory_event_ids),
         "universe_snapshot_id": house_view.universe_snapshot_id,
         "policy_id": house_view.policy_id,
@@ -1952,6 +1974,8 @@ def _parse_house_view(value: object) -> HouseView | None:  # noqa: PLR0911,PLR09
             "constitution_hash",
             "research_policy_hash",
             "research_artifact_ids",
+            "forecast_ids",
+            "model_fingerprint",
             "memory_event_ids",
             "universe_snapshot_id",
             "policy_id",
@@ -1978,6 +2002,8 @@ def _parse_house_view(value: object) -> HouseView | None:  # noqa: PLR0911,PLR09
             "constitution_hash": str() as constitution_hash,
             "research_policy_hash": str() as research_policy_hash,
             "research_artifact_ids": list() as raw_research_artifact_ids,
+            "forecast_ids": list() as raw_forecast_ids,
+            "model_fingerprint": str() as model_fingerprint,
             "memory_event_ids": list() as raw_memory_event_ids,
             "universe_snapshot_id": str() as universe_snapshot_id,
             "policy_id": str() as policy_id,
@@ -1999,6 +2025,7 @@ def _parse_house_view(value: object) -> HouseView | None:  # noqa: PLR0911,PLR09
         case _:
             return None
     research_artifact_ids = tuple(item for item in raw_research_artifact_ids if type(item) is str)
+    forecast_ids = tuple(item for item in raw_forecast_ids if type(item) is str)
     memory_event_ids = tuple(item for item in raw_memory_event_ids if type(item) is str)
     items: list[HouseViewItem] = []
     for value_item in raw_items:
@@ -2068,6 +2095,8 @@ def _parse_house_view(value: object) -> HouseView | None:  # noqa: PLR0911,PLR09
             constitution_hash,
             research_policy_hash,
             research_artifact_ids,
+            forecast_ids,
+            model_fingerprint,
             memory_event_ids,
             universe_snapshot_id,
             policy_id,

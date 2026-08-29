@@ -75,8 +75,13 @@ class SQLiteDecisionPublicationLedger:
         cycle_result = self.portfolio_ledger.load_cycle_for_run(run_id)
         if not validate_decision_publication(result, cycle_result):
             raise InvalidLifecycleStateError(_INVALID_HISTORY)
+        packet = result.packet
+        if packet is not None and (
+            parse_decision_packet(packet.to_payload(), verifier=self.verifier) != packet
+        ):
+            raise InvalidLifecycleStateError(_INVALID_HISTORY)
         decision_json = _canonical_json(result.decision_record.to_payload())
-        packet_json = None if result.packet is None else _canonical_json(result.packet.to_payload())
+        packet_json = None if packet is None else _canonical_json(packet.to_payload())
         try:
             with closing(sqlite3.connect(self.database, timeout=5.0)) as connection, connection:
                 connection.execute("PRAGMA foreign_keys = ON")
@@ -103,7 +108,6 @@ class SQLiteDecisionPublicationLedger:
                 ):
                     raise InvalidLifecycleStateError(_INVALID_HISTORY)
                 checkpoint = _checkpoint(result, recorded_at)
-                packet = result.packet
                 connection.execute(
                     """
                     INSERT INTO decision_publications (
@@ -251,6 +255,8 @@ def _checkpoint(
     recorded_at: UtcInstant,
 ) -> DecisionCheckpoint:
     packet = result.packet
+    if packet is not None and packet.issued_at.value > recorded_at.value:
+        raise InvalidLifecycleStateError(_INVALID_HISTORY)
     return DecisionCheckpoint(
         result.decision_record.decision_record_id,
         None if packet is None else packet.packet_id,

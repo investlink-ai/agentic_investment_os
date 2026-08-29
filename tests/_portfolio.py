@@ -42,6 +42,7 @@ def synthetic_portfolio_cycle(
     run_id: str = "1" * 64,
     with_authorized_adjustments: bool = True,
     with_authorized_decrease: bool = False,
+    model_fingerprint: str = "6" * 64,
 ) -> PortfolioCycleResult:
     """Construct one complete deterministic Balanced cycle and all required shadows."""
     resolutions = (
@@ -71,6 +72,8 @@ def synthetic_portfolio_cycle(
             constitution_hash="3" * 64,
             research_policy_hash="4" * 64,
             research_artifact_ids=tuple(sorted(item.resolution_id for item in resolutions)),
+            forecast_ids=tuple(sorted(item.forecast_id for item in resolutions)),
+            model_fingerprint=model_fingerprint,
             memory_event_ids=("5" * 64,),
             universe_snapshot_id="7" * 64,
             expected_research_request_ids=request_ids,
@@ -179,6 +182,7 @@ def _synthetic_resolution(
         identity=identity,
         request_id=resolution_id,
         resolution_id=resolution_id,
+        forecast_id=resolution_id,
         stance=stance,
         uncertainty="low",
         production_authority=True,

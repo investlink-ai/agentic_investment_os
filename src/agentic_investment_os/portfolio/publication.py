@@ -246,7 +246,6 @@ class PacketInstruction:
                 type(item) is not Decimal or not item.is_finite() or not Decimal(0) <= item <= 1
                 for item in weights
             )
-            or self.authorized_weight != self.target_weight
             or self.authorized_weight == self.current_weight
             or (
                 self.direction is PacketDirection.INCREASE
@@ -496,31 +495,19 @@ class DecisionPublicationResult:
 
 def _validated_decision_source(
     cycle_result: PortfolioCycleResult,
-    *,
-    forecast_ids: tuple[str, ...],
-    model_fingerprint: str,
 ) -> tuple[PortfolioConstructionResult, HouseView] | DecisionPublicationRefusalReason:
     if type(cycle_result) is not PortfolioCycleResult or cycle_result.balanced.refusal is not None:
         return DecisionPublicationRefusalReason.INVALID_PORTFOLIO
     balanced = cycle_result.balanced
     house_view = balanced.require_house_view()
-    if (
-        tuple(sorted(set(forecast_ids))) != forecast_ids
-        or any(not _is_hash(item) for item in forecast_ids)
-        or not set(forecast_ids).issubset(house_view.research_artifact_ids)
-        or not _is_hash(model_fingerprint)
-    ):
-        return DecisionPublicationRefusalReason.INVALID_FORECASTS
     return balanced, house_view
 
 
-def _construct_champion_decision_record(  # noqa: PLR0913 - every provenance pin is explicit.
+def _construct_champion_decision_record(
     cycle_result: PortfolioCycleResult,
     balanced: PortfolioConstructionResult,
     house_view: HouseView,
     *,
-    forecast_ids: tuple[str, ...],
-    model_fingerprint: str,
     benchmark_identity: EquityInstrumentIdentity,
 ) -> ChampionDecisionRecord | DecisionPublicationRefusalReason:
     if type(benchmark_identity) is not EquityInstrumentIdentity:
@@ -540,7 +527,7 @@ def _construct_champion_decision_record(  # noqa: PLR0913 - every provenance pin
         ("configuration", house_view.configuration_hash),
         ("constitution", house_view.constitution_hash),
         ("research_policy", house_view.research_policy_hash),
-        ("model", model_fingerprint),
+        ("model", house_view.model_fingerprint),
         ("universe_snapshot", house_view.universe_snapshot_id),
         ("portfolio_policy", balanced.policy_id),
         ("portfolio_input", balanced.input_id),
@@ -558,7 +545,7 @@ def _construct_champion_decision_record(  # noqa: PLR0913 - every provenance pin
         evidence_cutoff=house_view.evidence_cutoff,
         house_view_id=house_view.house_view_id,
         balanced_result_id=balanced.content_hash,
-        forecast_ids=forecast_ids,
+        forecast_ids=house_view.forecast_ids,
         target_band_ids=tuple(sorted(item.target_band_id for item in balanced.target_bands)),
         benchmark_identity=benchmark_identity,
         benchmark_state_id=benchmark_state_id,
@@ -572,7 +559,7 @@ def _construct_champion_decision_record(  # noqa: PLR0913 - every provenance pin
         cost_policy_id=policy.cost_input_policy.policy_id,
         data_regime=house_view.data_regime,
         source_fingerprint=_content_hash(inputs.source_identity),
-        model_fingerprint=model_fingerprint,
+        model_fingerprint=house_view.model_fingerprint,
         material_fingerprints=material_fingerprints,
         decision_record_id="",
     )
@@ -582,22 +569,16 @@ def _construct_champion_decision_record(  # noqa: PLR0913 - every provenance pin
     )
 
 
-def construct_decision_publication(  # noqa: PLR0911, PLR0913 - every authority input is explicit.
+def construct_decision_publication(  # noqa: PLR0911 - every authority input is explicit.
     cycle_result: PortfolioCycleResult,
     *,
-    forecast_ids: tuple[str, ...],
-    model_fingerprint: str,
     benchmark_identity: EquityInstrumentIdentity,
     account_scope: DecisionPacketAccountScope,
     validity_window: DecisionPacketValidityWindow,
     signer: DecisionPacketSigner,
 ) -> DecisionPublicationResult | DecisionPublicationRefusalReason:
     """Construct one ex-ante decision and at most one signed Balanced packet."""
-    source = _validated_decision_source(
-        cycle_result,
-        forecast_ids=forecast_ids,
-        model_fingerprint=model_fingerprint,
-    )
+    source = _validated_decision_source(cycle_result)
     if isinstance(source, DecisionPublicationRefusalReason):
         return source
     balanced, house_view = source
@@ -611,8 +592,6 @@ def construct_decision_publication(  # noqa: PLR0911, PLR0913 - every authority 
         cycle_result,
         balanced,
         house_view,
-        forecast_ids=forecast_ids,
-        model_fingerprint=model_fingerprint,
         benchmark_identity=benchmark_identity,
     )
     if isinstance(decision_record, DecisionPublicationRefusalReason):
@@ -680,11 +659,7 @@ def validate_decision_publication(
     record = publication.decision_record
     packet = publication.packet
     if packet is None:
-        source = _validated_decision_source(
-            cycle_result,
-            forecast_ids=record.forecast_ids,
-            model_fingerprint=record.model_fingerprint,
-        )
+        source = _validated_decision_source(cycle_result)
         if isinstance(source, DecisionPublicationRefusalReason):
             return False
         balanced, house_view = source
@@ -692,8 +667,6 @@ def validate_decision_publication(
             cycle_result,
             balanced,
             house_view,
-            forecast_ids=record.forecast_ids,
-            model_fingerprint=record.model_fingerprint,
             benchmark_identity=record.benchmark_identity,
         )
         return (
@@ -713,8 +686,6 @@ def validate_decision_publication(
     )
     rebuilt = construct_decision_publication(
         cycle_result,
-        forecast_ids=record.forecast_ids,
-        model_fingerprint=record.model_fingerprint,
         benchmark_identity=record.benchmark_identity,
         account_scope=account_scope,
         validity_window=validity_window,
@@ -1027,7 +998,7 @@ def _packet_instruction(band: TargetBand) -> PacketInstruction:
         direction,
         band.target_band_id,
         band.current_weight,
-        band.adjustment_weight,
+        band.target_weight,
         band.adjustment_weight,
         band.lower_weight,
         band.upper_weight,

@@ -216,9 +216,15 @@ class _PortfolioCioView:
 
 
 @dataclass(frozen=True, slots=True)
+class _PortfolioForecastView:
+    content_hash: str = "e" * SHA256_HEX_LENGTH
+
+
+@dataclass(frozen=True, slots=True)
 class _PortfolioResolutionView:
     request_id: str
     cio: _PortfolioCioView
+    forecast: _PortfolioForecastView | None = _PortfolioForecastView()
 
 
 @dataclass(frozen=True, slots=True)
@@ -1718,7 +1724,7 @@ def test_prepare_command_rejects_portfolio_input_time_violations(
     )
 
 
-@pytest.mark.parametrize("invalid_material", ["attention", "inputs", "subject"])
+@pytest.mark.parametrize("invalid_material", ["attention", "inputs", "forecast", "subject"])
 def test_portfolio_request_rejects_incomplete_internal_material(
     invalid_material: str,
 ) -> None:
@@ -1740,11 +1746,18 @@ def test_portfolio_request_rejects_incomplete_internal_material(
     elif invalid_material == "inputs":
         command = replace(command, portfolio_inputs=object())
     else:
-        assert invalid_material == "subject"
+        assert invalid_material in ("forecast", "subject")
+        if invalid_material == "forecast":
+            subject = snapshot.attention_subjects[0].identity
+            assert isinstance(subject, EquityInstrumentIdentity)
+        else:
+            subject = EquityInstrumentIdentity("alpaca-paper", "missing-subject", "NYSE")
         resolution = _PortfolioResolutionView(
             "missing-subject-request",
-            _PortfolioCioView(EquityInstrumentIdentity("alpaca-paper", "missing-subject", "NYSE")),
+            _PortfolioCioView(subject),
         )
+        if invalid_material == "forecast":
+            resolution = replace(resolution, forecast=None)
         run = ProductionResearchRun(
             RESEARCH_CHECKPOINT,
             (cast("ProductionResearchResolution", resolution),),

@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
+from agentic_investment_os.adapters.decision_signing import HmacSha256DecisionPacketSigner
 from agentic_investment_os.adapters.sqlite_decision import SQLiteDecisionPublicationLedger
 from agentic_investment_os.adapters.sqlite_lifecycle import (
     PreparedRuntimeDatabase,
@@ -31,7 +32,6 @@ from agentic_investment_os.portfolio.publication import (
 )
 from tests._decision import TEST_DECISION_ACCOUNT_SCOPE, TEST_PACKET_CRYPTOGRAPHY
 from tests._portfolio import (
-    SYNTHETIC_FORECAST_IDS,
     SYNTHETIC_SPY,
     synthetic_portfolio_cycle,
 )
@@ -71,13 +71,10 @@ def _publication(
     *,
     published_at: UtcInstant = _PUBLISHED_AT,
     account_scope: DecisionPacketAccountScope = TEST_DECISION_ACCOUNT_SCOPE,
-    model_fingerprint: str = "c" * 64,
 ) -> DecisionPublicationResult:
     house_view = cycle_result.balanced.require_house_view()
     result = construct_decision_publication(
         cycle_result,
-        forecast_ids=SYNTHETIC_FORECAST_IDS,
-        model_fingerprint=model_fingerprint,
         benchmark_identity=SYNTHETIC_SPY,
         account_scope=account_scope,
         validity_window=DecisionPacketValidityWindow(
@@ -170,8 +167,6 @@ def test_no_action_decision_redelivery_replays_without_a_packet(tmp_path: Path) 
     house_view = cycle_result.balanced.require_house_view()
     publication = construct_decision_publication(
         cycle_result,
-        forecast_ids=(),
-        model_fingerprint="c" * 64,
         benchmark_identity=SYNTHETIC_SPY,
         account_scope=TEST_DECISION_ACCOUNT_SCOPE,
         validity_window=DecisionPacketValidityWindow(
@@ -203,7 +198,7 @@ def test_changed_decision_or_authorization_material_conflicts_without_replacemen
     run_id = cycle_result.balanced.require_house_view().run_id
     original = _publication(cycle_result)
     checkpoint = decisions.record_publication(run_id, original, _PUBLISHED_AT)
-    changed_model = _publication(cycle_result, model_fingerprint="d" * 64)
+    changed_model = _publication(synthetic_portfolio_cycle(model_fingerprint="d" * 64))
     changed_scope = _publication(
         cycle_result,
         account_scope=DecisionPacketAccountScope("alpaca", "paper", "e" * 64),
@@ -241,6 +236,26 @@ def test_invalid_signature_material_never_becomes_visible(tmp_path: Path) -> Non
         assert connection.execute("SELECT COUNT(*) FROM decision_publications").fetchone() == (0,)
 
 
+def test_coherently_hashed_wrong_key_signature_never_becomes_visible(tmp_path: Path) -> None:
+    cycle_result = synthetic_portfolio_cycle()
+    database, portfolio, _ = _ledgers(tmp_path, cycle_result)
+    publication = _publication(cycle_result)
+    decisions = SQLiteDecisionPublicationLedger(
+        database,
+        HmacSha256DecisionPacketSigner(b"wrong-synthetic-signing-key"),
+        portfolio,
+    )
+
+    with pytest.raises(InvalidLifecycleStateError, match="durable decision publication is invalid"):
+        decisions.record_publication(
+            cycle_result.balanced.require_house_view().run_id,
+            publication,
+            _PUBLISHED_AT,
+        )
+    with sqlite3.connect(database) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM decision_publications").fetchone() == (0,)
+
+
 def test_corrupt_authoritative_packet_fails_reopen_validation(tmp_path: Path) -> None:
     cycle_result = synthetic_portfolio_cycle()
     database, _, decisions = _ledgers(tmp_path, cycle_result)
@@ -253,6 +268,40 @@ def test_corrupt_authoritative_packet_fails_reopen_validation(tmp_path: Path) ->
 
     with pytest.raises(InvalidLifecycleStateError, match="durable decision publication is invalid"):
         decisions.validate_reference(_reference(cycle_result, checkpoint))
+
+
+def test_corrupt_authoritative_decision_fails_reopen_validation(tmp_path: Path) -> None:
+    cycle_result = synthetic_portfolio_cycle()
+    database, _, decisions = _ledgers(tmp_path, cycle_result)
+    publication = _publication(cycle_result)
+    run_id = cycle_result.balanced.require_house_view().run_id
+    decisions.record_publication(run_id, publication, _PUBLISHED_AT)
+    with sqlite3.connect(database) as connection:
+        connection.execute("DROP TRIGGER decision_publications_are_append_only_update")
+        connection.execute("UPDATE decision_publications SET decision_record_json = '{}'")
+
+    with pytest.raises(InvalidLifecycleStateError, match="durable decision publication is invalid"):
+        decisions.replay_publication(run_id, publication.decision_record.cycle)
+
+
+def test_reopen_rejects_publication_recorded_before_its_signed_issue_time(
+    tmp_path: Path,
+) -> None:
+    cycle_result = synthetic_portfolio_cycle()
+    database, _, decisions = _ledgers(tmp_path, cycle_result)
+    publication = _publication(cycle_result)
+    run_id = cycle_result.balanced.require_house_view().run_id
+    decisions.record_publication(run_id, publication, _PUBLISHED_AT)
+    before_issue = UtcInstant.from_datetime(_PUBLISHED_AT.value - timedelta(microseconds=1))
+    with sqlite3.connect(database) as connection:
+        connection.execute("DROP TRIGGER decision_publications_are_append_only_update")
+        connection.execute(
+            "UPDATE decision_publications SET recorded_at = ?",
+            (before_issue.isoformat(),),
+        )
+
+    with pytest.raises(InvalidLifecycleStateError, match="durable decision publication is invalid"):
+        decisions.replay_publication(run_id, publication.decision_record.cycle)
 
 
 def test_expired_new_packet_and_mismatched_cycle_fail_closed(tmp_path: Path) -> None:

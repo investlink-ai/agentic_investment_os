@@ -24,7 +24,7 @@ from agentic_investment_os.adapters.sqlite_lifecycle import (
     SQLiteLifecycleLedger,
     prepare_runtime_database,
 )
-from agentic_investment_os.application.lifecycle import Advance, Status
+from agentic_investment_os.application.lifecycle import Advance, Clock, Status
 from agentic_investment_os.domain.attention import (
     AttentionArtifact,
     AttentionRefusalReason,
@@ -114,6 +114,8 @@ from tests._universe import (
     advance_command,
     pinned_run_identity,
     portfolio_shadow_references,
+    recorded_packet_universe,
+    recorded_portfolio,
     recorded_universe,
     runtime_configuration,
     typed_portfolio_inputs,
@@ -802,6 +804,17 @@ class FixedClock:
 
     def now(self) -> datetime:
         return self.instant
+
+
+@dataclass
+class SequenceClock:
+    instants: tuple[datetime, ...]
+    calls: int = 0
+
+    def now(self) -> datetime:
+        instant = self.instants[min(self.calls, len(self.instants) - 1)]
+        self.calls += 1
+        return instant
 
 
 @dataclass(frozen=True)
@@ -1574,9 +1587,10 @@ class _LifecycleReferenceModel:
 def _configure(
     state_root: Path,
     *,
-    clock: FixedClock | None = None,
-    cio_stance: Literal["hold", "abstain"] = "hold",
+    clock: Clock | None = None,
+    cio_stance: Literal["long", "hold", "abstain"] = "hold",
     evidence_fixture: Literal["complete", "required"] = "complete",
+    packet_capable_universe: bool = False,
 ) -> Advance:
     if evidence_fixture == "complete":
         recorded_official_evidence: object = production_recorded_official_evidence()
@@ -1584,6 +1598,7 @@ def _configure(
         recorded_official_evidence = None
     else:
         assert_never(evidence_fixture)
+    universe = recorded_packet_universe() if packet_capable_universe else recorded_universe()
     configured = configure_advance(
         (
             ConfigurationSource(
@@ -1592,8 +1607,8 @@ def _configure(
             ),
         ),
         repository_root=REPOSITORY_ROOT,
-        recorded_universe=recorded_universe(),
-        recorded_portfolio=recorded_portfolio_inputs(typed_portfolio_inputs().position_snapshot),
+        recorded_universe=universe,
+        recorded_portfolio=recorded_portfolio(universe),
         recorded_evidence=production_recorded_evidence(),
         recorded_official_evidence=recorded_official_evidence,
         recorded_model=ValidProductionModel(cio_stance=cio_stance),
@@ -1894,6 +1909,41 @@ def test_advance_pins_one_stream_and_reconstructs_its_receipt_after_reopen(
     ]
     assert stat.S_IMODE(state_root.stat().st_mode) == PRIVATE_DIRECTORY_MODE
     assert stat.S_IMODE((state_root / "lifecycle.sqlite3").stat().st_mode) == PRIVATE_FILE_MODE
+
+
+def test_decision_publication_resamples_time_after_slow_research(tmp_path: Path) -> None:
+    state_root = tmp_path / "runtime"
+    started_at = datetime(2026, 8, 21, 22, 0, tzinfo=UTC)
+    published_at = started_at + timedelta(minutes=6)
+    clock = SequenceClock((started_at, published_at))
+
+    receipt = _configure(
+        state_root,
+        clock=clock,
+        cio_stance="long",
+        packet_capable_universe=True,
+    )(
+        cycle=_cycle_payload("2026-08-21"),
+        mode="champion",
+        idempotency_key="resample-publication-time",
+    )
+
+    assert clock.calls >= len(clock.instants)
+    assert receipt.decision_checkpoint is not None
+    assert receipt.decision_checkpoint.recorded_at == UtcInstant.from_datetime(published_at)
+    with sqlite3.connect(state_root / "lifecycle.sqlite3") as connection:
+        row = connection.execute(
+            "SELECT packet_json, recorded_at FROM decision_publications"
+        ).fetchone()
+        event_time = connection.execute(
+            "SELECT recorded_at FROM lifecycle_events WHERE event_kind = 'decision_published'"
+        ).fetchone()
+    assert row is not None
+    assert row[0] is not None
+    packet = json.loads(row[0])
+    assert packet["issued_at"] == UtcInstant.from_datetime(published_at).isoformat()
+    assert row[1] == UtcInstant.from_datetime(published_at).isoformat()
+    assert event_time == (UtcInstant.from_datetime(published_at).isoformat(),)
 
 
 def test_advance_captures_all_recorded_official_sources_without_network_access(
