@@ -13,6 +13,8 @@ from agentic_investment_os.domain.lifecycle import (
     AdvanceCommand,
     AdvanceRequest,
     PinnedRunIdentity,
+    PortfolioShadowKind,
+    PortfolioShadowReference,
 )
 from agentic_investment_os.domain.temporal import UtcInstant
 from agentic_investment_os.domain.universe import (
@@ -216,8 +218,8 @@ def research_policy() -> dict[str, object]:
 def portfolio_policy() -> dict[str, object]:
     """Return the complete mechanics-calibrated Balanced policy used by tests."""
     return {
-        "schema_version": 1,
-        "policy_type": "balanced_inverse_volatility",
+        "schema_version": 2,
+        "policy_type": "balanced_with_same_input_shadows",
         "asset_class": "us_equity",
         "risk_profile": "balanced",
         "realized_volatility": {
@@ -239,6 +241,38 @@ def portfolio_policy() -> dict[str, object]:
         "partial_adjustment_fraction": "0.5",
         "reduce_multiplier": "0.5",
         "uncertainty_multipliers": {"low": "1", "medium": "0.75", "high": "0.5"},
+        "shadow_accounts": [
+            {
+                "account_kind": "conservative",
+                "sizing_method": "inverse_volatility",
+                "algorithm_version": 1,
+                "maximum_gross_weight": "0.6",
+                "maximum_name_weight": "0.05",
+                "maximum_sector_weight": "0.2",
+            },
+            {
+                "account_kind": "growth",
+                "sizing_method": "inverse_volatility",
+                "algorithm_version": 1,
+                "maximum_gross_weight": "1",
+                "maximum_name_weight": "0.12",
+                "maximum_sector_weight": "0.3",
+            },
+            {
+                "account_kind": "equal_weight",
+                "sizing_method": "equal_weight",
+                "algorithm_version": 1,
+                "maximum_gross_weight": "0.8",
+                "maximum_name_weight": "0.08",
+                "maximum_sector_weight": "0.25",
+            },
+        ],
+        "modeled_cost_inputs": {
+            "schema_version": 1,
+            "model_type": "frozen_ex_ante_turnover_inputs",
+            "turnover_basis": "absolute_adjustment_weight",
+            "price_basis": "available_at_time",
+        },
     }
 
 
@@ -377,6 +411,14 @@ def typed_portfolio_inputs(payload: object | None = None) -> PortfolioInputSet:
     )
     assert isinstance(parsed, PortfolioInputSet)
     return parsed
+
+
+def portfolio_shadow_references() -> tuple[PortfolioShadowReference, ...]:
+    return (
+        PortfolioShadowReference(PortfolioShadowKind.CONSERVATIVE, "a" * 64),
+        PortfolioShadowReference(PortfolioShadowKind.GROWTH, "b" * 64),
+        PortfolioShadowReference(PortfolioShadowKind.EQUAL_WEIGHT, "c" * 64),
+    )
 
 
 def typed_universe_inputs(payload: object | None = None) -> UniverseInputs:

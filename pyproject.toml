@@ -325,6 +325,7 @@ only_mutate = [
   "src/agentic_investment_os/memory/reducer.py",
   "src/agentic_investment_os/portfolio/__init__.py",
   "src/agentic_investment_os/portfolio/construction.py",
+  "src/agentic_investment_os/portfolio/shadows.py",
 ]
 pytest_add_cli_args = [
   "-o",

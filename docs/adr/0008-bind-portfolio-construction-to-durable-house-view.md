@@ -1,7 +1,8 @@
 # ADR 0008: Bind portfolio construction to a durable HouseView
 
-- Status: Accepted
+- Status: Superseded
 - Date: 2026-08-28
+- Superseded by: [ADR 0009](0009-account-for-required-same-input-portfolio-shadows.md)
 
 ## Context
 

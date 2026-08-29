@@ -88,13 +88,15 @@ from agentic_investment_os.portfolio.construction import (
     HouseViewResolution,
     MaterialEventEvidence,
     PortfolioConstructionRequest,
-    PortfolioHistoryValidator,
     PortfolioInputSet,
     PortfolioInputSource,
     PortfolioRefusalReason,
-    PortfolioResultLedger,
     PortfolioStance,
-    construct_balanced_portfolio,
+)
+from agentic_investment_os.portfolio.shadows import (
+    PortfolioCycleHistoryValidator,
+    PortfolioCycleResultLedger,
+    construct_portfolio_cycle,
 )
 from agentic_investment_os.research.authority import ResearchAuthority
 from agentic_investment_os.research.production import (
@@ -193,7 +195,7 @@ class Advance:
     memory_refusal_ledger: BeliefLedger
     portfolio_policy: BalancedPortfolioPolicy
     portfolio_input_source: PortfolioInputSource
-    portfolio_ledger: PortfolioResultLedger
+    portfolio_ledger: PortfolioCycleResultLedger
 
     def __call__(  # noqa: PLR0912, PLR0915 - exhaust each typed lifecycle decision.
         self,
@@ -352,7 +354,7 @@ class Advance:
                 )
                 if replayed_run is None:
                     raise InvalidLifecycleStateError(_INCOMPLETE_CHECKPOINT_RESULT)
-                result = construct_balanced_portfolio(
+                result = construct_portfolio_cycle(
                     self._portfolio_request(
                         command,
                         replayed_run,
@@ -362,7 +364,7 @@ class Advance:
                 )
                 command = replace(
                     command,
-                    portfolio_construction=self.portfolio_ledger.record(
+                    portfolio_construction=self.portfolio_ledger.record_cycle(
                         command.pinned_run_identity.run_id,
                         result,
                         recorded_at,
@@ -996,7 +998,7 @@ class Status:
     constitution_status: ConstitutionStatus
     research_history_validator: ProductionResearchHistoryValidator
     memory_history_validator: BeliefHistoryValidator
-    portfolio_history_validator: PortfolioHistoryValidator
+    portfolio_history_validator: PortfolioCycleHistoryValidator
 
     def __call__(self) -> LifecycleStatus:
         status = self.projection.rebuild_status()

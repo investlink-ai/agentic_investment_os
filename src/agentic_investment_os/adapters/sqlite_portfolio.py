@@ -14,12 +14,17 @@ from agentic_investment_os.domain.lifecycle import (
     PortfolioCheckpoint,
     PortfolioCheckpointReference,
     PortfolioCheckpointRefusalReason,
+    PortfolioShadowReference,
     is_sha256,
 )
 from agentic_investment_os.domain.temporal import InvalidUtcInstantError, UtcInstant
 from agentic_investment_os.portfolio.construction import (
-    PortfolioConstructionResult,
     parse_portfolio_construction_result,
+)
+from agentic_investment_os.portfolio.shadows import (
+    PortfolioCycleResult,
+    PortfolioShadowAccount,
+    parse_portfolio_shadow_account,
 )
 
 __all__ = ("SQLitePortfolioLedger",)
@@ -42,18 +47,21 @@ class SQLitePortfolioLedger:
         """Open the already startup-validated runtime database."""
         return cls(database)
 
-    def record(
+    def record_cycle(
         self,
         run_id: str,
-        result: PortfolioConstructionResult,
+        result: PortfolioCycleResult,
         recorded_at: UtcInstant,
     ) -> PortfolioCheckpoint:
-        """Append one result, or replay only byte-identical run material."""
+        """Append Balanced and every required shadow, or replay exact cycle material."""
         if not is_sha256(run_id) or type(recorded_at) is not UtcInstant:
             raise LifecyclePersistenceError(_CHECKPOINT_FAILED)
-        if result.house_view is not None and result.house_view.run_id != run_id:
+        balanced = result.balanced
+        if balanced.house_view is not None and balanced.house_view.run_id != run_id:
             raise InvalidLifecycleStateError(_INVALID_HISTORY)
-        payload = result.to_payload()
+        if any(item.run_id != run_id for item in result.shadows):
+            raise InvalidLifecycleStateError(_INVALID_HISTORY)
+        payload = balanced.to_payload()
         encoded = _canonical_json(payload)
         try:
             with closing(sqlite3.connect(self.database, timeout=5.0)) as connection, connection:
@@ -71,7 +79,11 @@ class SQLitePortfolioLedger:
                     if stored_recorded_at is None:
                         raise InvalidLifecycleStateError(_INVALID_HISTORY)
                     checkpoint = _checkpoint(result, stored_recorded_at)
-                    if existing[0] != checkpoint.result_id or existing[1] != encoded:
+                    if (
+                        existing[0] != checkpoint.result_id
+                        or existing[1] != encoded
+                        or _stored_shadows(connection, run_id, stored_recorded_at) != result.shadows
+                    ):
                         raise InvalidLifecycleStateError(_INVALID_HISTORY)
                     return checkpoint
                 checkpoint = _checkpoint(result, recorded_at)
@@ -98,6 +110,25 @@ class SQLitePortfolioLedger:
                         recorded_at.isoformat(),
                     ),
                 )
+                for shadow in result.shadows:
+                    connection.execute(
+                        """
+                        INSERT INTO portfolio_shadow_accounts (
+                            run_id, account_kind, account_id, house_view_id, policy_id,
+                            input_id, result_json, recorded_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            run_id,
+                            shadow.account_kind.value,
+                            shadow.account_id,
+                            shadow.house_view_id,
+                            shadow.policy_id,
+                            shadow.input_id,
+                            _canonical_json(shadow.to_payload()),
+                            recorded_at.isoformat(),
+                        ),
+                    )
         except InvalidLifecycleStateError:
             raise
         except (sqlite3.Error, ValueError) as error:
@@ -123,10 +154,12 @@ class SQLitePortfolioLedger:
                     decoded: object = json.loads(row[7])
                     result = parse_portfolio_construction_result(decoded)
                     parsed_recorded_at = _recorded_at(row[8])
+                    shadows = _stored_shadows(connection, run_id, parsed_recorded_at)
+                    cycle_result = None if result is None else PortfolioCycleResult(result, shadows)
                     rebuilt = (
                         None
-                        if result is None or parsed_recorded_at is None
-                        else _checkpoint(result, parsed_recorded_at)
+                        if cycle_result is None or parsed_recorded_at is None
+                        else _checkpoint(cycle_result, parsed_recorded_at)
                     )
                     if (
                         rebuilt is None
@@ -143,11 +176,20 @@ class SQLitePortfolioLedger:
                         or row[7] != _canonical_json(result.to_payload())
                         or parsed_recorded_at is None
                         or (result.house_view is not None and result.house_view.run_id != run_id)
+                        or any(item.run_id != run_id for item in shadows)
                     ):
                         raise InvalidLifecycleStateError(_INVALID_HISTORY)
                     available.append(
                         PortfolioCheckpointReference(run_id, rebuilt, parsed_recorded_at)
                     )
+                shadow_run_ids = {
+                    row[0]
+                    for row in connection.execute(
+                        "SELECT DISTINCT run_id FROM portfolio_shadow_accounts"
+                    ).fetchall()
+                }
+                if shadow_run_ids - {row[0] for row in rows}:
+                    raise InvalidLifecycleStateError(_INVALID_HISTORY)
                 for reference in references:
                     try:
                         available.remove(reference)
@@ -160,21 +202,62 @@ class SQLitePortfolioLedger:
 
 
 def _checkpoint(
-    result: PortfolioConstructionResult,
+    result: PortfolioCycleResult,
     recorded_at: UtcInstant,
 ) -> PortfolioCheckpoint:
+    balanced = result.balanced
     refusal = (
-        None if result.refusal is None else PortfolioCheckpointRefusalReason(result.refusal.value)
+        None
+        if balanced.refusal is None
+        else PortfolioCheckpointRefusalReason(balanced.refusal.value)
     )
     return PortfolioCheckpoint(
-        result_id=result.content_hash,
-        house_view_id=(None if result.house_view is None else result.house_view.house_view_id),
-        policy_id=result.policy_id,
-        input_id=result.input_id,
-        target_band_ids=tuple(sorted(band.target_band_id for band in result.target_bands)),
+        result_id=balanced.content_hash,
+        house_view_id=(None if balanced.house_view is None else balanced.house_view.house_view_id),
+        policy_id=balanced.policy_id,
+        input_id=balanced.input_id,
+        target_band_ids=tuple(sorted(band.target_band_id for band in balanced.target_bands)),
         refusal_reason=refusal,
         recorded_at=recorded_at,
+        shadow_accounts=tuple(
+            PortfolioShadowReference(item.account_kind, item.account_id) for item in result.shadows
+        ),
     )
+
+
+def _stored_shadows(
+    connection: sqlite3.Connection,
+    run_id: str,
+    expected_recorded_at: UtcInstant | None,
+) -> tuple[PortfolioShadowAccount, ...]:
+    rows = connection.execute(
+        """
+        SELECT account_kind, account_id, house_view_id, policy_id, input_id,
+               result_json, recorded_at
+        FROM portfolio_shadow_accounts WHERE run_id = ? ORDER BY account_kind
+        """,
+        (run_id,),
+    ).fetchall()
+    parsed: list[PortfolioShadowAccount] = []
+    for row in rows:
+        decoded: object = json.loads(row[5])
+        account = parse_portfolio_shadow_account(decoded)
+        recorded_at = _recorded_at(row[6])
+        if (
+            account is None
+            or recorded_at is None
+            or recorded_at != expected_recorded_at
+            or row[0] != account.account_kind.value
+            or row[1] != account.account_id
+            or row[2] != account.house_view_id
+            or row[3] != account.policy_id
+            or row[4] != account.input_id
+            or row[5] != _canonical_json(account.to_payload())
+        ):
+            raise InvalidLifecycleStateError(_INVALID_HISTORY)
+        parsed.append(account)
+    order = {"conservative": 0, "growth": 1, "equal_weight": 2}
+    return tuple(sorted(parsed, key=lambda item: order[item.account_kind.value]))
 
 
 def _canonical_json(value: object) -> str:

@@ -64,6 +64,8 @@ from agentic_investment_os.domain.lifecycle import (
     PortfolioCheckpoint,
     PortfolioCheckpointReference,
     PortfolioCheckpointRefusalReason,
+    PortfolioShadowKind,
+    PortfolioShadowReference,
     ProductionResearchReference,
     ResearchCheckpoint,
     ResearchRefusal,
@@ -100,6 +102,7 @@ from tests._portfolio import recorded_portfolio_inputs
 from tests._universe import (
     exact_text,
     pinned_run_identity,
+    portfolio_shadow_references,
     recorded_universe,
     typed_portfolio_inputs,
     typed_portfolio_policy,
@@ -131,7 +134,7 @@ if TYPE_CHECKING:
         EvidenceVault,
     )
     from agentic_investment_os.memory.beliefs import BeliefLedger
-    from agentic_investment_os.portfolio.construction import PortfolioResultLedger
+    from agentic_investment_os.portfolio.shadows import PortfolioCycleResultLedger
     from agentic_investment_os.research.policy import ProductionResearchPolicy
     from agentic_investment_os.research.production import (
         ProductionResearch,
@@ -251,7 +254,7 @@ def _advance(ledger: LifecycleLedger) -> Advance:
         portfolio_input_source=RecordedPortfolioSource(
             recorded_portfolio_inputs(typed_portfolio_inputs().position_snapshot)
         ),
-        portfolio_ledger=cast("PortfolioResultLedger", None),
+        portfolio_ledger=cast("PortfolioCycleResultLedger", None),
     )
 
 
@@ -280,6 +283,7 @@ def _advanced_receipt(
             identity.portfolio_input_hash,
             ("6" * SHA256_HEX_LENGTH,),
             recorded_at,
+            shadow_accounts=portfolio_shadow_references(),
         ),
         None,
     )
@@ -639,7 +643,7 @@ def test_advance_request_validates_the_complete_boundary() -> None:
         request,
         configuration_hash="a" * SHA256_HEX_LENGTH,
     )
-    assert identity.run_id == "16e7342cac5d962debc0cf9ff891364d91e77be82c22bb2827a3e0884cf9643f"
+    assert identity.run_id == "36f89e0f565d24295138aa9aea182b667e665b7469f006491a1bd626efbc5281"
 
     invalid_cases = (
         (
@@ -962,11 +966,18 @@ def test_portfolio_checkpoint_rejects_invalid_and_inconsistent_material() -> Non
         "4" * SHA256_HEX_LENGTH,
         ("5" * SHA256_HEX_LENGTH,),
         RECEIPT_RECORDED_AT,
+        shadow_accounts=portfolio_shadow_references(),
     )
     invalid_hash = {**valid.to_payload(), "result_id": "invalid"}
     missing_success_house_view = {**valid.to_payload(), "house_view_id": None}
     boolean_schema = {**valid.to_payload(), "schema_version": True}
     invalid_recorded_at = {**valid.to_payload(), "recorded_at": "invalid"}
+
+    with pytest.raises(ValueError, match="lifecycle stream checkpoint order is invalid"):
+        PortfolioShadowReference(
+            cast("PortfolioShadowKind", "invalid"),
+            "1" * SHA256_HEX_LENGTH,
+        )
 
     with pytest.raises(ValueError, match="lifecycle stream checkpoint order is invalid"):
         PortfolioCheckpoint(
@@ -984,6 +995,29 @@ def test_portfolio_checkpoint_rejects_invalid_and_inconsistent_material() -> Non
     assert parse_portfolio_checkpoint(missing_success_house_view) is None
     assert parse_portfolio_checkpoint(boolean_schema) is None
     assert parse_portfolio_checkpoint(invalid_recorded_at) is None
+    payload = valid.to_payload()
+    assert parse_portfolio_checkpoint({**payload, "shadow_accounts": {}}) is None
+    assert parse_portfolio_checkpoint({**payload, "shadow_accounts": [{}]}) is None
+    assert (
+        parse_portfolio_checkpoint(
+            {
+                **payload,
+                "shadow_accounts": [{"account_kind": True, "account_id": "1" * SHA256_HEX_LENGTH}],
+            }
+        )
+        is None
+    )
+    assert (
+        parse_portfolio_checkpoint(
+            {
+                **payload,
+                "shadow_accounts": [
+                    {"account_kind": "invalid", "account_id": "1" * SHA256_HEX_LENGTH}
+                ],
+            }
+        )
+        is None
+    )
     assert (
         parse_portfolio_checkpoint(
             PortfolioCheckpoint(

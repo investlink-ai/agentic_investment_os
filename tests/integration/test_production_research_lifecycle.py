@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
 import sqlite3
+from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, timedelta
@@ -31,6 +33,7 @@ from agentic_investment_os.domain.lifecycle import (
     LifecyclePersistenceError,
     LifecyclePhase,
     NoActionReason,
+    PortfolioCheckpoint,
     PortfolioCheckpointReference,
 )
 from agentic_investment_os.domain.temporal import UtcInstant
@@ -55,10 +58,16 @@ from agentic_investment_os.memory.beliefs import (
     RecordReceipt,
 )
 from agentic_investment_os.portfolio.construction import (
+    PortfolioConstructionResult,
     PortfolioRefusalReason,
     PortfolioTradeReason,
     construct_balanced_portfolio,
     parse_portfolio_construction_result,
+)
+from agentic_investment_os.portfolio.shadows import (
+    PortfolioCycleResult,
+    PortfolioCycleResultLedger,
+    parse_portfolio_shadow_account,
 )
 from agentic_investment_os.research.model import (
     MAXIMUM_MODEL_OUTPUT_BYTES,
@@ -104,6 +113,8 @@ from tests._universe import (
     reseal_recorded_snapshot,
     runtime_configuration,
 )
+
+SHADOW_ACCOUNT_COUNT = 3
 
 type _EventClearanceCase = tuple[str, str, str, str, str | None, bool, bool]
 
@@ -603,6 +614,28 @@ class _RecordedInputOverrides:
     official_evidence: object | None = None
 
 
+class _SimulatedPortfolioInterruptionError(RuntimeError):
+    pass
+
+
+@dataclass(slots=True)
+class _WriteThenInterruptPortfolioLedger:
+    delegate: PortfolioCycleResultLedger
+    interrupted: bool = False
+
+    def record_cycle(
+        self,
+        run_id: str,
+        result: PortfolioCycleResult,
+        recorded_at: UtcInstant,
+    ) -> PortfolioCheckpoint:
+        checkpoint = self.delegate.record_cycle(run_id, result, recorded_at)
+        if not self.interrupted:
+            self.interrupted = True
+            raise _SimulatedPortfolioInterruptionError
+        return checkpoint
+
+
 def _configure(
     state_root: Path,
     *,
@@ -669,12 +702,19 @@ def test_advance_constructs_and_status_rebuilds_one_portfolio_checkpoint(
     assert receipt.portfolio_checkpoint is not None
     assert receipt.portfolio_checkpoint.house_view_id is not None
     assert receipt.portfolio_checkpoint.target_band_ids
+    assert tuple(
+        reference.account_kind.value for reference in receipt.portfolio_checkpoint.shadow_accounts
+    ) == ("conservative", "growth", "equal_weight")
     assert replayed.portfolio_checkpoint == receipt.portfolio_checkpoint
     with sqlite3.connect(state_root / "lifecycle.sqlite3") as connection:
         assert connection.execute("SELECT COUNT(*) FROM portfolio_constructions").fetchone() == (1,)
         row = connection.execute(
             "SELECT run_id, result_json FROM portfolio_constructions"
         ).fetchone()
+        shadow_rows = connection.execute(
+            "SELECT account_kind, account_id, result_json "
+            "FROM portfolio_shadow_accounts ORDER BY account_kind"
+        ).fetchall()
         checkpoint_rows = connection.execute(
             "SELECT event_kind, research_checkpoint FROM lifecycle_events "
             "WHERE event_kind IN ('dossiers_built', 'research_run')"
@@ -683,6 +723,18 @@ def test_advance_constructs_and_status_rebuilds_one_portfolio_checkpoint(
     result = parse_portfolio_construction_result(json.loads(row[1]))
     assert result is not None
     assert result.house_view is not None
+    parsed_shadows = tuple(
+        parse_portfolio_shadow_account(json.loads(shadow_row[2])) for shadow_row in shadow_rows
+    )
+    assert all(shadow is not None for shadow in parsed_shadows)
+    assert {shadow_row[0] for shadow_row in shadow_rows} == {
+        "conservative",
+        "growth",
+        "equal_weight",
+    }
+    assert {shadow_row[1] for shadow_row in shadow_rows} == {
+        reference.account_id for reference in receipt.portfolio_checkpoint.shadow_accounts
+    }
     expected_research_artifact_ids = tuple(
         sorted(
             artifact_id
@@ -695,9 +747,9 @@ def test_advance_constructs_and_status_rebuilds_one_portfolio_checkpoint(
     ledger = SQLitePortfolioLedger.open_existing(state_root / "lifecycle.sqlite3")
     mismatched_run_id = "f" * 64
     with pytest.raises(InvalidLifecycleStateError, match="durable portfolio construction"):
-        ledger.record(
+        ledger.record_cycle(
             mismatched_run_id,
-            result,
+            _stored_cycle(state_root, result),
             receipt.pinned_run_identity.evidence_cutoff,
         )
     with sqlite3.connect(state_root / "lifecycle.sqlite3") as connection:
@@ -706,17 +758,17 @@ def test_advance_constructs_and_status_rebuilds_one_portfolio_checkpoint(
             (mismatched_run_id,),
         ).fetchone() == (0,)
     assert (
-        ledger.record(
+        ledger.record_cycle(
             row[0],
-            result,
+            _stored_cycle(state_root, result),
             receipt.pinned_run_identity.evidence_cutoff,
         )
         == receipt.portfolio_checkpoint
     )
     with pytest.raises(LifecyclePersistenceError, match="portfolio checkpoint"):
-        ledger.record(
+        ledger.record_cycle(
             "invalid-run-id",
-            result,
+            _stored_cycle(state_root, result),
             receipt.pinned_run_identity.evidence_cutoff,
         )
     assert receipt.recorded_at is not None
@@ -744,13 +796,177 @@ def test_advance_constructs_and_status_rebuilds_one_portfolio_checkpoint(
             )
         )
     with pytest.raises(LifecyclePersistenceError, match="portfolio checkpoint"):
-        SQLitePortfolioLedger.open_existing(tmp_path / "missing-schema.sqlite3").record(
+        SQLitePortfolioLedger.open_existing(tmp_path / "missing-schema.sqlite3").record_cycle(
             row[0],
-            result,
+            _stored_cycle(state_root, result),
             receipt.pinned_run_identity.evidence_cutoff,
         )
     status = _configured_status(state_root)()
     assert status.portfolio_checkpoint == receipt.portfolio_checkpoint
+
+
+def test_shadow_cycle_resumes_after_write_interruption_and_projection_rebuild(
+    tmp_path: Path,
+) -> None:
+    state_root = tmp_path / "state"
+    model = _ValidProductionModel()
+    capability = _configure(state_root, universe=recorded_universe(), model=model)
+    interrupted = replace(
+        capability,
+        portfolio_ledger=_WriteThenInterruptPortfolioLedger(capability.portfolio_ledger),
+    )
+
+    with pytest.raises(_SimulatedPortfolioInterruptionError):
+        _advance(interrupted, "shadow-write-interruption")
+
+    effects_after_interruption = model.unique_effect_count
+    with sqlite3.connect(state_root / "lifecycle.sqlite3") as connection:
+        assert connection.execute("SELECT COUNT(*) FROM portfolio_constructions").fetchone() == (1,)
+        assert connection.execute("SELECT COUNT(*) FROM portfolio_shadow_accounts").fetchone() == (
+            SHADOW_ACCOUNT_COUNT,
+        )
+        assert connection.execute(
+            "SELECT COUNT(*) FROM lifecycle_events WHERE event_kind = 'portfolio_constructed'"
+        ).fetchone() == (0,)
+
+    resumed = _configure(state_root, universe=recorded_universe(), model=model)
+    receipt = _advance(resumed, "shadow-write-interruption")
+    assert model.unique_effect_count == effects_after_interruption
+    assert receipt.portfolio_checkpoint is not None
+    assert len(receipt.portfolio_checkpoint.shadow_accounts) == SHADOW_ACCOUNT_COUNT
+
+    status_capability = _configured_status(state_root)
+    assert status_capability().portfolio_checkpoint == receipt.portfolio_checkpoint
+    with sqlite3.connect(state_root / "lifecycle.sqlite3") as connection, connection:
+        connection.execute("DELETE FROM lifecycle_status_projection")
+    status = status_capability()
+    assert status.portfolio_checkpoint == receipt.portfolio_checkpoint
+
+
+def test_concurrent_shadow_redelivery_returns_one_exact_account_set(tmp_path: Path) -> None:
+    state_root = tmp_path / "state"
+    capability = _configure(
+        state_root,
+        universe=recorded_universe(),
+        model=_ValidProductionModel(),
+    )
+    receipt = _advance(capability, "concurrent-shadow-redelivery")
+    assert receipt.portfolio_checkpoint is not None
+    assert receipt.pinned_run_identity is not None
+    run_id = receipt.pinned_run_identity.run_id
+    recorded_at = receipt.portfolio_checkpoint.recorded_at
+    with sqlite3.connect(state_root / "lifecycle.sqlite3") as connection:
+        row = connection.execute("SELECT result_json FROM portfolio_constructions").fetchone()
+    assert row is not None
+    balanced = parse_portfolio_construction_result(json.loads(row[0]))
+    assert balanced is not None
+    cycle = _stored_cycle(state_root, balanced)
+    ledger = SQLitePortfolioLedger.open_existing(state_root / "lifecycle.sqlite3")
+    changed_payload = cycle.shadows[1].to_payload()
+    changed_payload["cost_input_source"] = "changed-source"
+    changed_material = {
+        key: value for key, value in changed_payload.items() if key != "content_hash"
+    }
+    changed_payload["content_hash"] = hashlib.sha256(
+        json.dumps(changed_material, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    changed_growth = parse_portfolio_shadow_account(changed_payload)
+    assert changed_growth is not None
+    changed_cycle = PortfolioCycleResult(
+        balanced,
+        (cycle.shadows[0], changed_growth, cycle.shadows[2]),
+    )
+
+    with pytest.raises(InvalidLifecycleStateError, match="durable portfolio construction"):
+        ledger.record_cycle(
+            run_id,
+            changed_cycle,
+            recorded_at,
+        )
+
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        checkpoints = tuple(
+            executor.map(
+                lambda _: ledger.record_cycle(
+                    run_id,
+                    cycle,
+                    recorded_at,
+                ),
+                range(8),
+            )
+        )
+
+    assert checkpoints == (receipt.portfolio_checkpoint,) * 8
+    with sqlite3.connect(state_root / "lifecycle.sqlite3") as connection:
+        assert connection.execute("SELECT COUNT(*) FROM portfolio_constructions").fetchone() == (1,)
+        assert connection.execute("SELECT COUNT(*) FROM portfolio_shadow_accounts").fetchone() == (
+            SHADOW_ACCOUNT_COUNT,
+        )
+
+
+def test_status_rejects_missing_or_changed_shadow_authority(tmp_path: Path) -> None:
+    state_root = tmp_path / "state"
+    capability = _configure(
+        state_root,
+        universe=recorded_universe(),
+        model=_ValidProductionModel(),
+    )
+    receipt = _advance(capability, "corrupt-shadow-history")
+    assert receipt.portfolio_checkpoint is not None
+
+    for corruption in ("missing", "changed"):
+        copied_root = tmp_path / corruption
+        copied_root.mkdir()
+        copied_root.chmod(0o700)
+        source = state_root / "lifecycle.sqlite3"
+        database = copied_root / "lifecycle.sqlite3"
+        database.write_bytes(source.read_bytes())
+        database.chmod(0o600)
+        evidence_source = state_root / "evidence-vault"
+        evidence_copy = copied_root / "evidence-vault"
+        shutil.copytree(evidence_source, evidence_copy)
+        with sqlite3.connect(database) as connection, connection:
+            if corruption == "missing":
+                connection.execute("DROP TRIGGER portfolio_shadow_accounts_are_append_only_delete")
+                connection.execute(
+                    "DELETE FROM portfolio_shadow_accounts WHERE account_kind = 'growth'"
+                )
+                connection.execute(
+                    """
+                    CREATE TRIGGER portfolio_shadow_accounts_are_append_only_delete
+                    BEFORE DELETE ON portfolio_shadow_accounts
+                    BEGIN SELECT RAISE(ABORT, 'append-only portfolio shadow account'); END
+                    """
+                )
+            else:
+                row = connection.execute(
+                    "SELECT result_json FROM portfolio_shadow_accounts "
+                    "WHERE account_kind = 'growth'"
+                ).fetchone()
+                assert row is not None
+                payload = json.loads(row[0])
+                assert isinstance(payload, dict)
+                payload["cost_input_source"] = "substituted-source"
+                material = {key: value for key, value in payload.items() if key != "content_hash"}
+                payload["content_hash"] = hashlib.sha256(
+                    json.dumps(material, sort_keys=True, separators=(",", ":")).encode()
+                ).hexdigest()
+                connection.execute("DROP TRIGGER portfolio_shadow_accounts_are_append_only_update")
+                connection.execute(
+                    "UPDATE portfolio_shadow_accounts SET result_json = ? "
+                    "WHERE account_kind = 'growth'",
+                    (json.dumps(payload, sort_keys=True, separators=(",", ":")),),
+                )
+                connection.execute(
+                    """
+                    CREATE TRIGGER portfolio_shadow_accounts_are_append_only_update
+                    BEFORE UPDATE ON portfolio_shadow_accounts
+                    BEGIN SELECT RAISE(ABORT, 'append-only portfolio shadow account'); END
+                    """
+                )
+
+        with pytest.raises(InvalidLifecycleStateError, match="durable portfolio construction"):
+            _configured_status(copied_root)()
 
 
 def test_advance_and_status_persist_in_band_event_block_and_hard_risk_outcomes(
@@ -1042,8 +1258,9 @@ def test_portfolio_refusal_rows_cannot_substitute_across_runs(tmp_path: Path) ->
     second_time = UtcInstant.from_datetime(first_time.value + timedelta(seconds=1))
     first_run = "a" * 64
     second_run = "b" * 64
-    checkpoint = ledger.record(first_run, result, first_time)
-    second_checkpoint = ledger.record(second_run, result, second_time)
+    cycle_result = PortfolioCycleResult(result, ())
+    checkpoint = ledger.record_cycle(first_run, cycle_result, first_time)
+    second_checkpoint = ledger.record_cycle(second_run, cycle_result, second_time)
     assert second_checkpoint.recorded_at == second_time
     assert second_checkpoint != checkpoint
 
@@ -1084,9 +1301,9 @@ def test_status_rejects_corrupt_portfolio_construction_history(tmp_path: Path) -
     assert result is not None
     ledger = SQLitePortfolioLedger.open_existing(state_root / "lifecycle.sqlite3")
     with pytest.raises(InvalidLifecycleStateError, match="durable portfolio construction"):
-        ledger.record(
+        ledger.record_cycle(
             row[0],
-            result,
+            _stored_cycle(state_root, result),
             receipt.pinned_run_identity.evidence_cutoff,
         )
 
@@ -1113,6 +1330,24 @@ def _advance_on(capability: Advance, key: str, trading_date: date) -> AdvanceRec
         cycle=MarketSession(trading_date).to_payload(),
         mode="champion",
         idempotency_key=key,
+    )
+
+
+def _stored_cycle(
+    state_root: Path,
+    balanced: PortfolioConstructionResult,
+) -> PortfolioCycleResult:
+    with sqlite3.connect(state_root / "lifecycle.sqlite3") as connection:
+        rows = connection.execute("SELECT result_json FROM portfolio_shadow_accounts").fetchall()
+    shadows = tuple(
+        account
+        for account in (parse_portfolio_shadow_account(json.loads(row[0])) for row in rows)
+        if account is not None
+    )
+    order = {"conservative": 0, "growth": 1, "equal_weight": 2}
+    return PortfolioCycleResult(
+        balanced,
+        tuple(sorted(shadows, key=lambda item: order[item.account_kind.value])),
     )
 
 

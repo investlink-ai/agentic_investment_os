@@ -16,6 +16,7 @@ from agentic_investment_os.domain.identity import (
     EquityInstrumentIdentity,
     MarketSession,
 )
+from agentic_investment_os.domain.lifecycle import PortfolioShadowKind
 from agentic_investment_os.domain.temporal import UtcInstant
 from agentic_investment_os.domain.universe import (
     CryptoSpotPosition,
@@ -30,14 +31,23 @@ from agentic_investment_os.portfolio.construction import (
     MaterialEventEvidence,
     MaterialEventRisk,
     PortfolioConstructionRequest,
+    PortfolioCostInputPolicy,
     PortfolioInputSet,
     PortfolioRefusalReason,
     PortfolioRiskInput,
+    PortfolioSizingMethod,
     PortfolioStance,
     PortfolioTarget,
     PortfolioTradeReason,
+    ShadowPortfolioPolicy,
     construct_balanced_portfolio,
     parse_portfolio_construction_result,
+)
+from agentic_investment_os.portfolio.shadows import (
+    ShadowCostInput,
+    ShadowTargetBand,
+    construct_portfolio_cycle,
+    parse_portfolio_shadow_account,
 )
 from tests._universe import mutable_mapping, mutable_mapping_list
 
@@ -82,6 +92,340 @@ def test_balanced_capped_inverse_volatility_leaves_capped_remainder_in_cash() ->
     assert result.cash_weight == Decimal("0.84")
     assert all(item.lower_weight == Decimal("0.07") for item in result.target_bands)
     assert all(item.upper_weight == Decimal("0.08") for item in result.target_bands)
+
+
+def test_same_input_cycle_hand_calculates_each_approved_shadow_envelope() -> None:
+    cycle = construct_portfolio_cycle(
+        _request((_resolution(_AAPL, _HASH_A), _resolution(_SPY, _HASH_B)))
+    )
+
+    assert tuple(
+        (
+            shadow.account_kind,
+            tuple(target.target_weight for target in shadow.targets),
+            shadow.retained_cash_weight,
+        )
+        for shadow in cycle.shadows
+    ) == (
+        (
+            PortfolioShadowKind.CONSERVATIVE,
+            (Decimal("0.05"), Decimal("0.05")),
+            Decimal("0.90"),
+        ),
+        (
+            PortfolioShadowKind.GROWTH,
+            (Decimal("0.12"), Decimal("0.12")),
+            Decimal("0.76"),
+        ),
+        (
+            PortfolioShadowKind.EQUAL_WEIGHT,
+            (Decimal("0.08"), Decimal("0.08")),
+            Decimal("0.84"),
+        ),
+    )
+    assert cycle.balanced.cash_weight == Decimal("0.84")
+
+
+def test_shadow_accounts_bind_the_exact_house_view_inputs_and_cost_facts() -> None:
+    request = _request((_resolution(_AAPL, _HASH_A), _resolution(_SPY, _HASH_B)))
+    cycle = construct_portfolio_cycle(request)
+    assert cycle.balanced.house_view is not None
+
+    for shadow in cycle.shadows:
+        assert shadow.house_view_id == cycle.balanced.house_view.house_view_id
+        assert shadow.policy_id == request.policy.policy_id
+        assert shadow.input_id == request.inputs.input_id
+        assert shadow.evidence_cutoff == request.evidence_cutoff
+        assert shadow.position_snapshot_id == request.inputs.position_snapshot.fingerprint
+        assert shadow.starting_cash == request.inputs.cash
+        assert shadow.cost_input_policy_id == request.policy.cost_input_policy.policy_id
+        assert shadow.cost_input_source == request.inputs.source_identity
+        assert shadow.cost_inputs_available_at == request.inputs.available_at
+        assert tuple(item.price for item in shadow.cost_inputs) == (
+            Decimal(100),
+            Decimal(100),
+        )
+        assert dict(shadow.material_fingerprints) == {
+            "configuration": request.configuration_hash,
+            "constitution": request.constitution_hash,
+            "research_policy": request.research_policy_hash,
+            "universe_snapshot": request.universe_snapshot_id,
+            "portfolio_policy": request.policy.policy_id,
+            "portfolio_input": request.inputs.input_id,
+            "house_view": cycle.balanced.house_view.house_view_id,
+        }
+
+
+def test_shadow_turnover_notional_uses_starting_equity_and_absolute_adjustment() -> None:
+    resolution = replace(_resolution(_AAPL, _HASH_A), is_position=True)
+    cycle = construct_portfolio_cycle(
+        _request((resolution,), inputs=_inputs_with_position(Decimal("0.08")))
+    )
+    conservative = cycle.shadows[0]
+
+    assert conservative.cost_inputs[0].current_weight == Decimal("0.08")
+    assert conservative.cost_inputs[0].adjustment_weight == Decimal("0.05")
+    assert conservative.modeled_turnover_weight == Decimal("0.03")
+    assert conservative.modeled_turnover_notional == Decimal(3000)
+
+
+def test_portfolio_cycle_preserves_balanced_refusal_without_shadow_accounts() -> None:
+    request = _request(
+        (_resolution(_AAPL, _HASH_A),),
+        expected=("f" * 64,),
+    )
+    balanced = construct_balanced_portfolio(request)
+
+    with pytest.raises(ValueError, match="invalid portfolio construction result"):
+        balanced.require_house_view()
+    cycle = construct_portfolio_cycle(request)
+    assert cycle.balanced == balanced
+    assert cycle.shadows == ()
+
+
+def test_shadow_account_round_trip_refuses_authority_or_outcome_fields() -> None:
+    account = construct_portfolio_cycle(
+        _request((_resolution(_AAPL, _HASH_A), _resolution(_SPY, _HASH_B)))
+    ).shadows[0]
+    payload = account.to_payload()
+
+    assert parse_portfolio_shadow_account(payload) == account
+    assert payload["authority_scope"] == "non_executable_shadow_account"
+    assert {"champion", "packet_id", "order", "fill", "outcome"}.isdisjoint(payload)
+    assert parse_portfolio_shadow_account({**payload, "record_kind": "invalid"}) is None
+    assert parse_portfolio_shadow_account({**payload, "authority_scope": "executable"}) is None
+    for prohibited in ("champion", "packet_id", "fill", "outcome"):
+        assert parse_portfolio_shadow_account({**payload, prohibited: True}) is None
+
+
+def test_shadow_account_values_fail_closed_when_invariants_or_content_change() -> None:
+    account = construct_portfolio_cycle(
+        _request((_resolution(_AAPL, _HASH_A), _resolution(_SPY, _HASH_B)))
+    ).shadows[0]
+
+    with pytest.raises(ValueError, match="invalid portfolio shadow account"):
+        replace(account.target_bands[0], lower_weight=Decimal(1))
+    with pytest.raises(ValueError, match="invalid portfolio shadow account"):
+        replace(account.cost_inputs[0], price=Decimal(0))
+    with pytest.raises(ValueError, match="invalid portfolio shadow account"):
+        replace(account, schema_version=2)
+    with pytest.raises(ValueError, match="invalid portfolio shadow account"):
+        replace(account, content_hash="f" * 64).to_payload()
+
+
+def test_shadow_account_parser_rejects_hostile_nested_material() -> None:
+    account = construct_portfolio_cycle(
+        _request((_resolution(_AAPL, _HASH_A), _resolution(_SPY, _HASH_B)))
+    ).shadows[0]
+    payload = account.to_payload()
+    crypto_identity = CryptoSpotInstrumentIdentity(
+        "alpaca-paper", "crypto-btc-usd", "BTC", "USD", "ALPACA"
+    ).to_payload()
+
+    invalid_payloads: list[dict[str, object]] = []
+    for collection in ("targets", "target_bands", "cost_inputs"):
+        changed = deepcopy(payload)
+        values = changed[collection]
+        assert isinstance(values, list)
+        values[0] = {}
+        invalid_payloads.append(changed)
+    for collection in ("targets", "target_bands", "cost_inputs"):
+        changed = deepcopy(payload)
+        values = changed[collection]
+        assert isinstance(values, list)
+        item = values[0]
+        assert isinstance(item, dict)
+        item["identity"] = crypto_identity
+        invalid_payloads.append(changed)
+
+    invalid_nested_values = (
+        ("targets", "target_weight", "+0.05"),
+        ("targets", "target_weight", "1.1"),
+        ("target_bands", "accounting_reason", True),
+        ("target_bands", "accounting_reason", "invalid"),
+        ("target_bands", "lower_weight", "+0.04"),
+        ("cost_inputs", "price", "0"),
+    )
+    for collection, key, value in invalid_nested_values:
+        changed = deepcopy(payload)
+        values = changed[collection]
+        assert isinstance(values, list)
+        item = values[0]
+        assert isinstance(item, dict)
+        item[key] = value
+        invalid_payloads.append(changed)
+
+    invalid_payloads.extend(
+        (
+            {**payload, "run_id": True},
+            {**payload, "account_kind": "invalid"},
+            {**payload, "starting_cash": True},
+            {**payload, "retained_cash_weight": "NaN"},
+            {**payload, "cost_input_source": "changed"},
+            {
+                **payload,
+                "material_fingerprints": {
+                    "configuration": "1" * 64,
+                },
+            },
+            {
+                **payload,
+                "material_fingerprints": {
+                    **dict(account.material_fingerprints),
+                    "configuration": True,
+                },
+            },
+        )
+    )
+
+    invalid_payloads.extend(
+        {**payload, field: None}
+        for field in (
+            "cycle",
+            "schema_version",
+            "run_id",
+            "account_kind",
+            "sizing_method",
+            "algorithm_version",
+            "house_view_id",
+            "policy_id",
+            "input_id",
+            "position_snapshot_id",
+            "cash_currency",
+            "cost_input_policy_id",
+            "cost_input_source",
+            "content_hash",
+        )
+    )
+    invalid_payloads.extend(
+        {**payload, field: ()}
+        for field in ("targets", "target_bands", "cost_inputs", "material_fingerprints")
+    )
+
+    assert all(parse_portfolio_shadow_account(value) is None for value in invalid_payloads)
+
+
+def test_shadow_value_types_reject_invalid_direct_construction() -> None:
+    account = construct_portfolio_cycle(
+        _request((_resolution(_AAPL, _HASH_A), _resolution(_SPY, _HASH_B)))
+    ).shadows[0]
+    band = account.target_bands[0]
+    cost = account.cost_inputs[0]
+
+    with pytest.raises(ValueError, match="invalid portfolio shadow account"):
+        ShadowTargetBand(
+            band.identity,
+            band.target_weight,
+            Decimal(1),
+            band.upper_weight,
+            band.current_weight,
+            band.adjustment_weight,
+            band.accounting_reason,
+        )
+    with pytest.raises(ValueError, match="invalid portfolio shadow account"):
+        ShadowCostInput(cost.identity, Decimal(0), cost.current_weight, cost.adjustment_weight)
+
+
+def test_equal_weight_changes_only_sizing_over_the_same_admitted_subjects() -> None:
+    identities = tuple(_identity(index) for index in range(20))
+    request = _request(
+        tuple(
+            _resolution(identity, _hash(str(index))) for index, identity in enumerate(identities)
+        ),
+        inputs=_inputs_for(
+            tuple(
+                _risk_input(
+                    identity,
+                    f"sector-{index}",
+                    common=f"cause-{index}",
+                    cluster=f"cluster-{index}",
+                    amplitude=index + 1,
+                )
+                for index, identity in enumerate(identities)
+            )
+        ),
+    )
+
+    cycle = construct_portfolio_cycle(request)
+    equal_weight = cycle.shadows[2]
+
+    assert all(item.target_weight == Decimal("0.04") for item in equal_weight.targets)
+    assert tuple(item.identity for item in equal_weight.targets) == tuple(
+        item.identity for item in cycle.balanced.targets
+    )
+    assert tuple(item.target_weight for item in equal_weight.targets) != tuple(
+        item.target_weight for item in cycle.balanced.targets
+    )
+    for inverse_volatility in cycle.shadows[:2]:
+        assert tuple(item.target_weight for item in inverse_volatility.targets) != tuple(
+            item.target_weight for item in equal_weight.targets
+        )
+        assert (
+            inverse_volatility.targets[0].target_weight
+            != inverse_volatility.targets[-1].target_weight
+        )
+
+
+def test_shadow_calculation_is_independent_of_the_ambient_decimal_context() -> None:
+    identities = tuple(_identity(index) for index in range(20))
+    request = _request(
+        tuple(
+            _resolution(identity, _hash(str(index))) for index, identity in enumerate(identities)
+        ),
+        inputs=_inputs_for(
+            tuple(
+                _risk_input(
+                    identity,
+                    f"sector-{index}",
+                    common=f"cause-{index}",
+                    cluster=f"cluster-{index}",
+                    amplitude=index + 1,
+                )
+                for index, identity in enumerate(identities)
+            )
+        ),
+    )
+    expected = construct_portfolio_cycle(request)
+
+    with localcontext() as context:
+        context.prec = 2
+        actual = construct_portfolio_cycle(request)
+
+    assert actual == expected
+
+
+@given(st.integers(min_value=1, max_value=30))
+def test_shadow_profiles_preserve_caps_cash_and_canonical_order(count: int) -> None:
+    identities = tuple(_identity(index) for index in range(count))
+    resolutions = tuple(
+        _resolution(identity, _hash(str(index))) for index, identity in enumerate(identities)
+    )
+    inputs = _inputs_for(
+        tuple(
+            _risk_input(
+                identity,
+                f"sector-{index}",
+                common=f"cause-{index}",
+                cluster=f"cluster-{index}",
+                amplitude=index + 1,
+            )
+            for index, identity in enumerate(identities)
+        )
+    )
+    request = _request(resolutions, inputs=inputs)
+
+    cycle = construct_portfolio_cycle(request)
+    reordered = construct_portfolio_cycle(_request(tuple(reversed(resolutions)), inputs=inputs))
+
+    for account, policy in zip(cycle.shadows, request.policy.shadow_policies, strict=True):
+        assert sum(item.target_weight for item in account.targets) <= policy.maximum_gross_weight
+        assert all(item.target_weight <= policy.maximum_name_weight for item in account.targets)
+        assert (
+            sum(item.target_weight for item in account.targets) + account.retained_cash_weight == 1
+        )
+    assert tuple(item.to_payload() for item in cycle.shadows) == tuple(
+        item.to_payload() for item in reordered.shadows
+    )
 
 
 def test_construction_is_invariant_to_the_ambient_decimal_context() -> None:
@@ -159,8 +503,49 @@ def test_balanced_policy_parser_requires_the_complete_approved_risk_envelope() -
     assert BalancedPortfolioPolicy.parse(payload) == _policy()
     assert BalancedPortfolioPolicy.parse({**payload, "maximum_gross_weight": "0.81"}) is None
     assert BalancedPortfolioPolicy.parse({**payload, "schema_version": True}) is None
+    assert BalancedPortfolioPolicy.parse({**payload, "shadow_accounts": []}) is None
+    assert BalancedPortfolioPolicy.parse({**payload, "modeled_cost_inputs": {}}) is None
+    changed_shadows = deepcopy(payload)
+    shadow_accounts = mutable_mapping_list(changed_shadows["shadow_accounts"])
+    mutable_mapping(shadow_accounts[0])["maximum_gross_weight"] = "0.61"
+    assert BalancedPortfolioPolicy.parse(changed_shadows) is None
     with pytest.raises(ValueError, match="Balanced portfolio policy"):
         replace(_policy(), schema_version=True)
+
+
+def test_portfolio_policy_parser_rejects_hostile_shadow_and_cost_shapes() -> None:
+    payload = _policy().to_payload()
+    shadows = mutable_mapping_list(payload["shadow_accounts"])
+    cost_inputs = mutable_mapping(payload["modeled_cost_inputs"])
+
+    invalid_shadow_shapes: tuple[dict[str, object], ...] = (
+        {**shadows[0], "unexpected": True},
+        {**shadows[0], "maximum_gross_weight": "invalid"},
+        {**shadows[0], "maximum_name_weight": "invalid"},
+        {**shadows[0], "maximum_sector_weight": "invalid"},
+        {**shadows[0], "algorithm_version": "1"},
+        {**shadows[0], "account_kind": "invalid"},
+    )
+    for changed_shadow in invalid_shadow_shapes:
+        changed = deepcopy(payload)
+        mutable_mapping_list(changed["shadow_accounts"])[0] = changed_shadow
+        assert BalancedPortfolioPolicy.parse(changed) is None
+
+    invalid_cost_shapes: tuple[object, ...] = (
+        {**cost_inputs, "unexpected": True},
+        {**cost_inputs, "schema_version": True},
+        {**cost_inputs, "model_type": True},
+        {**cost_inputs, "turnover_basis": True},
+        {**cost_inputs, "price_basis": True},
+        {**cost_inputs, "model_type": "invalid"},
+    )
+    for changed_cost in invalid_cost_shapes:
+        changed = deepcopy(payload)
+        changed["modeled_cost_inputs"] = changed_cost
+        assert BalancedPortfolioPolicy.parse(changed) is None
+
+    with pytest.raises(ValueError, match="Balanced portfolio policy"):
+        replace(_policy().cost_input_policy, model_type="invalid")
 
 
 def test_v0_policy_cannot_exceed_its_approved_clamp_envelope() -> None:
@@ -320,13 +705,13 @@ def test_canonical_portfolio_material_has_stable_content_identities() -> None:
     result = construct_balanced_portfolio(_request((_resolution(_AAPL, _HASH_A),)))
 
     assert inputs.input_id == "98e69eac483ad140d159dc53d0df78b0d4384a2ec346feee9117250b373a3662"
-    assert policy.policy_id == "3152f4e63b33ef63f7a0d6298dc33942b91b351560c83ad526ebce36c27533f7"
+    assert policy.policy_id == "131be6aa9c10dd88729db052e0086706775e2adc8a8d6984ec3876048a17752a"
     assert result.house_view is not None
     assert (
         result.house_view.house_view_id
-        == "c542176233606aa778fa1d243311980d8e879b82c205a06da3492e409d3ab7cf"
+        == "058a08fc7056c34440cf5aa40a4ddc64dcd8939b61fa425caf0147371c8ca508"
     )
-    assert result.content_hash == "3da26afef8e9acc943925e1567f2c69c2df49c5dd2cfebeb670ca8794c7e0e34"
+    assert result.content_hash == "31895c94eb557618de0bea20c030840956dd1fdff0dafdb1e5407b40d0ecd7b4"
     assert (
         result.target_bands[0].target_band_id
         == "19bb8f2b0c9c37e13cc7909e77abe8bcc936d9c85d926319c46d035d577d2d3f"
@@ -369,7 +754,7 @@ def test_refusal_round_trips_with_a_stable_canonical_identity() -> None:
     result = construct_balanced_portfolio(request)
 
     assert result.refusal is PortfolioRefusalReason.INVALID_REQUEST
-    assert result.content_hash == "36b6b689568d2332b8febcedb5c29a50b847290205a84d65397e8a04aa2b785d"
+    assert result.content_hash == "886432dbd0aaf562b60ccf7cb479d6e0bbc107939f08a73044c8e6be5c74e1e9"
     assert parse_portfolio_construction_result(result.to_payload()) == result
 
 
@@ -2244,7 +2629,7 @@ def _test_content_hash(value: object) -> str:
 
 def _policy() -> BalancedPortfolioPolicy:
     return BalancedPortfolioPolicy(
-        schema_version=1,
+        schema_version=2,
         estimator="sample_standard_deviation",
         lookback_days=2,
         annualization_periods=252,
@@ -2265,5 +2650,37 @@ def _policy() -> BalancedPortfolioPolicy:
             ("low", Decimal(1)),
             ("medium", Decimal("0.75")),
             ("high", Decimal("0.50")),
+        ),
+        shadow_policies=(
+            ShadowPortfolioPolicy(
+                PortfolioShadowKind.CONSERVATIVE,
+                PortfolioSizingMethod.INVERSE_VOLATILITY,
+                1,
+                Decimal("0.60"),
+                Decimal("0.05"),
+                Decimal("0.20"),
+            ),
+            ShadowPortfolioPolicy(
+                PortfolioShadowKind.GROWTH,
+                PortfolioSizingMethod.INVERSE_VOLATILITY,
+                1,
+                Decimal("1.00"),
+                Decimal("0.12"),
+                Decimal("0.30"),
+            ),
+            ShadowPortfolioPolicy(
+                PortfolioShadowKind.EQUAL_WEIGHT,
+                PortfolioSizingMethod.EQUAL_WEIGHT,
+                1,
+                Decimal("0.80"),
+                Decimal("0.08"),
+                Decimal("0.25"),
+            ),
+        ),
+        cost_input_policy=PortfolioCostInputPolicy(
+            1,
+            "frozen_ex_ante_turnover_inputs",
+            "absolute_adjustment_weight",
+            "available_at_time",
         ),
     )

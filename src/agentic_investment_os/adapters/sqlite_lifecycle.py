@@ -425,6 +425,33 @@ BEFORE DELETE ON portfolio_constructions
 BEGIN SELECT RAISE(ABORT, 'append-only portfolio construction'); END
 """,
     """
+CREATE TABLE portfolio_shadow_accounts (
+    run_id TEXT NOT NULL CHECK (length(run_id) = 64),
+    account_kind TEXT NOT NULL CHECK (
+        account_kind IN ('conservative', 'growth', 'equal_weight')
+    ),
+    account_id TEXT NOT NULL CHECK (length(account_id) = 64),
+    house_view_id TEXT NOT NULL CHECK (length(house_view_id) = 64),
+    policy_id TEXT NOT NULL CHECK (length(policy_id) = 64),
+    input_id TEXT NOT NULL CHECK (length(input_id) = 64),
+    result_json TEXT NOT NULL,
+    recorded_at TEXT NOT NULL,
+    PRIMARY KEY (run_id, account_kind),
+    UNIQUE (account_id),
+    FOREIGN KEY (run_id) REFERENCES portfolio_constructions(run_id)
+) STRICT
+""",
+    """
+CREATE TRIGGER portfolio_shadow_accounts_are_append_only_update
+BEFORE UPDATE ON portfolio_shadow_accounts
+BEGIN SELECT RAISE(ABORT, 'append-only portfolio shadow account'); END
+""",
+    """
+CREATE TRIGGER portfolio_shadow_accounts_are_append_only_delete
+BEFORE DELETE ON portfolio_shadow_accounts
+BEGIN SELECT RAISE(ABORT, 'append-only portfolio shadow account'); END
+""",
+    """
 CREATE TRIGGER advance_refusals_are_append_only_update
 BEFORE UPDATE ON advance_refusals BEGIN SELECT RAISE(ABORT, 'append-only refusal ledger'); END
     """,
@@ -628,7 +655,7 @@ class _DatabaseOpenMode(StrEnum):
     EXISTING_ONLY = "rw"
 
 
-_CURRENT_DATABASE_VERSION = 13
+_CURRENT_DATABASE_VERSION = 14
 _CURRENT_SCHEMA_SIGNATURE = frozenset(" ".join(statement.split()) for statement in _CURRENT_SCHEMA)
 
 _PROJECTION_SCHEMA = """

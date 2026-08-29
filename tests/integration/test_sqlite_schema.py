@@ -32,9 +32,9 @@ from agentic_investment_os.domain.lifecycle import (
 from agentic_investment_os.domain.temporal import UtcInstant
 from tests._attention import attention_artifact
 from tests._evidence import evidence_capture_checkpoint
-from tests._universe import advance_command
+from tests._universe import advance_command, portfolio_shadow_references
 
-CURRENT_DATABASE_VERSION = 13
+CURRENT_DATABASE_VERSION = 14
 CONFIGURATION_HASH = "a" * 64
 RECORDED_AT = "2026-08-21T22:00:00.000000+00:00"
 MAX_DIAGNOSTIC_LENGTH = 100
@@ -140,6 +140,7 @@ def _populate_current_history(database: Path) -> tuple[AdvanceRequest, PinnedRun
                     identity.portfolio_input_hash,
                     ("6" * 64,),
                     recorded_at,
+                    shadow_accounts=portfolio_shadow_references(),
                 ),
             )
             decision = ledger.advance_step(command, attempt, recorded_at)
@@ -237,6 +238,9 @@ def test_fresh_database_records_its_physical_schema_version(tmp_path: Path) -> N
         "portfolio_constructions",
         "portfolio_constructions_are_append_only_delete",
         "portfolio_constructions_are_append_only_update",
+        "portfolio_shadow_accounts",
+        "portfolio_shadow_accounts_are_append_only_delete",
+        "portfolio_shadow_accounts_are_append_only_update",
         "production_research_call_intents",
         "production_research_call_intents_are_append_only_delete",
         "production_research_call_intents_are_append_only_update",

@@ -15,6 +15,7 @@ EXPECTED_MUTATION_SOURCES = [
     "src/agentic_investment_os/memory/reducer.py",
     "src/agentic_investment_os/portfolio/__init__.py",
     "src/agentic_investment_os/portfolio/construction.py",
+    "src/agentic_investment_os/portfolio/shadows.py",
 ]
 EXPECTED_AUTHORITY_ROOTS = [
     "src/agentic_investment_os/execution",
