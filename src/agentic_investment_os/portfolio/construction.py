@@ -26,6 +26,7 @@ from agentic_investment_os.domain.identity import (
     parse_decision_cycle_identity,
     parse_instrument_identity,
 )
+from agentic_investment_os.domain.lifecycle import PortfolioShadowKind
 from agentic_investment_os.domain.temporal import InvalidUtcInstantError, UtcInstant
 from agentic_investment_os.domain.universe import (
     EquityPosition,
@@ -36,11 +37,6 @@ from agentic_investment_os.domain.universe import (
 if TYPE_CHECKING:
     from collections.abc import Iterable
 
-    from agentic_investment_os.domain.lifecycle import (
-        PortfolioCheckpoint,
-        PortfolioCheckpointReference,
-    )
-
 __all__ = (
     "AdjustedClose",
     "BalancedPortfolioPolicy",
@@ -50,21 +46,23 @@ __all__ = (
     "MaterialEventRisk",
     "PortfolioConstructionRequest",
     "PortfolioConstructionResult",
-    "PortfolioHistoryValidator",
+    "PortfolioCostInputPolicy",
     "PortfolioInputSet",
     "PortfolioInputSource",
     "PortfolioRefusalReason",
-    "PortfolioResultLedger",
     "PortfolioRiskInput",
+    "PortfolioSizingMethod",
     "PortfolioStance",
     "PortfolioTarget",
     "PortfolioTradeReason",
+    "ShadowPortfolioPolicy",
     "TargetBand",
     "construct_balanced_portfolio",
     "parse_portfolio_construction_result",
 )
 
 _HASH_LENGTH = 64
+_POLICY_SCHEMA_VERSION = 2
 _MINIMUM_LOOKBACK_DAYS = 2
 _MAXIMUM_DECIMAL_TEXT_LENGTH = 64
 _MAXIMUM_SOURCE_IDENTITY_LENGTH = 256
@@ -136,6 +134,183 @@ class PortfolioTradeReason(StrEnum):
     BELOW_MINIMUM_NOTIONAL = "below_minimum_notional"
     EVENT_BLOCKED = "event_blocked"
     HARD_RISK_BREACH = "hard_risk_breach"
+
+
+class PortfolioSizingMethod(StrEnum):
+    """Name the only deterministic sizing methods admitted to portfolio accounting."""
+
+    INVERSE_VOLATILITY = "inverse_volatility"
+    EQUAL_WEIGHT = "equal_weight"
+
+
+@dataclass(frozen=True, slots=True)
+class ShadowPortfolioPolicy:
+    """Freeze one required non-executable shadow envelope and sizing method."""
+
+    account_kind: PortfolioShadowKind
+    sizing_method: PortfolioSizingMethod
+    algorithm_version: int
+    maximum_gross_weight: Decimal
+    maximum_name_weight: Decimal
+    maximum_sector_weight: Decimal
+
+    def __post_init__(self) -> None:
+        expected = {
+            PortfolioShadowKind.CONSERVATIVE: (
+                PortfolioSizingMethod.INVERSE_VOLATILITY,
+                Decimal("0.60"),
+                Decimal("0.05"),
+                Decimal("0.20"),
+            ),
+            PortfolioShadowKind.GROWTH: (
+                PortfolioSizingMethod.INVERSE_VOLATILITY,
+                Decimal("1.00"),
+                Decimal("0.12"),
+                Decimal("0.30"),
+            ),
+            PortfolioShadowKind.EQUAL_WEIGHT: (
+                PortfolioSizingMethod.EQUAL_WEIGHT,
+                Decimal("0.80"),
+                Decimal("0.08"),
+                Decimal("0.25"),
+            ),
+        }
+        actual = (
+            self.sizing_method,
+            self.maximum_gross_weight,
+            self.maximum_name_weight,
+            self.maximum_sector_weight,
+        )
+        if (
+            type(self.account_kind) is not PortfolioShadowKind
+            or type(self.sizing_method) is not PortfolioSizingMethod
+            or type(self.algorithm_version) is not int
+            or self.algorithm_version != 1
+            or any(type(item) is not Decimal or not item.is_finite() for item in actual[1:])
+            or actual != expected[self.account_kind]
+        ):
+            raise ValueError(_INVALID_POLICY)
+
+    def to_payload(self) -> dict[str, object]:
+        return {
+            "account_kind": self.account_kind.value,
+            "sizing_method": self.sizing_method.value,
+            "algorithm_version": self.algorithm_version,
+            "maximum_gross_weight": _decimal_text(self.maximum_gross_weight),
+            "maximum_name_weight": _decimal_text(self.maximum_name_weight),
+            "maximum_sector_weight": _decimal_text(self.maximum_sector_weight),
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class PortfolioCostInputPolicy:
+    """Freeze ex-ante turnover and price inputs without evaluating later outcomes."""
+
+    schema_version: int
+    model_type: str
+    turnover_basis: str
+    price_basis: str
+
+    def __post_init__(self) -> None:
+        if (
+            type(self.schema_version) is not int
+            or self.schema_version != 1
+            or self.model_type != "frozen_ex_ante_turnover_inputs"
+            or self.turnover_basis != "absolute_adjustment_weight"
+            or self.price_basis != "available_at_time"
+        ):
+            raise ValueError(_INVALID_POLICY)
+
+    @property
+    def policy_id(self) -> str:
+        return _content_hash(self.to_payload())
+
+    def to_payload(self) -> dict[str, object]:
+        return {
+            "schema_version": self.schema_version,
+            "model_type": self.model_type,
+            "turnover_basis": self.turnover_basis,
+            "price_basis": self.price_basis,
+        }
+
+
+def _parse_shadow_policy(value: object) -> ShadowPortfolioPolicy | None:
+    fields = _exact_mapping(
+        value,
+        {
+            "account_kind",
+            "sizing_method",
+            "algorithm_version",
+            "maximum_gross_weight",
+            "maximum_name_weight",
+            "maximum_sector_weight",
+        },
+    )
+    if fields is None:
+        return None
+    match (
+        fields["account_kind"],
+        fields["sizing_method"],
+        fields["algorithm_version"],
+        _plain_decimal(fields["maximum_gross_weight"]),
+        _plain_decimal(fields["maximum_name_weight"]),
+        _plain_decimal(fields["maximum_sector_weight"]),
+    ):
+        case (
+            str() as account_kind,
+            str() as sizing_method,
+            int() as algorithm_version,
+            Decimal() as maximum_gross,
+            Decimal() as maximum_name,
+            Decimal() as maximum_sector,
+        ) if type(algorithm_version) is int:
+            pass
+        case _:
+            return None
+    try:
+        return ShadowPortfolioPolicy(
+            account_kind=PortfolioShadowKind(account_kind),
+            sizing_method=PortfolioSizingMethod(sizing_method),
+            algorithm_version=algorithm_version,
+            maximum_gross_weight=maximum_gross,
+            maximum_name_weight=maximum_name,
+            maximum_sector_weight=maximum_sector,
+        )
+    except (TypeError, ValueError):
+        return None
+
+
+def _parse_cost_input_policy(value: object) -> PortfolioCostInputPolicy | None:
+    fields = _exact_mapping(
+        value,
+        {"schema_version", "model_type", "turnover_basis", "price_basis"},
+    )
+    if fields is None:
+        return None
+    match (
+        fields["schema_version"],
+        fields["model_type"],
+        fields["turnover_basis"],
+        fields["price_basis"],
+    ):
+        case (
+            int() as schema_version,
+            str() as model_type,
+            str() as turnover_basis,
+            str() as price_basis,
+        ) if type(schema_version) is int:
+            pass
+        case _:
+            return None
+    try:
+        return PortfolioCostInputPolicy(
+            schema_version=schema_version,
+            model_type=model_type,
+            turnover_basis=turnover_basis,
+            price_basis=price_basis,
+        )
+    except (TypeError, ValueError):
+        return None
 
 
 @dataclass(frozen=True, slots=True)
@@ -370,6 +545,23 @@ class PortfolioInputSet:
             input_id,
         )
 
+    def to_payload(self) -> dict[str, object]:
+        """Return the exact immutable input material needed to reconstruct a shadow."""
+        return {
+            "schema_version": 1,
+            "record_kind": "portfolio_input_set",
+            "position_snapshot": self.position_snapshot.to_payload(),
+            "cash": _decimal_text(self.cash),
+            "cash_currency": self.cash_currency,
+            "source_identity": self.source_identity,
+            "observed_at": self.observed_at.isoformat(),
+            "available_at": self.available_at.isoformat(),
+            "data_regime": self.data_regime,
+            "session_calendar_id": self.session_calendar_id,
+            "risk_inputs": [_risk_input_payload(item) for item in self.risk_inputs],
+            "input_id": self.input_id,
+        }
+
 
 class PortfolioInputSource(Protocol):
     """Load one hostile as-of input set against the pinned position snapshot."""
@@ -380,26 +572,9 @@ class PortfolioInputSource(Protocol):
     ) -> PortfolioInputSet | PortfolioRefusalReason: ...
 
 
-class PortfolioResultLedger(Protocol):
-    """Append or replay one exact deterministic portfolio result."""
-
-    def record(
-        self,
-        run_id: str,
-        result: PortfolioConstructionResult,
-        recorded_at: UtcInstant,
-    ) -> PortfolioCheckpoint: ...
-
-
-class PortfolioHistoryValidator(Protocol):
-    """Validate durable portfolio artifacts named by lifecycle history."""
-
-    def validate_history(self, references: tuple[PortfolioCheckpointReference, ...]) -> None: ...
-
-
 @dataclass(frozen=True, slots=True)
 class BalancedPortfolioPolicy:
-    """Freeze every mechanics-calibrated Balanced construction decision."""
+    """Freeze Balanced mechanics and every required same-input shadow declaration."""
 
     schema_version: int
     estimator: str
@@ -419,6 +594,8 @@ class BalancedPortfolioPolicy:
     partial_adjustment_fraction: Decimal
     reduce_multiplier: Decimal
     uncertainty_multipliers: tuple[tuple[str, Decimal], ...]
+    shadow_policies: tuple[ShadowPortfolioPolicy, ...]
+    cost_input_policy: PortfolioCostInputPolicy
 
     def __post_init__(self) -> None:
         uncertainty = dict(self.uncertainty_multipliers)
@@ -438,7 +615,7 @@ class BalancedPortfolioPolicy:
         )
         if (
             type(self.schema_version) is not int
-            or self.schema_version != 1
+            or self.schema_version != _POLICY_SCHEMA_VERSION
             or self.estimator != "sample_standard_deviation"
             or type(self.lookback_days) is not int
             or self.lookback_days < _MINIMUM_LOOKBACK_DAYS
@@ -468,6 +645,15 @@ class BalancedPortfolioPolicy:
                 <= uncertainty["low"]
                 <= Decimal(1)
             )
+            or type(self.shadow_policies) is not tuple
+            or tuple(item.account_kind for item in self.shadow_policies)
+            != (
+                PortfolioShadowKind.CONSERVATIVE,
+                PortfolioShadowKind.GROWTH,
+                PortfolioShadowKind.EQUAL_WEIGHT,
+            )
+            or any(type(item) is not ShadowPortfolioPolicy for item in self.shadow_policies)
+            or type(self.cost_input_policy) is not PortfolioCostInputPolicy
         ):
             raise ValueError(_INVALID_POLICY)
 
@@ -494,6 +680,8 @@ class BalancedPortfolioPolicy:
                 "partial_adjustment_fraction",
                 "reduce_multiplier",
                 "uncertainty_multipliers",
+                "shadow_accounts",
+                "modeled_cost_inputs",
             },
         )
         if fields is None:
@@ -512,10 +700,19 @@ class BalancedPortfolioPolicy:
         if (
             volatility is None
             or multipliers is None
-            or fields["policy_type"] != "balanced_inverse_volatility"
+            or fields["policy_type"] != "balanced_with_same_input_shadows"
             or fields["asset_class"] != "us_equity"
             or fields["risk_profile"] != "balanced"
+            or type(fields["shadow_accounts"]) is not list
         ):
+            return None
+        shadow_policies = tuple(
+            item
+            for item in (_parse_shadow_policy(value) for value in fields["shadow_accounts"])
+            if item is not None
+        )
+        cost_input_policy = _parse_cost_input_policy(fields["modeled_cost_inputs"])
+        if len(shadow_policies) != len(fields["shadow_accounts"]) or cost_input_policy is None:
             return None
         decimal_fields = (
             "maximum_gross_weight",
@@ -588,6 +785,8 @@ class BalancedPortfolioPolicy:
                 uncertainty_multipliers=tuple(
                     zip(("low", "medium", "high"), parsed_multipliers, strict=True)
                 ),
+                shadow_policies=shadow_policies,
+                cost_input_policy=cost_input_policy,
             )
         except (TypeError, ValueError):
             return None
@@ -599,7 +798,7 @@ class BalancedPortfolioPolicy:
     def to_payload(self) -> dict[str, object]:
         return {
             "schema_version": self.schema_version,
-            "policy_type": "balanced_inverse_volatility",
+            "policy_type": "balanced_with_same_input_shadows",
             "asset_class": "us_equity",
             "risk_profile": "balanced",
             "realized_volatility": {
@@ -627,6 +826,8 @@ class BalancedPortfolioPolicy:
             "uncertainty_multipliers": {
                 key: _decimal_text(value) for key, value in self.uncertainty_multipliers
             },
+            "shadow_accounts": [item.to_payload() for item in self.shadow_policies],
+            "modeled_cost_inputs": self.cost_input_policy.to_payload(),
         }
 
 
@@ -890,6 +1091,19 @@ class PortfolioConstructionResult:
             raise ValueError(_INVALID_RESULT)
         return {**material, "content_hash": self.content_hash}
 
+    def require_house_view(self) -> HouseView:
+        """Return the accepted HouseView or refuse use of a non-accepted result."""
+        if self.refusal is not None or self.house_view is None:
+            raise ValueError(_INVALID_RESULT)
+        return self.house_view
+
+
+@dataclass(frozen=True, slots=True)
+class _PortfolioVariantResult:
+    targets: tuple[PortfolioTarget, ...]
+    target_bands: tuple[TargetBand, ...]
+    cash_weight: Decimal
+
 
 def construct_balanced_portfolio(
     request: PortfolioConstructionRequest,
@@ -899,7 +1113,7 @@ def construct_balanced_portfolio(
         return _construct_balanced_portfolio(request)
 
 
-def _construct_balanced_portfolio(  # noqa: PLR0911,PLR0912,PLR0915 - each refusal is a distinct safety result.
+def _construct_balanced_portfolio(  # noqa: PLR0911,PLR0912 - each refusal is distinct.
     request: PortfolioConstructionRequest,
 ) -> PortfolioConstructionResult:
     if not _request_is_valid(request):
@@ -973,6 +1187,9 @@ def _construct_balanced_portfolio(  # noqa: PLR0911,PLR0912,PLR0915 - each refus
     }
     if set(positions) != set(resolution_positions):
         return _refused(request, PortfolioRefusalReason.INCOMPLETE_INPUT)
+    equity = request.inputs.cash + sum(position.valuation.amount for position in positions.values())
+    if equity <= 0:
+        return _refused(request, PortfolioRefusalReason.CONTRADICTORY_INPUT)
     ordered_resolutions = tuple(
         sorted(request.resolutions, key=lambda item: canonical_instrument_bytes(item.identity))
     )
@@ -1004,89 +1221,17 @@ def _construct_balanced_portfolio(  # noqa: PLR0911,PLR0912,PLR0915 - each refus
         _house_view_id(request, items),
         items,
     )
-    active = tuple(
-        item
-        for item in items
-        if not item.event_blocked
-        and item.stance in (PortfolioStance.LONG, PortfolioStance.HOLD)
-        and (item.eligible or canonical_instrument_bytes(item.identity) in positions)
+    variant = _allocate_variant(
+        request,
+        house_view,
+        maximum_gross_weight=request.policy.maximum_gross_weight,
+        maximum_name_weight=request.policy.maximum_name_weight,
+        maximum_sector_weight=request.policy.maximum_sector_weight,
+        sizing_method=PortfolioSizingMethod.INVERSE_VOLATILITY,
     )
-    inverse_volatility = {
-        canonical_instrument_bytes(item.identity): Decimal(1)
-        / _realized_volatility(
-            risk_by_identity[canonical_instrument_bytes(item.identity)], request.policy
-        )
-        for item in active
-    }
-    denominator = sum(inverse_volatility.values())
-    equity = request.inputs.cash + sum(position.valuation.amount for position in positions.values())
-    if equity <= 0:
-        return _refused(request, PortfolioRefusalReason.CONTRADICTORY_INPUT)
-    weights: dict[bytes, Decimal] = {}
-    uncertainty = dict(request.policy.uncertainty_multipliers)
-    for item in items:
-        key = canonical_instrument_bytes(item.identity)
-        if item.stance in (PortfolioStance.EXIT, PortfolioStance.ABSTAIN) or item.event_blocked:
-            weight = Decimal(0)
-        elif item.stance is PortfolioStance.REDUCE:
-            current = _current_weight(positions.get(key), equity)
-            risk = risk_by_identity[key]
-            liquidity = (
-                risk.median_dollar_volume
-                * request.policy.maximum_fraction_of_median_dollar_volume
-                / equity
-            )
-            weight = min(
-                current * request.policy.reduce_multiplier,
-                request.policy.maximum_name_weight,
-                liquidity,
-            )
-        elif not item.eligible and key not in positions:
-            weight = Decimal(0)
-        else:
-            risk = risk_by_identity[key]
-            raw = (
-                request.policy.maximum_gross_weight
-                * inverse_volatility[key]
-                / denominator
-                * uncertainty[item.uncertainty]
-            )
-            liquidity = (
-                risk.median_dollar_volume
-                * request.policy.maximum_fraction_of_median_dollar_volume
-                / equity
-            )
-            weight = min(raw, request.policy.maximum_name_weight, liquidity)
-            if not item.eligible:
-                weight = min(weight, _current_weight(positions[key], equity))
-        weights[key] = weight
-
-    weights = _apply_group_caps(weights, items, risk_by_identity, request.policy)
-    weights = _apply_gross_cap(weights, request.policy.maximum_gross_weight)
-    hard_risk_breaches = _hard_risk_breaches(
-        weights,
-        items,
-        positions,
-        risk_by_identity,
-        equity,
-        request.policy,
-    )
-    targets = tuple(
-        PortfolioTarget(item.identity, weights[canonical_instrument_bytes(item.identity)])
-        for item in items
-    )
-    bands = tuple(
-        _target_band(
-            target,
-            next(item for item in items if item.identity == target.identity),
-            _current_weight(positions.get(canonical_instrument_bytes(target.identity)), equity),
-            equity,
-            request.policy,
-            hard_risk_breach=(canonical_instrument_bytes(target.identity) in hard_risk_breaches),
-        )
-        for target in targets
-    )
-    cash_weight = Decimal(1) - sum(target.target_weight for target in targets)
+    targets = variant.targets
+    bands = variant.target_bands
+    cash_weight = variant.cash_weight
     provisional = PortfolioConstructionResult(
         house_view,
         targets,
@@ -1105,6 +1250,170 @@ def _construct_balanced_portfolio(  # noqa: PLR0911,PLR0912,PLR0915 - each refus
         request.inputs.input_id,
         _content_hash(_result_material(provisional)),
     )
+
+
+def _construct_shadow_variant(
+    request: PortfolioConstructionRequest,
+    house_view: HouseView,
+    shadow_policy: ShadowPortfolioPolicy,
+) -> _PortfolioVariantResult:
+    """Construct accounting targets only from the exact accepted Balanced HouseView."""
+    return _construct_shadow_variant_from_inputs(
+        request.inputs,
+        house_view,
+        request.policy,
+        shadow_policy,
+    )
+
+
+def _construct_shadow_variant_from_inputs(
+    inputs: PortfolioInputSet,
+    house_view: HouseView,
+    policy: BalancedPortfolioPolicy,
+    shadow_policy: ShadowPortfolioPolicy,
+) -> _PortfolioVariantResult:
+    """Re-derive one shadow from its pinned policy and complete input set."""
+    return _allocate_variant_from_inputs(
+        inputs,
+        house_view,
+        policy,
+        maximum_gross_weight=shadow_policy.maximum_gross_weight,
+        maximum_name_weight=shadow_policy.maximum_name_weight,
+        maximum_sector_weight=shadow_policy.maximum_sector_weight,
+        sizing_method=shadow_policy.sizing_method,
+    )
+
+
+def _allocate_variant(  # noqa: PLR0913 - the variant envelope is explicit and immutable.
+    request: PortfolioConstructionRequest,
+    house_view: HouseView,
+    *,
+    maximum_gross_weight: Decimal,
+    maximum_name_weight: Decimal,
+    maximum_sector_weight: Decimal,
+    sizing_method: PortfolioSizingMethod,
+) -> _PortfolioVariantResult:
+    return _allocate_variant_from_inputs(
+        request.inputs,
+        house_view,
+        request.policy,
+        maximum_gross_weight=maximum_gross_weight,
+        maximum_name_weight=maximum_name_weight,
+        maximum_sector_weight=maximum_sector_weight,
+        sizing_method=sizing_method,
+    )
+
+
+def _allocate_variant_from_inputs(  # noqa: PLR0913 - every allocation input remains explicit.
+    inputs: PortfolioInputSet,
+    house_view: HouseView,
+    policy: BalancedPortfolioPolicy,
+    *,
+    maximum_gross_weight: Decimal,
+    maximum_name_weight: Decimal,
+    maximum_sector_weight: Decimal,
+    sizing_method: PortfolioSizingMethod,
+) -> _PortfolioVariantResult:
+    items = house_view.items
+    risk_by_identity = {
+        canonical_instrument_bytes(item.identity): item for item in inputs.risk_inputs
+    }
+    positions = {
+        canonical_instrument_bytes(position.identity): position
+        for position in inputs.position_snapshot.positions
+        if type(position) is EquityPosition
+    }
+    active = tuple(
+        item
+        for item in items
+        if not item.event_blocked
+        and item.stance in (PortfolioStance.LONG, PortfolioStance.HOLD)
+        and (item.eligible or canonical_instrument_bytes(item.identity) in positions)
+    )
+    sizing_scores = (
+        {
+            canonical_instrument_bytes(item.identity): Decimal(1)
+            / _realized_volatility(
+                risk_by_identity[canonical_instrument_bytes(item.identity)], policy
+            )
+            for item in active
+        }
+        if sizing_method is PortfolioSizingMethod.INVERSE_VOLATILITY
+        else {}
+    )
+    denominator = sum(sizing_scores.values())
+    equity = inputs.cash + sum(position.valuation.amount for position in positions.values())
+    weights: dict[bytes, Decimal] = {}
+    uncertainty = dict(policy.uncertainty_multipliers)
+    for item in items:
+        key = canonical_instrument_bytes(item.identity)
+        if item.stance in (PortfolioStance.EXIT, PortfolioStance.ABSTAIN) or item.event_blocked:
+            weight = Decimal(0)
+        elif item.stance is PortfolioStance.REDUCE:
+            current = _current_weight(positions.get(key), equity)
+            risk = risk_by_identity[key]
+            liquidity = (
+                risk.median_dollar_volume * policy.maximum_fraction_of_median_dollar_volume / equity
+            )
+            weight = min(
+                current * policy.reduce_multiplier,
+                maximum_name_weight,
+                liquidity,
+            )
+        elif not item.eligible and key not in positions:
+            weight = Decimal(0)
+        else:
+            risk = risk_by_identity[key]
+            raw = (
+                maximum_gross_weight * sizing_scores[key] / denominator
+                if sizing_method is PortfolioSizingMethod.INVERSE_VOLATILITY
+                else maximum_name_weight
+            ) * uncertainty[item.uncertainty]
+            liquidity = (
+                risk.median_dollar_volume * policy.maximum_fraction_of_median_dollar_volume / equity
+            )
+            weight = min(raw, maximum_name_weight, liquidity)
+            if not item.eligible:
+                weight = min(weight, _current_weight(positions[key], equity))
+        weights[key] = weight
+
+    weights = _apply_group_caps(
+        weights,
+        items,
+        risk_by_identity,
+        policy,
+        maximum_sector_weight,
+    )
+    weights = _apply_gross_cap(weights, maximum_gross_weight)
+    hard_risk_breaches = _hard_risk_breaches(
+        weights,
+        items,
+        positions,
+        risk_by_identity,
+        equity,
+        policy,
+        maximum_gross_weight,
+        maximum_name_weight,
+        maximum_sector_weight,
+    )
+    targets = tuple(
+        PortfolioTarget(item.identity, weights[canonical_instrument_bytes(item.identity)])
+        for item in items
+    )
+    bands = tuple(
+        _target_band(
+            target,
+            next(item for item in items if item.identity == target.identity),
+            _current_weight(positions.get(canonical_instrument_bytes(target.identity)), equity),
+            equity,
+            policy,
+            maximum_name_weight=maximum_name_weight,
+            hard_risk_breach=(canonical_instrument_bytes(target.identity) in hard_risk_breaches),
+        )
+        for target in targets
+    )
+    cash_weight = Decimal(1) - sum(target.target_weight for target in targets)
+    return _PortfolioVariantResult(targets, bands, cash_weight)
 
 
 def parse_portfolio_construction_result(  # noqa: PLR0911 - reject each hostile envelope layer.
@@ -1256,10 +1565,11 @@ def _apply_group_caps(
     items: tuple[HouseViewItem, ...],
     risks: dict[bytes, PortfolioRiskInput],
     policy: BalancedPortfolioPolicy,
+    maximum_sector_weight: Decimal,
 ) -> dict[bytes, Decimal]:
     bounded = dict(weights)
     for attribute, cap in (
-        ("sector", policy.maximum_sector_weight),
+        ("sector", maximum_sector_weight),
         ("common_cause_group", policy.maximum_common_cause_weight),
         ("correlation_cluster", policy.maximum_correlation_cluster_weight),
     ):
@@ -1297,10 +1607,14 @@ def _scale_to_cap(
 ) -> None:
     if total <= cap:
         return
+    positive_keys = tuple(key for key in keys if weights[key] > 0)
     scale = cap / total
-    for key in keys[:-1]:
-        weights[key] *= scale
-    weights[keys[-1]] = cap - sum(weights[key] for key in keys[:-1])
+    allocated = Decimal(0)
+    for key in positive_keys[:-1]:
+        weight = weights[key] * scale
+        weights[key] = weight
+        allocated += weight
+    weights[positive_keys[-1]] = cap - allocated
 
 
 def _hard_risk_breaches(  # noqa: PLR0913,PLR0917 - evaluate each frozen risk envelope.
@@ -1310,6 +1624,9 @@ def _hard_risk_breaches(  # noqa: PLR0913,PLR0917 - evaluate each frozen risk en
     risks: dict[bytes, PortfolioRiskInput],
     equity: Decimal,
     policy: BalancedPortfolioPolicy,
+    maximum_gross_weight: Decimal,
+    maximum_name_weight: Decimal,
+    maximum_sector_weight: Decimal,
 ) -> frozenset[bytes]:
     current = {
         canonical_instrument_bytes(item.identity): _current_weight(
@@ -1327,12 +1644,10 @@ def _hard_risk_breaches(  # noqa: PLR0913,PLR0917 - evaluate each frozen risk en
             * policy.maximum_fraction_of_median_dollar_volume
             / equity
         )
-        if weight > policy.maximum_name_weight or (
-            liquidity_cap is not None and weight > liquidity_cap
-        ):
+        if weight > maximum_name_weight or (liquidity_cap is not None and weight > liquidity_cap):
             breached.add(key)
     for attribute, cap in (
-        ("sector", policy.maximum_sector_weight),
+        ("sector", maximum_sector_weight),
         ("common_cause_group", policy.maximum_common_cause_weight),
         ("correlation_cluster", policy.maximum_correlation_cluster_weight),
     ):
@@ -1346,7 +1661,7 @@ def _hard_risk_breaches(  # noqa: PLR0913,PLR0917 - evaluate each frozen risk en
             if sum(current[key] for key in keys) > cap:
                 breached.update(key for key in keys if current[key] > target_weights[key])
     gross = sum(position.valuation.amount / equity for position in positions.values())
-    if gross > policy.maximum_gross_weight:
+    if gross > maximum_gross_weight:
         breached.update(key for key, weight in current.items() if weight > target_weights[key])
     return frozenset(breached)
 
@@ -1417,10 +1732,11 @@ def _target_band(  # noqa: PLR0913 - one pure decision over explicit facts.
     equity: Decimal,
     policy: BalancedPortfolioPolicy,
     *,
+    maximum_name_weight: Decimal,
     hard_risk_breach: bool,
 ) -> TargetBand:
     lower = max(Decimal(0), target.target_weight - policy.target_band_width)
-    upper = min(policy.maximum_name_weight, target.target_weight + policy.target_band_width)
+    upper = min(maximum_name_weight, target.target_weight + policy.target_band_width)
     if house_view_item.event_blocked:
         return TargetBand(
             identity=target.identity,

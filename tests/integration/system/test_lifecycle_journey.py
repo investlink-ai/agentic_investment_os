@@ -18,6 +18,7 @@ INTERRUPTED_EXIT_CODE = 75
 ADVANCE_FIELD_COUNT = 8
 STATUS_FIELD_COUNT = 11
 SHA256_HEX_LENGTH = 64
+SHADOW_ACCOUNT_COUNT = 3
 AUTHORITY_SENTINEL_NAMES = frozenset(
     {
         "SYSTEM_JOURNEY_BROKER_SENTINEL",
@@ -150,7 +151,7 @@ def _snapshot_id(database: Path) -> str:
     return snapshot_id
 
 
-def test_lifecycle_journey_resumes_replays_and_rebuilds_status_across_processes(
+def test_lifecycle_journey_resumes_replays_and_rebuilds_status_across_processes(  # noqa: PLR0915 - one process-boundary journey proves ordered recovery.
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -195,6 +196,32 @@ def test_lifecycle_journey_resumes_replays_and_rebuilds_status_across_processes(
     ]
     assert {str(row[3]) for row in completed_history} == {resumed.run_id}
     assert {str(row[4]) for row in completed_history} == {resumed.configuration_hash}
+    with sqlite3.connect(database) as connection:
+        balanced_row = connection.execute(
+            "SELECT result_json FROM portfolio_constructions"
+        ).fetchone()
+        shadow_rows = connection.execute(
+            "SELECT account_kind, result_json FROM portfolio_shadow_accounts"
+        ).fetchall()
+        checkpoint_row = connection.execute(
+            "SELECT portfolio_checkpoint FROM lifecycle_events "
+            "WHERE event_kind = 'portfolio_constructed'"
+        ).fetchone()
+    assert balanced_row is not None
+    assert checkpoint_row is not None
+    balanced_payload = json.loads(balanced_row[0])
+    checkpoint_payload = json.loads(checkpoint_row[0])
+    house_view = balanced_payload["house_view"]
+    assert isinstance(house_view, dict)
+    assert {row[0] for row in shadow_rows} == {"conservative", "growth", "equal_weight"}
+    for _, encoded_shadow in shadow_rows:
+        shadow = json.loads(encoded_shadow)
+        assert shadow["house_view_id"] == house_view["house_view_id"]
+        assert shadow["evidence_cutoff"] == house_view["evidence_cutoff"]
+        assert shadow["input_id"] == house_view["input_id"]
+        assert shadow["authority_scope"] == "non_executable_shadow_account"
+    assert len(checkpoint_payload["shadow_accounts"]) == SHADOW_ACCOUNT_COUNT
+    assert "targets" not in checkpoint_payload["shadow_accounts"][0]
 
     expected_status = _status_observation(_run_process("status", state_root))
 

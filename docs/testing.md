@@ -236,6 +236,7 @@ The implemented candidate inventory is:
 | `memory/beliefs.py` | Non-critical typed belief history, receipt, and bounded as-of graph projection; unit, property, contract, integration, corruption, and coverage evidence |
 | `memory/reducer.py` | Critical append-only belief-transition reducer, projection identity, and ledger commitment; unit, property, refusal, and mutation evidence |
 | `portfolio/construction.py` | Critical HouseView admission, capped inverse-volatility sizing, uncertainty downside, risk clamps, cash preservation, Target Bands, typed refusals, and hostile result reconstruction; hand-oracle, property, contract, lifecycle, corruption, coverage, and mutation evidence |
+| `portfolio/shadows.py` | Critical same-input Conservative, Growth, and equal-weight sizing plus cash, Target Band, turnover-input, non-executable schema, and hostile reconstruction behavior; hand-oracle, property, lifecycle, corruption, coverage, and mutation evidence |
 | `research/authority.py` | Safety-supporting closed production-versus-Lab authority labels with no effect implementation; unit and coverage evidence |
 | `research/dossier.py` | Safety-supporting exact-schema, citation, cutoff, lens, and prohibited-authority validation; unit, hostile-input, and coverage evidence |
 | `research/model.py` | Safety-supporting owner-defined model and Lab-ledger contracts with no direct effect implementation; contract, integration, and coverage evidence |
@@ -248,7 +249,8 @@ The implemented candidate inventory is:
 `tool.mutmut.only_mutate` is the single static mutation source allowlist. It contains exact implemented
 critical module paths, never package globs or an engine exclusion list. `source_paths = ["src"]` is only
 the engine's copy root and confers no mutation scope. The current exact entries are the critical
-`memory/admission.py`, `memory/reducer.py`, and `portfolio/construction.py` kernels and the empty
+`memory/admission.py`, `memory/reducer.py`, `portfolio/construction.py`, and `portfolio/shadows.py`
+kernels and the empty
 `execution` and `portfolio` initializers. Their exact test selection is `tests/unit/test_beliefs.py`,
 `tests/contract/test_belief_event_contract.py`, and `tests/unit/test_portfolio.py`; the scaffold files
 add no unrelated tests. The separate
@@ -521,8 +523,19 @@ evidence. A scenario becomes mandatory when its owning behavior is implemented.
   even when the current research resolution cites it. Durable retries append one result, and `Status`
   rejects missing, altered, malformed, noncanonical, cross-run, or recorded-instant-substituted
   portfolio history.
-- Equal-weight and Risk Profile shadows consume the same HouseView, eligibility, Evidence Cutoff, and
-  available-at-time prices as the Champion.
+- Equal-weight and Risk Profile shadows consume the same HouseView, eligibility, Evidence Cutoff,
+  positions, cash, available-at-time prices, risk inputs, constraints, Target Band mechanics, and
+  frozen cost-input policy as the Champion. Hand oracles distinguish all four outputs; properties
+  prove profile envelopes, cash, canonical order, zero-liquidity cash preservation, and equal-weight's
+  sizing-only difference. Hostile whole-set substitutions and coherently resealed Target Bands fail
+  semantic re-derivation even when all three shadows agree with one another.
+- Shadow accounting appends Conservative, Growth, and equal-weight records as one required set. Exact
+  and concurrent first-delivery retry return the prior identities; changed material conflicts;
+  interruption resumes; terminal `Advance` replay and `Status` reject missing or corrupt authoritative
+  rows; unrelated corrupt runs do not block request-scoped `Advance`, while global `Status` still
+  rejects them; projection loss rebuilds the same bounded references. Shadow schemas and module boundaries
+  expose no Champion, packet, order, fill, outcome,
+  executor, broker, or credential authority.
 - Target Bands create no trade inside the band and apply only the approved partial adjustment outside
   it.
 - Gaps, events, halt or LULD state, stale quotes, buying power, account or position mismatch, packet

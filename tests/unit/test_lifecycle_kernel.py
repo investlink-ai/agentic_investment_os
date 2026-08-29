@@ -54,6 +54,7 @@ from tests._attention import attention_artifact
 from tests._universe import (
     advance_command,
     pinned_run_identity,
+    portfolio_shadow_references,
     typed_portfolio_inputs,
     universe_snapshot,
 )
@@ -88,6 +89,7 @@ def _portfolio_checkpoint(command: AdvanceCommand) -> PortfolioCheckpoint:
         identity.portfolio_input_hash,
         ("6" * SHA256_HEX_LENGTH,),
         KERNEL_RECORDED_AT,
+        shadow_accounts=portfolio_shadow_references(),
     )
 
 

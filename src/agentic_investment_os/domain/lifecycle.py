@@ -82,6 +82,8 @@ __all__ = (
     "PortfolioCheckpoint",
     "PortfolioCheckpointReference",
     "PortfolioCheckpointRefusalReason",
+    "PortfolioShadowKind",
+    "PortfolioShadowReference",
     "ProductionResearchReference",
     "ResearchCheckpoint",
     "ResearchRefusal",
@@ -412,6 +414,14 @@ class PortfolioCheckpointRefusalReason(StrEnum):
     AUTHORITY_VIOLATION = "authority_violation"
 
 
+class PortfolioShadowKind(StrEnum):
+    """Identify the closed non-executable same-input portfolio accounts."""
+
+    CONSERVATIVE = "conservative"
+    GROWTH = "growth"
+    EQUAL_WEIGHT = "equal_weight"
+
+
 @dataclass(frozen=True, slots=True)
 class IdempotencyKey:
     """Carry a validated stable key for one operator request."""
@@ -613,6 +623,21 @@ class ResearchCheckpoint:
 
 
 @dataclass(frozen=True, slots=True)
+class PortfolioShadowReference:
+    """Expose one bounded shadow-account identity without its accounting payload."""
+
+    account_kind: PortfolioShadowKind
+    account_id: str
+
+    def __post_init__(self) -> None:
+        if type(self.account_kind) is not PortfolioShadowKind or not is_sha256(self.account_id):
+            raise ValueError(_INVALID_CHECKPOINT_ORDER)
+
+    def to_payload(self) -> dict[str, object]:
+        return {"account_kind": self.account_kind.value, "account_id": self.account_id}
+
+
+@dataclass(frozen=True, slots=True)
 class PortfolioCheckpoint:
     """Bind one durable portfolio result to its material and original append instant."""
 
@@ -623,6 +648,7 @@ class PortfolioCheckpoint:
     target_band_ids: tuple[str, ...]
     recorded_at: UtcInstant
     refusal_reason: PortfolioCheckpointRefusalReason | None = None
+    shadow_accounts: tuple[PortfolioShadowReference, ...] = ()
 
     def __post_init__(self) -> None:
         if (
@@ -632,13 +658,27 @@ class PortfolioCheckpoint:
             or not is_sha256(self.input_id)
             or not _valid_optional_hash_references(self.target_band_ids)
             or type(self.recorded_at) is not UtcInstant
+            or type(self.shadow_accounts) is not tuple
+            or any(type(item) is not PortfolioShadowReference for item in self.shadow_accounts)
+            or tuple(item.account_kind for item in self.shadow_accounts)
+            not in (
+                (),
+                (
+                    PortfolioShadowKind.CONSERVATIVE,
+                    PortfolioShadowKind.GROWTH,
+                    PortfolioShadowKind.EQUAL_WEIGHT,
+                ),
+            )
+            or len({item.account_id for item in self.shadow_accounts}) != len(self.shadow_accounts)
             or (self.refusal_reason is None and self.house_view_id is None)
+            or (self.refusal_reason is None and not self.shadow_accounts)
             or (
                 self.refusal_reason is not None
                 and (
                     type(self.refusal_reason) is not PortfolioCheckpointRefusalReason
                     or self.house_view_id is not None
                     or self.target_band_ids
+                    or self.shadow_accounts
                 )
             )
         ):
@@ -652,6 +692,7 @@ class PortfolioCheckpoint:
             "policy_id": self.policy_id,
             "input_id": self.input_id,
             "target_band_ids": list(self.target_band_ids),
+            "shadow_accounts": [item.to_payload() for item in self.shadow_accounts],
             "refusal_reason": (None if self.refusal_reason is None else self.refusal_reason.value),
             "recorded_at": self.recorded_at.isoformat(),
         }
@@ -675,7 +716,9 @@ class PortfolioCheckpointReference:
             raise ValueError(_INVALID_CHECKPOINT_ORDER)
 
 
-def parse_portfolio_checkpoint(value: object) -> PortfolioCheckpoint | None:
+def parse_portfolio_checkpoint(  # noqa: PLR0911 - reject each hostile checkpoint layer.
+    value: object,
+) -> PortfolioCheckpoint | None:
     """Validate one hostile durable portfolio-checkpoint payload."""
     fields = _exact_mapping(
         value,
@@ -687,6 +730,7 @@ def parse_portfolio_checkpoint(value: object) -> PortfolioCheckpoint | None:
                 "policy_id",
                 "input_id",
                 "target_band_ids",
+                "shadow_accounts",
                 "refusal_reason",
                 "recorded_at",
             }
@@ -695,6 +739,27 @@ def parse_portfolio_checkpoint(value: object) -> PortfolioCheckpoint | None:
     if fields is None or type(fields["schema_version"]) is not int or fields["schema_version"] != 1:
         return None
     target_band_ids = _parse_hash_tuple(fields["target_band_ids"])
+    shadow_accounts_value = fields["shadow_accounts"]
+    if type(shadow_accounts_value) is not list:
+        return None
+    shadow_accounts: list[PortfolioShadowReference] = []
+    for shadow_value in shadow_accounts_value:
+        item = _exact_mapping(shadow_value, frozenset({"account_kind", "account_id"}))
+        if item is None or not is_sha256(item["account_id"]):
+            return None
+        account_kind = item["account_kind"]
+        account_id = item["account_id"]
+        if type(account_kind) is not str or type(account_id) is not str:
+            return None
+        try:
+            shadow_accounts.append(
+                PortfolioShadowReference(
+                    PortfolioShadowKind(account_kind),
+                    account_id,
+                )
+            )
+        except (TypeError, ValueError):
+            return None
     result_id = fields["result_id"]
     house_view_id = fields["house_view_id"]
     policy_id = fields["policy_id"]
@@ -725,6 +790,7 @@ def parse_portfolio_checkpoint(value: object) -> PortfolioCheckpoint | None:
             target_band_ids=target_band_ids,
             refusal_reason=refusal,
             recorded_at=recorded_at,
+            shadow_accounts=tuple(shadow_accounts),
         )
     except (TypeError, ValueError):
         return None

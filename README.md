@@ -16,7 +16,8 @@ isolated Research Lab.
 | Belief memory | **Implemented:** `Record` appends evidence-bound Belief Events and rebuilds bounded as-of Belief Graphs | `application`, `memory`, `adapters` | [Belief journey](tests/integration/system/test_belief_record_journey.py), [Belief Event contract](tests/contract/test_belief_event_contract.py) |
 | Constitution governance | **Implemented:** operator-only `Govern` schedules signed amendments; `Advance` pins the active version before work | `application`, `domain`, `adapters`, `entrypoints` | [Governance integration](tests/integration/test_constitution_governance.py), [governance contract](tests/contract/test_constitution_governance.py) |
 | Isolated Research Lab | **Implemented:** `Replay` validates a non-production Dossier and runs Thesis, Skeptic, Scenario, and CIO roles | `application`, `research`, `adapters`, `entrypoints` | [Resolution journey](tests/integration/system/test_research_lab_resolution_journey.py), [model contract](tests/contract/test_research_lab_model.py) |
-| Packet publication, execution, evaluation, shadows, and later lifecycle phases | **Scaffolded:** accepted contracts exist, but production behavior and composition are not enabled | `portfolio`, `execution`, `evaluation`, `application` | No production behavior gate yet; [stage acceptance](docs/product-requirements.md) remains authoritative |
+| Same-input portfolio shadows | **Implemented:** every accepted Balanced result durably accounts for Conservative, Growth, and equal-weight variants without packet or broker authority | `portfolio`, `application`, `adapters` | [Production lifecycle](tests/integration/test_production_research_lifecycle.py), [shadow properties](tests/unit/test_portfolio.py) |
+| Packet publication, execution, evaluation, and later lifecycle phases | **Scaffolded:** accepted contracts exist, but production behavior and composition are not enabled | `portfolio`, `execution`, `evaluation`, `application` | No production behavior gate yet; [stage acceptance](docs/product-requirements.md) remains authoritative |
 | Crypto spot and listed options | **Reserved and disabled:** shared typed contracts exist; V0 composition remains US-equity-only | `domain`, `entrypoints` | [Identity unit tests](tests/unit/test_identity.py), [runtime configuration](tests/integration/test_runtime_configuration.py) |
 
 Implemented production retries reproduce durable identities, transitions, bounded refusals, and
@@ -28,6 +29,8 @@ the Belief Ledger, and has no sizing, packet, credential, or broker capability. 
 reconstructs that exact durable resolution set without another model effect, persists one fully bound
 HouseView, and applies deterministic capped inverse-volatility sizing, uncertainty downside, risk
 clamps, cash preservation, and Target Bands. It constructs no packet and reaches no broker.
+The same accepted input also produces immutable Conservative, Growth, and equal-weight accounting
+records whose available-at-time cost inputs remain explicitly non-executable.
 Authoritative records are append-only; projections remain disposable and rebuildable.
 
 Research Lab calls use copied or synthetic inputs and a separate durable namespace. A completed call

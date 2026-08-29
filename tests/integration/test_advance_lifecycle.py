@@ -109,6 +109,7 @@ from tests._production_research import (
 from tests._universe import (
     advance_command,
     pinned_run_identity,
+    portfolio_shadow_references,
     recorded_universe,
     runtime_configuration,
     typed_portfolio_inputs,
@@ -1423,6 +1424,7 @@ class _LifecycleReferenceModel:
                 identity.portfolio_input_hash,
                 ("6" * SHA256_HEX_LENGTH,),
                 UtcInstant.from_datetime(RECORDED_AT),
+                shadow_accounts=portfolio_shadow_references(),
             ),
             None,
         )
@@ -3759,6 +3761,7 @@ def test_lifecycle_ledger_appends_generic_checkpoint_records(  # noqa: PLR0915
         identity.portfolio_input_hash,
         ("6" * SHA256_HEX_LENGTH,),
         now,
+        shadow_accounts=portfolio_shadow_references(),
     )
     command = AdvanceCommand(request, identity, snapshot, typed_portfolio_inputs())
     attempt = AdvanceAttempt()

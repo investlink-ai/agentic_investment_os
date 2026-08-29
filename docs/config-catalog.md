@@ -141,19 +141,19 @@ adapter is the only implemented production adapter. There is no ambient model se
 client, subscription switch, metered fallback, broker capability, or credential path in production
 research composition.
 
-### Balanced portfolio policy
+### Portfolio cycle policy
 
 `portfolio_policy` is the complete mechanics-calibrated policy consumed by `ConstructPortfolio`. It
 has no default and is validated before runtime storage is prepared. Decimal values are canonical
 plain non-negative strings of at most 64 characters. Unknown, missing, noncanonical, non-finite, or
 internally inconsistent material fails configuration. The exact canonical object is included in the
-runtime configuration fingerprint; its SHA-256 identity is independently pinned into the run and the
-HouseView.
+runtime configuration fingerprint; its SHA-256 identity is independently pinned into the run, the
+HouseView, the Balanced result, and every required shadow account.
 
 | Field | Type and validation | Effect |
 | --- | --- | --- |
-| `schema_version` | Integer; must equal `1` | Versions the complete portfolio-policy representation |
-| `policy_type` | String; must equal `balanced_inverse_volatility` | Selects the sole implemented deterministic allocator |
+| `schema_version` | Integer; must equal `2` | Versions the complete Balanced-plus-shadow policy representation |
+| `policy_type` | String; must equal `balanced_with_same_input_shadows` | Selects the closed V0 portfolio cycle |
 | `asset_class` | String; must equal `us_equity` | Prevents a policy from crossing the enabled asset boundary |
 | `risk_profile` | String; must equal `balanced` | Identifies the paper Champion policy |
 | `realized_volatility` | Exact object containing the five fields below | Freezes the estimator rather than inferring it from data or model output |
@@ -174,6 +174,23 @@ HouseView.
 | `partial_adjustment_fraction` | Decimal in `(0, 1]`; configured V0 value `0.5` | Moves an ordinary eligible breach halfway toward target |
 | `reduce_multiplier` | Decimal in `[0, 1]`; configured V0 value `0.5` | Begins a reduction target at half current weight before clamps |
 | `uncertainty_multipliers` | Exact `low`, `medium`, and `high` object with positive non-increasing decimals no greater than one; configured values `1`, `0.75`, and `0.5` | Allows uncertainty to reduce, never increase, allocation |
+| `shadow_accounts` | Exact ordered list containing Conservative, Growth, and equal-weight declarations | Requires every same-input accounting variant before lifecycle publication |
+| `shadow_accounts[].account_kind` | Exact closed value `conservative`, `growth`, or `equal_weight` in that order | Identifies the non-executable account |
+| `shadow_accounts[].sizing_method` | `inverse_volatility` for Conservative and Growth; `equal_weight` for the comparator | Changes only the declared initial sizing score |
+| `shadow_accounts[].algorithm_version` | Integer; must equal `1` | Versions deterministic shadow construction |
+| Conservative gross, name, and sector limits | Exact decimals `0.6`, `0.05`, and `0.2` | Applies the approved Conservative envelope |
+| Growth gross, name, and sector limits | Exact decimals `1`, `0.12`, and `0.3` | Applies the approved Growth envelope |
+| Equal-weight gross, name, and sector limits | Exact Balanced decimals `0.8`, `0.08`, and `0.25` | Keeps Balanced constraints while changing only sizing method |
+| `modeled_cost_inputs` | Exact versioned object described below | Freezes ex-ante turnover inputs without inferring fills, outcomes, or evaluation |
+| `modeled_cost_inputs.schema_version` | Integer; must equal `1` | Versions the cost-input representation |
+| `modeled_cost_inputs.model_type` | String; must equal `frozen_ex_ante_turnover_inputs` | Limits construction to reconstructable inputs rather than a realized cost result |
+| `modeled_cost_inputs.turnover_basis` | String; must equal `absolute_adjustment_weight` | Sums each hypothetical Target Band adjustment from its starting weight |
+| `modeled_cost_inputs.price_basis` | String; must equal `available_at_time` | Binds the same cutoff-admissible prices used by Balanced |
+
+Common-cause, correlation, liquidity, uncertainty, event, reduction, and Target Band fields are shared
+by all variants. The cost-input policy records turnover weight and notional from frozen prices; the
+official conservative modeled-cost overlay remains evaluation behavior and is not computed during
+ex-ante portfolio construction.
 
 The runtime additionally requires an explicit recorded portfolio-input object bound to the exact
 position snapshot. It contains canonical cash, positions, prices, split-adjusted histories, sectors,
