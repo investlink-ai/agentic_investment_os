@@ -370,16 +370,12 @@ def _house_view_fingerprints(house_view: HouseView) -> tuple[tuple[str, str], ..
 
 
 def _input_equity(inputs: PortfolioInputSet) -> Decimal:
-    return _sum_decimals(
-        (
-            inputs.cash,
-            *(
-                position.valuation.amount
-                for position in inputs.position_snapshot.positions
-                if type(position) is EquityPosition
-            ),
+    with localcontext(_PORTFOLIO_DECIMAL_CONTEXT):
+        return inputs.cash + sum(
+            position.valuation.amount
+            for position in inputs.position_snapshot.positions
+            if type(position) is EquityPosition
         )
-    )
 
 
 def _shadow_matches_cycle(account: PortfolioShadowAccount, house_view: HouseView) -> bool:

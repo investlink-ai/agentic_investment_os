@@ -703,6 +703,44 @@ def test_shadow_reconstruction_is_independent_of_ambient_decimal_context() -> No
     assert reconstructed == expected
 
 
+def test_shadow_equity_validation_matches_construction_summation_order() -> None:
+    cash = Decimal(10000000000000000000000000000)
+    positions = (
+        EquityPosition(
+            _AAPL,
+            Decimal("0.03"),
+            PositionValuation(Decimal(3), "USD", "alpaca-paper-market-value"),
+        ),
+        EquityPosition(
+            _SPY,
+            Decimal("0.03"),
+            PositionValuation(Decimal(3), "USD", "alpaca-paper-market-value"),
+        ),
+    )
+    request = _request(
+        (
+            replace(_resolution(_AAPL, _HASH_A), is_position=True),
+            replace(_resolution(_SPY, _HASH_B), is_position=True),
+        ),
+        inputs=_inputs_for(
+            (_risk_input(_AAPL, "technology"), _risk_input(_SPY, "technology")),
+            positions=positions,
+            cash=cash,
+        ),
+    )
+
+    cycle = construct_portfolio_cycle(request)
+
+    assert cycle.balanced.refusal is None
+    assert all(
+        shadow.starting_equity == Decimal(10000000000000000000000000010) for shadow in cycle.shadows
+    )
+    with localcontext() as context:
+        context.prec = 2
+        context.rounding = ROUND_UP
+        assert parse_portfolio_shadow_account(cycle.shadows[0].to_payload()) == cycle.shadows[0]
+
+
 @given(st.integers(min_value=2, max_value=30))
 @example(14)
 def test_shadow_profiles_preserve_caps_cash_and_canonical_order(count: int) -> None:
