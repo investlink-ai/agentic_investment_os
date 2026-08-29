@@ -22,16 +22,18 @@ from agentic_investment_os.domain.temporal import InvalidUtcInstantError, UtcIns
 from agentic_investment_os.domain.universe import EquityPosition
 from agentic_investment_os.portfolio.construction import (
     _PORTFOLIO_DECIMAL_CONTEXT,
+    BalancedPortfolioPolicy,
     HouseView,
     PortfolioConstructionRequest,
     PortfolioConstructionResult,
+    PortfolioInputSet,
     PortfolioSizingMethod,
-    PortfolioStance,
     PortfolioTarget,
     PortfolioTradeReason,
     ShadowPortfolioPolicy,
     TargetBand,
     _construct_shadow_variant,
+    _construct_shadow_variant_from_inputs,
     _content_hash,
     _decimal_text,
     _exact_mapping,
@@ -131,7 +133,7 @@ class ShadowCostInput:
             or self.price <= 0
             or type(self.median_dollar_volume) is not Decimal
             or not self.median_dollar_volume.is_finite()
-            or self.median_dollar_volume <= 0
+            or self.median_dollar_volume < 0
             or any(
                 type(item) is not str or not item
                 for item in (self.sector, self.common_cause_group, self.correlation_cluster)
@@ -157,6 +159,8 @@ class PortfolioShadowAccount:
     house_view_id: str
     policy_id: str
     input_id: str
+    portfolio_inputs: PortfolioInputSet
+    portfolio_policy: BalancedPortfolioPolicy
     evidence_cutoff: UtcInstant
     position_snapshot_id: str
     starting_cash: Decimal
@@ -187,6 +191,10 @@ class PortfolioShadowAccount:
             or type(self.sizing_method) is not PortfolioSizingMethod
             or type(self.algorithm_version) is not int
             or self.algorithm_version != 1
+            or type(self.portfolio_inputs) is not PortfolioInputSet
+            or type(self.portfolio_policy) is not BalancedPortfolioPolicy
+            or self.portfolio_inputs.input_id != self.input_id
+            or self.portfolio_policy.policy_id != self.policy_id
             or not all(
                 _is_hash(item)
                 for item in (
@@ -237,6 +245,13 @@ class PortfolioShadowAccount:
             or self.modeled_turnover_weight
             != sum(abs(item.adjustment_weight - item.current_weight) for item in self.cost_inputs)
             or self.modeled_turnover_notional != self.modeled_turnover_weight * self.starting_equity
+            or self.position_snapshot_id != self.portfolio_inputs.position_snapshot.fingerprint
+            or self.starting_cash != self.portfolio_inputs.cash
+            or self.starting_equity != _input_equity(self.portfolio_inputs)
+            or self.cash_currency != self.portfolio_inputs.cash_currency
+            or self.cost_input_policy_id != self.portfolio_policy.cost_input_policy.policy_id
+            or self.cost_input_source != self.portfolio_inputs.source_identity
+            or self.cost_inputs_available_at != self.portfolio_inputs.available_at
             or type(self.cost_input_source) is not str
             or not self.cost_input_source
             or type(self.cost_inputs_available_at) is not UtcInstant
@@ -330,26 +345,67 @@ def _house_view_fingerprints(house_view: HouseView) -> tuple[tuple[str, str], ..
     )
 
 
-def _targets_match_house_view(account: PortfolioShadowAccount, house_view: HouseView) -> bool:
-    for index, view_item in enumerate(house_view.items):
-        target = account.targets[index]
-        cost = account.cost_inputs[index]
-        if (
-            view_item.event_blocked
-            or view_item.stance in (PortfolioStance.EXIT, PortfolioStance.ABSTAIN)
-        ) and target.target_weight != 0:
-            return False
-        if not view_item.eligible and target.target_weight > cost.current_weight:
-            return False
-    return True
+def _input_equity(inputs: PortfolioInputSet) -> Decimal:
+    return inputs.cash + sum(
+        position.valuation.amount
+        for position in inputs.position_snapshot.positions
+        if type(position) is EquityPosition
+    )
+
+
+def _shadow_matches_cycle(account: PortfolioShadowAccount, house_view: HouseView) -> bool:
+    policy = next(
+        item
+        for item in account.portfolio_policy.shadow_policies
+        if item.account_kind is account.account_kind
+    )
+    expected = _construct_shadow_variant_from_inputs(
+        account.portfolio_inputs,
+        house_view,
+        account.portfolio_policy,
+        policy,
+    )
+    risks = {
+        canonical_instrument_bytes(item.identity): item
+        for item in account.portfolio_inputs.risk_inputs
+    }
+    expected_bands = tuple(_shadow_band(item) for item in expected.target_bands)
+    expected_costs = tuple(
+        ShadowCostInput(
+            band.identity,
+            risks[canonical_instrument_bytes(band.identity)].price,
+            risks[canonical_instrument_bytes(band.identity)].median_dollar_volume,
+            risks[canonical_instrument_bytes(band.identity)].sector,
+            risks[canonical_instrument_bytes(band.identity)].common_cause_group,
+            risks[canonical_instrument_bytes(band.identity)].correlation_cluster,
+            band.current_weight,
+            band.adjustment_weight,
+        )
+        for band in expected_bands
+    )
+    actual_material = (
+        account.portfolio_inputs.data_regime,
+        account.portfolio_inputs.input_id,
+        account.portfolio_policy.policy_id,
+        account.targets,
+        account.target_bands,
+        account.retained_cash_weight,
+        account.cost_inputs,
+    )
+    expected_material = (
+        house_view.data_regime,
+        house_view.input_id,
+        house_view.policy_id,
+        expected.targets,
+        expected_bands,
+        expected.cash_weight,
+        expected_costs,
+    )
+    return actual_material == expected_material
 
 
 def _shadows_share_input_material(shadows: tuple[PortfolioShadowAccount, ...]) -> bool:
-    if not shadows:
-        return True
-    expected = shadows[0]
-    expected_costs = tuple(_shared_cost_input(item) for item in expected.cost_inputs)
-    return all(
+    shared_material = {
         (
             item.position_snapshot_id,
             item.starting_cash,
@@ -358,22 +414,14 @@ def _shadows_share_input_material(shadows: tuple[PortfolioShadowAccount, ...]) -
             item.cost_input_policy_id,
             item.cost_input_source,
             item.cost_inputs_available_at,
+            item.portfolio_inputs,
+            item.portfolio_policy,
             item.material_fingerprints,
             tuple(_shared_cost_input(cost) for cost in item.cost_inputs),
         )
-        == (
-            expected.position_snapshot_id,
-            expected.starting_cash,
-            expected.starting_equity,
-            expected.cash_currency,
-            expected.cost_input_policy_id,
-            expected.cost_input_source,
-            expected.cost_inputs_available_at,
-            expected.material_fingerprints,
-            expected_costs,
-        )
-        for item in shadows[1:]
-    )
+        for item in shadows
+    }
+    return not shadows or len(shared_material) == 1
 
 
 def _shared_cost_input(item: ShadowCostInput) -> tuple[object, ...]:
@@ -422,7 +470,7 @@ class PortfolioCycleResult:
                 or item.material_fingerprints != _house_view_fingerprints(house_view)
                 or tuple(target.identity for target in item.targets)
                 != tuple(view_item.identity for view_item in house_view.items)
-                or not _targets_match_house_view(item, house_view)
+                or not _shadow_matches_cycle(item, house_view)
                 for item in self.shadows
             )
             or not _shadows_share_input_material(self.shadows)
@@ -442,11 +490,15 @@ class PortfolioCycleResultLedger(Protocol):
 
     def validate_history(self, references: tuple[PortfolioCheckpointReference, ...]) -> None: ...
 
+    def validate_reference(self, reference: PortfolioCheckpointReference) -> None: ...
+
 
 class PortfolioCycleHistoryValidator(Protocol):
     """Validate durable Balanced and shadow artifacts named by lifecycle history."""
 
     def validate_history(self, references: tuple[PortfolioCheckpointReference, ...]) -> None: ...
+
+    def validate_reference(self, reference: PortfolioCheckpointReference) -> None: ...
 
 
 def construct_portfolio_cycle(request: PortfolioConstructionRequest) -> PortfolioCycleResult:
@@ -505,6 +557,8 @@ def _shadow_account(
         house_view.house_view_id,
         request.policy.policy_id,
         request.inputs.input_id,
+        request.inputs,
+        request.policy,
         request.evidence_cutoff,
         request.inputs.position_snapshot.fingerprint,
         request.inputs.cash,
@@ -535,6 +589,8 @@ def _shadow_account(
 
 def parse_portfolio_shadow_account(  # noqa: PLR0911 - refuse each hostile schema layer.
     value: object,
+    *,
+    portfolio_inputs: PortfolioInputSet,
 ) -> PortfolioShadowAccount | None:
     """Validate one hostile durable shadow-account representation."""
     root = _exact_mapping(
@@ -551,6 +607,8 @@ def parse_portfolio_shadow_account(  # noqa: PLR0911 - refuse each hostile schem
             "house_view_id",
             "policy_id",
             "input_id",
+            "portfolio_inputs",
+            "portfolio_policy",
             "evidence_cutoff",
             "position_snapshot_id",
             "starting_cash",
@@ -593,6 +651,9 @@ def parse_portfolio_shadow_account(  # noqa: PLR0911 - refuse each hostile schem
         case _:
             return None
     cycle = parse_decision_cycle_identity(root["cycle"])
+    if root["portfolio_inputs"] != portfolio_inputs.to_payload():
+        return None
+    portfolio_policy = BalancedPortfolioPolicy.parse(root["portfolio_policy"])
     targets = tuple(_parse_target(item) for item in target_values)
     bands = tuple(_parse_shadow_band(item) for item in band_values)
     cost_inputs = tuple(_parse_cost_input(item) for item in cost_input_values)
@@ -606,6 +667,8 @@ def parse_portfolio_shadow_account(  # noqa: PLR0911 - refuse each hostile schem
         root["house_view_id"],
         root["policy_id"],
         root["input_id"],
+        portfolio_inputs,
+        portfolio_policy,
         root["position_snapshot_id"],
         root["cash_currency"],
         root["cost_input_policy_id"],
@@ -628,6 +691,8 @@ def parse_portfolio_shadow_account(  # noqa: PLR0911 - refuse each hostile schem
             str() as house_view_id,
             str() as policy_id,
             str() as input_id,
+            PortfolioInputSet() as parsed_inputs,
+            BalancedPortfolioPolicy() as parsed_policy,
             str() as position_snapshot_id,
             str() as cash_currency,
             str() as cost_input_policy_id,
@@ -654,6 +719,8 @@ def parse_portfolio_shadow_account(  # noqa: PLR0911 - refuse each hostile schem
             house_view_id=house_view_id,
             policy_id=policy_id,
             input_id=input_id,
+            portfolio_inputs=parsed_inputs,
+            portfolio_policy=parsed_policy,
             evidence_cutoff=UtcInstant.parse(root["evidence_cutoff"]),
             position_snapshot_id=position_snapshot_id,
             starting_cash=starting_cash,
@@ -701,6 +768,8 @@ def _shadow_material(account: PortfolioShadowAccount) -> dict[str, object]:
         "house_view_id": account.house_view_id,
         "policy_id": account.policy_id,
         "input_id": account.input_id,
+        "portfolio_inputs": account.portfolio_inputs.to_payload(),
+        "portfolio_policy": account.portfolio_policy.to_payload(),
         "evidence_cutoff": account.evidence_cutoff.isoformat(),
         "position_snapshot_id": account.position_snapshot_id,
         "starting_cash": _decimal_text(account.starting_cash),

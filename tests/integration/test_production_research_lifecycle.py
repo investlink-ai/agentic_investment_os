@@ -18,6 +18,9 @@ from agentic_investment_os.adapters.recorded_model import (
     RecordedModelFixture,
     RecordedResearchModel,
 )
+from agentic_investment_os.adapters.recorded_portfolio import (
+    parse_recorded_portfolio_shadow_account as parse_portfolio_shadow_account,
+)
 from agentic_investment_os.adapters.recorded_universe import RecordedUniverseSource
 from agentic_investment_os.adapters.sqlite_portfolio import SQLitePortfolioLedger
 from agentic_investment_os.application.lifecycle import Advance, Status
@@ -67,7 +70,6 @@ from agentic_investment_os.portfolio.construction import (
 from agentic_investment_os.portfolio.shadows import (
     PortfolioCycleResult,
     PortfolioCycleResultLedger,
-    parse_portfolio_shadow_account,
 )
 from agentic_investment_os.research.model import (
     MAXIMUM_MODEL_OUTPUT_BYTES,
@@ -638,6 +640,9 @@ class _WriteThenInterruptPortfolioLedger:
     def validate_history(self, references: tuple[PortfolioCheckpointReference, ...]) -> None:
         self.delegate.validate_history(references)
 
+    def validate_reference(self, reference: PortfolioCheckpointReference) -> None:
+        self.delegate.validate_reference(reference)
+
 
 def _configure(
     state_root: Path,
@@ -873,13 +878,7 @@ def test_concurrent_shadow_redelivery_returns_one_exact_account_set(tmp_path: Pa
     changed_payload["content_hash"] = hashlib.sha256(
         json.dumps(changed_material, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
-    changed_growth = parse_portfolio_shadow_account(changed_payload)
-    assert changed_growth is not None
-    with pytest.raises(ValueError, match="invalid portfolio cycle result"):
-        PortfolioCycleResult(
-            balanced,
-            (cycle.shadows[0], changed_growth, cycle.shadows[2]),
-        )
+    assert parse_portfolio_shadow_account(changed_payload) is None
 
     with ThreadPoolExecutor(max_workers=4) as executor:
         checkpoints = tuple(
@@ -1312,6 +1311,43 @@ def test_portfolio_refusal_rows_cannot_substitute_across_runs(tmp_path: Path) ->
 
     with pytest.raises(InvalidLifecycleStateError, match="durable portfolio construction"):
         ledger.validate_history((PortfolioCheckpointReference(first_run, checkpoint, first_time),))
+
+
+def test_advance_validates_only_the_requested_portfolio_history(tmp_path: Path) -> None:
+    state_root = tmp_path / "state"
+    capability = _configure(
+        state_root,
+        universe=recorded_universe(),
+        model=_ValidProductionModel(),
+    )
+    unrelated = _advance_on(
+        capability,
+        "unrelated-corrupt-portfolio-history",
+        date(2026, 8, 20),
+    )
+    requested = _advance(capability, "requested-valid-portfolio-history")
+    assert unrelated.pinned_run_identity is not None
+    assert requested.portfolio_checkpoint is not None
+
+    with sqlite3.connect(state_root / "lifecycle.sqlite3") as connection, connection:
+        connection.execute("DROP TRIGGER portfolio_shadow_accounts_are_append_only_update")
+        connection.execute(
+            "UPDATE portfolio_shadow_accounts SET result_json = '{' WHERE run_id = ?",
+            (unrelated.pinned_run_identity.run_id,),
+        )
+        connection.execute(
+            """
+            CREATE TRIGGER portfolio_shadow_accounts_are_append_only_update
+            BEFORE UPDATE ON portfolio_shadow_accounts
+            BEGIN SELECT RAISE(ABORT, 'append-only portfolio shadow account'); END
+            """
+        )
+
+    replayed = _advance(capability, "requested-valid-portfolio-history")
+
+    assert replayed.portfolio_checkpoint == requested.portfolio_checkpoint
+    with pytest.raises(InvalidLifecycleStateError, match="durable portfolio construction"):
+        _configured_status(state_root)()
 
 
 def test_status_rejects_corrupt_portfolio_construction_history(tmp_path: Path) -> None:

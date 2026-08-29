@@ -31,15 +31,20 @@ The cost-input policy fixes available-at-time prices and absolute hypothetical a
 the reconstructable turnover inputs; it does not infer a fill, apply a later outcome, or implement the
 official evaluation cost overlay. Each shadow record binds its run, cycle, account and algorithm
 identity, shared HouseView, policy and input identities, cutoff, starting position-snapshot identity,
-cash and equity, targets, accounting bands, retained cash, available-at-time prices,
-median-dollar-volume and risk-group inputs, modeled turnover inputs, source availability, material
-fingerprints, and content hash.
+cash and equity, complete validated portfolio input and policy material, targets, accounting bands,
+retained cash, available-at-time prices, median-dollar-volume and risk-group inputs, modeled turnover
+inputs, source availability, material fingerprints, and content hash. Reconstruction verifies the
+embedded input and policy identities against Balanced, then re-derives every shadow target, Target
+Band, cash remainder, and cost input. Agreement among the three shadows is not evidence of a shared
+input when all three could carry the same substitution.
 
 The portfolio ledger appends Balanced and every required shadow in one SQLite transaction. Exact
 redelivery returns the prior identities. Changed material conflicts, an incomplete shadow set is
 invalid authoritative history, and concurrent first delivery serializes before checking for a
 winning append. `Advance` revalidates terminal replay, while `Status` reparses every record before
-accepting the lifecycle checkpoint. Both expose only the fixed account kind and content hash for each
+accepting the lifecycle checkpoint. `Advance` scopes that validation to its requested run so unrelated
+history cannot block a valid retry; `Status` retains global validation and rejects corruption anywhere
+in authoritative portfolio history. Both expose only the fixed account kind and content hash for each
 shadow.
 The shadow schema has no Champion, packet, order, fill, outcome, broker, credential, or trade-
 eligibility field, and no shadow type crosses into `execution`.
@@ -60,8 +65,9 @@ eligibility field, and no shadow type crosses into `execution`.
 - One production cycle preserves selection equivalence while making sizing policy differences
   independently inspectable.
 - A missing or corrupt required shadow blocks reconstruction and any later Champion publication.
-- Shadow payloads duplicate bounded target and cost-input material, accepting storage cost in return
-  for independent hash validation and append-only reconstruction.
+- Shadow payloads duplicate the complete validated input and policy plus bounded target and cost-input
+  material, accepting storage cost in return for independent semantic re-derivation and append-only
+  reconstruction.
 - The current lifecycle still stops at `ConstructPortfolio`; packet publication, broker effects,
   outcome observation, and evaluation remain separately authorized work.
 - Shadow sizing is critical deterministic portfolio behavior and requires hand-oracle, property,

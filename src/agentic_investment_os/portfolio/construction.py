@@ -545,6 +545,23 @@ class PortfolioInputSet:
             input_id,
         )
 
+    def to_payload(self) -> dict[str, object]:
+        """Return the exact immutable input material needed to reconstruct a shadow."""
+        return {
+            "schema_version": 1,
+            "record_kind": "portfolio_input_set",
+            "position_snapshot": self.position_snapshot.to_payload(),
+            "cash": _decimal_text(self.cash),
+            "cash_currency": self.cash_currency,
+            "source_identity": self.source_identity,
+            "observed_at": self.observed_at.isoformat(),
+            "available_at": self.available_at.isoformat(),
+            "data_regime": self.data_regime,
+            "session_calendar_id": self.session_calendar_id,
+            "risk_inputs": [_risk_input_payload(item) for item in self.risk_inputs],
+            "input_id": self.input_id,
+        }
+
 
 class PortfolioInputSource(Protocol):
     """Load one hostile as-of input set against the pinned position snapshot."""
@@ -1241,9 +1258,25 @@ def _construct_shadow_variant(
     shadow_policy: ShadowPortfolioPolicy,
 ) -> _PortfolioVariantResult:
     """Construct accounting targets only from the exact accepted Balanced HouseView."""
-    return _allocate_variant(
-        request,
+    return _construct_shadow_variant_from_inputs(
+        request.inputs,
         house_view,
+        request.policy,
+        shadow_policy,
+    )
+
+
+def _construct_shadow_variant_from_inputs(
+    inputs: PortfolioInputSet,
+    house_view: HouseView,
+    policy: BalancedPortfolioPolicy,
+    shadow_policy: ShadowPortfolioPolicy,
+) -> _PortfolioVariantResult:
+    """Re-derive one shadow from its pinned policy and complete input set."""
+    return _allocate_variant_from_inputs(
+        inputs,
+        house_view,
+        policy,
         maximum_gross_weight=shadow_policy.maximum_gross_weight,
         maximum_name_weight=shadow_policy.maximum_name_weight,
         maximum_sector_weight=shadow_policy.maximum_sector_weight,
@@ -1260,13 +1293,34 @@ def _allocate_variant(  # noqa: PLR0913 - the variant envelope is explicit and i
     maximum_sector_weight: Decimal,
     sizing_method: PortfolioSizingMethod,
 ) -> _PortfolioVariantResult:
+    return _allocate_variant_from_inputs(
+        request.inputs,
+        house_view,
+        request.policy,
+        maximum_gross_weight=maximum_gross_weight,
+        maximum_name_weight=maximum_name_weight,
+        maximum_sector_weight=maximum_sector_weight,
+        sizing_method=sizing_method,
+    )
+
+
+def _allocate_variant_from_inputs(  # noqa: PLR0913 - every allocation input remains explicit.
+    inputs: PortfolioInputSet,
+    house_view: HouseView,
+    policy: BalancedPortfolioPolicy,
+    *,
+    maximum_gross_weight: Decimal,
+    maximum_name_weight: Decimal,
+    maximum_sector_weight: Decimal,
+    sizing_method: PortfolioSizingMethod,
+) -> _PortfolioVariantResult:
     items = house_view.items
     risk_by_identity = {
-        canonical_instrument_bytes(item.identity): item for item in request.inputs.risk_inputs
+        canonical_instrument_bytes(item.identity): item for item in inputs.risk_inputs
     }
     positions = {
         canonical_instrument_bytes(position.identity): position
-        for position in request.inputs.position_snapshot.positions
+        for position in inputs.position_snapshot.positions
         if type(position) is EquityPosition
     }
     active = tuple(
@@ -1280,7 +1334,7 @@ def _allocate_variant(  # noqa: PLR0913 - the variant envelope is explicit and i
         {
             canonical_instrument_bytes(item.identity): Decimal(1)
             / _realized_volatility(
-                risk_by_identity[canonical_instrument_bytes(item.identity)], request.policy
+                risk_by_identity[canonical_instrument_bytes(item.identity)], policy
             )
             for item in active
         }
@@ -1288,9 +1342,9 @@ def _allocate_variant(  # noqa: PLR0913 - the variant envelope is explicit and i
         else {}
     )
     denominator = sum(sizing_scores.values())
-    equity = request.inputs.cash + sum(position.valuation.amount for position in positions.values())
+    equity = inputs.cash + sum(position.valuation.amount for position in positions.values())
     weights: dict[bytes, Decimal] = {}
-    uncertainty = dict(request.policy.uncertainty_multipliers)
+    uncertainty = dict(policy.uncertainty_multipliers)
     for item in items:
         key = canonical_instrument_bytes(item.identity)
         if item.stance in (PortfolioStance.EXIT, PortfolioStance.ABSTAIN) or item.event_blocked:
@@ -1299,12 +1353,10 @@ def _allocate_variant(  # noqa: PLR0913 - the variant envelope is explicit and i
             current = _current_weight(positions.get(key), equity)
             risk = risk_by_identity[key]
             liquidity = (
-                risk.median_dollar_volume
-                * request.policy.maximum_fraction_of_median_dollar_volume
-                / equity
+                risk.median_dollar_volume * policy.maximum_fraction_of_median_dollar_volume / equity
             )
             weight = min(
-                current * request.policy.reduce_multiplier,
+                current * policy.reduce_multiplier,
                 maximum_name_weight,
                 liquidity,
             )
@@ -1318,9 +1370,7 @@ def _allocate_variant(  # noqa: PLR0913 - the variant envelope is explicit and i
                 else maximum_name_weight
             ) * uncertainty[item.uncertainty]
             liquidity = (
-                risk.median_dollar_volume
-                * request.policy.maximum_fraction_of_median_dollar_volume
-                / equity
+                risk.median_dollar_volume * policy.maximum_fraction_of_median_dollar_volume / equity
             )
             weight = min(raw, maximum_name_weight, liquidity)
             if not item.eligible:
@@ -1331,7 +1381,7 @@ def _allocate_variant(  # noqa: PLR0913 - the variant envelope is explicit and i
         weights,
         items,
         risk_by_identity,
-        request.policy,
+        policy,
         maximum_sector_weight,
     )
     weights = _apply_gross_cap(weights, maximum_gross_weight)
@@ -1341,7 +1391,7 @@ def _allocate_variant(  # noqa: PLR0913 - the variant envelope is explicit and i
         positions,
         risk_by_identity,
         equity,
-        request.policy,
+        policy,
         maximum_gross_weight,
         maximum_name_weight,
         maximum_sector_weight,
@@ -1356,7 +1406,7 @@ def _allocate_variant(  # noqa: PLR0913 - the variant envelope is explicit and i
             next(item for item in items if item.identity == target.identity),
             _current_weight(positions.get(canonical_instrument_bytes(target.identity)), equity),
             equity,
-            request.policy,
+            policy,
             maximum_name_weight=maximum_name_weight,
             hard_risk_breach=(canonical_instrument_bytes(target.identity) in hard_risk_breaches),
         )

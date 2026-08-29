@@ -320,10 +320,11 @@ stateDiagram-v2
   exists with different canonical material while later expected events remain absent. Belief
   transaction time remains bounded by the lifecycle checkpoint. Portfolio construction separately
   reparses its complete canonical Balanced result and every required shadow account, reconstructs
-  target-band and shadow identities, validates the approved envelopes plus shared HouseView, cutoff,
-  input pins, source availability, position state, cost facts and risk groups, lifecycle reference,
-  and canonical recorded instant, and treats the status projection as disposable. Exact
-  process retry returns the same result set; missing, changed, or corrupt run material fails closed. SQLite
+  target-band and shadow identities, authenticates each shadow's complete portfolio input and policy
+  against Balanced, and re-derives the approved allocation, Target Band, cash, position, cost, and risk
+  behavior. Terminal `Advance` validates only its requested portfolio reference; `Status` validates
+  global portfolio history and treats the status projection as disposable. Exact process retry returns
+  the same result set; missing, changed, or corrupt run material fails closed. SQLite
   initializes or validates one exact current physical schema; other non-empty shapes fail before writes.
   [ADR 0004](adr/0004-require-current-sqlite-schema.md) owns that decision. Runtime stores use explicit
   ignored roots; source directories never hold runtime state.

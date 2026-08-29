@@ -236,6 +236,9 @@ class _FixturePortfolioHistory:
     def validate_history(self, references: tuple[PortfolioCheckpointReference, ...]) -> None:
         self.references = references
 
+    def validate_reference(self, reference: PortfolioCheckpointReference) -> None:
+        self.references = (reference,)
+
 
 def _advance(
     ledger: LifecycleLedger,

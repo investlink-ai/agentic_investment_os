@@ -8,6 +8,9 @@ from contextlib import closing
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Self
 
+from agentic_investment_os.adapters.recorded_portfolio import (
+    parse_recorded_portfolio_shadow_account,
+)
 from agentic_investment_os.domain.lifecycle import (
     InvalidLifecycleStateError,
     LifecyclePersistenceError,
@@ -24,7 +27,6 @@ from agentic_investment_os.portfolio.construction import (
 from agentic_investment_os.portfolio.shadows import (
     PortfolioCycleResult,
     PortfolioShadowAccount,
-    parse_portfolio_shadow_account,
 )
 
 __all__ = ("SQLitePortfolioLedger",)
@@ -147,42 +149,7 @@ class SQLitePortfolioLedger:
                     FROM portfolio_constructions ORDER BY run_id
                     """
                 ).fetchall()
-                available: list[PortfolioCheckpointReference] = []
-                for row in rows:
-                    run_id = row[0]
-                    if not is_sha256(run_id):
-                        raise InvalidLifecycleStateError(_INVALID_HISTORY)
-                    decoded: object = json.loads(row[7])
-                    result = parse_portfolio_construction_result(decoded)
-                    parsed_recorded_at = _recorded_at(row[8])
-                    shadows = _stored_shadows(connection, run_id, parsed_recorded_at)
-                    cycle_result = None if result is None else PortfolioCycleResult(result, shadows)
-                    rebuilt = (
-                        None
-                        if cycle_result is None or parsed_recorded_at is None
-                        else _checkpoint(cycle_result, parsed_recorded_at)
-                    )
-                    if (
-                        rebuilt is None
-                        or result is None
-                        or row[1] != rebuilt.result_id
-                        or row[2] != rebuilt.house_view_id
-                        or row[3] != rebuilt.policy_id
-                        or row[4] != rebuilt.input_id
-                        or row[5] != _canonical_json(list(rebuilt.target_band_ids))
-                        or row[6]
-                        != (
-                            None if rebuilt.refusal_reason is None else rebuilt.refusal_reason.value
-                        )
-                        or row[7] != _canonical_json(result.to_payload())
-                        or parsed_recorded_at is None
-                        or (result.house_view is not None and result.house_view.run_id != run_id)
-                        or any(item.run_id != run_id for item in shadows)
-                    ):
-                        raise InvalidLifecycleStateError(_INVALID_HISTORY)
-                    available.append(
-                        PortfolioCheckpointReference(run_id, rebuilt, parsed_recorded_at)
-                    )
+                available = [_validated_reference(connection, row) for row in rows]
                 shadow_run_ids = {
                     row[0]
                     for row in connection.execute(
@@ -200,6 +167,61 @@ class SQLitePortfolioLedger:
             raise
         except (json.JSONDecodeError, sqlite3.Error, TypeError, ValueError) as error:
             raise InvalidLifecycleStateError(_INVALID_HISTORY) from error
+
+    def validate_reference(self, reference: PortfolioCheckpointReference) -> None:
+        """Validate only the portfolio history owned by one requested lifecycle run."""
+        try:
+            with closing(sqlite3.connect(self.database, timeout=5.0)) as connection:
+                row = connection.execute(
+                    """
+                    SELECT run_id, result_id, house_view_id, policy_id, input_id,
+                           target_band_ids, refusal_reason, result_json, recorded_at
+                    FROM portfolio_constructions WHERE run_id = ?
+                    """,
+                    (reference.run_id,),
+                ).fetchone()
+                if row is None or _validated_reference(connection, row) != reference:
+                    raise InvalidLifecycleStateError(_INVALID_HISTORY)
+        except InvalidLifecycleStateError:
+            raise
+        except (json.JSONDecodeError, sqlite3.Error, TypeError, ValueError) as error:
+            raise InvalidLifecycleStateError(_INVALID_HISTORY) from error
+
+
+def _validated_reference(
+    connection: sqlite3.Connection,
+    row: tuple[object, ...],
+) -> PortfolioCheckpointReference:
+    run_id = row[0]
+    encoded = row[7]
+    if type(run_id) is not str or not is_sha256(run_id) or type(encoded) is not str:
+        raise InvalidLifecycleStateError(_INVALID_HISTORY)
+    decoded: object = json.loads(encoded)
+    result = parse_portfolio_construction_result(decoded)
+    parsed_recorded_at = _recorded_at(row[8])
+    shadows = _stored_shadows(connection, run_id, parsed_recorded_at)
+    cycle_result = None if result is None else PortfolioCycleResult(result, shadows)
+    rebuilt = (
+        None
+        if cycle_result is None or parsed_recorded_at is None
+        else _checkpoint(cycle_result, parsed_recorded_at)
+    )
+    if (
+        rebuilt is None
+        or result is None
+        or row[1] != rebuilt.result_id
+        or row[2] != rebuilt.house_view_id
+        or row[3] != rebuilt.policy_id
+        or row[4] != rebuilt.input_id
+        or row[5] != _canonical_json(list(rebuilt.target_band_ids))
+        or row[6] != (None if rebuilt.refusal_reason is None else rebuilt.refusal_reason.value)
+        or encoded != _canonical_json(result.to_payload())
+        or parsed_recorded_at is None
+        or (result.house_view is not None and result.house_view.run_id != run_id)
+        or any(item.run_id != run_id for item in shadows)
+    ):
+        raise InvalidLifecycleStateError(_INVALID_HISTORY)
+    return PortfolioCheckpointReference(run_id, rebuilt, parsed_recorded_at)
 
 
 def _checkpoint(
@@ -242,7 +264,7 @@ def _stored_shadows(
     parsed: list[PortfolioShadowAccount] = []
     for row in rows:
         decoded: object = json.loads(row[5])
-        account = parse_portfolio_shadow_account(decoded)
+        account = parse_recorded_portfolio_shadow_account(decoded)
         recorded_at = _recorded_at(row[6])
         if (
             account is None

@@ -47,7 +47,11 @@ from agentic_investment_os.domain.universe import (
     parse_nonnegative_decimal,
 )
 
-__all__ = ("RecordedUniverseSource", "is_alpaca_paper_identity")
+__all__ = (
+    "RecordedUniverseSource",
+    "is_alpaca_paper_identity",
+    "parse_recorded_position_snapshot",
+)
 
 _ALPACA_PAPER_CATALOG_NAMESPACE = "alpaca-paper"
 
@@ -157,6 +161,15 @@ def parse_recorded_universe(value: object) -> UniverseInputs | UniverseRefusal:
         return parsed_root
     root, data_regime, cutoff = parsed_root
     return _parse_recorded_snapshots(root, data_regime=data_regime, cutoff=cutoff)
+
+
+def parse_recorded_position_snapshot(value: object) -> PositionSnapshot | None:
+    """Validate one standalone durable position snapshot."""
+    fields = _mapping(value, _SNAPSHOT_FIELDS)
+    if fields is None:
+        return None
+    parsed = _parse_position_snapshot(fields)
+    return None if isinstance(parsed, UniverseRefusal) else parsed
 
 
 def _parse_recorded_root(

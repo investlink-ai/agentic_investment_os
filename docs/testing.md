@@ -526,11 +526,14 @@ evidence. A scenario becomes mandatory when its owning behavior is implemented.
 - Equal-weight and Risk Profile shadows consume the same HouseView, eligibility, Evidence Cutoff,
   positions, cash, available-at-time prices, risk inputs, constraints, Target Band mechanics, and
   frozen cost-input policy as the Champion. Hand oracles distinguish all four outputs; properties
-  prove profile envelopes, cash, canonical order, and equal-weight's sizing-only difference.
+  prove profile envelopes, cash, canonical order, zero-liquidity cash preservation, and equal-weight's
+  sizing-only difference. Hostile whole-set substitutions and coherently resealed Target Bands fail
+  semantic re-derivation even when all three shadows agree with one another.
 - Shadow accounting appends Conservative, Growth, and equal-weight records as one required set. Exact
   and concurrent first-delivery retry return the prior identities; changed material conflicts;
   interruption resumes; terminal `Advance` replay and `Status` reject missing or corrupt authoritative
-  rows; projection loss rebuilds the same bounded references. Shadow schemas and module boundaries
+  rows; unrelated corrupt runs do not block request-scoped `Advance`, while global `Status` still
+  rejects them; projection loss rebuilds the same bounded references. Shadow schemas and module boundaries
   expose no Champion, packet, order, fill, outcome,
   executor, broker, or credential authority.
 - Target Bands create no trade inside the band and apply only the approved partial adjustment outside

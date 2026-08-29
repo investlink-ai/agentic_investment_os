@@ -8,6 +8,7 @@ from datetime import date
 from decimal import Decimal
 from typing import TYPE_CHECKING, TypeGuard
 
+from agentic_investment_os.adapters.recorded_universe import parse_recorded_position_snapshot
 from agentic_investment_os.domain.identity import (
     EquityInstrumentIdentity,
     MarketSession,
@@ -21,11 +22,19 @@ from agentic_investment_os.portfolio.construction import (
     PortfolioRefusalReason,
     PortfolioRiskInput,
 )
+from agentic_investment_os.portfolio.shadows import (
+    PortfolioShadowAccount,
+    parse_portfolio_shadow_account,
+)
 
 if TYPE_CHECKING:
     from agentic_investment_os.domain.universe import PositionSnapshot
 
-__all__ = ("RecordedPortfolioSource",)
+__all__ = (
+    "RecordedPortfolioSource",
+    "parse_recorded_portfolio_input_set",
+    "parse_recorded_portfolio_shadow_account",
+)
 
 _ROOT_FIELDS = frozenset(
     {
@@ -40,6 +49,22 @@ _ROOT_FIELDS = frozenset(
         "cash_currency",
         "session_calendar_id",
         "risk_inputs",
+    }
+)
+_DURABLE_ROOT_FIELDS = frozenset(
+    {
+        "schema_version",
+        "record_kind",
+        "position_snapshot",
+        "cash",
+        "cash_currency",
+        "source_identity",
+        "observed_at",
+        "available_at",
+        "data_regime",
+        "session_calendar_id",
+        "risk_inputs",
+        "input_id",
     }
 )
 _RISK_FIELDS = frozenset(
@@ -120,6 +145,48 @@ class RecordedPortfolioSource:
             )
         except ValueError:
             return PortfolioRefusalReason.CONTRADICTORY_INPUT
+
+
+def parse_recorded_portfolio_input_set(value: object) -> PortfolioInputSet | None:
+    """Validate the complete input set embedded in durable shadow accounting."""
+    fields = _mapping(value, _DURABLE_ROOT_FIELDS)
+    if fields is None:
+        return None
+    snapshot = parse_recorded_position_snapshot(fields["position_snapshot"])
+    if snapshot is None or type(fields["input_id"]) is not str:
+        return None
+    recorded = {
+        "schema_version": fields["schema_version"],
+        "record_kind": fields["record_kind"],
+        "data_regime": fields["data_regime"],
+        "observed_at": fields["observed_at"],
+        "available_at": fields["available_at"],
+        "source_identity": fields["source_identity"],
+        "position_snapshot_hash": snapshot.fingerprint,
+        "cash": fields["cash"],
+        "cash_currency": fields["cash_currency"],
+        "session_calendar_id": fields["session_calendar_id"],
+        "risk_inputs": fields["risk_inputs"],
+    }
+    parsed = RecordedPortfolioSource(recorded).load(snapshot)
+    return (
+        parsed
+        if type(parsed) is PortfolioInputSet
+        and parsed.input_id == fields["input_id"]
+        and parsed.to_payload() == fields
+        else None
+    )
+
+
+def parse_recorded_portfolio_shadow_account(value: object) -> PortfolioShadowAccount | None:
+    """Validate a durable shadow and its embedded complete portfolio input set."""
+    root = value if type(value) is dict else None
+    inputs = (
+        None if root is None else parse_recorded_portfolio_input_set(root.get("portfolio_inputs"))
+    )
+    return (
+        None if inputs is None else parse_portfolio_shadow_account(value, portfolio_inputs=inputs)
+    )
 
 
 def _risk_input(value: object) -> PortfolioRiskInput | None:

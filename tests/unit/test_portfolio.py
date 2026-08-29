@@ -11,6 +11,9 @@ import pytest
 from hypothesis import example, given
 from hypothesis import strategies as st
 
+from agentic_investment_os.adapters.recorded_portfolio import (
+    parse_recorded_portfolio_shadow_account as parse_portfolio_shadow_account,
+)
 from agentic_investment_os.domain.identity import (
     CryptoSpotInstrumentIdentity,
     EquityInstrumentIdentity,
@@ -49,7 +52,9 @@ from agentic_investment_os.portfolio.shadows import (
     ShadowCostInput,
     ShadowTargetBand,
     construct_portfolio_cycle,
-    parse_portfolio_shadow_account,
+)
+from agentic_investment_os.portfolio.shadows import (
+    parse_portfolio_shadow_account as parse_typed_shadow_account,
 )
 from tests._universe import mutable_mapping, mutable_mapping_list
 
@@ -160,6 +165,26 @@ def test_shadow_accounts_bind_the_exact_house_view_inputs_and_cost_facts() -> No
         }
 
 
+def test_zero_liquidity_preserves_a_complete_cash_only_shadow_cycle() -> None:
+    request = _request(
+        (_resolution(_AAPL, _HASH_A),),
+        inputs=_inputs_for(
+            (replace(_risk_input(_AAPL, "technology"), median_dollar_volume=Decimal(0)),)
+        ),
+    )
+
+    cycle = construct_portfolio_cycle(request)
+
+    assert cycle.balanced.refusal is None
+    assert tuple(target.target_weight for target in cycle.balanced.targets) == (Decimal(0),)
+    assert all(
+        tuple(target.target_weight for target in shadow.targets) == (Decimal(0),)
+        for shadow in cycle.shadows
+    )
+    assert all(shadow.retained_cash_weight == Decimal(1) for shadow in cycle.shadows)
+    assert all(shadow.cost_inputs[0].median_dollar_volume == Decimal(0) for shadow in cycle.shadows)
+
+
 def test_shadow_turnover_notional_uses_starting_equity_and_absolute_adjustment() -> None:
     resolution = replace(_resolution(_AAPL, _HASH_A), is_position=True)
     cycle = construct_portfolio_cycle(
@@ -194,6 +219,22 @@ def test_shadow_account_round_trip_refuses_authority_or_outcome_fields() -> None
     payload = account.to_payload()
 
     assert parse_portfolio_shadow_account(payload) == account
+    assert (
+        parse_typed_shadow_account(
+            payload,
+            portfolio_inputs=PortfolioInputSet.create(
+                position_snapshot=account.portfolio_inputs.position_snapshot,
+                cash=account.portfolio_inputs.cash,
+                cash_currency=account.portfolio_inputs.cash_currency,
+                source_identity="different-source",
+                observed_at=account.portfolio_inputs.observed_at,
+                available_at=account.portfolio_inputs.available_at,
+                data_regime=account.portfolio_inputs.data_regime,
+                risk_inputs=account.portfolio_inputs.risk_inputs,
+            ),
+        )
+        is None
+    )
     assert payload["authority_scope"] == "non_executable_shadow_account"
     assert {"champion", "packet_id", "order", "fill", "outcome"}.isdisjoint(payload)
     assert parse_portfolio_shadow_account({**payload, "record_kind": "invalid"}) is None
@@ -339,21 +380,26 @@ def test_shadow_cycle_rejects_resealed_policy_and_same_input_substitutions() -> 
         _reseal_shadow_payload(payload)
         assert parse_portfolio_shadow_account(payload) is None
 
-    same_input_substitutions: list[dict[str, object]] = []
+    cycle_substitutions: list[dict[str, object]] = []
     changed_cycle = deepcopy(account.to_payload())
     changed_cycle["cycle"] = MarketSession(date.fromisoformat("2026-08-20")).to_payload()
-    same_input_substitutions.append(changed_cycle)
+    cycle_substitutions.append(changed_cycle)
     changed_snapshot = deepcopy(account.to_payload())
     changed_snapshot["position_snapshot_id"] = "f" * 64
-    same_input_substitutions.append(changed_snapshot)
     changed_fingerprint = deepcopy(account.to_payload())
     mutable_mapping(changed_fingerprint["material_fingerprints"])["configuration"] = "f" * 64
-    same_input_substitutions.append(changed_fingerprint)
+    cycle_substitutions.append(changed_fingerprint)
     changed_price = deepcopy(account.to_payload())
     mutable_mapping(mutable_mapping_list(changed_price["cost_inputs"])[0])["price"] = "101"
-    same_input_substitutions.append(changed_price)
+    cycle_substitutions.append(changed_price)
+    changed_source = deepcopy(account.to_payload())
+    changed_source["cost_input_source"] = "substituted-source"
 
-    for payload in same_input_substitutions:
+    for payload in (changed_snapshot, changed_source):
+        _reseal_shadow_payload(payload)
+        assert parse_portfolio_shadow_account(payload) is None
+
+    for payload in cycle_substitutions:
         _reseal_shadow_payload(payload)
         substituted = parse_portfolio_shadow_account(payload)
         assert substituted is not None
@@ -363,16 +409,42 @@ def test_shadow_cycle_rejects_resealed_policy_and_same_input_substitutions() -> 
                 (substituted, cycle.shadows[1], cycle.shadows[2]),
             )
 
-    changed_middle_payload = deepcopy(cycle.shadows[1].to_payload())
-    changed_middle_payload["cost_input_source"] = "substituted-source"
-    _reseal_shadow_payload(changed_middle_payload)
-    changed_middle = parse_portfolio_shadow_account(changed_middle_payload)
-    assert changed_middle is not None
-    with pytest.raises(ValueError, match="invalid portfolio cycle result"):
-        PortfolioCycleResult(
-            cycle.balanced,
-            (cycle.shadows[0], changed_middle, cycle.shadows[2]),
+
+def test_shadow_cycle_rejects_collectively_substituted_pinned_inputs() -> None:
+    cycle = construct_portfolio_cycle(
+        _request((_resolution(_AAPL, _HASH_A), _resolution(_SPY, _HASH_B)))
+    )
+    original_inputs = cycle.shadows[0].portfolio_inputs
+    substituted_inputs = PortfolioInputSet.create(
+        position_snapshot=original_inputs.position_snapshot,
+        cash=original_inputs.cash,
+        cash_currency=original_inputs.cash_currency,
+        source_identity="substituted-source",
+        observed_at=original_inputs.observed_at,
+        available_at=original_inputs.available_at,
+        data_regime=original_inputs.data_regime,
+        risk_inputs=original_inputs.risk_inputs,
+    )
+    substituted: list[PortfolioShadowAccount] = []
+    for account in cycle.shadows:
+        payload = deepcopy(account.to_payload())
+        payload.update(
+            {
+                "input_id": substituted_inputs.input_id,
+                "portfolio_inputs": substituted_inputs.to_payload(),
+                "cost_input_source": substituted_inputs.source_identity,
+            }
         )
+        mutable_mapping(payload["material_fingerprints"])["portfolio_input"] = (
+            substituted_inputs.input_id
+        )
+        _reseal_shadow_payload(payload)
+        parsed = parse_portfolio_shadow_account(payload)
+        assert parsed is not None
+        substituted.append(parsed)
+
+    with pytest.raises(ValueError, match="invalid portfolio cycle result"):
+        PortfolioCycleResult(cycle.balanced, tuple(substituted))
 
 
 def test_shadow_parser_rejects_resealed_gross_and_group_limit_breaches() -> None:

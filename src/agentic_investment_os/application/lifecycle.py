@@ -732,13 +732,11 @@ class Advance:
             return
         if identity is None:
             raise InvalidLifecycleStateError(_INCOMPLETE_CHECKPOINT_RESULT)
-        self.portfolio_ledger.validate_history(
-            (
-                PortfolioCheckpointReference(
-                    identity.run_id,
-                    checkpoint,
-                    checkpoint.recorded_at,
-                ),
+        self.portfolio_ledger.validate_reference(
+            PortfolioCheckpointReference(
+                identity.run_id,
+                checkpoint,
+                checkpoint.recorded_at,
             )
         )
 
