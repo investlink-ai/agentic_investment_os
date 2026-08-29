@@ -1037,11 +1037,13 @@ def _validate_review_axes(raw: object, *, plan: ReviewPlan, source: str) -> None
             message = f"{axis_source} selection must agree with the review plan"
             raise HarnessValidationError(message)
         disposition = _string(axis_data["disposition"], field=f"{axis_source}.disposition")
-        if disposition not in {"passed", "missing", "not_applicable"}:
-            message = f"{axis_source}.disposition is not a review disposition"
-            raise HarnessValidationError(message)
-        if expected_selection == "selected" and disposition == "not_applicable":
-            message = f"{axis_source} selected disposition cannot be not_applicable"
+        if expected_selection == "selected" and disposition not in {
+            "passed",
+            "passed_with_advisories",
+            "must_fix",
+            "missing",
+        }:
+            message = f"{axis_source} selected disposition cannot be {disposition}"
             raise HarnessValidationError(message)
         if expected_selection == "not_selected" and disposition != "not_applicable":
             message = f"{axis_source} not-selected disposition must be not_applicable"

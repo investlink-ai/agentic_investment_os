@@ -580,6 +580,48 @@ def test_suite_rejects_not_applicable_disposition_for_a_selected_axis(tmp_path: 
         load_suite(tmp_path)
 
 
+@pytest.mark.parametrize("disposition", ["passed_with_advisories", "must_fix"])
+def test_suite_accepts_complete_selected_axis_dispositions(
+    tmp_path: Path,
+    disposition: str,
+) -> None:
+    _write_suite(tmp_path)
+    harness = tmp_path / ".agents" / "harness"
+    context_directory = harness / "active-delivery-contexts"
+    context_directory.mkdir()
+    evidence = _active_delivery_evidence()
+    review_axes = evidence["review_axes"]
+    assert isinstance(review_axes, dict)
+    standards_axis = review_axes["standards"]
+    assert isinstance(standards_axis, dict)
+    standards_axis["disposition"] = disposition
+    context_path = context_directory / "selected-axis-disposition.json"
+    context_path.write_text(
+        json.dumps(
+            {
+                "_active_delivery_context": {
+                    "source_type": "harness-controlled active delivery ledger",
+                    "producer": "deliver-issue",
+                    "same_execution": True,
+                },
+                "delivery_evidence": evidence,
+            }
+        ),
+        encoding="utf-8",
+    )
+    scenario_path = harness / "scenarios" / "issue-publication-awaits-approval.json"
+    scenario = json.loads(scenario_path.read_text(encoding="utf-8"))
+    scenario["active_delivery_context"] = "selected-axis-disposition"
+    scenario["active_delivery_context_sha256"] = hashlib.sha256(
+        context_path.read_bytes()
+    ).hexdigest()
+    scenario_path.write_text(json.dumps(scenario), encoding="utf-8")
+
+    suite = load_suite(tmp_path)
+
+    assert suite.scenarios[0].active_delivery_context == "selected-axis-disposition"
+
+
 @pytest.mark.parametrize(
     ("contract", "expected_error"),
     [
