@@ -6,7 +6,7 @@
   "fixture": "clean-base-update-retains-review",
   "fixture_sha256": "0391a2359bb3a2fbcd8d778fb53040fc492ffaf84b2023e1911d295bbe8edbea",
   "active_delivery_context": "clean-base-update-retains-review",
-  "active_delivery_context_sha256": "5ee121d283b3a0fa69e1c6a1f125b6a788ab025d234379475a75a90fb836a25f",
+  "active_delivery_context_sha256": "023af41b9223df0b22932f3801e510546191d2436245189a99aff47019ec53ad",
   "expected_issue_number": 46,
   "expected_repository": "investlink-ai/fixture",
   "repository_paths": [

@@ -548,6 +548,15 @@ def parse_review_finding(raw: object, *, source: str) -> ReviewFinding:
     if merge_disposition == "must_fix" and automation_action == "track_follow_up":
         message = f"{source} must_fix finding cannot be follow-up work"
         raise HarnessValidationError(message)
+    if severity in {"Blocker", "High"} and merge_disposition != "must_fix":
+        message = f"{source} Blocker and High findings must be must_fix"
+        raise HarnessValidationError(message)
+    if merge_disposition == "must_fix" and automation_action not in {
+        "fix_in_batch",
+        "human_review_required",
+    }:
+        message = f"{source} must_fix finding requires a blocking automation action"
+        raise HarnessValidationError(message)
     if automation_action in {"fix_in_batch", "human_review_required"} and (
         merge_disposition != "must_fix"
     ):
@@ -968,6 +977,51 @@ def _validate_fixture_repository(fixture_root: Path, *, expected: str | None) ->
         raise HarnessValidationError(message)
 
 
+def _validate_reviewer_contract(raw: object, *, source: str) -> None:
+    contract = _mapping(raw, field=source)
+    contract_source = _string(contract.get("source"), field=f"{source}.source")
+    expected_fields = {
+        "trusted_installed": {"source", "resolved_path", "sha256"},
+        "verified_base": {
+            "source",
+            "repository_path",
+            "base_object_id",
+            "git_blob_id",
+        },
+    }.get(contract_source)
+    if expected_fields is None or set(contract) != expected_fields:
+        message = f"{source} is incomplete or untrusted"
+        raise HarnessValidationError(message)
+    for field in expected_fields - {"source"}:
+        _string(contract[field], field=f"{source}.{field}")
+
+
+def _validate_review_axes(raw: object, *, plan: ReviewPlan, source: str) -> None:
+    review_axes = _mapping(raw, field=source)
+    if set(review_axes) != _REVIEW_AXES:
+        message = f"{source} must define every review axis"
+        raise HarnessValidationError(message)
+    for axis, raw_axis in review_axes.items():
+        axis_source = f"{source}.{axis}"
+        axis_data = _mapping(raw_axis, field=axis_source)
+        if set(axis_data) != {"selection", "disposition", "reviewer_contract"}:
+            message = f"{axis_source} must define selection, disposition, and reviewer_contract"
+            raise HarnessValidationError(message)
+        expected_selection = (
+            "selected" if plan.axes[axis].selection == "selected" else "not_selected"
+        )
+        if _string(axis_data["selection"], field=f"{axis_source}.selection") != expected_selection:
+            message = f"{axis_source} selection must agree with the review plan"
+            raise HarnessValidationError(message)
+        disposition = _string(axis_data["disposition"], field=f"{axis_source}.disposition")
+        if expected_selection == "not_selected" and disposition != "not_applicable":
+            message = f"{axis_source} not-selected disposition must be not_applicable"
+            raise HarnessValidationError(message)
+        _validate_reviewer_contract(
+            axis_data["reviewer_contract"], source=f"{axis_source}.reviewer_contract"
+        )
+
+
 def _validate_active_delivery_context(path: Path, *, expected_sha256: str) -> None:
     if not path.is_file() or path.is_symlink():
         message = f"active delivery context must be a real file: {path}"
@@ -1030,25 +1084,19 @@ def _validate_active_delivery_context(path: Path, *, expected_sha256: str) -> No
     review_basis = _string(
         evidence.get("review_basis"), field=f"{path}.delivery_evidence.review_basis"
     )
-    expected_mode = {
-        "fresh": "full",
-        "clean_equivalence": "retained",
-        "focused_conflict": "focused",
+    permitted_modes = {
+        "fresh": {"full", "incremental"},
+        "clean_equivalence": {"retained"},
+        "focused_conflict": {"focused"},
     }.get(review_basis)
-    if expected_mode is None or plan.mode != expected_mode:
+    if permitted_modes is None or plan.mode not in permitted_modes:
         message = f"{path} review mode must agree with review basis"
         raise HarnessValidationError(message)
-    review_axes = _mapping(
-        evidence.get("review_axes"), field=f"{path}.delivery_evidence.review_axes"
+    _validate_review_axes(
+        evidence.get("review_axes"),
+        plan=plan,
+        source=f"{path}.delivery_evidence.review_axes",
     )
-    safety_axis = _mapping(
-        review_axes.get("investment_safety"),
-        field=f"{path}.delivery_evidence.review_axes.investment_safety",
-    )
-    safety_selected = safety_axis.get("selection") == "selected"
-    if safety_selected != (plan.axes["investment_safety"].selection == "selected"):
-        message = f"{path} safety-axis selection must agree with the review plan"
-        raise HarnessValidationError(message)
 
 
 def _require_repository_file(root: Path, relative: str, *, source: str) -> None:
@@ -2014,6 +2062,15 @@ def _git_read_effects(
             specialized_reads.append(Effect("git.base_ref.read", classified.detail))
         elif arguments == ("HEAD",):
             specialized_reads.append(Effect("git.head_ref.read", classified.detail))
+    elif subcommand == "show" and len(arguments) == 1:
+        revision_path = arguments[0]
+        _revision, separator, repository_path = revision_path.partition(":")
+        reviewer_effects = {
+            ".agents/skills/code-review/SKILL.md": "reviewer.general_identity.read",
+            ".agents/skills/investment-safety-review/SKILL.md": "reviewer.safety_identity.read",
+        }
+        if separator and repository_path in reviewer_effects:
+            specialized_reads.append(Effect(reviewer_effects[repository_path], classified.detail))
     return tuple(specialized_reads)
 
 
@@ -2940,14 +2997,68 @@ def _fixture_pull_request_paths(workspace: Path) -> tuple[str, ...]:
     return paths
 
 
+def _fixture_trusted_base_paths(workspace: Path) -> tuple[str, ...]:
+    state = _mapping(_load_json(workspace / "state.json"), field="fixture state")
+    review_value = state.get("review")
+    if review_value is None:
+        return ()
+    review = _mapping(review_value, field="fixture state.review")
+    if review.get("trusted_base_contract_available") is not True:
+        return ()
+    paths = tuple(
+        _relative_path(path, field="fixture state.review.changed_paths[]")
+        for path in _non_empty_string_list(
+            review.get("changed_paths"), field="fixture state.review.changed_paths"
+        )
+    )
+    for relative in paths:
+        path = workspace / relative
+        if path.is_symlink() or not path.is_file():
+            message = f"trusted-base fixture change must be a real file: {relative}"
+            raise HarnessValidationError(message)
+    return paths
+
+
+def _commit_trusted_base_change(workspace: Path, paths: tuple[str, ...]) -> None:
+    for relative in paths:
+        path = workspace / relative
+        path.write_text(
+            f"{path.read_text(encoding='utf-8').rstrip()}\n\n"
+            "<!-- Synthetic fixture change to the review gate. -->\n",
+            encoding="utf-8",
+        )
+    completed = _run_git(workspace, "add", *paths)
+    if completed.returncode != 0:
+        message = f"cannot stage synthetic review-gate change: {completed.stderr.strip()}"
+        raise HarnessValidationError(message)
+    _commit_fixture(workspace, "Change synthetic review gates")
+
+
+def _commit_pull_request_change(
+    workspace: Path,
+    files: list[tuple[str, bytes, int]],
+) -> None:
+    for relative, content, mode in files:
+        path = workspace / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(content)
+        path.chmod(mode)
+    completed = _run_git(workspace, "add", *(relative for relative, _content, _mode in files))
+    if completed.returncode != 0:
+        message = f"cannot stage synthetic pull-request change: {completed.stderr.strip()}"
+        raise HarnessValidationError(message)
+    _commit_fixture(workspace, "Apply synthetic merged pull request")
+
+
 def _initialize_fixture_repository(
     workspace: Path,
     *,
     issue_branch: str | None,
     pull_request_paths: tuple[str, ...],
+    trusted_base_paths: tuple[str, ...],
 ) -> None:
-    if issue_branch is not None and pull_request_paths:
-        message = "fixture cannot model an active issue branch and a merged pull request together"
+    if sum(bool(value) for value in (issue_branch, pull_request_paths, trusted_base_paths)) > 1:
+        message = "fixture cannot combine issue, pull-request, and trusted-base histories"
         raise HarnessValidationError(message)
     preserved_pull_request_files: list[tuple[str, bytes, int]] = []
     for relative in pull_request_paths:
@@ -2962,7 +3073,7 @@ def _initialize_fixture_repository(
         message = f"cannot initialize scenario Git fixture: {completed.stderr.strip()}"
         raise HarnessValidationError(message)
 
-    if issue_branch is None and not pull_request_paths:
+    if issue_branch is None and not pull_request_paths and not trusted_base_paths:
         _commit_fixture(workspace, "Initialize scenario base", allow_empty=True)
     completed = _run_git(workspace, "add", ".")
     if completed.returncode != 0:
@@ -2970,17 +3081,11 @@ def _initialize_fixture_repository(
         raise HarnessValidationError(message)
     _commit_fixture(workspace, "Initialize scenario fixture")
 
+    if trusted_base_paths:
+        _commit_trusted_base_change(workspace, trusted_base_paths)
+
     if pull_request_paths:
-        for relative, content, mode in preserved_pull_request_files:
-            path = workspace / relative
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_bytes(content)
-            path.chmod(mode)
-        completed = _run_git(workspace, "add", *pull_request_paths)
-        if completed.returncode != 0:
-            message = f"cannot stage synthetic pull-request change: {completed.stderr.strip()}"
-            raise HarnessValidationError(message)
-        _commit_fixture(workspace, "Apply synthetic merged pull request")
+        _commit_pull_request_change(workspace, preserved_pull_request_files)
 
     if issue_branch is not None:
         completed = _run_git(workspace, "switch", "-c", issue_branch)
@@ -3355,10 +3460,12 @@ def _prepare_workspace(
     fake_bin = model_context / "bin"
     issue_branch = _fixture_branch(workspace)
     pull_request_paths = _fixture_pull_request_paths(workspace)
+    trusted_base_paths = _fixture_trusted_base_paths(workspace)
     _initialize_fixture_repository(
         workspace,
         issue_branch=issue_branch,
         pull_request_paths=pull_request_paths,
+        trusted_base_paths=trusted_base_paths,
     )
     _configure_fixture_remote(workspace)
     _exclude_harness_runtime(workspace)

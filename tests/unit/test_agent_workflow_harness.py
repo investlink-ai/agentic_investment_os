@@ -227,6 +227,37 @@ def test_review_finding_rejects_follow_up_for_a_merge_blocker() -> None:
         )
 
 
+@pytest.mark.parametrize(
+    ("severity", "merge_disposition", "automation_action", "expected_error"),
+    [
+        ("High", "advisory", "none", "Blocker and High findings must be must_fix"),
+        ("Medium", "must_fix", "none", "requires a blocking automation action"),
+    ],
+)
+def test_review_finding_rejects_non_blocking_fields_for_merge_blockers(
+    severity: str,
+    merge_disposition: str,
+    automation_action: str,
+    expected_error: str,
+) -> None:
+    with pytest.raises(HarnessValidationError, match=expected_error):
+        parse_review_finding(
+            {
+                "stable_id": "STD-005",
+                "axis": "standards",
+                "severity": severity,
+                "governing_rule": "Required workflow evidence must fail closed.",
+                "consequence": "Publication could proceed with an unresolved blocker.",
+                "evidence": "The finding fields contradict the workflow contract.",
+                "merge_disposition": merge_disposition,
+                "automation_action": automation_action,
+                "residual_risk": "The blocker remains unresolved.",
+                "follow_up": None,
+            },
+            source="finding",
+        )
+
+
 def test_review_finding_rejects_an_identifier_from_another_axis() -> None:
     with pytest.raises(HarnessValidationError, match="prefix must agree with axis"):
         parse_review_finding(
@@ -1050,6 +1081,53 @@ def test_trace_evaluation_observes_each_trusted_reviewer_digest() -> None:
     evaluation = evaluate_trace(scenario, trace)
 
     assert {effect.category for effect in evaluation.observed_effects} == {
+        "reviewer.general_identity.read",
+        "reviewer.safety_identity.read",
+    }
+
+
+def test_trace_evaluation_observes_trusted_base_reviewer_reads() -> None:
+    raw = _scenario_data()
+    raw["permitted_effects"] = [
+        "repository.read",
+        "reviewer.general_identity.read",
+        "reviewer.safety_identity.read",
+    ]
+    raw["required_effects"] = [
+        "reviewer.general_identity.read",
+        "reviewer.safety_identity.read",
+    ]
+    scenario = parse_scenario(raw, source="scenario.json")
+    trace = _trace(
+        {"type": "thread.started", "thread_id": "thread-1"},
+        {"type": "turn.started"},
+        {
+            "type": "item.completed",
+            "item": {
+                "type": "command_execution",
+                "command": "git show HEAD^:.agents/skills/code-review/SKILL.md",
+                "status": "completed",
+                "exit_code": 0,
+            },
+        },
+        {
+            "type": "item.completed",
+            "item": {
+                "type": "command_execution",
+                "command": (
+                    f"git show {'a' * 40}:.agents/skills/investment-safety-review/SKILL.md"
+                ),
+                "status": "completed",
+                "exit_code": 0,
+            },
+        },
+        {"type": "turn.completed", "usage": {}},
+    )
+
+    evaluation = evaluate_trace(scenario, trace)
+
+    assert {effect.category for effect in evaluation.observed_effects} == {
+        "repository.read",
         "reviewer.general_identity.read",
         "reviewer.safety_identity.read",
     }

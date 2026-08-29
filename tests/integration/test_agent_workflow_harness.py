@@ -15,6 +15,7 @@ from scripts.agent_workflow_harness import (
     HarnessValidationError,
     Outcome,
     _prepare_workspace,
+    _run_git,
     _write_fake_tools,
     load_suite,
     main,
@@ -52,7 +53,42 @@ def _active_delivery_evidence() -> dict[str, object]:
             "epoch": 1,
             "invalidation_evidence": ["changed fixture contract"],
         },
-        "review_axes": {"investment_safety": {"selection": "not_selected"}},
+        "review_axes": {
+            "standards": {
+                "selection": "selected",
+                "disposition": "passed",
+                "reviewer_contract": {
+                    "source": "trusted_installed",
+                    "resolved_path": (
+                        "$WORKSPACE/.agent-harness/trusted-reviewers/code-review/SKILL.md"
+                    ),
+                    "sha256": "a" * 64,
+                },
+            },
+            "spec": {
+                "selection": "selected",
+                "disposition": "passed",
+                "reviewer_contract": {
+                    "source": "trusted_installed",
+                    "resolved_path": (
+                        "$WORKSPACE/.agent-harness/trusted-reviewers/code-review/SKILL.md"
+                    ),
+                    "sha256": "a" * 64,
+                },
+            },
+            "investment_safety": {
+                "selection": "not_selected",
+                "disposition": "not_applicable",
+                "reviewer_contract": {
+                    "source": "trusted_installed",
+                    "resolved_path": (
+                        "$WORKSPACE/.agent-harness/trusted-reviewers/"
+                        "investment-safety-review/SKILL.md"
+                    ),
+                    "sha256": "b" * 64,
+                },
+            },
+        },
     }
 
 
@@ -396,6 +432,117 @@ def test_suite_binds_harness_controlled_active_delivery_context(tmp_path: Path) 
         load_suite(tmp_path)
 
 
+def test_suite_accepts_incremental_active_delivery_evidence(tmp_path: Path) -> None:
+    _write_suite(tmp_path)
+    harness = tmp_path / ".agents" / "harness"
+    context_directory = harness / "active-delivery-contexts"
+    context_directory.mkdir()
+    evidence = _active_delivery_evidence()
+    review_plan = evidence["review_plan"]
+    assert isinstance(review_plan, dict)
+    review_plan["mode"] = "incremental"
+    evidence["remediation_rounds_used"] = 1
+    context_path = context_directory / "incremental-delivery-evidence.json"
+    context_path.write_text(
+        json.dumps(
+            {
+                "_active_delivery_context": {
+                    "source_type": "harness-controlled active delivery ledger",
+                    "producer": "deliver-issue",
+                    "same_execution": True,
+                },
+                "delivery_evidence": evidence,
+            }
+        ),
+        encoding="utf-8",
+    )
+    scenario_path = harness / "scenarios" / "issue-publication-awaits-approval.json"
+    scenario = json.loads(scenario_path.read_text(encoding="utf-8"))
+    scenario["active_delivery_context"] = "incremental-delivery-evidence"
+    scenario["active_delivery_context_sha256"] = hashlib.sha256(
+        context_path.read_bytes()
+    ).hexdigest()
+    scenario_path.write_text(json.dumps(scenario), encoding="utf-8")
+
+    suite = load_suite(tmp_path)
+
+    assert suite.scenarios[0].active_delivery_context == "incremental-delivery-evidence"
+
+
+def test_suite_rejects_delivery_evidence_with_an_omitted_axis(tmp_path: Path) -> None:
+    _write_suite(tmp_path)
+    harness = tmp_path / ".agents" / "harness"
+    context_directory = harness / "active-delivery-contexts"
+    context_directory.mkdir()
+    evidence = _active_delivery_evidence()
+    review_axes = evidence["review_axes"]
+    assert isinstance(review_axes, dict)
+    review_axes.pop("spec")
+    context_path = context_directory / "omitted-axis.json"
+    context_path.write_text(
+        json.dumps(
+            {
+                "_active_delivery_context": {
+                    "source_type": "harness-controlled active delivery ledger",
+                    "producer": "deliver-issue",
+                    "same_execution": True,
+                },
+                "delivery_evidence": evidence,
+            }
+        ),
+        encoding="utf-8",
+    )
+    scenario_path = harness / "scenarios" / "issue-publication-awaits-approval.json"
+    scenario = json.loads(scenario_path.read_text(encoding="utf-8"))
+    scenario["active_delivery_context"] = "omitted-axis"
+    scenario["active_delivery_context_sha256"] = hashlib.sha256(
+        context_path.read_bytes()
+    ).hexdigest()
+    scenario_path.write_text(json.dumps(scenario), encoding="utf-8")
+
+    with pytest.raises(HarnessValidationError, match="must define every review axis"):
+        load_suite(tmp_path)
+
+
+def test_suite_rejects_delivery_evidence_with_mismatched_axis_selection(
+    tmp_path: Path,
+) -> None:
+    _write_suite(tmp_path)
+    harness = tmp_path / ".agents" / "harness"
+    context_directory = harness / "active-delivery-contexts"
+    context_directory.mkdir()
+    evidence = _active_delivery_evidence()
+    review_axes = evidence["review_axes"]
+    assert isinstance(review_axes, dict)
+    standards_axis = review_axes["standards"]
+    assert isinstance(standards_axis, dict)
+    standards_axis["selection"] = "not_selected"
+    context_path = context_directory / "mismatched-axis.json"
+    context_path.write_text(
+        json.dumps(
+            {
+                "_active_delivery_context": {
+                    "source_type": "harness-controlled active delivery ledger",
+                    "producer": "deliver-issue",
+                    "same_execution": True,
+                },
+                "delivery_evidence": evidence,
+            }
+        ),
+        encoding="utf-8",
+    )
+    scenario_path = harness / "scenarios" / "issue-publication-awaits-approval.json"
+    scenario = json.loads(scenario_path.read_text(encoding="utf-8"))
+    scenario["active_delivery_context"] = "mismatched-axis"
+    scenario["active_delivery_context_sha256"] = hashlib.sha256(
+        context_path.read_bytes()
+    ).hexdigest()
+    scenario_path.write_text(json.dumps(scenario), encoding="utf-8")
+
+    with pytest.raises(HarnessValidationError, match="selection must agree"):
+        load_suite(tmp_path)
+
+
 def test_runner_materializes_active_delivery_context_outside_the_tested_diff(
     tmp_path: Path,
 ) -> None:
@@ -710,6 +857,52 @@ def test_pull_request_view_materialization_matches_exact_synthetic_merge(tmp_pat
         second_runtime,
     )
     assert second_pull_request == pull_request_materialization
+
+
+def test_workspace_preserves_trusted_reviewers_in_the_synthetic_base(tmp_path: Path) -> None:
+    fixture_state = _write_suite(tmp_path)
+    reviewer_paths = {
+        "code-review": ".agents/skills/code-review/SKILL.md",
+        "investment-safety-review": ".agents/skills/investment-safety-review/SKILL.md",
+    }
+    for name, relative in reviewer_paths.items():
+        path = tmp_path / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f"# Trusted {name}\n", encoding="utf-8")
+    state = json.loads(fixture_state.read_text(encoding="utf-8"))
+    state["review"] = {
+        "changed_paths": list(reviewer_paths.values()),
+        "trusted_base_contract_available": True,
+    }
+    fixture_state.write_text(json.dumps(state), encoding="utf-8")
+    scenario_path = (
+        tmp_path / ".agents" / "harness" / "scenarios" / "issue-publication-awaits-approval.json"
+    )
+    scenario = json.loads(scenario_path.read_text(encoding="utf-8"))
+    scenario["fixture_sha256"] = _fixture_digest(fixture_state.parent)
+    scenario["skills"].update(reviewer_paths)
+    scenario["expected_skill_routes"] = sorted(scenario["skills"])
+    scenario_path.write_text(json.dumps(scenario), encoding="utf-8")
+    suite = load_suite(tmp_path)
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+
+    workspace, _fake_bin, _active, _pull_request = _prepare_workspace(
+        suite, suite.scenarios[0], runtime
+    )
+
+    for relative in reviewer_paths.values():
+        base_contract = _run_git(workspace, "show", f"HEAD^:{relative}")
+        assert base_contract.returncode == 0
+        assert base_contract.stdout.startswith("# Trusted")
+    changed = subprocess.run(
+        ["/usr/bin/git", "diff", "--name-only", "HEAD^", "HEAD"],
+        cwd=workspace,
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    assert changed.stdout.splitlines() == list(reviewer_paths.values())
 
 
 def test_runner_records_pull_request_view_materialization(tmp_path: Path) -> None:

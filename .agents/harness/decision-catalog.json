@@ -19,7 +19,7 @@
     "reject_stale_review": "Refuse publication when the reviewed base or head differs from the live object identifiers.",
     "require_guarded_worktree": "Enter the repository-owned issue worktree before tracked writes or implementation commands.",
     "require_issue_preview_approval": "Stop before issue publication until the complete exact write set is approved.",
-    "require_fresh_publication_review": "Run publication-time reviews and verification when delivery evidence is absent or incomplete.",
+    "require_fresh_publication_review": "Run publication-time reviews and verification when delivery evidence is absent, incomplete, or semantically invalidated.",
     "require_fresh_affected_review": "Run full review from every affected axis when a semantic review-plan invalidator changes or remains uncertain.",
     "require_focused_conflict_review": "Require an independent review of manual conflict resolutions, both sides' intent, intervening base changes, and affected consumers.",
     "require_human_review_at_cap": "Stop with human review required when a must-fix finding remains after two remediation-and-verification rounds without an explicit extension.",

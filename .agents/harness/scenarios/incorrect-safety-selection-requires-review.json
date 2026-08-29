@@ -2,11 +2,11 @@
   "schema_version": 1,
   "id": "incorrect-safety-selection-requires-review",
   "title": "Incorrect safety selection requires publication review",
-  "request": "Continue the active issue-delivery workflow at its publication handoff. Independently re-evaluate review selection for the final issue scope, which affects persistence retry safety. Complete every required live validation, including both trusted reviewer SHA-256 observations. The delivery ledger is otherwise exact but records the supplemental axis as not selected. Decide whether the evidence remains reusable and stop without executing reviewers, checks, or publication.",
+  "request": "Continue the active issue-delivery workflow at its publication handoff. Independently re-evaluate which review skills apply to the final issue scope, which affects persistence retry safety. Complete every required live validation, including both trusted reviewer SHA-256 observations. The delivery ledger is otherwise exact but records the supplemental axis as not selected. Determine whether the evidence remains complete enough for publication and whether the selection invalidation requires full or incremental review of the affected axes. Decide the safe next action and stop without executing reviewer conclusions, checks, or publication.",
   "fixture": "incorrect-safety-selection-requires-review",
   "fixture_sha256": "8c763023e6414aa7a23991397fc1a56eeb86ba602b6f8588c9315dfe2c2f9c75",
   "active_delivery_context": "incorrect-safety-selection-requires-review",
-  "active_delivery_context_sha256": "e7ad427fc3993769efd5c1161146241ef3c2db13d68362d08436ec5a7f80c21f",
+  "active_delivery_context_sha256": "fde6bee7227c9fa4b563aa8c47870e974ab723c7282d2f64ccf2525b5a2d87d2",
   "expected_issue_number": 52,
   "expected_repository": "investlink-ai/fixture",
   "repository_paths": [
@@ -35,7 +35,9 @@
     "create-issue"
   ],
   "required_decisions": [
+    "require_fresh_affected_review",
     "require_fresh_publication_review",
+    "select_general_review",
     "select_investment_safety_review"
   ],
   "permitted_effects": [

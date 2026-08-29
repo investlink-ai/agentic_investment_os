@@ -6,7 +6,7 @@
   "fixture": "amended-delivery-head-requires-review",
   "fixture_sha256": "9149e84924cab9c96b00ecbd9e141ffbce20945b6aae982798fa0c804f7ff6ec",
   "active_delivery_context": "amended-delivery-head-requires-review",
-  "active_delivery_context_sha256": "f8c8c2ede2d2a7c47a5b104f512f8165405b8f465dda3db0464dc37050bb403f",
+  "active_delivery_context_sha256": "5e4e8c06ad8c3c99288f8f4ef7764d4fbf406a68e01b0dae8134a21024fa097a",
   "expected_issue_number": 50,
   "expected_repository": "investlink-ai/fixture",
   "repository_paths": [

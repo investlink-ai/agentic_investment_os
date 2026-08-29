@@ -89,6 +89,7 @@
     },
     "review_axes": {
       "standards": {
+        "selection": "selected",
         "disposition": "passed",
         "reviewer_contract": {
           "source": "verified_base",
@@ -98,6 +99,7 @@
         }
       },
       "spec": {
+        "selection": "selected",
         "disposition": "passed",
         "reviewer_contract": {
           "source": "verified_base",

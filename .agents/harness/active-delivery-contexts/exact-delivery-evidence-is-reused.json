@@ -45,6 +45,7 @@
     "reviewed_head": "$WORKSPACE_HEAD",
     "review_axes": {
       "standards": {
+        "selection": "selected",
         "disposition": "passed",
         "reviewer_contract": {
           "source": "trusted_installed",
@@ -53,6 +54,7 @@
         }
       },
       "spec": {
+        "selection": "selected",
         "disposition": "passed",
         "reviewer_contract": {
           "source": "trusted_installed",
