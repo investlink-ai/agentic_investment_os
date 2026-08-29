@@ -29,7 +29,7 @@ from tests._production_research import (
     production_recorded_evidence,
     production_recorded_official_evidence,
 )
-from tests._universe import recorded_universe, runtime_configuration
+from tests._universe import recorded_portfolio, recorded_universe, runtime_configuration
 
 if TYPE_CHECKING:
     from agentic_investment_os.domain.governance import ConstitutionUse
@@ -106,6 +106,7 @@ def _advance(state_root: Path) -> Advance:
         _sources(state_root),
         repository_root=REPOSITORY_ROOT,
         recorded_universe=recorded_universe(),
+        recorded_portfolio=recorded_portfolio(),
         recorded_evidence=production_recorded_evidence(),
         recorded_official_evidence=production_recorded_official_evidence(),
         recorded_model=ValidProductionModel(),
@@ -197,6 +198,9 @@ def _interrupt_after_reconcile(state_root: Path) -> None:
         evidence_vault=configured.evidence_vault,
         memory=configured.memory,
         memory_refusal_ledger=configured.memory_refusal_ledger,
+        portfolio_policy=configured.portfolio_policy,
+        portfolio_input_source=configured.portfolio_input_source,
+        portfolio_ledger=configured.portfolio_ledger,
     )
     interrupted(
         cycle=MarketSession(date.fromisoformat(SESSION)).to_payload(),

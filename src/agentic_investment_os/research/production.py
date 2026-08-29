@@ -28,6 +28,7 @@ from agentic_investment_os.research.model import (
     ModelTimingDisposition,
     ResearchRole,
     ResearchRoleModel,
+    observation_matches_role,
     parse_model_configuration_contract_payload,
     parse_prompt_contract_payload,
     parse_tool_contract_payloads,
@@ -62,6 +63,7 @@ __all__ = (
     "ProductionCallIntent",
     "ProductionCallLedger",
     "ProductionCallPreparation",
+    "ProductionCallReplay",
     "ProductionModelResponseRecord",
     "ProductionResearch",
     "ProductionResearchBuild",
@@ -647,6 +649,22 @@ class ProductionCallLedger(Protocol):
         recorded_at: UtcInstant,
     ) -> LabCallObservation: ...
 
+    def replay_calls(self, call_ids: tuple[str, ...]) -> tuple[ProductionCallReplay, ...]: ...
+
+
+@dataclass(frozen=True, slots=True)
+class ProductionCallReplay:
+    """Return one validated persisted intent and its exact observed artifact."""
+
+    intent: ProductionCallIntent
+    observation: LabCallObservation
+
+    def __post_init__(self) -> None:
+        if self.observation.call_id != self.intent.call_id or not observation_matches_role(
+            self.observation, self.intent.role
+        ):
+            raise ValueError(_INVALID_INTENT)
+
 
 class ProductionResearchHistoryValidator(Protocol):
     """Validate complete durable production research history without invoking effects."""
@@ -898,6 +916,148 @@ class ProductionResearch:
             _checkpoint(calls, tuple(artifact_ids)),
             tuple(resolutions),
             no_action,
+            None,
+        )
+
+    def replay_run(  # noqa: PLR0911, PLR0912 - reject each corrupt replay shape locally.
+        self,
+        *,
+        run_id: str,
+        dossier_checkpoint: ResearchCheckpoint,
+        research_checkpoint: ResearchCheckpoint,
+        no_action_reason: NoActionReason | None,
+    ) -> ProductionResearchRun | None:
+        """Rebuild terminal resolutions from exact durable calls without new model effects."""
+        call_ids = tuple(sorted((*dossier_checkpoint.call_ids, *research_checkpoint.call_ids)))
+        records = self.ledger.replay_calls(call_ids)
+        if tuple(record.intent.call_id for record in records) != call_ids or any(
+            record.intent.run_id != run_id for record in records
+        ):
+            return None
+        by_call_id = {record.intent.call_id: record for record in records}
+        dossier_calls = tuple(by_call_id[call_id] for call_id in dossier_checkpoint.call_ids)
+        research_calls = tuple(by_call_id[call_id] for call_id in research_checkpoint.call_ids)
+        if (
+            _replayed_checkpoint(dossier_calls) != dossier_checkpoint
+            or _replayed_checkpoint(research_calls) != research_checkpoint
+        ):
+            return None
+        dossiers: dict[str, Dossier] = {}
+        for record in dossier_calls:
+            artifact = record.observation.artifact
+            if (
+                record.intent.role is not ResearchRole.EVIDENCE_COLLECTOR
+                or type(artifact) is not Dossier
+            ):
+                return None
+            if record.intent.request_id in dossiers:
+                return None
+            dossiers[record.intent.request_id] = artifact
+        roles_by_request: dict[str, dict[ResearchRole, ProductionCallReplay]] = {}
+        for record in research_calls:
+            roles = roles_by_request.setdefault(record.intent.request_id, {})
+            if record.intent.role in roles:
+                return None
+            roles[record.intent.role] = record
+        if not dossiers and not roles_by_request:
+            return (
+                ProductionResearchRun(
+                    research_checkpoint,
+                    (),
+                    no_action_reason,
+                    None,
+                )
+                if no_action_reason is NoActionReason.NO_ATTENTION
+                else None
+            )
+        if set(roles_by_request) != set(dossiers):
+            return None
+        resolutions: list[ProductionResearchResolution] = []
+        supported_no_action: set[NoActionReason] = set()
+        for request_id in sorted(dossiers):
+            dossier = dossiers[request_id]
+            roles = roles_by_request[request_id]
+            thesis_record = roles.get(ResearchRole.THESIS_BUILDER)
+            thesis = None if thesis_record is None else thesis_record.observation.artifact
+            if type(thesis) is not Thesis or not _replayed_predecessors_match(
+                thesis_record, dossier=dossier, thesis=None, skeptic=None, forecast=None
+            ):
+                return None
+            if any(condition.active for condition in thesis.uninvestable_conditions):
+                if set(roles) != {ResearchRole.THESIS_BUILDER}:
+                    return None
+                supported_no_action.add(NoActionReason.NO_VALID_THESIS)
+                continue
+            skeptic_record = roles.get(ResearchRole.INDEPENDENT_SKEPTIC)
+            skeptic = None if skeptic_record is None else skeptic_record.observation.artifact
+            if type(skeptic) is not SkepticResult or not _replayed_predecessors_match(
+                skeptic_record,
+                dossier=dossier,
+                thesis=thesis,
+                skeptic=None,
+                forecast=None,
+            ):
+                return None
+            if skeptic.decision is SkepticDecision.REJECT:
+                if set(roles) != {
+                    ResearchRole.THESIS_BUILDER,
+                    ResearchRole.INDEPENDENT_SKEPTIC,
+                }:
+                    return None
+                supported_no_action.add(NoActionReason.SKEPTIC_REJECTED)
+                resolutions.append(
+                    ProductionResearchResolution(request_id, dossier, thesis, skeptic, None, None)
+                )
+                continue
+            if skeptic.decision is not SkepticDecision.ACCEPT:
+                return None
+            forecast_record = roles.get(ResearchRole.SCENARIO_FORECASTER)
+            forecast = None if forecast_record is None else forecast_record.observation.artifact
+            if type(forecast) is not ScenarioForecast or not _replayed_predecessors_match(
+                forecast_record,
+                dossier=dossier,
+                thesis=thesis,
+                skeptic=skeptic,
+                forecast=None,
+            ):
+                return None
+            cio_record = roles.get(ResearchRole.CIO)
+            cio = None if cio_record is None else cio_record.observation.artifact
+            if (
+                type(cio) is not CioResolution
+                or set(roles)
+                != {
+                    ResearchRole.THESIS_BUILDER,
+                    ResearchRole.INDEPENDENT_SKEPTIC,
+                    ResearchRole.SCENARIO_FORECASTER,
+                    ResearchRole.CIO,
+                }
+                or not _replayed_predecessors_match(
+                    cio_record,
+                    dossier=dossier,
+                    thesis=thesis,
+                    skeptic=skeptic,
+                    forecast=forecast,
+                )
+            ):
+                return None
+            if cio.stance is CioStance.ABSTAIN:
+                supported_no_action.add(NoActionReason.CIO_ABSTAINED)
+            resolutions.append(
+                ProductionResearchResolution(request_id, dossier, thesis, skeptic, forecast, cio)
+            )
+        active = any(
+            item.cio is not None and item.cio.stance is not CioStance.ABSTAIN
+            for item in resolutions
+        )
+        if (active and no_action_reason is not None) or (
+            not active and no_action_reason not in supported_no_action
+        ):
+            return None
+        return ProductionResearchRun(
+            research_checkpoint,
+            tuple(resolutions),
+            no_action_reason,
             None,
         )
 
@@ -1426,6 +1586,48 @@ def _checkpoint(
         sum(call.observation.input_tokens for call in calls),
         sum(call.observation.output_tokens for call in calls),
         sum(call.observation.turns for call in calls),
+    )
+
+
+def _replayed_checkpoint(
+    records: tuple[ProductionCallReplay, ...],
+) -> ResearchCheckpoint | None:
+    calls: list[_CallResult] = []
+    artifact_ids: list[str] = []
+    for record in records:
+        artifact = record.observation.artifact
+        if (
+            record.observation.disposition is not LabObservationDisposition.VALIDATED
+            or artifact is None
+        ):
+            return None
+        calls.append(_CallResult(record.intent, record.observation))
+        artifact_ids.append(artifact.content_hash)
+    return _checkpoint(calls, tuple(artifact_ids))
+
+
+def _replayed_predecessors_match(
+    record: ProductionCallReplay | None,
+    *,
+    dossier: Dossier,
+    thesis: Thesis | None,
+    skeptic: SkepticResult | None,
+    forecast: ScenarioForecast | None,
+) -> bool:
+    if record is None:
+        return False
+    try:
+        payload = json.loads(record.intent.model_input_json)
+    except json.JSONDecodeError:  # pragma: no cover - intent construction already proves JSON.
+        return False
+    return type(payload) is dict and all(
+        payload.get(field) == (None if artifact is None else artifact.to_payload())
+        for field, artifact in (
+            ("dossier", dossier),
+            ("thesis", thesis),
+            ("skeptic", skeptic),
+            ("forecast", forecast),
+        )
     )
 
 

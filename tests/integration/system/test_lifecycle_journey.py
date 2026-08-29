@@ -174,7 +174,7 @@ def test_lifecycle_journey_resumes_replays_and_rebuilds_status_across_processes(
     resumed = _advance_observation(_run_process("advance", state_root))
 
     assert resumed.disposition == "advanced"
-    assert resumed.completed_phase == "UpdateMemory"
+    assert resumed.completed_phase == "ConstructPortfolio"
     assert resumed.recovery == "resumed"
     assert resumed.configuration_version == 1
     assert len(resumed.run_id) == SHA256_HEX_LENGTH
@@ -191,6 +191,7 @@ def test_lifecycle_journey_resumes_replays_and_rebuilds_status_across_processes(
         (6, "dossiers_built", "BuildDossiers"),
         (7, "research_run", "RunResearch"),
         (8, "memory_updated", "UpdateMemory"),
+        (9, "portfolio_constructed", "ConstructPortfolio"),
     ]
     assert {str(row[3]) for row in completed_history} == {resumed.run_id}
     assert {str(row[4]) for row in completed_history} == {resumed.configuration_hash}

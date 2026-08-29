@@ -158,9 +158,10 @@ not consume a remediation round.
 The pre-commit hook checks formatting, lint, and staged-diff whitespace. After checking destination
 refs, the pre-push hook clears Git's repository-local environment before running the full local gate,
 so nested fixture repositories cannot alter the issue worktree's index or refs. GitHub Actions
-installs the locked environment and runs the same `make check` target. Hooks and CI are guardrails,
-not substitutes for focused tests. Treat a hook refusal as a failed gate to resolve through the issue
-worktree; never commit or push with `--no-verify`.
+installs the locked environment for separate Makefile-owned static-and-coverage and lifecycle
+state-machine jobs, then reports the stable `make check` aggregate only when both pass. Hooks and CI
+are guardrails, not substitutes for focused tests. Treat a hook refusal as a failed gate to resolve
+through the issue worktree; never commit or push with `--no-verify`.
 
 A request to work on, implement, fix, refactor, document, complete, resume, deliver, or ship a numbered
 issue authorizes local edits, checks, commits, issue-branch push, and creation or update of a draft

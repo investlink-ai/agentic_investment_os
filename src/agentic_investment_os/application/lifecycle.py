@@ -21,6 +21,7 @@ from agentic_investment_os.domain.identity import (
     CryptoDecisionWindow,
     EquityInstrumentIdentity,
     MarketSession,
+    canonical_instrument_bytes,
     parse_decision_cycle_identity,
 )
 from agentic_investment_os.domain.lifecycle import (
@@ -46,6 +47,7 @@ from agentic_investment_os.domain.lifecycle import (
     PerformDossierBuild,
     PerformEvidenceCapture,
     PerformMemoryUpdate,
+    PerformPortfolioConstruction,
     PerformResearch,
     PinnedRunIdentity,
     ResearchCheckpoint,
@@ -64,8 +66,10 @@ from agentic_investment_os.domain.universe import (
 )
 from agentic_investment_os.evidence.capture import (
     EvidenceFeed,
+    EvidenceKind,
     EvidencePersistenceError,
     InvalidEvidenceError,
+    is_official_macro_release,
 )
 from agentic_investment_os.memory.admission import (
     BeliefClaimKind,
@@ -79,6 +83,20 @@ from agentic_investment_os.memory.beliefs import (
     BeliefPersistenceError,
     RecordDisposition,
 )
+from agentic_investment_os.portfolio.construction import (
+    BalancedPortfolioPolicy,
+    HouseViewResolution,
+    MaterialEventEvidence,
+    PortfolioConstructionRequest,
+    PortfolioHistoryValidator,
+    PortfolioInputSet,
+    PortfolioInputSource,
+    PortfolioRefusalReason,
+    PortfolioResultLedger,
+    PortfolioStance,
+    construct_balanced_portfolio,
+)
+from agentic_investment_os.research.authority import ResearchAuthority
 from agentic_investment_os.research.production import (
     ProductionBeliefGraph,
     ProductionResearch,
@@ -173,6 +191,9 @@ class Advance:
     evidence_vault: EvidenceVault
     memory: Record
     memory_refusal_ledger: BeliefLedger
+    portfolio_policy: BalancedPortfolioPolicy
+    portfolio_input_source: PortfolioInputSource
+    portfolio_ledger: PortfolioResultLedger
 
     def __call__(  # noqa: PLR0912, PLR0915 - exhaust each typed lifecycle decision.
         self,
@@ -317,6 +338,36 @@ class Advance:
                     command,
                     memory_update=memory_result,
                     no_action_reason=run.no_action_reason,
+                )
+                continue
+            if isinstance(decision, PerformPortfolioConstruction):
+                if not isinstance(command, AdvanceCommand):
+                    raise InvalidLifecycleStateError(_INCOMPLETE_CHECKPOINT_RESULT)
+                command = replace(command, attention_selection=decision.attention_artifact)
+                replayed_run = self.production_research.replay_run(
+                    run_id=decision.pinned_run_identity.run_id,
+                    dossier_checkpoint=decision.dossier_checkpoint,
+                    research_checkpoint=decision.research_checkpoint,
+                    no_action_reason=decision.no_action_reason,
+                )
+                if replayed_run is None:
+                    raise InvalidLifecycleStateError(_INCOMPLETE_CHECKPOINT_RESULT)
+                result = construct_balanced_portfolio(
+                    self._portfolio_request(
+                        command,
+                        replayed_run,
+                        decision.dossier_checkpoint,
+                        decision.memory_checkpoint,
+                    )
+                )
+                command = replace(
+                    command,
+                    portfolio_construction=self.portfolio_ledger.record(
+                        command.pinned_run_identity.run_id,
+                        result,
+                        recorded_at,
+                    ),
+                    no_action_reason=decision.no_action_reason,
                 )
                 continue
             # Strict mypy proves this line unreachable; removing it is runtime-equivalent.
@@ -668,7 +719,7 @@ class Advance:
         ):
             raise InvalidLifecycleStateError(_INCOMPLETE_CHECKPOINT_RESULT)
 
-    def _prepare_command(
+    def _prepare_command(  # noqa: PLR0911 - map each hostile input refusal explicitly.
         self,
         parsed: AdvanceRequest | InputRefusal,
         recorded_at: UtcInstant,
@@ -712,11 +763,33 @@ class Advance:
                 )
                 if isinstance(universe_identity, UniverseRefusal):
                     raise LifecyclePersistenceError(_UNIVERSE_SOURCE_INVALID)
+                portfolio_inputs = self.portfolio_input_source.load(loaded.position_snapshot)
+                if isinstance(portfolio_inputs, PortfolioRefusalReason):
+                    return InputRefusal(
+                        _portfolio_input_refusal_code(portfolio_inputs),
+                        parsed.idempotency_key,
+                        parsed.session,
+                    )
+                if portfolio_inputs.available_at.value > loaded.evidence_cutoff.value:
+                    return InputRefusal(
+                        InputRefusalCode.CONTRADICTORY_PORTFOLIO_INPUT,
+                        parsed.idempotency_key,
+                        parsed.session,
+                    )
+                portfolio_age = loaded.evidence_cutoff.value - portfolio_inputs.observed_at.value
+                if portfolio_age.total_seconds() > self.portfolio_policy.maximum_input_age_seconds:
+                    return InputRefusal(
+                        InputRefusalCode.STALE_PORTFOLIO_INPUT,
+                        parsed.idempotency_key,
+                        parsed.session,
+                    )
                 identity = PinnedRunIdentity.create(
                     parsed,
                     configuration_version=self.configuration_version,
                     configuration_hash=self.configuration_hash,
                     research_policy_hash=self.production_research.policy.fingerprint,
+                    portfolio_policy_hash=self.portfolio_policy.policy_id,
+                    portfolio_input_hash=portfolio_inputs.input_id,
                     universe_inputs=universe_identity,
                     constitution=constitution.reference,
                 )
@@ -739,6 +812,7 @@ class Advance:
                         parsed,
                         identity,
                         snapshot,
+                        portfolio_inputs,
                         constitution=constitution,
                     )
                 # Strict mypy proves this line unreachable; removing it is runtime-equivalent.
@@ -747,6 +821,132 @@ class Advance:
             assert_never(loaded)  # pragma: no cover
         # Strict mypy proves this line unreachable; removing it is runtime-equivalent.
         assert_never(parsed)  # pragma: no cover
+
+    def _portfolio_request(
+        self,
+        command: AdvanceCommand,
+        run: ProductionResearchRun,
+        dossier_checkpoint: ResearchCheckpoint,
+        memory_checkpoint: ResearchCheckpoint,
+    ) -> PortfolioConstructionRequest:
+        subjects = {
+            canonical_instrument_bytes(subject.identity): subject
+            for subject in command.universe_snapshot.attention_subjects
+        }
+        resolutions: list[HouseViewResolution] = []
+        for resolution in run.resolutions:
+            cio = resolution.cio
+            if cio is None:
+                continue
+            subject = subjects.get(canonical_instrument_bytes(cio.subject))
+            if subject is None:
+                raise InvalidLifecycleStateError(_INCOMPLETE_CHECKPOINT_RESULT)
+            resolutions.append(
+                HouseViewResolution(
+                    identity=cio.subject,
+                    request_id=resolution.request_id,
+                    resolution_id=cio.content_hash,
+                    stance=PortfolioStance(cio.stance.value),
+                    uncertainty=cio.uncertainty,
+                    production_authority=(
+                        cio.authority_scope == ResearchAuthority.PRODUCTION.value
+                        and cio.non_production is False
+                    ),
+                    eligible_for_new_entry=subject.eligible_for_new_entry,
+                    is_position=subject.is_position,
+                    evidence_artifact_ids=tuple(
+                        sorted(
+                            {
+                                artifact_id
+                                for assertion in (
+                                    *resolution.dossier.facts,
+                                    *resolution.dossier.interpretations,
+                                )
+                                if assertion.assertion_id in cio.rationale.assertion_ids
+                                for artifact_id in assertion.citation_artifact_ids
+                            }
+                        )
+                    ),
+                )
+            )
+        identity = command.pinned_run_identity
+        attention = command.attention_selection
+        if not isinstance(attention, AttentionArtifact):
+            raise InvalidLifecycleStateError(_INCOMPLETE_CHECKPOINT_RESULT)
+        expected_request_ids = tuple(
+            sorted(
+                {
+                    *(item.request_id for item in attention.dossier_requests),
+                    *(
+                        item.refresh_id
+                        for item in attention.holding_refreshes
+                        if item.disposition is HoldingRefreshDisposition.REQUIRED
+                    ),
+                }
+            )
+        )
+        if not isinstance(command.portfolio_inputs, PortfolioInputSet):
+            raise InvalidLifecycleStateError(_INCOMPLETE_CHECKPOINT_RESULT)
+        try:
+            evidence_records = self.evidence_vault.stored_records_for_artifacts(
+                attention.evidence_artifact_ids
+            )
+        except (EvidencePersistenceError, InvalidEvidenceError) as error:
+            raise InvalidLifecycleStateError(_INCOMPLETE_CHECKPOINT_RESULT) from error
+        material_event_evidence: list[MaterialEventEvidence] = []
+        for record in evidence_records:
+            artifact = record.artifact
+            if artifact.kind not in (EvidenceKind.ISSUER_RELEASE, EvidenceKind.OFFICIAL_MACRO):
+                continue
+            if artifact.kind is EvidenceKind.OFFICIAL_MACRO and not is_official_macro_release(
+                record
+            ):
+                continue
+            released_at = artifact.source_event_at or artifact.published_at
+            if released_at is None:
+                raise InvalidLifecycleStateError(_INCOMPLETE_CHECKPOINT_RESULT)
+            material_event_evidence.append(
+                MaterialEventEvidence(
+                    artifact.artifact_id,
+                    artifact.kind.value,
+                    artifact.source_identity,
+                    released_at,
+                    artifact.available_at,
+                    tuple(
+                        sorted(
+                            (mapping.identity for mapping in artifact.entity_mappings),
+                            key=canonical_instrument_bytes,
+                        )
+                    ),
+                )
+            )
+        return PortfolioConstructionRequest(
+            run_id=identity.run_id,
+            cycle=command.request.session,
+            evidence_cutoff=identity.evidence_cutoff,
+            data_regime=identity.data_regime,
+            configuration_hash=identity.configuration_hash,
+            constitution_version=identity.constitution_version,
+            constitution_hash=identity.constitution_hash,
+            research_policy_hash=identity.research_policy_hash,
+            research_artifact_ids=tuple(
+                sorted(
+                    {
+                        *dossier_checkpoint.artifact_ids,
+                        *(() if run.checkpoint is None else run.checkpoint.artifact_ids),
+                    }
+                )
+            ),
+            memory_event_ids=memory_checkpoint.artifact_ids,
+            universe_snapshot_id=command.universe_snapshot.snapshot_id,
+            expected_research_request_ids=expected_request_ids,
+            resolutions=tuple(resolutions),
+            inputs=command.portfolio_inputs,
+            policy=self.portfolio_policy,
+            material_event_evidence=tuple(
+                sorted(material_event_evidence, key=lambda item: item.artifact_id)
+            ),
+        )
 
 
 def _research_refusal(memory_refusal: MemoryUpdateRefusal) -> ResearchRefusal:
@@ -775,6 +975,18 @@ def _input_refusal_code(code: UniverseRefusalCode) -> InputRefusalCode:
     assert_never(code)  # pragma: no cover
 
 
+def _portfolio_input_refusal_code(
+    reason: PortfolioRefusalReason,
+) -> InputRefusalCode:
+    if reason is PortfolioRefusalReason.STALE_INPUT:
+        return InputRefusalCode.STALE_PORTFOLIO_INPUT
+    if reason is PortfolioRefusalReason.CONTRADICTORY_INPUT:
+        return InputRefusalCode.CONTRADICTORY_PORTFOLIO_INPUT
+    if reason is PortfolioRefusalReason.INCOMPLETE_INPUT:
+        return InputRefusalCode.MISSING_PORTFOLIO_INPUT
+    return InputRefusalCode.INVALID_PORTFOLIO_INPUT
+
+
 @dataclass(frozen=True, slots=True)
 class Status:
     """Rebuild and return lifecycle status without advancing authoritative history."""
@@ -784,6 +996,7 @@ class Status:
     constitution_status: ConstitutionStatus
     research_history_validator: ProductionResearchHistoryValidator
     memory_history_validator: BeliefHistoryValidator
+    portfolio_history_validator: PortfolioHistoryValidator
 
     def __call__(self) -> LifecycleStatus:
         status = self.projection.rebuild_status()
@@ -792,5 +1005,8 @@ class Status:
             self.projection.rebuild_production_research_checkpoints()
         )
         self.memory_history_validator.validate_history(self.projection.rebuild_memory_event_ids())
+        self.portfolio_history_validator.validate_history(
+            self.projection.rebuild_portfolio_checkpoints()
+        )
         uses = self.projection.rebuild_constitution_uses()
         return replace(status, constitution_governance=self.constitution_status(uses))

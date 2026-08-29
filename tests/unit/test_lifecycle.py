@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, cast, override
 
 import pytest
 
+from agentic_investment_os.adapters.recorded_portfolio import RecordedPortfolioSource
 from agentic_investment_os.adapters.recorded_universe import RecordedUniverseSource
 from agentic_investment_os.application.lifecycle import Advance
 from agentic_investment_os.domain.attention import (
@@ -21,7 +22,12 @@ from agentic_investment_os.domain.governance import (
     ConstitutionUse,
     GovernanceStateError,
 )
-from agentic_investment_os.domain.identity import AssetClass, CryptoDecisionWindow, MarketSession
+from agentic_investment_os.domain.identity import (
+    AssetClass,
+    CryptoDecisionWindow,
+    EquityInstrumentIdentity,
+    MarketSession,
+)
 from agentic_investment_os.domain.lifecycle import (
     AdvanceAttempt,
     AdvanceCommand,
@@ -47,18 +53,24 @@ from agentic_investment_os.domain.lifecycle import (
     LifecyclePhase,
     MemoryUpdateRefusal,
     MemoryUpdateRefusalReason,
+    NoActionReason,
     PerformAttentionSelection,
     PerformDossierBuild,
     PerformEvidenceCapture,
     PerformMemoryUpdate,
+    PerformPortfolioConstruction,
     PerformResearch,
     PinnedRunIdentity,
+    PortfolioCheckpoint,
+    PortfolioCheckpointReference,
+    PortfolioCheckpointRefusalReason,
     ProductionResearchReference,
     ResearchCheckpoint,
     ResearchRefusal,
     derive_lifecycle_status,
     parse_advance_receipt,
     parse_lifecycle_checkpoint,
+    parse_portfolio_checkpoint,
     parse_research_checkpoint,
     parse_research_refusal,
     reconstruct_constitution_uses,
@@ -71,6 +83,12 @@ from agentic_investment_os.domain.universe import (
     UniverseSnapshot,
 )
 from agentic_investment_os.evidence.capture import EvidencePersistenceError
+from agentic_investment_os.portfolio.construction import (
+    PortfolioInputSet,
+    PortfolioRefusalReason,
+)
+from agentic_investment_os.research.production import ProductionResearchRun
+from agentic_investment_os.research.resolution import CioStance
 from tests._attention import (
     attention_artifact,
     attention_inputs_for_snapshot,
@@ -78,10 +96,13 @@ from tests._attention import (
 )
 from tests._evidence import evidence_capture_checkpoint
 from tests._governance import BaselineConstitutionRegistry
+from tests._portfolio import recorded_portfolio_inputs
 from tests._universe import (
     exact_text,
     pinned_run_identity,
     recorded_universe,
+    typed_portfolio_inputs,
+    typed_portfolio_policy,
     typed_research_policy,
     typed_universe_policy,
     universe_snapshot,
@@ -103,13 +124,19 @@ MEMORY_CHECKPOINT = ResearchCheckpoint(("3" * SHA256_HEX_LENGTH,))
 if TYPE_CHECKING:
     from agentic_investment_os.application.memory import Record
     from agentic_investment_os.domain.attention import AttentionInputs
+    from agentic_investment_os.domain.universe import PositionSnapshot
     from agentic_investment_os.evidence.capture import (
         EvidenceCaptureSummary,
         EvidenceStoredRecord,
         EvidenceVault,
     )
     from agentic_investment_os.memory.beliefs import BeliefLedger
-    from agentic_investment_os.research.production import ProductionResearch
+    from agentic_investment_os.portfolio.construction import PortfolioResultLedger
+    from agentic_investment_os.research.policy import ProductionResearchPolicy
+    from agentic_investment_os.research.production import (
+        ProductionResearch,
+        ProductionResearchResolution,
+    )
 
 
 class _StringSubclass(str):
@@ -133,6 +160,50 @@ class _NoneSpoof:
 @dataclass(frozen=True, slots=True)
 class _FixtureProductionResearch:
     policy: object
+
+
+@dataclass(frozen=True, slots=True)
+class _MissingPortfolioReplay:
+    policy: ProductionResearchPolicy
+
+    def replay_run(
+        self,
+        *,
+        run_id: str,
+        dossier_checkpoint: ResearchCheckpoint,
+        research_checkpoint: ResearchCheckpoint,
+        no_action_reason: NoActionReason | None,
+    ) -> ProductionResearchRun | None:
+        _ = (run_id, dossier_checkpoint, research_checkpoint, no_action_reason)
+        return None
+
+
+@dataclass(frozen=True, slots=True)
+class _FixedPortfolioInputSource:
+    result: PortfolioInputSet | PortfolioRefusalReason
+
+    def load(
+        self,
+        position_snapshot: PositionSnapshot,
+    ) -> PortfolioInputSet | PortfolioRefusalReason:
+        _ = position_snapshot
+        return self.result
+
+
+@dataclass(frozen=True, slots=True)
+class _PortfolioCioView:
+    subject: EquityInstrumentIdentity
+    content_hash: str = "f" * SHA256_HEX_LENGTH
+    stance: CioStance = CioStance.LONG
+    uncertainty: str = "low"
+    authority_scope: str = "production_research"
+    non_production: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class _PortfolioResolutionView:
+    request_id: str
+    cio: _PortfolioCioView
 
 
 @dataclass(frozen=True, slots=True)
@@ -176,6 +247,11 @@ def _advance(ledger: LifecycleLedger) -> Advance:
         evidence_vault=cast("EvidenceVault", None),
         memory=cast("Record", None),
         memory_refusal_ledger=cast("BeliefLedger", None),
+        portfolio_policy=typed_portfolio_policy(),
+        portfolio_input_source=RecordedPortfolioSource(
+            recorded_portfolio_inputs(typed_portfolio_inputs().position_snapshot)
+        ),
+        portfolio_ledger=cast("PortfolioResultLedger", None),
     )
 
 
@@ -197,6 +273,14 @@ def _advanced_receipt(
         DOSSIER_CHECKPOINT,
         RESEARCH_CHECKPOINT,
         MEMORY_CHECKPOINT,
+        PortfolioCheckpoint(
+            "4" * SHA256_HEX_LENGTH,
+            "5" * SHA256_HEX_LENGTH,
+            identity.portfolio_policy_hash,
+            identity.portfolio_input_hash,
+            ("6" * SHA256_HEX_LENGTH,),
+            recorded_at,
+        ),
         None,
     )
 
@@ -225,6 +309,8 @@ def _reseal_receipt_with_pinned_identity(envelope: dict[str, object]) -> None:
         pinned["instrument_snapshot_hash"],
         pinned["position_snapshot_hash"],
         pinned["eligibility_policy_hash"],
+        pinned["portfolio_policy_hash"],
+        pinned["portfolio_input_hash"],
     )
     pinned["run_id"] = hashlib.sha256(json.dumps(run_material).encode()).hexdigest()
     _reseal_receipt(envelope)
@@ -553,7 +639,7 @@ def test_advance_request_validates_the_complete_boundary() -> None:
         request,
         configuration_hash="a" * SHA256_HEX_LENGTH,
     )
-    assert identity.run_id == "7eb5c160f165d0a304ab13967e3b678b525b021a8be641c4759502a2696a362f"
+    assert identity.run_id == "16e7342cac5d962debc0cf9ff891364d91e77be82c22bb2827a3e0884cf9643f"
 
     invalid_cases = (
         (
@@ -745,6 +831,8 @@ def test_pinned_identity_rejects_an_untyped_evidence_cutoff_with_a_bounded_error
             configuration_version=1,
             configuration_hash="a" * 64,
             research_policy_hash="b" * 64,
+            portfolio_policy_hash="c" * 64,
+            portfolio_input_hash="d" * 64,
             universe_inputs=universe_inputs,
             constitution=ACTIVE_CONSTITUTION.reference,
         )
@@ -864,6 +952,52 @@ def test_research_checkpoint_parser_rejects_hostile_shapes_and_negative_resource
     )
 
     assert all(parse_research_checkpoint(value) is None for value in invalid_values)
+
+
+def test_portfolio_checkpoint_rejects_invalid_and_inconsistent_material() -> None:
+    valid = PortfolioCheckpoint(
+        "1" * SHA256_HEX_LENGTH,
+        "2" * SHA256_HEX_LENGTH,
+        "3" * SHA256_HEX_LENGTH,
+        "4" * SHA256_HEX_LENGTH,
+        ("5" * SHA256_HEX_LENGTH,),
+        RECEIPT_RECORDED_AT,
+    )
+    invalid_hash = {**valid.to_payload(), "result_id": "invalid"}
+    missing_success_house_view = {**valid.to_payload(), "house_view_id": None}
+    boolean_schema = {**valid.to_payload(), "schema_version": True}
+    invalid_recorded_at = {**valid.to_payload(), "recorded_at": "invalid"}
+
+    with pytest.raises(ValueError, match="lifecycle stream checkpoint order is invalid"):
+        PortfolioCheckpoint(
+            "1" * SHA256_HEX_LENGTH,
+            None,
+            "3" * SHA256_HEX_LENGTH,
+            "4" * SHA256_HEX_LENGTH,
+            (),
+            RECEIPT_RECORDED_AT,
+        )
+    with pytest.raises(ValueError, match="lifecycle stream checkpoint order is invalid"):
+        PortfolioCheckpointReference("invalid", valid, RECEIPT_RECORDED_AT)
+
+    assert parse_portfolio_checkpoint(invalid_hash) is None
+    assert parse_portfolio_checkpoint(missing_success_house_view) is None
+    assert parse_portfolio_checkpoint(boolean_schema) is None
+    assert parse_portfolio_checkpoint(invalid_recorded_at) is None
+    assert (
+        parse_portfolio_checkpoint(
+            PortfolioCheckpoint(
+                "1" * SHA256_HEX_LENGTH,
+                None,
+                "3" * SHA256_HEX_LENGTH,
+                "4" * SHA256_HEX_LENGTH,
+                (),
+                RECEIPT_RECORDED_AT,
+                PortfolioCheckpointRefusalReason.INCOMPLETE_INPUT,
+            ).to_payload()
+        )
+        is not None
+    )
 
 
 def test_research_refusal_parser_rejects_hostile_envelopes_and_checkpoints() -> None:
@@ -1067,7 +1201,7 @@ def test_advance_rejects_missing_attention_owned_subject_evidence() -> None:
 
 @pytest.mark.parametrize(
     "decision_kind",
-    ["dossier", "research", "memory"],
+    ["dossier", "research", "memory", "portfolio"],
 )
 def test_advance_rejects_stage_three_effects_for_an_input_refusal(decision_kind: str) -> None:
     identity = pinned_run_identity(_request())
@@ -1082,9 +1216,18 @@ def test_advance_rejects_stage_three_effects_for_an_input_refusal(decision_kind:
         )
     elif decision_kind == "research":
         decision = PerformResearch(identity, DOSSIER_CHECKPOINT, artifact)
-    else:
-        assert decision_kind == "memory"
+    elif decision_kind == "memory":
         decision = PerformMemoryUpdate(identity, RESEARCH_CHECKPOINT, artifact)
+    else:
+        assert decision_kind == "portfolio"
+        decision = PerformPortfolioConstruction(
+            identity,
+            DOSSIER_CHECKPOINT,
+            RESEARCH_CHECKPOINT,
+            MEMORY_CHECKPOINT,
+            artifact,
+            None,
+        )
     capability = _advance(_DecisionOnRefusalLedger(decision))
 
     with pytest.raises(
@@ -1092,6 +1235,187 @@ def test_advance_rejects_stage_three_effects_for_an_input_refusal(decision_kind:
         match="lifecycle ledger returned an incomplete checkpoint result",
     ):
         capability(cycle=_cycle(), mode="invalid", idempotency_key="invalid-stage-three")
+
+
+def test_advance_rejects_a_missing_effect_free_research_replay() -> None:
+    identity = pinned_run_identity(_request())
+    artifact = attention_artifact(
+        identity,
+        universe_snapshot(identity),
+        evidence_capture_checkpoint(),
+    )
+    decision = PerformPortfolioConstruction(
+        identity,
+        DOSSIER_CHECKPOINT,
+        RESEARCH_CHECKPOINT,
+        MEMORY_CHECKPOINT,
+        artifact,
+        None,
+    )
+    capability = replace(
+        _advance(_DecisionOnRefusalLedger(decision)),
+        production_research=cast(
+            "ProductionResearch",
+            _MissingPortfolioReplay(typed_research_policy()),
+        ),
+    )
+
+    with pytest.raises(
+        InvalidLifecycleStateError,
+        match="lifecycle ledger returned an incomplete checkpoint result",
+    ):
+        capability(cycle=_cycle(), mode="champion", idempotency_key="concurrent-request")
+
+
+@pytest.mark.parametrize(
+    ("reason", "expected_code"),
+    [
+        (PortfolioRefusalReason.STALE_INPUT, InputRefusalCode.STALE_PORTFOLIO_INPUT),
+        (
+            PortfolioRefusalReason.CONTRADICTORY_INPUT,
+            InputRefusalCode.CONTRADICTORY_PORTFOLIO_INPUT,
+        ),
+        (
+            PortfolioRefusalReason.INCOMPLETE_INPUT,
+            InputRefusalCode.MISSING_PORTFOLIO_INPUT,
+        ),
+        (PortfolioRefusalReason.INVALID_REQUEST, InputRefusalCode.INVALID_PORTFOLIO_INPUT),
+        (
+            PortfolioRefusalReason.AUTHORITY_VIOLATION,
+            InputRefusalCode.INVALID_PORTFOLIO_INPUT,
+        ),
+    ],
+)
+def test_prepare_command_maps_portfolio_source_refusals(
+    reason: PortfolioRefusalReason,
+    expected_code: InputRefusalCode,
+) -> None:
+    request = _request("portfolio-source-refusal")
+    capability = replace(
+        _advance(
+            _DecisionOnRefusalLedger(
+                AdvanceReceipt.failed_closed(
+                    AdvanceFailureReason.INVALID_DURABLE_STATE,
+                    cycle=request.session,
+                )
+            )
+        ),
+        portfolio_input_source=_FixedPortfolioInputSource(reason),
+    )
+
+    prepared = capability._prepare_command(request, RECEIPT_RECORDED_AT)
+
+    assert prepared == InputRefusal(
+        expected_code,
+        request.idempotency_key,
+        request.session,
+    )
+
+
+@pytest.mark.parametrize(
+    ("input_kind", "expected_code"),
+    [
+        ("contradictory", InputRefusalCode.CONTRADICTORY_PORTFOLIO_INPUT),
+        ("stale", InputRefusalCode.STALE_PORTFOLIO_INPUT),
+    ],
+)
+def test_prepare_command_rejects_portfolio_input_time_violations(
+    input_kind: str,
+    expected_code: InputRefusalCode,
+) -> None:
+    request = _request(f"portfolio-{input_kind}")
+    capability = _advance(
+        _DecisionOnRefusalLedger(
+            AdvanceReceipt.failed_closed(
+                AdvanceFailureReason.INVALID_DURABLE_STATE,
+                cycle=request.session,
+            )
+        )
+    )
+    loaded = capability.universe_source.load()
+    assert isinstance(loaded, UniverseInputs)
+    base = typed_portfolio_inputs()
+    if input_kind == "contradictory":
+        observed_at = base.observed_at
+        available_at = UtcInstant(loaded.evidence_cutoff.value + timedelta(seconds=1))
+    else:
+        assert input_kind == "stale"
+        observed_at = UtcInstant(
+            loaded.evidence_cutoff.value
+            - timedelta(seconds=capability.portfolio_policy.maximum_input_age_seconds + 1)
+        )
+        available_at = UtcInstant(loaded.evidence_cutoff.value - timedelta(seconds=1))
+    inputs = PortfolioInputSet.create(
+        position_snapshot=base.position_snapshot,
+        cash=base.cash,
+        cash_currency=base.cash_currency,
+        source_identity=base.source_identity,
+        observed_at=observed_at,
+        available_at=available_at,
+        data_regime=base.data_regime,
+        risk_inputs=base.risk_inputs,
+    )
+    capability = replace(
+        capability,
+        portfolio_input_source=_FixedPortfolioInputSource(inputs),
+    )
+
+    prepared = capability._prepare_command(request, RECEIPT_RECORDED_AT)
+
+    assert prepared == InputRefusal(
+        expected_code,
+        request.idempotency_key,
+        request.session,
+    )
+
+
+@pytest.mark.parametrize("invalid_material", ["attention", "inputs", "subject"])
+def test_portfolio_request_rejects_incomplete_internal_material(
+    invalid_material: str,
+) -> None:
+    request = _request(f"portfolio-request-{invalid_material}")
+    identity = pinned_run_identity(request)
+    snapshot = universe_snapshot(identity)
+    capture = evidence_capture_checkpoint()
+    artifact = attention_artifact(identity, snapshot, capture)
+    command = AdvanceCommand(
+        request,
+        identity,
+        snapshot,
+        typed_portfolio_inputs(),
+        attention_selection=artifact,
+    )
+    run = ProductionResearchRun(RESEARCH_CHECKPOINT, (), None, None)
+    if invalid_material == "attention":
+        command = replace(command, attention_selection=None)
+    elif invalid_material == "inputs":
+        command = replace(command, portfolio_inputs=object())
+    else:
+        assert invalid_material == "subject"
+        resolution = _PortfolioResolutionView(
+            "missing-subject-request",
+            _PortfolioCioView(EquityInstrumentIdentity("alpaca-paper", "missing-subject", "NYSE")),
+        )
+        run = ProductionResearchRun(
+            RESEARCH_CHECKPOINT,
+            (cast("ProductionResearchResolution", resolution),),
+            None,
+            None,
+        )
+    capability = _advance(
+        _DecisionOnRefusalLedger(
+            AdvanceReceipt.failed_closed(
+                AdvanceFailureReason.INVALID_DURABLE_STATE,
+                cycle=request.session,
+            )
+        )
+    )
+
+    with pytest.raises(
+        InvalidLifecycleStateError,
+        match="lifecycle ledger returned an incomplete checkpoint result",
+    ):
+        capability._portfolio_request(command, run, DOSSIER_CHECKPOINT, MEMORY_CHECKPOINT)
 
 
 def test_advance_receipts_round_trip_through_one_versioned_public_envelope() -> None:

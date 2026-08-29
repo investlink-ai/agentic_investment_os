@@ -1,9 +1,10 @@
 LIFECYCLE_STATE_MACHINE := tests/integration/test_advance_lifecycle.py::TestLifecycleStateMachine::runTest
 PYTEST_COMMAND := uv run pytest
+PYTEST_TIMING_ARGUMENTS := --durations=20 --durations-min=1.0
 COVERAGE_TIER_COMMAND := uv run python -m scripts.check_coverage_tiers --root .
 
-.PHONY: agent-workflow architecture bootstrap check format harness lint mutation sync test \
-	test-coverage test-lifecycle-state-machine typecheck
+.PHONY: agent-workflow architecture bootstrap check check-coverage format harness lint mutation \
+	sync test test-coverage test-lifecycle-state-machine typecheck
 
 bootstrap: sync
 	git config core.hooksPath .githooks
@@ -93,12 +94,15 @@ test:
 	$(MAKE) --no-print-directory -j2 test-coverage test-lifecycle-state-machine
 
 test-coverage:
-	$(PYTEST_COMMAND) --deselect=$(LIFECYCLE_STATE_MACHINE)
+	$(PYTEST_COMMAND) $(PYTEST_TIMING_ARGUMENTS) --deselect=$(LIFECYCLE_STATE_MACHINE)
 	$(COVERAGE_TIER_COMMAND)
 
 test-lifecycle-state-machine:
-	$(PYTEST_COMMAND) -o 'addopts=--strict-config --strict-markers -ra' \
+	$(PYTEST_COMMAND) $(PYTEST_TIMING_ARGUMENTS) \
+		-o 'addopts=--strict-config --strict-markers -ra' \
 		-p no:cacheprovider $(LIFECYCLE_STATE_MACHINE)
+
+check-coverage: harness architecture lint typecheck test-coverage
 
 mutation:
 	uv run python scripts/run_mutation.py

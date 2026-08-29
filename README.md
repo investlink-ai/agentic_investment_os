@@ -12,11 +12,11 @@ isolated Research Lab.
 
 | Surface | Delivery state | Code owner | Verification surface |
 | --- | --- | --- | --- |
-| Production lifecycle, evidence, attention, and research | **Implemented:** `Advance` persists `SnapshotUniverse`, `CaptureEvidence`, `SelectAttention`, `BuildDossiers`, `RunResearch`, and `UpdateMemory`; `Status` cross-validates authoritative lifecycle, evidence, governance, and production call history | `application`, `domain`, `evidence`, `research`, `memory`, `adapters` | [Lifecycle journey](tests/integration/system/test_lifecycle_journey.py), [production research lifecycle](tests/integration/test_production_research_lifecycle.py) |
+| Production lifecycle, research, memory, and portfolio construction | **Implemented:** `Advance` persists `SnapshotUniverse` through `ConstructPortfolio`; `Status` cross-validates lifecycle, evidence, governance, production calls, memory, and portfolio history | `application`, `domain`, `evidence`, `research`, `memory`, `portfolio`, `adapters` | [Lifecycle journey](tests/integration/system/test_lifecycle_journey.py), [production and portfolio lifecycle](tests/integration/test_production_research_lifecycle.py), [portfolio properties](tests/unit/test_portfolio.py) |
 | Belief memory | **Implemented:** `Record` appends evidence-bound Belief Events and rebuilds bounded as-of Belief Graphs | `application`, `memory`, `adapters` | [Belief journey](tests/integration/system/test_belief_record_journey.py), [Belief Event contract](tests/contract/test_belief_event_contract.py) |
 | Constitution governance | **Implemented:** operator-only `Govern` schedules signed amendments; `Advance` pins the active version before work | `application`, `domain`, `adapters`, `entrypoints` | [Governance integration](tests/integration/test_constitution_governance.py), [governance contract](tests/contract/test_constitution_governance.py) |
 | Isolated Research Lab | **Implemented:** `Replay` validates a non-production Dossier and runs Thesis, Skeptic, Scenario, and CIO roles | `application`, `research`, `adapters`, `entrypoints` | [Resolution journey](tests/integration/system/test_research_lab_resolution_journey.py), [model contract](tests/contract/test_research_lab_model.py) |
-| Portfolio, execution, evaluation, and later lifecycle phases | **Scaffolded:** accepted contracts exist, but production behavior and composition are not enabled | `portfolio`, `execution`, `evaluation`, `application` | No production behavior gate yet; [stage acceptance](docs/product-requirements.md) remains authoritative |
+| Packet publication, execution, evaluation, shadows, and later lifecycle phases | **Scaffolded:** accepted contracts exist, but production behavior and composition are not enabled | `portfolio`, `execution`, `evaluation`, `application` | No production behavior gate yet; [stage acceptance](docs/product-requirements.md) remains authoritative |
 | Crypto spot and listed options | **Reserved and disabled:** shared typed contracts exist; V0 composition remains US-equity-only | `domain`, `entrypoints` | [Identity unit tests](tests/unit/test_identity.py), [runtime configuration](tests/integration/test_runtime_configuration.py) |
 
 Implemented production retries reproduce durable identities, transitions, bounded refusals, and
@@ -24,8 +24,11 @@ pinned evidence, policy, governance, and time provenance without widening model 
 The attention scan admits at most twenty Candidate Cards and five new Dossier requests, while retained
 holdings are refreshed outside that research cap. Production research runs five fixed stateless roles
 through intent-first recorded model effects, admits only validated non-abstaining CIO resolutions to
-the Belief Ledger, and has no sizing, packet, credential, or broker capability. Authoritative records
-are append-only; projections remain disposable and rebuildable.
+the Belief Ledger, and has no sizing, packet, credential, or broker capability. `ConstructPortfolio`
+reconstructs that exact durable resolution set without another model effect, persists one fully bound
+HouseView, and applies deterministic capped inverse-volatility sizing, uncertainty downside, risk
+clamps, cash preservation, and Target Bands. It constructs no packet and reaches no broker.
+Authoritative records are append-only; projections remain disposable and rebuildable.
 
 Research Lab calls use copied or synthetic inputs and a separate durable namespace. A completed call
 replays without another effect; an unobserved prior effect, changed retry material, invalid artifact,

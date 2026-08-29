@@ -71,8 +71,11 @@ from agentic_investment_os.domain.lifecycle import (
     PerformDossierBuild,
     PerformEvidenceCapture,
     PerformMemoryUpdate,
+    PerformPortfolioConstruction,
     PerformResearch,
     PinnedRunIdentity,
+    PortfolioCheckpoint,
+    PortfolioCheckpointReference,
     ProductionResearchReference,
     ResearchCheckpoint,
     ResearchRefusal,
@@ -83,11 +86,13 @@ from agentic_investment_os.domain.lifecycle import (
     derive_lifecycle_status,
     is_sha256,
     parse_lifecycle_checkpoint,
+    parse_portfolio_checkpoint,
     parse_research_checkpoint,
     parse_research_refusal,
     reconstruct_constitution_uses,
     reconstruct_evidence_checkpoints,
     reconstruct_memory_event_ids,
+    reconstruct_portfolio_checkpoints,
     reconstruct_production_research_checkpoints,
 )
 from agentic_investment_os.domain.temporal import InvalidUtcInstantError, UtcInstant
@@ -169,11 +174,14 @@ CREATE TABLE lifecycle_events (
     instrument_snapshot_hash TEXT NOT NULL CHECK (length(instrument_snapshot_hash) = 64),
     position_snapshot_hash TEXT NOT NULL CHECK (length(position_snapshot_hash) = 64),
     eligibility_policy_hash TEXT NOT NULL CHECK (length(eligibility_policy_hash) = 64),
+    portfolio_policy_hash TEXT NOT NULL CHECK (length(portfolio_policy_hash) = 64),
+    portfolio_input_hash TEXT NOT NULL CHECK (length(portfolio_input_hash) = 64),
     event_kind TEXT NOT NULL CHECK (
         event_kind IN (
             'advance_requested', 'phase_completed', 'run_inputs_pinned',
             'universe_snapshotted', 'evidence_captured', 'attention_selected',
-            'dossiers_built', 'research_run', 'memory_updated'
+            'dossiers_built', 'research_run', 'memory_updated',
+            'portfolio_constructed'
         )
     ),
     completed_phase TEXT,
@@ -191,6 +199,7 @@ CREATE TABLE lifecycle_events (
     ),
     attention_artifact TEXT,
     research_checkpoint TEXT,
+    portfolio_checkpoint TEXT,
     no_action_reason TEXT CHECK (
         no_action_reason IS NULL OR no_action_reason IN (
             'no_attention', 'no_valid_thesis', 'skeptic_rejected', 'cio_abstained'
@@ -208,6 +217,7 @@ CREATE TABLE lifecycle_events (
             AND attention_artifact_id IS NULL
             AND attention_artifact IS NULL
             AND research_checkpoint IS NULL
+            AND portfolio_checkpoint IS NULL
             AND no_action_reason IS NULL)
         OR (event_kind = 'universe_snapshotted'
             AND universe_snapshot_id IS NOT NULL
@@ -218,6 +228,7 @@ CREATE TABLE lifecycle_events (
             AND attention_artifact_id IS NULL
             AND attention_artifact IS NULL
             AND research_checkpoint IS NULL
+            AND portfolio_checkpoint IS NULL
             AND no_action_reason IS NULL)
         OR (event_kind = 'evidence_captured'
             AND universe_snapshot_id IS NULL
@@ -228,6 +239,7 @@ CREATE TABLE lifecycle_events (
             AND attention_artifact_id IS NULL
             AND attention_artifact IS NULL
             AND research_checkpoint IS NULL
+            AND portfolio_checkpoint IS NULL
             AND no_action_reason IS NULL)
         OR (event_kind = 'attention_selected'
             AND universe_snapshot_id IS NULL
@@ -238,6 +250,7 @@ CREATE TABLE lifecycle_events (
             AND attention_artifact_id IS NOT NULL
             AND attention_artifact IS NOT NULL
             AND research_checkpoint IS NULL
+            AND portfolio_checkpoint IS NULL
             AND no_action_reason IS NULL)
         OR (event_kind IN ('dossiers_built', 'research_run')
             AND universe_snapshot_id IS NULL
@@ -248,6 +261,7 @@ CREATE TABLE lifecycle_events (
             AND attention_artifact_id IS NULL
             AND attention_artifact IS NULL
             AND research_checkpoint IS NOT NULL
+            AND portfolio_checkpoint IS NULL
             AND no_action_reason IS NULL)
         OR (event_kind = 'memory_updated'
             AND universe_snapshot_id IS NULL
@@ -257,10 +271,23 @@ CREATE TABLE lifecycle_events (
             AND evidence_refusal_ids IS NULL
             AND attention_artifact_id IS NULL
             AND attention_artifact IS NULL
-            AND research_checkpoint IS NOT NULL)
+            AND research_checkpoint IS NOT NULL
+            AND portfolio_checkpoint IS NULL)
+        OR (event_kind = 'portfolio_constructed'
+            AND universe_snapshot_id IS NULL
+            AND universe_snapshot IS NULL
+            AND evidence_policy_id IS NULL
+            AND evidence_artifact_ids IS NULL
+            AND evidence_refusal_ids IS NULL
+            AND attention_artifact_id IS NULL
+            AND attention_artifact IS NULL
+            AND research_checkpoint IS NULL
+            AND portfolio_checkpoint IS NOT NULL
+            AND no_action_reason IS NULL)
         OR (event_kind NOT IN (
                 'run_inputs_pinned', 'universe_snapshotted', 'evidence_captured',
-                'attention_selected', 'dossiers_built', 'research_run', 'memory_updated'
+                'attention_selected', 'dossiers_built', 'research_run', 'memory_updated',
+                'portfolio_constructed'
             )
             AND universe_snapshot_id IS NULL
             AND universe_snapshot IS NULL
@@ -270,6 +297,7 @@ CREATE TABLE lifecycle_events (
             AND attention_artifact_id IS NULL
             AND attention_artifact IS NULL
             AND research_checkpoint IS NULL
+            AND portfolio_checkpoint IS NULL
             AND no_action_reason IS NULL)
     ),
     PRIMARY KEY (stream_id, sequence),
@@ -291,6 +319,8 @@ CREATE TABLE advance_refusals (
             'invalid_session', 'invalid_mode', 'invalid_idempotency_key',
             'missing_universe_input', 'invalid_universe_input',
             'stale_universe_input', 'contradictory_universe_input',
+            'missing_portfolio_input', 'invalid_portfolio_input',
+            'stale_portfolio_input', 'contradictory_portfolio_input',
             'session_stream_conflict', 'idempotency_key_conflict',
             'invalid_durable_state', 'evidence_capture_failed',
             'attention_selection_failed', 'research_failed', 'memory_update_failed'
@@ -361,6 +391,38 @@ BEFORE UPDATE ON lifecycle_events BEGIN SELECT RAISE(ABORT, 'append-only lifecyc
     """
 CREATE TRIGGER lifecycle_events_are_append_only_delete
 BEFORE DELETE ON lifecycle_events BEGIN SELECT RAISE(ABORT, 'append-only lifecycle ledger'); END
+""",
+    """
+CREATE TABLE portfolio_constructions (
+    run_id TEXT PRIMARY KEY CHECK (length(run_id) = 64),
+    result_id TEXT NOT NULL CHECK (length(result_id) = 64),
+    house_view_id TEXT CHECK (house_view_id IS NULL OR length(house_view_id) = 64),
+    policy_id TEXT NOT NULL CHECK (length(policy_id) = 64),
+    input_id TEXT NOT NULL CHECK (length(input_id) = 64),
+    target_band_ids TEXT NOT NULL,
+    refusal_reason TEXT CHECK (
+        refusal_reason IS NULL OR refusal_reason IN (
+            'invalid_request', 'incomplete_input', 'stale_input',
+            'contradictory_input', 'authority_violation'
+        )
+    ),
+    result_json TEXT NOT NULL,
+    recorded_at TEXT NOT NULL,
+    CHECK (
+        (refusal_reason IS NULL AND house_view_id IS NOT NULL)
+        OR (refusal_reason IS NOT NULL AND house_view_id IS NULL AND target_band_ids = '[]')
+    )
+) STRICT
+""",
+    """
+CREATE TRIGGER portfolio_constructions_are_append_only_update
+BEFORE UPDATE ON portfolio_constructions
+BEGIN SELECT RAISE(ABORT, 'append-only portfolio construction'); END
+""",
+    """
+CREATE TRIGGER portfolio_constructions_are_append_only_delete
+BEFORE DELETE ON portfolio_constructions
+BEGIN SELECT RAISE(ABORT, 'append-only portfolio construction'); END
 """,
     """
 CREATE TRIGGER advance_refusals_are_append_only_update
@@ -566,7 +628,7 @@ class _DatabaseOpenMode(StrEnum):
     EXISTING_ONLY = "rw"
 
 
-_CURRENT_DATABASE_VERSION = 12
+_CURRENT_DATABASE_VERSION = 13
 _CURRENT_SCHEMA_SIGNATURE = frozenset(" ".join(statement.split()) for statement in _CURRENT_SCHEMA)
 
 _PROJECTION_SCHEMA = """
@@ -585,12 +647,15 @@ CREATE TABLE lifecycle_status_projection (
     instrument_snapshot_hash TEXT,
     position_snapshot_hash TEXT,
     eligibility_policy_hash TEXT,
+    portfolio_policy_hash TEXT,
+    portfolio_input_hash TEXT,
     liveness TEXT NOT NULL,
     durable_reason TEXT,
     universe_snapshot_cycle TEXT,
     universe_snapshot_id TEXT,
     attention_artifact_cycle TEXT,
-    attention_artifact_id TEXT
+    attention_artifact_id TEXT,
+    portfolio_checkpoint TEXT
 ) STRICT;
 """
 
@@ -887,6 +952,8 @@ class SQLiteLifecycleLedger:
                 return decision
             if isinstance(decision, PerformMemoryUpdate):
                 return decision
+            if isinstance(decision, PerformPortfolioConstruction):
+                return decision
             # Strict mypy proves this line unreachable; removing it is runtime-equivalent.
             assert_never(decision)  # pragma: no cover
 
@@ -904,6 +971,18 @@ class SQLiteLifecycleLedger:
             status = derive_lifecycle_status(history)
             _replace_status_projection(connection, status)
             return status
+
+        return self._write(operation)
+
+    def rebuild_portfolio_checkpoints(self) -> tuple[PortfolioCheckpointReference, ...]:
+        """Rebuild exact portfolio references from validated lifecycle history."""
+
+        def operation(
+            connection: sqlite3.Connection,
+        ) -> tuple[PortfolioCheckpointReference, ...]:
+            return reconstruct_portfolio_checkpoints(
+                LifecycleHistory(events=tuple(_load_events(connection)))
+            )
 
         return self._write(operation)
 
@@ -1244,11 +1323,12 @@ def _load_events(
                    constitution_version, constitution_hash, run_id,
                    data_regime, evidence_cutoff, instrument_snapshot_hash,
                    position_snapshot_hash, eligibility_policy_hash,
+                   portfolio_policy_hash, portfolio_input_hash,
                    event_kind, completed_phase, universe_snapshot_id,
                    universe_snapshot, evidence_policy_id,
                    evidence_artifact_ids, evidence_refusal_ids,
                    attention_artifact_id, attention_artifact,
-                   research_checkpoint, no_action_reason,
+                   research_checkpoint, portfolio_checkpoint, no_action_reason,
                    event_envelope, recorded_at
             FROM lifecycle_events ORDER BY stream_id, sequence
             """
@@ -1262,11 +1342,12 @@ def _load_events(
                    constitution_version, constitution_hash, run_id,
                    data_regime, evidence_cutoff, instrument_snapshot_hash,
                    position_snapshot_hash, eligibility_policy_hash,
+                   portfolio_policy_hash, portfolio_input_hash,
                    event_kind, completed_phase, universe_snapshot_id,
                    universe_snapshot, evidence_policy_id,
                    evidence_artifact_ids, evidence_refusal_ids,
                    attention_artifact_id, attention_artifact,
-                   research_checkpoint, no_action_reason,
+                   research_checkpoint, portfolio_checkpoint, no_action_reason,
                    event_envelope, recorded_at
             FROM lifecycle_events
             WHERE idempotency_key = ? OR stream_id IN (
@@ -1286,11 +1367,12 @@ def _load_events(
                    constitution_version, constitution_hash, run_id,
                    data_regime, evidence_cutoff, instrument_snapshot_hash,
                    position_snapshot_hash, eligibility_policy_hash,
+                   portfolio_policy_hash, portfolio_input_hash,
                    event_kind, completed_phase, universe_snapshot_id,
                    universe_snapshot, evidence_policy_id,
                    evidence_artifact_ids, evidence_refusal_ids,
                    attention_artifact_id, attention_artifact,
-                   research_checkpoint, no_action_reason,
+                   research_checkpoint, portfolio_checkpoint, no_action_reason,
                    event_envelope, recorded_at
             FROM lifecycle_events WHERE idempotency_key = ? ORDER BY sequence
             """,
@@ -1351,33 +1433,36 @@ def _load_event(row: tuple[object, ...]) -> LifecycleEvent:
     instrument_snapshot_hash = _hash(row[13], "instrument_snapshot_hash")
     position_snapshot_hash = _hash(row[14], "position_snapshot_hash")
     eligibility_policy_hash = _hash(row[15], "eligibility_policy_hash")
-    recorded_at = _canonical_timestamp(row[28], "recorded_at")
+    portfolio_policy_hash = _hash(row[16], "portfolio_policy_hash")
+    portfolio_input_hash = _hash(row[17], "portfolio_input_hash")
+    recorded_at = _canonical_timestamp(row[31], "recorded_at")
     if evidence_cutoff.value > recorded_at.value:
         raise InvalidLifecycleStateError(_FUTURE_EVIDENCE_CUTOFF)
     try:
-        event_kind = LifecycleEventKind(_text(row[16], "event_kind"))
+        event_kind = LifecycleEventKind(_text(row[18], "event_kind"))
     except ValueError as error:
         raise InvalidLifecycleStateError(_INVALID_CHECKPOINT_ORDER) from error
-    completed_phase = _optional_checkpoint(row[17])
+    completed_phase = _optional_checkpoint(row[19])
     prepared_snapshot, published_snapshot_id = _load_universe_reference(
-        row[18],
-        row[19],
+        row[20],
+        row[21],
         event_kind=event_kind,
         run_id=run_id,
         recorded_at=recorded_at,
     )
-    evidence_capture = _load_evidence_capture(row[20], row[21], row[22], event_kind=event_kind)
+    evidence_capture = _load_evidence_capture(row[22], row[23], row[24], event_kind=event_kind)
     attention_artifact = _load_attention_artifact(
-        row[23],
-        row[24],
+        row[25],
+        row[26],
         event_kind=event_kind,
         recorded_at=recorded_at,
     )
     research_checkpoint, no_action_reason = _load_research_checkpoint(
-        row[25],
-        row[26],
+        row[27],
+        row[29],
         event_kind=event_kind,
     )
+    portfolio_checkpoint = _load_portfolio_checkpoint(row[28], event_kind=event_kind)
     event = LifecycleEvent(
         stream_id=stream_id,
         sequence=sequence,
@@ -1395,6 +1480,8 @@ def _load_event(row: tuple[object, ...]) -> LifecycleEvent:
             instrument_snapshot_hash,
             position_snapshot_hash,
             eligibility_policy_hash,
+            portfolio_policy_hash,
+            portfolio_input_hash,
         ),
         event_kind=event_kind,
         completed_phase=completed_phase,
@@ -1404,9 +1491,10 @@ def _load_event(row: tuple[object, ...]) -> LifecycleEvent:
         evidence_capture=evidence_capture,
         attention_artifact=attention_artifact,
         research_checkpoint=research_checkpoint,
+        portfolio_checkpoint=portfolio_checkpoint,
         no_action_reason=no_action_reason,
     )
-    envelope = _text(row[27], "event_envelope")
+    envelope = _text(row[30], "event_envelope")
     if _canonical_json(event.to_envelope()) != envelope:
         raise InvalidLifecycleStateError(_INVALID_CHECKPOINT_ORDER)
     return event
@@ -1545,6 +1633,26 @@ def _load_research_checkpoint(
     except ValueError as error:
         raise InvalidLifecycleStateError(_INVALID_CHECKPOINT_ORDER) from error
     return checkpoint, reason
+
+
+def _load_portfolio_checkpoint(
+    checkpoint_value: object,
+    *,
+    event_kind: LifecycleEventKind,
+) -> PortfolioCheckpoint | None:
+    if event_kind is not LifecycleEventKind.PORTFOLIO_CONSTRUCTED:
+        if checkpoint_value is not None:
+            raise InvalidLifecycleStateError(_INVALID_CHECKPOINT_ORDER)
+        return None
+    encoded = _text(checkpoint_value, "portfolio_checkpoint")
+    try:
+        decoded: object = json.loads(encoded)
+    except (ValueError, RecursionError) as error:
+        raise InvalidLifecycleStateError(_INVALID_CHECKPOINT_ORDER) from error
+    checkpoint = parse_portfolio_checkpoint(decoded)
+    if checkpoint is None or _canonical_json(checkpoint.to_payload()) != encoded:
+        raise InvalidLifecycleStateError(_INVALID_CHECKPOINT_ORDER)
+    return checkpoint
 
 
 def _hash_tuple_json(value: object, field: str) -> tuple[str, ...]:
@@ -1799,15 +1907,16 @@ def _append_record(
                 constitution_version, constitution_hash, run_id,
                 data_regime, evidence_cutoff, instrument_snapshot_hash,
                 position_snapshot_hash, eligibility_policy_hash,
+                portfolio_policy_hash, portfolio_input_hash,
                 event_kind, completed_phase, universe_snapshot_id,
                 universe_snapshot, evidence_policy_id,
                 evidence_artifact_ids, evidence_refusal_ids,
                 attention_artifact_id, attention_artifact,
-                research_checkpoint, no_action_reason,
+                research_checkpoint, portfolio_checkpoint, no_action_reason,
                 event_envelope, recorded_at
             ) VALUES (
-                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
             )
             """,
             (
@@ -1827,6 +1936,8 @@ def _append_record(
                 identity.instrument_snapshot_hash,
                 identity.position_snapshot_hash,
                 identity.eligibility_policy_hash,
+                identity.portfolio_policy_hash,
+                identity.portfolio_input_hash,
                 record.event_kind.value,
                 (
                     None
@@ -1864,6 +1975,11 @@ def _append_record(
                     None
                     if record.research_checkpoint is None
                     else _canonical_json(record.research_checkpoint.to_payload())
+                ),
+                (
+                    None
+                    if record.portfolio_checkpoint is None
+                    else _canonical_json(record.portfolio_checkpoint.to_payload())
                 ),
                 (None if record.no_action_reason is None else record.no_action_reason.value),
                 _canonical_json(record.to_envelope()),
@@ -1941,9 +2057,10 @@ def _replace_status_projection(
             research_policy_hash,
             constitution_version, constitution_hash, data_regime, evidence_cutoff,
             instrument_snapshot_hash, position_snapshot_hash, eligibility_policy_hash,
+            portfolio_policy_hash, portfolio_input_hash,
             liveness, durable_reason, universe_snapshot_cycle, universe_snapshot_id,
-            attention_artifact_cycle, attention_artifact_id
-        ) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            attention_artifact_cycle, attention_artifact_id, portfolio_checkpoint
+        ) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             (
@@ -1967,6 +2084,8 @@ def _replace_status_projection(
             None if identity is None else identity.instrument_snapshot_hash,
             None if identity is None else identity.position_snapshot_hash,
             None if identity is None else identity.eligibility_policy_hash,
+            None if identity is None else identity.portfolio_policy_hash,
+            None if identity is None else identity.portfolio_input_hash,
             status.liveness.value,
             None if status.durable_reason is None else status.durable_reason.value,
             (
@@ -1981,6 +2100,11 @@ def _replace_status_projection(
                 else _canonical_json(status.attention_artifact_cycle.to_payload())
             ),
             status.attention_artifact_id,
+            (
+                None
+                if status.portfolio_checkpoint is None
+                else _canonical_json(status.portfolio_checkpoint.to_payload())
+            ),
         ),
     )
 

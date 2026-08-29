@@ -31,7 +31,7 @@ from agentic_investment_os.memory.beliefs import (
 )
 from tests._governance import RecordedSessionEligibility
 from tests._production_research import ValidProductionModel, production_recorded_evidence
-from tests._universe import recorded_universe, runtime_configuration
+from tests._universe import recorded_portfolio, recorded_universe, runtime_configuration
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
 INTERRUPTED_EXIT_CODE = 75
@@ -78,6 +78,7 @@ def _seed(state_root: Path) -> None:
         _sources(state_root),
         repository_root=REPOSITORY_ROOT,
         recorded_universe=recorded_universe(),
+        recorded_portfolio=recorded_portfolio(),
         recorded_evidence=production_recorded_evidence(),
         recorded_model=ValidProductionModel(cio_stance="abstain"),
         session_eligibility=RecordedSessionEligibility(),

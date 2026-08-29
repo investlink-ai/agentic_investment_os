@@ -37,7 +37,7 @@ from tests._production_research import (
     production_recorded_evidence,
     production_recorded_official_evidence,
 )
-from tests._universe import recorded_universe, runtime_configuration
+from tests._universe import recorded_portfolio, recorded_universe, runtime_configuration
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 VALID_EVIDENCE_IDS_JSON = json.dumps(["a" * 64], separators=(",", ":"))
@@ -90,6 +90,7 @@ def _advance_at(state_root: Path, instant: datetime) -> Advance:
         _sources(state_root),
         repository_root=REPOSITORY_ROOT,
         recorded_universe=recorded_universe(),
+        recorded_portfolio=recorded_portfolio(),
         recorded_evidence=production_recorded_evidence(),
         recorded_official_evidence=production_recorded_official_evidence(),
         recorded_model=ValidProductionModel(cio_stance="abstain"),
@@ -271,6 +272,8 @@ def test_status_reports_empty_incomplete_and_universe_snapshot_history(tmp_path:
             receipt.pinned_run_identity.instrument_snapshot_hash,
             receipt.pinned_run_identity.position_snapshot_hash,
             receipt.pinned_run_identity.eligibility_policy_hash,
+            receipt.pinned_run_identity.portfolio_policy_hash,
+            receipt.pinned_run_identity.portfolio_input_hash,
             "active",
             None,
             (
@@ -285,6 +288,15 @@ def test_status_reports_empty_incomplete_and_universe_snapshot_history(tmp_path:
                 '"payload_schema_version":1,"schema_version":1}'
             ),
             receipt.attention_artifact.artifact_id,
+            (
+                None
+                if receipt.portfolio_checkpoint is None
+                else json.dumps(
+                    receipt.portfolio_checkpoint.to_payload(),
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+            ),
         )
     ]
 
@@ -547,13 +559,14 @@ def test_status_rejects_corrupt_authoritative_history_instead_of_using_projectio
                    configuration_version, configuration_hash,
                    research_policy_hash,
                    constitution_version, constitution_hash, run_id,
-                   data_regime, evidence_cutoff, instrument_snapshot_hash,
-                   position_snapshot_hash, eligibility_policy_hash,
-                   event_kind, completed_phase, universe_snapshot_id,
+                       data_regime, evidence_cutoff, instrument_snapshot_hash,
+                       position_snapshot_hash, eligibility_policy_hash,
+                       portfolio_policy_hash, portfolio_input_hash,
+                       event_kind, completed_phase, universe_snapshot_id,
                    universe_snapshot, evidence_policy_id,
                    evidence_artifact_ids, evidence_refusal_ids,
-                   attention_artifact_id, attention_artifact,
-                   research_checkpoint, no_action_reason,
+                       attention_artifact_id, attention_artifact,
+                       research_checkpoint, portfolio_checkpoint, no_action_reason,
                    event_envelope, recorded_at
             FROM lifecycle_events ORDER BY sequence
             """
@@ -566,13 +579,14 @@ def test_status_rejects_corrupt_authoritative_history_instead_of_using_projectio
                 configuration_version, configuration_hash,
                 research_policy_hash,
                 constitution_version, constitution_hash, run_id,
-                data_regime, evidence_cutoff, instrument_snapshot_hash,
-                position_snapshot_hash, eligibility_policy_hash,
-                event_kind, completed_phase, universe_snapshot_id,
+                    data_regime, evidence_cutoff, instrument_snapshot_hash,
+                    position_snapshot_hash, eligibility_policy_hash,
+                    portfolio_policy_hash, portfolio_input_hash,
+                    event_kind, completed_phase, universe_snapshot_id,
                 universe_snapshot, evidence_policy_id,
                 evidence_artifact_ids, evidence_refusal_ids,
-                attention_artifact_id, attention_artifact,
-                research_checkpoint, no_action_reason,
+                    attention_artifact_id, attention_artifact,
+                    research_checkpoint, portfolio_checkpoint, no_action_reason,
                 event_envelope, recorded_at
             )
             """
@@ -580,7 +594,7 @@ def test_status_rejects_corrupt_authoritative_history_instead_of_using_projectio
         connection.executemany(
             "INSERT INTO lifecycle_events VALUES "
             "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
-            "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             rows,
         )
         connection.execute(
@@ -984,11 +998,12 @@ def _replace_event_table(database: Path, statement: str) -> None:
                    constitution_version, constitution_hash, run_id,
                    data_regime, evidence_cutoff, instrument_snapshot_hash,
                    position_snapshot_hash, eligibility_policy_hash,
+                   portfolio_policy_hash, portfolio_input_hash,
                    event_kind, completed_phase, universe_snapshot_id,
                    universe_snapshot, evidence_policy_id,
                    evidence_artifact_ids, evidence_refusal_ids,
                    attention_artifact_id, attention_artifact,
-                   research_checkpoint, no_action_reason,
+                   research_checkpoint, portfolio_checkpoint, no_action_reason,
                    event_envelope, recorded_at
             FROM lifecycle_events ORDER BY stream_id, sequence
             """
@@ -1003,11 +1018,12 @@ def _replace_event_table(database: Path, statement: str) -> None:
                 constitution_version, constitution_hash, run_id,
                 data_regime, evidence_cutoff, instrument_snapshot_hash,
                 position_snapshot_hash, eligibility_policy_hash,
+                portfolio_policy_hash, portfolio_input_hash,
                 event_kind, completed_phase, universe_snapshot_id,
                 universe_snapshot, evidence_policy_id,
                 evidence_artifact_ids, evidence_refusal_ids,
                 attention_artifact_id, attention_artifact,
-                research_checkpoint, no_action_reason,
+                research_checkpoint, portfolio_checkpoint, no_action_reason,
                 event_envelope, recorded_at
             )
             """
@@ -1015,7 +1031,7 @@ def _replace_event_table(database: Path, statement: str) -> None:
         connection.executemany(
             "INSERT INTO lifecycle_events VALUES "
             "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
-            "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             rows,
         )
         connection.execute(statement)

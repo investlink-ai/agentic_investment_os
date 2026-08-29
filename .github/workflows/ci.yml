@@ -14,8 +14,16 @@ permissions:
   contents: read
 
 jobs:
-  check:
-    name: make check
+  gate:
+    name: ${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: static and coverage
+            target: check-coverage
+          - name: lifecycle state machine
+            target: test-lifecycle-state-machine
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -39,5 +47,17 @@ jobs:
       - name: Sync locked environment
         run: uv sync --all-groups --frozen
 
-      - name: Run repository gate
-        run: make check
+      - name: Run repository gate leg
+        run: make ${{ matrix.target }}
+
+  check:
+    name: make check
+    needs: gate
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
+    steps:
+      - name: Require every gate leg
+        env:
+          GATE_RESULT: ${{ needs.gate.result }}
+        run: test "$GATE_RESULT" = success

@@ -297,9 +297,11 @@ safety_supporting_paths = [
   "adapters/filesystem_evidence.py",
   "adapters/recorded_evidence.py",
   "adapters/recorded_model.py",
+  "adapters/recorded_portfolio.py",
   "adapters/recorded_universe.py",
   "adapters/sqlite_lab.py",
   "adapters/sqlite_memory.py",
+  "adapters/sqlite_portfolio.py",
   "application/replay.py",
   "domain/attention.py",
   "domain/identity.py",
@@ -322,6 +324,7 @@ only_mutate = [
   "src/agentic_investment_os/memory/admission.py",
   "src/agentic_investment_os/memory/reducer.py",
   "src/agentic_investment_os/portfolio/__init__.py",
+  "src/agentic_investment_os/portfolio/construction.py",
 ]
 pytest_add_cli_args = [
   "-o",
@@ -330,6 +333,7 @@ pytest_add_cli_args = [
 pytest_add_cli_args_test_selection = [
   "tests/unit/test_beliefs.py",
   "tests/contract/test_belief_event_contract.py",
+  "tests/unit/test_portfolio.py",
 ]
 mutate_only_covered_lines = false
 

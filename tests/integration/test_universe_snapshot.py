@@ -31,6 +31,7 @@ from tests._production_research import (
 from tests._universe import (
     mutable_mapping,
     mutable_mapping_list,
+    recorded_portfolio,
     recorded_universe,
     reseal_recorded_snapshot,
     runtime_configuration,
@@ -61,6 +62,7 @@ def _configure(
         (ConfigurationSource("test", runtime_configuration(state_root)),),
         repository_root=Path.cwd(),
         recorded_universe=payload,
+        recorded_portfolio=recorded_portfolio(payload),
         recorded_evidence=production_recorded_evidence(),
         recorded_official_evidence=production_recorded_official_evidence(),
         recorded_model=ValidProductionModel(),
@@ -91,7 +93,7 @@ def test_advance_durably_publishes_a_reconstructable_universe_snapshot(tmp_path:
 
     assert first.disposition is AdvanceDisposition.ADVANCED
     assert first.completed_phase is not None
-    assert first.completed_phase.phase is LifecyclePhase.UPDATE_MEMORY
+    assert first.completed_phase.phase is LifecyclePhase.CONSTRUCT_PORTFOLIO
     assert first.recovery is AdvanceRecovery.FRESH
     assert first.universe_snapshot_id is not None
     assert first.pinned_run_identity is not None
@@ -120,6 +122,7 @@ def test_advance_durably_publishes_a_reconstructable_universe_snapshot(tmp_path:
         ("dossiers_built", "BuildDossiers"),
         ("research_run", "RunResearch"),
         ("memory_updated", "UpdateMemory"),
+        ("portfolio_constructed", "ConstructPortfolio"),
     ]
     assert all(row[2] is None and row[3] is None for row in events[:2])
     assert events[2][2] == first.universe_snapshot_id
@@ -387,5 +390,5 @@ def test_retry_with_changed_recorded_snapshot_fails_without_changing_first_snaps
     assert replay.universe_snapshot_id == first.universe_snapshot_id
     assert replay.recovery is AdvanceRecovery.PREVIOUSLY_COMPLETED
     with sqlite3.connect(state_root / "lifecycle.sqlite3") as connection:
-        assert connection.execute("SELECT COUNT(*) FROM lifecycle_events").fetchone() == (9,)
+        assert connection.execute("SELECT COUNT(*) FROM lifecycle_events").fetchone() == (10,)
         assert connection.execute("SELECT COUNT(*) FROM advance_conflicts").fetchone() == (1,)

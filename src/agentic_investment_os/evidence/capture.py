@@ -51,6 +51,7 @@ __all__ = (
     "EvidenceVault",
     "InvalidEvidenceError",
     "is_normalized_evidence_content",
+    "is_official_macro_release",
     "parse_capture_intent",
     "parse_capture_outcome",
     "parse_evidence_artifact",
@@ -906,6 +907,21 @@ class EvidenceStoredRecord:
             )
         ):
             raise InvalidEvidenceError(_INVALID_ARTIFACT)
+
+
+def is_official_macro_release(record: EvidenceStoredRecord) -> bool:
+    """Return whether a validated official-macro record is the publication, not its schedule."""
+    if (
+        type(record) is not EvidenceStoredRecord
+        or record.artifact.kind is not EvidenceKind.OFFICIAL_MACRO
+    ):
+        return False
+    try:
+        value: object = json.loads(record.content)
+    except (UnicodeDecodeError, ValueError, RecursionError):
+        return False
+    root = _exact_mapping(value, _MACRO_CONTENT_FIELDS)
+    return root is not None and root["artifact_type"] == "release"
 
 
 @dataclass(frozen=True, slots=True)

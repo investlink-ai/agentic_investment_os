@@ -26,7 +26,15 @@ MUTATING_ALL_METHODS = frozenset(
     }
 )
 ALLOWED_EDGES = {
-    "entrypoints": {"application", "domain", "execution", "adapters", "evidence", "research"},
+    "entrypoints": {
+        "application",
+        "domain",
+        "execution",
+        "adapters",
+        "evidence",
+        "research",
+        "portfolio",
+    },
     "application": {"evidence", "memory", "research", "portfolio", "evaluation", "domain"},
     "evidence": {"domain"},
     "memory": {"domain"},
@@ -34,7 +42,7 @@ ALLOWED_EDGES = {
     "portfolio": {"domain"},
     "execution": {"domain"},
     "evaluation": {"domain"},
-    "adapters": {"domain", "evidence", "memory", "research", "execution"},
+    "adapters": {"domain", "evidence", "memory", "research", "portfolio", "execution"},
     "domain": set(),
 }
 

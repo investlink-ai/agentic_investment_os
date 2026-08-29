@@ -37,6 +37,7 @@ required and have no default.
 | `evidence_policy` | Complete object matching the schema below | Included canonically | Resolved at process composition; it authorizes the configured market, news, SEC, issuer, and official-macro captures for the pinned Data Regime | Safe to log or expose to a model after validation |
 | `attention_policy` | Complete object matching the schema below | Included canonically; its own content hash binds every Attention Artifact | Resolved at process composition; it bounds research admission without granting research or execution authority | Safe to log or expose to a model after validation |
 | `research_policy` | Complete object matching the schema below | Included canonically; its own content hash is also pinned into the run identity and every production role input | Resolved at process composition; it authorizes only the bounded production research workflow and grants no portfolio or execution authority | Safe to log or expose to a model after validation |
+| `portfolio_policy` | Complete object matching the schema below | Included canonically; its content hash is pinned into the run identity and HouseView | Resolved at process composition; deterministic `portfolio` alone interprets it, and it grants no packet, broker, or model authority | Safe to log; only its hash and deterministic result may enter later model-visible history |
 
 The resolver hashes canonical JSON containing exactly these validated fields with SHA-256. The state
 root is created with mode `0700`; the fixed `lifecycle.sqlite3` file is created with mode `0600`.
@@ -140,6 +141,52 @@ adapter is the only implemented production adapter. There is no ambient model se
 client, subscription switch, metered fallback, broker capability, or credential path in production
 research composition.
 
+### Balanced portfolio policy
+
+`portfolio_policy` is the complete mechanics-calibrated policy consumed by `ConstructPortfolio`. It
+has no default and is validated before runtime storage is prepared. Decimal values are canonical
+plain non-negative strings of at most 64 characters. Unknown, missing, noncanonical, non-finite, or
+internally inconsistent material fails configuration. The exact canonical object is included in the
+runtime configuration fingerprint; its SHA-256 identity is independently pinned into the run and the
+HouseView.
+
+| Field | Type and validation | Effect |
+| --- | --- | --- |
+| `schema_version` | Integer; must equal `1` | Versions the complete portfolio-policy representation |
+| `policy_type` | String; must equal `balanced_inverse_volatility` | Selects the sole implemented deterministic allocator |
+| `asset_class` | String; must equal `us_equity` | Prevents a policy from crossing the enabled asset boundary |
+| `risk_profile` | String; must equal `balanced` | Identifies the paper Champion policy |
+| `realized_volatility` | Exact object containing the five fields below | Freezes the estimator rather than inferring it from data or model output |
+| `realized_volatility.estimator` | String; must equal `sample_standard_deviation` | Computes standalone realized volatility from daily returns |
+| `realized_volatility.lookback_days` | Integer of at least `2`; configured V0 value `20` | Requires one additional adjusted close and fixes the return window |
+| `realized_volatility.annualization_periods` | Positive integer; configured V0 value `252` | Annualizes the sample variance |
+| `realized_volatility.floor` | Positive decimal; configured V0 value `0.1` | Prevents near-zero volatility from increasing exposure without bound |
+| `realized_volatility.price_adjustment` | String; must equal `split_adjusted_close` | Fixes the price-history unit and corporate-action convention |
+| `maximum_input_age_seconds` | Positive integer; configured V0 value `7200` | Refuses portfolio facts observed more than two hours before cutoff |
+| `maximum_gross_weight` | Decimal; must equal `0.8` | Caps all accepted non-cash exposure at 80% |
+| `maximum_name_weight` | Decimal; must equal `0.08` | Caps one canonical instrument at 8% |
+| `maximum_sector_weight` | Decimal; must equal `0.25` | Caps one sector at 25% |
+| `maximum_common_cause_weight` | Decimal; must equal `0.25` | Caps one named common-cause group at 25% |
+| `maximum_correlation_cluster_weight` | Decimal; must equal `0.25` | Caps one recorded correlation cluster at 25% |
+| `maximum_fraction_of_median_dollar_volume` | Decimal; must equal `0.01` | Caps target notional at 1% of median daily dollar volume |
+| `target_band_width` | Decimal from zero through `maximum_name_weight`; configured V0 value `0.01` | Sets the symmetric no-trade band before clipping |
+| `minimum_executable_notional` | Positive decimal; configured V0 value `100` | Suppresses smaller adjustments |
+| `partial_adjustment_fraction` | Decimal in `(0, 1]`; configured V0 value `0.5` | Moves an ordinary eligible breach halfway toward target |
+| `reduce_multiplier` | Decimal in `[0, 1]`; configured V0 value `0.5` | Begins a reduction target at half current weight before clamps |
+| `uncertainty_multipliers` | Exact `low`, `medium`, and `high` object with positive non-increasing decimals no greater than one; configured values `1`, `0.75`, and `0.5` | Allows uncertainty to reduce, never increase, allocation |
+
+The runtime additionally requires an explicit recorded portfolio-input object bound to the exact
+position snapshot. It contains canonical cash, positions, prices, split-adjusted histories, sectors,
+liquidity, common-cause and correlation groups, material events, source identity, Data Regime,
+observed time, available time, and the exact `xnys-regular-2026a` session-calendar identity. That
+object is hostile adapter input, not configuration; its content hash is pinned into the run and
+HouseView. The calendar identity is a code-owned safety constant, not a tunable default. It admits
+only consecutive regular 2026 NYSE sessions and fails closed for another version or year. Each known
+event records calendar provenance; clearing it also requires the captured release artifact and exact
+fresh terminal research request and resolution identities. A schedule remains evidence about a
+future event but cannot substitute for the publication. No model, packet store, broker port, account
+credential, or live data fallback is part of portfolio composition.
+
 ## Constitution governance composition
 
 Constitution governance adds no runtime configuration field or default. Version 1 is the exact
@@ -181,7 +228,7 @@ keyless recorded adapter is the only implemented adapter; no metered or network 
 | `uv.lock` | Exact resolved dependency graph | Generated by `uv`; never edit manually |
 | `Makefile` | Stable developer command surface | Keep commands thin and composable |
 | `.githooks/` | Versioned local commit and push gates | Keep aligned with documented completion criteria |
-| `.github/workflows/ci.yml` | Hosted pull-request and main-branch gate | Delegate to `make check`; keep permissions read-only |
+| `.github/workflows/ci.yml` | Hosted pull-request and main-branch gate | Run the Makefile-owned static-and-coverage and lifecycle state-machine legs on separate runners, aggregate them under the stable `make check` name, and keep permissions read-only |
 | `.github/dependabot.yml` | Low-noise dependency update schedule | Cover `uv` and GitHub Actions without metered services |
 | `.gitignore` | Secret, runtime-state, cache, and artifact exclusions | Treat removals from safety exclusions as security-sensitive |
 

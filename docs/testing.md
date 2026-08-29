@@ -61,11 +61,29 @@ the deterministic pytest suite. Its test phase concurrently runs the coverage-pr
 full lifecycle state machine. Both legs are mandatory; the state-machine leg disables pytest caching
 and coverage instrumentation but retains the default Hypothesis example and step budgets.
 
+Hosted CI gives those same Makefile-owned legs separate runners so the coverage suite and generated
+state machine do not contend for one shared CPU allocation. A stable `make check` aggregate reports
+failure unless both jobs pass; splitting execution therefore changes scheduling, not gate strength or
+branch-protection identity. The local and pre-push gate remains one command and runs the legs
+concurrently on the developer machine.
+
 The default Hypothesis profile in `tests/conftest.py` uses derandomized generation, no example
 database or wall-clock deadline, bounded example and state-machine step counts, one reported failure,
 and printed replay blobs. Generated tests remain credential-free and network-free, inject any clock,
 and shrink a failure to a reproducible counterexample; neither Hypothesis shrinking nor replay may
 turn a failure into a passing retry.
+
+Generated tests vary only the behavioral dimension they own. A state machine uses the smallest
+canonical fixture that preserves its transition, persistence, interruption, retry, reopen, corruption,
+and reference-model seams. Orthogonal provider, source-kind, schema, or payload breadth belongs to
+focused contract or integration tests and does not enter every generated sequence. Removing a variant
+from a generated fixture is valid only when direct deterministic evidence retains its accepted and
+refused forms; never reduce the Hypothesis example or step budget to hide fixture amplification.
+
+Both pytest legs report their slowest tests and wall time. These timings are diagnostic rather than a
+hard shared-runner performance threshold. A material increase, especially a near doubling of one leg
+or encroachment on the hosted-CI timeout, requires a test-cost investigation before increasing the
+timeout, reducing exploration, or moving evidence out of the handoff gate.
 
 ## Static architecture gates
 
@@ -191,12 +209,14 @@ The implemented candidate inventory is:
 | `adapters/filesystem_evidence.py` | Non-critical Evidence Vault filesystem mechanics and append-only observation durability; integration, corruption, and coverage evidence |
 | `adapters/recorded_evidence.py` | Non-critical recorded-boundary validation and normalization; contract, hostile-input, and coverage evidence |
 | `adapters/recorded_model.py` | Safety-supporting scripted model-call idempotency and recorded resource observations; contract, interruption, and coverage evidence |
+| `adapters/recorded_portfolio.py` | Safety-supporting hostile portfolio-input admission, canonical units and as-of validation, and typed refusal translation; contract and coverage evidence |
 | `adapters/sqlite_lab.py` | Safety-supporting namespace isolation, intent-before-effect durability, append-only reconstruction, and private-root validation; integration, interruption, corruption, and coverage evidence |
 | `adapters/sqlite_lifecycle.py` | Non-critical SQL mechanics and non-authorizing lifecycle and Constitution-governance durability; integration, corruption, architecture, and critical-coverage evidence |
 | `adapters/sqlite_memory.py` | Non-critical belief SQL mechanics and authoritative-history validation; integration, concurrency, corruption, and coverage evidence |
+| `adapters/sqlite_portfolio.py` | Safety-supporting append-only portfolio-result persistence, exact retry, canonical reconstruction, and lifecycle-reference validation; integration, corruption, and coverage evidence |
 | `adapters/sqlite_production_research.py` | Safety-supporting production intent-before-effect durability, append-only observation reconstruction, and lifecycle-reference validation; integration, interruption, corruption, and coverage evidence |
 | `application/governance.py` | Non-critical Constitution scheduling and resolution orchestration with no packet or broker authority; unit, integration, and critical-coverage evidence |
-| `application/lifecycle.py` | Non-critical orchestration through Constitution pinning, evidence capture, bounded attention, production research, and Belief Event admission with no sizing or broker authority; unit, integration, system-journey, and critical-coverage evidence |
+| `application/lifecycle.py` | Non-critical orchestration through Constitution pinning, evidence capture, bounded attention, production research, Belief Event admission, and the portfolio-owned construction interface with no sizing or broker authority; unit, integration, system-journey, and critical-coverage evidence |
 | `application/memory.py` | Non-critical Record orchestration; integration, system-journey, and coverage evidence |
 | `application/replay.py` | Safety-supporting hostile-input admission and Lab replay orchestration with no production or execution authority; unit, contract, integration, interruption, and coverage evidence |
 | `domain/attention.py` | Safety-supporting, non-authorizing admission to bounded research capacity with no stance, sizing, packet, order, or execution effect; unit, property, integration, hostile-input, and coverage evidence |
@@ -215,6 +235,7 @@ The implemented candidate inventory is:
 | `memory/admission.py` | Critical canonical Belief Event types, hostile-input parsing, serialization, and evidence admission; unit, contract, refusal, and mutation evidence |
 | `memory/beliefs.py` | Non-critical typed belief history, receipt, and bounded as-of graph projection; unit, property, contract, integration, corruption, and coverage evidence |
 | `memory/reducer.py` | Critical append-only belief-transition reducer, projection identity, and ledger commitment; unit, property, refusal, and mutation evidence |
+| `portfolio/construction.py` | Critical HouseView admission, capped inverse-volatility sizing, uncertainty downside, risk clamps, cash preservation, Target Bands, typed refusals, and hostile result reconstruction; hand-oracle, property, contract, lifecycle, corruption, coverage, and mutation evidence |
 | `research/authority.py` | Safety-supporting closed production-versus-Lab authority labels with no effect implementation; unit and coverage evidence |
 | `research/dossier.py` | Safety-supporting exact-schema, citation, cutoff, lens, and prohibited-authority validation; unit, hostile-input, and coverage evidence |
 | `research/model.py` | Safety-supporting owner-defined model and Lab-ledger contracts with no direct effect implementation; contract, integration, and coverage evidence |
@@ -227,9 +248,10 @@ The implemented candidate inventory is:
 `tool.mutmut.only_mutate` is the single static mutation source allowlist. It contains exact implemented
 critical module paths, never package globs or an engine exclusion list. `source_paths = ["src"]` is only
 the engine's copy root and confers no mutation scope. The current exact entries are the critical
-`memory/admission.py` and `memory/reducer.py` kernels and the empty `execution` and `portfolio`
-initializers. Their exact test selection is `tests/unit/test_beliefs.py` and
-`tests/contract/test_belief_event_contract.py`; the scaffold files add no unrelated tests. The separate
+`memory/admission.py`, `memory/reducer.py`, and `portfolio/construction.py` kernels and the empty
+`execution` and `portfolio` initializers. Their exact test selection is `tests/unit/test_beliefs.py`,
+`tests/contract/test_belief_event_contract.py`, and `tests/unit/test_portfolio.py`; the scaffold files
+add no unrelated tests. The separate
 `tool.mutation_gate` inventory names the authority-owning capability roots and any callable module a
 human has classified as non-critical; it never adds or removes a mutation source. A callable below
 those roots that appears in neither exact classification fails the gate, so a scaffold exemption
@@ -484,6 +506,21 @@ evidence. A scenario becomes mandatory when its owning behavior is implemented.
   no-leverage rules.
 - Capped inverse-volatility sizing never increases allocation from model confidence and handles
   volatility floors, missing history, stale input, and caps deterministically.
+- HouseView construction consumes exactly the terminal production CIO resolution set and binds its
+  session, cutoff, Data Regime, Constitution, configuration, research, memory, universe, policy,
+  portfolio-input, source-request, resolution, and canonical instrument identities. Empty attention
+  yields full cash; altered, partial, Lab, future, or contradictory material yields a typed refusal.
+- Hand-calculated fixtures cover entry, exit, reduction, ordinary band breach, hard-risk breach,
+  minimum-notional suppression, complete known-event blocking, uncertainty downside, cap interaction,
+  and cash remainder. Property tests vary volatility, sector, common-cause, correlation,
+  uncertainty, order, and portfolio breadth without changing the result under canonical reordering
+  or ambient decimal-context changes.
+- Recorded portfolio contracts reject malformed nested identities, decimals, units, calendar
+  versions, non-session or gapped daily histories, availability, events, and duplicate material
+  before domain admission. Portfolio journeys prove an official macro schedule remains event-blocked
+  even when the current research resolution cites it. Durable retries append one result, and `Status`
+  rejects missing, altered, malformed, noncanonical, cross-run, or recorded-instant-substituted
+  portfolio history.
 - Equal-weight and Risk Profile shadows consume the same HouseView, eligibility, Evidence Cutoff, and
   available-at-time prices as the Champion.
 - Target Bands create no trade inside the band and apply only the approved partial adjustment outside
