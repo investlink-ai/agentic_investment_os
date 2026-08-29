@@ -21,6 +21,7 @@ from agentic_investment_os.portfolio.publication import (
 )
 from tests._decision import TEST_DECISION_ACCOUNT_SCOPE, TEST_PACKET_CRYPTOGRAPHY
 from tests._portfolio import (
+    SYNTHETIC_AAPL,
     SYNTHETIC_FORECAST_IDS,
     SYNTHETIC_SPY,
     synthetic_portfolio_cycle,
@@ -99,7 +100,11 @@ def test_publication_contract_has_one_exact_material_and_signature_oracle() -> N
         "maximum_common_cause_weight": "0.25",
         "maximum_correlation_cluster_weight": "0.25",
     }
-    assert validate_decision_publication(publication, cycle)
+    assert validate_decision_publication(
+        publication,
+        cycle,
+        benchmark_identity=SYNTHETIC_SPY,
+    )
 
 
 def test_no_action_publication_reconstructs_without_packet_authority() -> None:
@@ -118,17 +123,24 @@ def test_no_action_publication_reconstructs_without_packet_authority() -> None:
 
     assert isinstance(result, DecisionPublicationResult)
     assert result.packet is None
-    assert validate_decision_publication(result, cycle)
+    assert validate_decision_publication(result, cycle, benchmark_identity=SYNTHETIC_SPY)
+    assert not validate_decision_publication(
+        result,
+        cycle,
+        benchmark_identity=SYNTHETIC_AAPL,
+    )
     assert not validate_decision_publication(
         result,
         synthetic_portfolio_cycle(
             run_id="2" * 64,
             with_authorized_adjustments=False,
         ),
+        benchmark_identity=SYNTHETIC_SPY,
     )
     assert not validate_decision_publication(
         result,
         None,  # type: ignore[arg-type]  # Exercise a hostile runtime protocol value.
+        benchmark_identity=SYNTHETIC_SPY,
     )
 
 
@@ -151,7 +163,7 @@ def test_packet_preserves_one_authorized_balanced_reduction() -> None:
     reduction = next(item for item in result.packet.instructions if item.identity != SYNTHETIC_SPY)
     assert reduction.direction is PacketDirection.DECREASE
     assert reduction.authorized_weight < reduction.current_weight
-    assert validate_decision_publication(result, cycle)
+    assert validate_decision_publication(result, cycle, benchmark_identity=SYNTHETIC_SPY)
 
 
 @pytest.mark.parametrize(

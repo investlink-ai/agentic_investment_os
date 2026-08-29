@@ -57,6 +57,13 @@ if TYPE_CHECKING:
     from agentic_investment_os.research.model import ResearchRoleModel
 
 
+_OFFICIAL_BENCHMARK_IDENTITY = EquityInstrumentIdentity(
+    "alpaca-paper",
+    "equity-spy",
+    "ARCA",
+)
+
+
 @dataclass(frozen=True, slots=True)
 class SystemClock:
     """Provide UTC wall-clock time only from the composition boundary."""
@@ -107,6 +114,7 @@ def configure_advance(  # noqa: PLR0913 - composition names each untrusted bound
             database.path,
             decision_verifier,
             portfolio_ledger,
+            _OFFICIAL_BENCHMARK_IDENTITY,
         )
         return Advance(
             ledger=SQLiteLifecycleLedger(database.path),
@@ -156,11 +164,7 @@ def configure_advance(  # noqa: PLR0913 - composition names each untrusted bound
             decision_signer=decision_signer,
             decision_window_source=ShortLivedDecisionPacketWindowSource(),
             decision_account_scope=decision_account_scope,
-            benchmark_identity=EquityInstrumentIdentity(
-                "alpaca-paper",
-                "equity-spy",
-                "ARCA",
-            ),
+            benchmark_identity=_OFFICIAL_BENCHMARK_IDENTITY,
         )
     # Strict mypy proves this line unreachable; removing it is runtime-equivalent.
     assert_never(database)  # pragma: no cover
@@ -220,6 +224,7 @@ def configure_status(
                 database.path,
                 verifier=decision_verifier,
                 portfolio_ledger=portfolio_ledger,
+                benchmark_identity=_OFFICIAL_BENCHMARK_IDENTITY,
             ),
         )
     # Strict mypy proves this line unreachable; removing it is runtime-equivalent.

@@ -419,10 +419,18 @@ class Advance:
                 )
                 if replayed_run is None:
                     raise InvalidLifecycleStateError(_INCOMPLETE_CHECKPOINT_RESULT)
-                recorded_at = _clock_instant(self.clock)
+                issued_at = _clock_instant(self.clock)
+                if issued_at.value < decision.portfolio_checkpoint.recorded_at.value:
+                    command = replace(
+                        command,
+                        decision_publication=(
+                            LifecycleDecisionPublicationRefusalReason.INVALID_VALIDITY_WINDOW
+                        ),
+                    )
+                    continue
                 validity_window = self.decision_window_source.window_for(
                     command.request.session,
-                    recorded_at,
+                    issued_at,
                 )
                 publication: DecisionPublicationResult | DecisionPublicationRefusalReason
                 if isinstance(validity_window, DecisionPublicationRefusalReason):
@@ -443,6 +451,21 @@ class Advance:
                         ),
                     )
                     continue
+                visible_at = _clock_instant(self.clock)
+                packet = publication.packet
+                if (
+                    visible_at.value < issued_at.value
+                    or visible_at.value < decision.portfolio_checkpoint.recorded_at.value
+                    or (packet is not None and packet.expires_at.value <= visible_at.value)
+                ):
+                    command = replace(
+                        command,
+                        decision_publication=(
+                            LifecycleDecisionPublicationRefusalReason.INVALID_VALIDITY_WINDOW
+                        ),
+                    )
+                    continue
+                recorded_at = visible_at
                 command = replace(
                     command,
                     decision_publication=self.decision_ledger.record_publication(

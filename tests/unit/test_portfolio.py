@@ -180,7 +180,7 @@ def test_decision_publication_refuses_missing_benchmark_and_omits_no_trade_packe
     assert isinstance(no_trade, DecisionPublicationResult)
     assert no_trade.packet is None
     assert no_trade.no_action_reason is PacketNoActionReason.NO_AUTHORIZED_ADJUSTMENTS
-    assert validate_decision_publication(no_trade, cycle)
+    assert validate_decision_publication(no_trade, cycle, benchmark_identity=_SPY)
 
 
 @pytest.mark.parametrize(
@@ -215,7 +215,7 @@ def test_decision_publication_binds_upstream_forecast_and_model_identity(
     assert publication.decision_record.forecast_ids == house_view.forecast_ids
     assert publication.decision_record.model_fingerprint == house_view.model_fingerprint
     object.__setattr__(publication.decision_record, field, invalid_value)
-    assert not validate_decision_publication(publication, cycle)
+    assert not validate_decision_publication(publication, cycle, benchmark_identity=_SPY)
 
 
 def test_decision_publication_refuses_invalid_portfolio_window_identity_and_signer() -> None:
@@ -327,6 +327,7 @@ def test_publication_value_objects_reject_invalid_windows_and_forged_serializati
     assert not validate_decision_publication(
         object(),  # type: ignore[arg-type]  # Hostile boundary input.
         construct_portfolio_cycle(_request(())),
+        benchmark_identity=_SPY,
     )
 
 

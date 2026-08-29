@@ -646,8 +646,11 @@ class _WriteThenInterruptPortfolioLedger:
     def load_cycle(self, reference: PortfolioCheckpointReference) -> PortfolioCycleResult:
         return self.delegate.load_cycle(reference)
 
-    def load_cycle_for_run(self, run_id: str) -> PortfolioCycleResult:
-        return self.delegate.load_cycle_for_run(run_id)
+    def load_cycle_with_reference_for_run(
+        self,
+        run_id: str,
+    ) -> tuple[PortfolioCycleResult, PortfolioCheckpointReference]:
+        return self.delegate.load_cycle_with_reference_for_run(run_id)
 
 
 def _configure(

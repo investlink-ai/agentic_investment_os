@@ -207,8 +207,11 @@ class SQLitePortfolioLedger:
         except (json.JSONDecodeError, sqlite3.Error, TypeError, ValueError) as error:
             raise InvalidLifecycleStateError(_INVALID_HISTORY) from error
 
-    def load_cycle_for_run(self, run_id: str) -> PortfolioCycleResult:
-        """Load one exact revalidated portfolio cycle by its deterministic run identity."""
+    def load_cycle_with_reference_for_run(
+        self,
+        run_id: str,
+    ) -> tuple[PortfolioCycleResult, PortfolioCheckpointReference]:
+        """Load one exact cycle together with its revalidated durable reference."""
         if not is_sha256(run_id):
             raise InvalidLifecycleStateError(_INVALID_HISTORY)
         try:
@@ -223,8 +226,8 @@ class SQLitePortfolioLedger:
                 ).fetchone()
                 if row is None:
                     raise InvalidLifecycleStateError(_INVALID_HISTORY)
-                _validated_reference(connection, row)
-                return _load_cycle_for_row(connection, row)
+                reference = _validated_reference(connection, row)
+                return _load_cycle_for_row(connection, row), reference
         except InvalidLifecycleStateError:
             raise
         except (json.JSONDecodeError, sqlite3.Error, TypeError, ValueError) as error:

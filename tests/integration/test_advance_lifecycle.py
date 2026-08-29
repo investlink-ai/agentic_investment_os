@@ -1915,7 +1915,7 @@ def test_decision_publication_resamples_time_after_slow_research(tmp_path: Path)
     state_root = tmp_path / "runtime"
     started_at = datetime(2026, 8, 21, 22, 0, tzinfo=UTC)
     published_at = started_at + timedelta(minutes=6)
-    clock = SequenceClock((started_at, published_at))
+    clock = SequenceClock((started_at, published_at, published_at))
 
     receipt = _configure(
         state_root,
@@ -1944,6 +1944,86 @@ def test_decision_publication_resamples_time_after_slow_research(tmp_path: Path)
     assert packet["issued_at"] == UtcInstant.from_datetime(published_at).isoformat()
     assert row[1] == UtcInstant.from_datetime(published_at).isoformat()
     assert event_time == (UtcInstant.from_datetime(published_at).isoformat(),)
+
+
+def test_decision_publication_refuses_a_packet_that_expires_during_signing(
+    tmp_path: Path,
+) -> None:
+    state_root = tmp_path / "runtime"
+    started_at = datetime(2026, 8, 21, 22, 0, tzinfo=UTC)
+    issued_at = started_at + timedelta(minutes=6)
+    visible_at = issued_at + timedelta(minutes=5)
+    clock = SequenceClock((started_at, started_at, issued_at, visible_at))
+
+    receipt = _configure(
+        state_root,
+        clock=clock,
+        cio_stance="long",
+        packet_capable_universe=True,
+    )(
+        cycle=_cycle_payload("2026-08-21"),
+        mode="champion",
+        idempotency_key="packet-expired-during-signing",
+    )
+
+    assert receipt.failure_reason is AdvanceFailureReason.DECISION_PUBLICATION_FAILED
+    assert receipt.decision_checkpoint is None
+    with sqlite3.connect(state_root / "lifecycle.sqlite3") as connection:
+        assert connection.execute("SELECT COUNT(*) FROM decision_publications").fetchone() == (0,)
+        refusal = connection.execute(
+            "SELECT decision_publication_refusal, recorded_at FROM advance_refusals"
+        ).fetchone()
+    assert refusal == (
+        PacketPublicationRefusalReason.INVALID_VALIDITY_WINDOW.value,
+        UtcInstant.from_datetime(started_at).isoformat(),
+    )
+
+
+@pytest.mark.parametrize("regression_point", ["before_signing", "after_signing"])
+def test_decision_publication_refuses_a_backward_clock_without_an_orphan_packet(
+    tmp_path: Path,
+    regression_point: Literal["before_signing", "after_signing"],
+) -> None:
+    state_root = tmp_path / "runtime"
+    started_at = datetime(2026, 8, 21, 22, 0, tzinfo=UTC)
+    regressed_at = started_at - timedelta(seconds=1)
+    clock = SequenceClock(
+        (started_at, started_at, started_at, regressed_at)
+        if regression_point == "after_signing"
+        else (started_at, started_at, regressed_at)
+    )
+    capability = _configure(
+        state_root,
+        clock=clock,
+        cio_stance="long",
+        packet_capable_universe=True,
+    )
+
+    receipt = capability(
+        cycle=_cycle_payload("2026-08-21"),
+        mode="champion",
+        idempotency_key=f"backward-publication-clock-{regression_point}",
+    )
+
+    assert receipt.failure_reason is AdvanceFailureReason.DECISION_PUBLICATION_FAILED
+    assert receipt.decision_checkpoint is None
+    database = state_root / "lifecycle.sqlite3"
+    with sqlite3.connect(database) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM decision_publications").fetchone() == (0,)
+        refusal = connection.execute(
+            "SELECT decision_publication_refusal, recorded_at FROM advance_refusals"
+        ).fetchone()
+    assert refusal == (
+        PacketPublicationRefusalReason.INVALID_VALIDITY_WINDOW.value,
+        UtcInstant.from_datetime(started_at).isoformat(),
+    )
+    assert _events(database)[-1] == ("portfolio_constructed", "ConstructPortfolio")
+    status = configure_status(
+        (ConfigurationSource("test", runtime_configuration(state_root)),),
+        repository_root=REPOSITORY_ROOT,
+    )
+    assert isinstance(status, Status)
+    assert status().durable_reason is AdvanceFailureReason.DECISION_PUBLICATION_FAILED
 
 
 def test_advance_captures_all_recorded_official_sources_without_network_access(

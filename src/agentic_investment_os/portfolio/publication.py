@@ -652,9 +652,14 @@ def construct_decision_publication(  # noqa: PLR0911 - every authority input is 
 def validate_decision_publication(
     publication: DecisionPublicationResult,
     cycle_result: PortfolioCycleResult,
+    *,
+    benchmark_identity: EquityInstrumentIdentity,
 ) -> bool:
-    """Reconstruct publication semantics from the exact durable portfolio cycle."""
-    if type(publication) is not DecisionPublicationResult:
+    """Reconstruct publication semantics from the cycle and trusted official benchmark."""
+    if (
+        type(publication) is not DecisionPublicationResult
+        or publication.decision_record.benchmark_identity != benchmark_identity
+    ):
         return False
     record = publication.decision_record
     packet = publication.packet
@@ -667,7 +672,7 @@ def validate_decision_publication(
             cycle_result,
             balanced,
             house_view,
-            benchmark_identity=record.benchmark_identity,
+            benchmark_identity=benchmark_identity,
         )
         return (
             rebuilt_record,
@@ -686,7 +691,7 @@ def validate_decision_publication(
     )
     rebuilt = construct_decision_publication(
         cycle_result,
-        benchmark_identity=record.benchmark_identity,
+        benchmark_identity=benchmark_identity,
         account_scope=account_scope,
         validity_window=validity_window,
         signer=_StoredSignatureSigner(packet.signature),

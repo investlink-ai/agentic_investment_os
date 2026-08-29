@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, date, datetime, timedelta
@@ -32,6 +33,7 @@ from agentic_investment_os.portfolio.publication import (
 )
 from tests._decision import TEST_DECISION_ACCOUNT_SCOPE, TEST_PACKET_CRYPTOGRAPHY
 from tests._portfolio import (
+    SYNTHETIC_AAPL,
     SYNTHETIC_SPY,
     synthetic_portfolio_cycle,
 )
@@ -62,6 +64,7 @@ def _ledgers(
         prepared.path,
         TEST_PACKET_CRYPTOGRAPHY,
         portfolio,
+        SYNTHETIC_SPY,
     )
     return prepared.path, portfolio, decisions
 
@@ -71,6 +74,7 @@ def _publication(
     *,
     published_at: UtcInstant = _PUBLISHED_AT,
     account_scope: DecisionPacketAccountScope = TEST_DECISION_ACCOUNT_SCOPE,
+    packet_expected: bool = True,
 ) -> DecisionPublicationResult:
     house_view = cycle_result.balanced.require_house_view()
     result = construct_decision_publication(
@@ -85,7 +89,7 @@ def _publication(
         signer=TEST_PACKET_CRYPTOGRAPHY,
     )
     assert isinstance(result, DecisionPublicationResult)
-    assert result.packet is not None
+    assert (result.packet is not None) is packet_expected
     return result
 
 
@@ -125,6 +129,7 @@ def test_publication_is_atomic_and_replays_exactly_after_reopen(tmp_path: Path) 
         database,
         verifier=TEST_PACKET_CRYPTOGRAPHY,
         portfolio_ledger=SQLitePortfolioLedger.open_existing(database),
+        benchmark_identity=SYNTHETIC_SPY,
     )
 
     assert reopened.replay_publication(run_id, publication.decision_record.cycle) == checkpoint
@@ -244,6 +249,7 @@ def test_coherently_hashed_wrong_key_signature_never_becomes_visible(tmp_path: P
         database,
         HmacSha256DecisionPacketSigner(b"wrong-synthetic-signing-key"),
         portfolio,
+        SYNTHETIC_SPY,
     )
 
     with pytest.raises(InvalidLifecycleStateError, match="durable decision publication is invalid"):
@@ -254,6 +260,71 @@ def test_coherently_hashed_wrong_key_signature_never_becomes_visible(tmp_path: P
         )
     with sqlite3.connect(database) as connection:
         assert connection.execute("SELECT COUNT(*) FROM decision_publications").fetchone() == (0,)
+
+
+def test_wrong_official_benchmark_never_becomes_visible(tmp_path: Path) -> None:
+    cycle_result = synthetic_portfolio_cycle(with_authorized_adjustments=False)
+    database, _, decisions = _ledgers(tmp_path, cycle_result)
+    house_view = cycle_result.balanced.require_house_view()
+    publication = construct_decision_publication(
+        cycle_result,
+        benchmark_identity=SYNTHETIC_AAPL,
+        account_scope=TEST_DECISION_ACCOUNT_SCOPE,
+        validity_window=DecisionPacketValidityWindow(
+            house_view.cycle,
+            _PUBLISHED_AT,
+            UtcInstant.from_datetime(_PUBLISHED_AT.value + timedelta(minutes=5)),
+        ),
+        signer=TEST_PACKET_CRYPTOGRAPHY,
+    )
+    assert isinstance(publication, DecisionPublicationResult)
+    assert publication.packet is None
+
+    with pytest.raises(InvalidLifecycleStateError, match="durable decision publication is invalid"):
+        decisions.record_publication(house_view.run_id, publication, _PUBLISHED_AT)
+    with sqlite3.connect(database) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM decision_publications").fetchone() == (0,)
+
+
+def test_resealed_no_action_benchmark_substitution_fails_reopen_validation(
+    tmp_path: Path,
+) -> None:
+    cycle_result = synthetic_portfolio_cycle(with_authorized_adjustments=False)
+    database, _, decisions = _ledgers(tmp_path, cycle_result)
+    house_view = cycle_result.balanced.require_house_view()
+    original = _publication(cycle_result, packet_expected=False)
+    checkpoint = decisions.record_publication(house_view.run_id, original, _PUBLISHED_AT)
+    substituted = construct_decision_publication(
+        cycle_result,
+        benchmark_identity=SYNTHETIC_AAPL,
+        account_scope=TEST_DECISION_ACCOUNT_SCOPE,
+        validity_window=DecisionPacketValidityWindow(
+            house_view.cycle,
+            _PUBLISHED_AT,
+            UtcInstant.from_datetime(_PUBLISHED_AT.value + timedelta(minutes=5)),
+        ),
+        signer=TEST_PACKET_CRYPTOGRAPHY,
+    )
+    assert isinstance(substituted, DecisionPublicationResult)
+    assert substituted.packet is None
+    with sqlite3.connect(database) as connection:
+        connection.execute("DROP TRIGGER decision_publications_are_append_only_update")
+        connection.execute(
+            "UPDATE decision_publications SET decision_record_id = ?, decision_record_json = ?",
+            (
+                substituted.decision_record.decision_record_id,
+                json.dumps(
+                    substituted.decision_record.to_payload(),
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+            ),
+        )
+
+    with pytest.raises(InvalidLifecycleStateError, match="durable decision publication is invalid"):
+        decisions.replay_publication(house_view.run_id, house_view.cycle)
+    with pytest.raises(InvalidLifecycleStateError, match="durable decision publication is invalid"):
+        decisions.validate_reference(_reference(cycle_result, checkpoint))
 
 
 def test_corrupt_authoritative_packet_fails_reopen_validation(tmp_path: Path) -> None:
@@ -302,6 +373,60 @@ def test_reopen_rejects_publication_recorded_before_its_signed_issue_time(
 
     with pytest.raises(InvalidLifecycleStateError, match="durable decision publication is invalid"):
         decisions.replay_publication(run_id, publication.decision_record.cycle)
+
+
+def test_reopen_rejects_no_action_publication_recorded_before_its_evidence_cutoff(
+    tmp_path: Path,
+) -> None:
+    cycle_result = synthetic_portfolio_cycle(with_authorized_adjustments=False)
+    database, _, decisions = _ledgers(tmp_path, cycle_result)
+    publication = _publication(cycle_result, packet_expected=False)
+    run_id = cycle_result.balanced.require_house_view().run_id
+    checkpoint = decisions.record_publication(run_id, publication, _PUBLISHED_AT)
+    before_cutoff = UtcInstant.from_datetime(
+        publication.decision_record.evidence_cutoff.value - timedelta(microseconds=1)
+    )
+    with sqlite3.connect(database) as connection:
+        connection.execute("DROP TRIGGER decision_publications_are_append_only_update")
+        connection.execute(
+            "UPDATE decision_publications SET recorded_at = ?",
+            (before_cutoff.isoformat(),),
+        )
+
+    with pytest.raises(InvalidLifecycleStateError, match="durable decision publication is invalid"):
+        decisions.replay_publication(run_id, publication.decision_record.cycle)
+    with pytest.raises(InvalidLifecycleStateError, match="durable decision publication is invalid"):
+        decisions.validate_reference(_reference(cycle_result, checkpoint))
+
+
+def test_publication_before_the_portfolio_checkpoint_never_becomes_valid_history(
+    tmp_path: Path,
+) -> None:
+    cycle_result = synthetic_portfolio_cycle(with_authorized_adjustments=False)
+    database, _, decisions = _ledgers(tmp_path, cycle_result)
+    publication = _publication(cycle_result, packet_expected=False)
+    run_id = cycle_result.balanced.require_house_view().run_id
+    before_portfolio = UtcInstant.from_datetime(
+        _PORTFOLIO_RECORDED_AT.value - timedelta(microseconds=1)
+    )
+
+    with pytest.raises(InvalidLifecycleStateError, match="durable decision publication is invalid"):
+        decisions.record_publication(run_id, publication, before_portfolio)
+    with sqlite3.connect(database) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM decision_publications").fetchone() == (0,)
+
+    checkpoint = decisions.record_publication(run_id, publication, _PUBLISHED_AT)
+    with sqlite3.connect(database) as connection:
+        connection.execute("DROP TRIGGER decision_publications_are_append_only_update")
+        connection.execute(
+            "UPDATE decision_publications SET recorded_at = ?",
+            (before_portfolio.isoformat(),),
+        )
+
+    with pytest.raises(InvalidLifecycleStateError, match="durable decision publication is invalid"):
+        decisions.replay_publication(run_id, publication.decision_record.cycle)
+    with pytest.raises(InvalidLifecycleStateError, match="durable decision publication is invalid"):
+        decisions.validate_reference(_reference(cycle_result, checkpoint))
 
 
 def test_expired_new_packet_and_mismatched_cycle_fail_closed(tmp_path: Path) -> None:

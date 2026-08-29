@@ -8,7 +8,11 @@ from contextlib import closing
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Self
 
-from agentic_investment_os.domain.identity import MarketSession, parse_decision_cycle_identity
+from agentic_investment_os.domain.identity import (
+    EquityInstrumentIdentity,
+    MarketSession,
+    parse_decision_cycle_identity,
+)
 from agentic_investment_os.domain.lifecycle import (
     DecisionCheckpoint,
     DecisionCheckpointReference,
@@ -45,6 +49,7 @@ class SQLiteDecisionPublicationLedger:
     database: Path
     verifier: DecisionPacketVerifier
     portfolio_ledger: PortfolioCycleResultLedger
+    benchmark_identity: EquityInstrumentIdentity
 
     @classmethod
     def open_existing(
@@ -53,9 +58,10 @@ class SQLiteDecisionPublicationLedger:
         *,
         verifier: DecisionPacketVerifier,
         portfolio_ledger: PortfolioCycleResultLedger,
+        benchmark_identity: EquityInstrumentIdentity,
     ) -> Self:
         """Open the already startup-validated runtime database."""
-        return cls(database, verifier, portfolio_ledger)
+        return cls(database, verifier, portfolio_ledger, benchmark_identity)
 
     def record_publication(
         self,
@@ -72,8 +78,17 @@ class SQLiteDecisionPublicationLedger:
             or result.decision_record.evidence_cutoff.value > recorded_at.value
         ):
             raise InvalidLifecycleStateError(_INVALID_HISTORY)
-        cycle_result = self.portfolio_ledger.load_cycle_for_run(run_id)
-        if not validate_decision_publication(result, cycle_result):
+        cycle_result, portfolio_reference = self.portfolio_ledger.load_cycle_with_reference_for_run(
+            run_id
+        )
+        if (
+            recorded_at.value < portfolio_reference.recorded_at.value
+            or not validate_decision_publication(
+                result,
+                cycle_result,
+                benchmark_identity=self.benchmark_identity,
+            )
+        ):
             raise InvalidLifecycleStateError(_INVALID_HISTORY)
         packet = result.packet
         if packet is not None and (
@@ -232,9 +247,14 @@ class SQLiteDecisionPublicationLedger:
             raise InvalidLifecycleStateError(_INVALID_HISTORY)
         result = DecisionPublicationResult(decision, packet, no_action_reason)
         checkpoint = _checkpoint(result, recorded_at)
+        cycle_result, portfolio_reference = self.portfolio_ledger.load_cycle_with_reference_for_run(
+            run_id
+        )
         if (
             decision.run_id != run_id
             or decision.cycle != cycle
+            or decision.evidence_cutoff.value > recorded_at.value
+            or portfolio_reference.recorded_at.value > recorded_at.value
             or row[2] != decision.decision_record_id
             or decision_json != _canonical_json(decision.to_payload())
             or row[4] != (None if packet is None else packet.packet_id)
@@ -243,7 +263,8 @@ class SQLiteDecisionPublicationLedger:
             or row[7] != (None if no_action_reason is None else no_action_reason.value)
             or not validate_decision_publication(
                 result,
-                self.portfolio_ledger.load_cycle_for_run(run_id),
+                cycle_result,
+                benchmark_identity=self.benchmark_identity,
             )
         ):
             raise InvalidLifecycleStateError(_INVALID_HISTORY)
@@ -255,7 +276,9 @@ def _checkpoint(
     recorded_at: UtcInstant,
 ) -> DecisionCheckpoint:
     packet = result.packet
-    if packet is not None and packet.issued_at.value > recorded_at.value:
+    if result.decision_record.evidence_cutoff.value > recorded_at.value or (
+        packet is not None and packet.issued_at.value > recorded_at.value
+    ):
         raise InvalidLifecycleStateError(_INVALID_HISTORY)
     return DecisionCheckpoint(
         result.decision_record.decision_record_id,

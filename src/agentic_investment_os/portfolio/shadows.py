@@ -527,7 +527,10 @@ class PortfolioCycleResultLedger(Protocol):
 
     def load_cycle(self, reference: PortfolioCheckpointReference) -> PortfolioCycleResult: ...
 
-    def load_cycle_for_run(self, run_id: str) -> PortfolioCycleResult: ...
+    def load_cycle_with_reference_for_run(
+        self,
+        run_id: str,
+    ) -> tuple[PortfolioCycleResult, PortfolioCheckpointReference]: ...
 
 
 class PortfolioCycleHistoryValidator(Protocol):
