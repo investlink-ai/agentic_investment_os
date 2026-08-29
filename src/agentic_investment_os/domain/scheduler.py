@@ -241,8 +241,9 @@ def session_windows_through(
 ) -> tuple[SessionWindow, ...]:
     """Return supported due windows from activation through the supplied instant."""
     local_date = recorded_at.value.astimezone(_NEW_YORK).date()
-    if local_date.year != _PINNED_YEAR:
+    if local_date.year < _PINNED_YEAR:
         return ()
+    local_date = min(local_date, date(_PINNED_YEAR, 12, 31))
     current = policy.first_session.trading_date
     windows: list[SessionWindow] = []
     while current <= local_date:
@@ -283,10 +284,7 @@ def receipt_matches_session(receipt: AdvanceReceipt, cycle: MarketSession) -> bo
     """Bind one public lifecycle observation to its requested scheduler session."""
     if type(receipt) is not AdvanceReceipt or type(cycle) is not MarketSession:
         return False
-    observed_cycle = receipt.cycle
-    return observed_cycle == cycle or (
-        receipt.disposition.value == "failed_closed" and observed_cycle is None
-    )
+    return receipt.cycle == cycle
 
 
 class ScheduledRunDisposition(StrEnum):

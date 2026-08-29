@@ -20,7 +20,7 @@ from agentic_investment_os.application.scheduler import (
     Scheduler,
     SchedulerCalendarError,
 )
-from agentic_investment_os.domain.identity import MarketSession
+from agentic_investment_os.domain.identity import MarketSession, parse_decision_cycle_identity
 from agentic_investment_os.domain.lifecycle import (
     AdvanceDisposition,
     AdvanceFailureReason,
@@ -34,6 +34,7 @@ from agentic_investment_os.domain.scheduler import (
     SchedulerClaimDisposition,
     SchedulerPolicy,
     build_session_window,
+    session_windows_through,
 )
 from agentic_investment_os.domain.temporal import UtcInstant
 from agentic_investment_os.entrypoints.scheduler import (
@@ -74,6 +75,20 @@ class FrozenClock:
 
 
 @dataclass
+class SequenceClock:
+    instants: list[datetime]
+
+    def now(self) -> datetime:
+        return self.instants.pop(0)
+
+
+def _requested_market_session(value: object) -> MarketSession:
+    parsed = parse_decision_cycle_identity(value)
+    assert type(parsed) is MarketSession
+    return parsed
+
+
+@dataclass
 class RefusingAdvance:
     calls: list[tuple[object, object, object]]
 
@@ -81,6 +96,7 @@ class RefusingAdvance:
         self.calls.append((cycle, mode, idempotency_key))
         return AdvanceReceipt.failed_closed(
             AdvanceFailureReason.INVALID_DURABLE_STATE,
+            cycle=_requested_market_session(cycle),
         )
 
 
@@ -92,6 +108,21 @@ class RaisingAdvance:
         self.calls.append((cycle, mode, idempotency_key))
         message = "simulated process interruption"
         raise RuntimeError(message)
+
+
+@dataclass
+class ClockAdvancingRefusingAdvance:
+    calls: list[tuple[object, object, object]]
+    clock: FrozenClock
+    advance_to: datetime
+
+    def __call__(self, *, cycle: object, mode: object, idempotency_key: object) -> AdvanceReceipt:
+        self.calls.append((cycle, mode, idempotency_key))
+        self.clock.instant = self.advance_to
+        return AdvanceReceipt.failed_closed(
+            AdvanceFailureReason.INVALID_DURABLE_STATE,
+            cycle=_requested_market_session(cycle),
+        )
 
 
 @dataclass
@@ -124,7 +155,10 @@ class BlockingAdvance:
         if not self.release.wait(timeout=5):
             message = "test did not release blocking advance"
             raise RuntimeError(message)
-        return AdvanceReceipt.failed_closed(AdvanceFailureReason.INVALID_DURABLE_STATE)
+        return AdvanceReceipt.failed_closed(
+            AdvanceFailureReason.INVALID_DURABLE_STATE,
+            cycle=_requested_market_session(cycle),
+        )
 
 
 class InvalidAdvanceReceipt(AdvanceReceipt):
@@ -261,6 +295,112 @@ def test_action_bound_prioritizes_a_currently_eligible_session_over_missed_bookk
     assert receipt.sessions[0].cycle == MarketSession(date(2026, 8, 28))
     assert receipt.pending is not None
     assert receipt.pending.cycle == MarketSession(date(2026, 8, 25))
+
+
+def test_action_bound_resumes_an_interrupted_prior_session_before_current_work(
+    tmp_path: Path,
+) -> None:
+    calls: list[tuple[object, object, object]] = []
+    root = tmp_path / "runtime"
+    interrupted = _scheduler(
+        root,
+        now=datetime(2026, 8, 27, 12, 45, tzinfo=UTC),
+        advance=RaisingAdvance(calls),
+        policy=_policy(first_session="2026-08-27", maximum_actions_per_run=1),
+    )
+    with pytest.raises(RuntimeError, match="simulated process interruption"):
+        interrupted()
+
+    resumed = _scheduler(
+        root,
+        now=datetime(2026, 8, 28, 12, 45, tzinfo=UTC),
+        advance=RefusingAdvance(calls),
+        policy=_policy(first_session="2026-08-27", maximum_actions_per_run=1),
+    )()
+
+    assert [call[0] for call in calls] == [
+        MarketSession(date(2026, 8, 27)).to_payload(),
+        MarketSession(date(2026, 8, 27)).to_payload(),
+    ]
+    assert resumed.sessions[0].disposition is ScheduledRunDisposition.REFUSED
+    assert resumed.pending is not None
+    assert resumed.pending.cycle == MarketSession(date(2026, 8, 28))
+
+
+def test_recovery_crossing_a_newer_deadline_does_not_backfill_lifecycle_work(
+    tmp_path: Path,
+) -> None:
+    calls: list[tuple[object, object, object]] = []
+    root = tmp_path / "runtime"
+    policy = _policy(first_session="2026-08-27")
+    interrupted = _scheduler(
+        root,
+        now=datetime(2026, 8, 27, 12, 45, tzinfo=UTC),
+        advance=RaisingAdvance(calls),
+        policy=policy,
+    )
+    with pytest.raises(RuntimeError, match="simulated process interruption"):
+        interrupted()
+
+    clock = FrozenClock(datetime(2026, 8, 28, 12, 45, tzinfo=UTC))
+    configured = configure_scheduler(
+        runtime_configuration(root),
+        scheduler_policy=policy,
+        repository_root=Path(__file__).resolve().parents[2],
+        advance=ClockAdvancingRefusingAdvance(
+            calls,
+            clock,
+            datetime(2026, 8, 28, 14, 1, tzinfo=UTC),
+        ),
+        status=NotStartedStatus(),
+        clock=clock,
+    )
+    assert isinstance(configured, Scheduler)
+
+    recovered = configured()
+
+    assert [call[0] for call in calls] == [
+        MarketSession(date(2026, 8, 27)).to_payload(),
+        MarketSession(date(2026, 8, 27)).to_payload(),
+    ]
+    assert [session.disposition for session in recovered.sessions] == [
+        ScheduledRunDisposition.REFUSED,
+        ScheduledRunDisposition.MISSED,
+    ]
+    assert recovered.pending is not None
+    assert recovered.pending.cycle == MarketSession(date(2026, 8, 31))
+
+
+def test_waiting_prior_session_defers_newer_lifecycle_work(tmp_path: Path) -> None:
+    calls: list[tuple[object, object, object]] = []
+    root = tmp_path / "runtime"
+    policy = _policy(
+        first_session="2026-08-27",
+        recovery_delay_seconds=86_400,
+        maximum_actions_per_run=20,
+    )
+    interrupted = _scheduler(
+        root,
+        now=datetime(2026, 8, 27, 12, 50, tzinfo=UTC),
+        advance=RaisingAdvance(calls),
+        policy=policy,
+    )
+    with pytest.raises(RuntimeError, match="simulated process interruption"):
+        interrupted()
+
+    waiting = _scheduler(
+        root,
+        now=datetime(2026, 8, 28, 12, 45, tzinfo=UTC),
+        advance=RefusingAdvance(calls),
+        policy=policy,
+    )()
+
+    assert [call[0] for call in calls] == [
+        MarketSession(date(2026, 8, 27)).to_payload(),
+    ]
+    assert waiting.sessions[0].disposition is ScheduledRunDisposition.STARTED
+    assert waiting.pending is not None
+    assert waiting.pending.cycle == MarketSession(date(2026, 8, 28))
 
 
 def test_scheduler_invokes_one_public_advance_with_a_stable_identity(tmp_path: Path) -> None:
@@ -403,6 +543,62 @@ def test_clock_rollback_after_a_terminal_observation_fails_closed(tmp_path: Path
         rolled_back()
 
 
+def test_clock_rollback_between_due_reconstruction_and_claim_fails_before_effect(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "runtime"
+    calls: list[tuple[object, object, object]] = []
+    configured = configure_scheduler(
+        runtime_configuration(root),
+        scheduler_policy=_policy(),
+        repository_root=Path(__file__).resolve().parents[2],
+        advance=RefusingAdvance(calls),
+        status=NotStartedStatus(),
+        clock=SequenceClock(
+            [
+                datetime(2026, 8, 28, 12, 45, tzinfo=UTC),
+                datetime(2026, 8, 28, 12, 15, tzinfo=UTC),
+            ]
+        ),
+    )
+    assert isinstance(configured, Scheduler)
+
+    with pytest.raises(RuntimeError, match="precedes"):
+        configured()
+
+    assert calls == []
+    assert (
+        _scheduler(
+            root,
+            now=datetime(2026, 8, 28, 12, 45, tzinfo=UTC),
+            advance=RefusingAdvance(calls),
+        )
+        .status()
+        .sessions
+        == ()
+    )
+
+
+def test_scheduler_ledger_rejects_a_new_claim_before_eligibility(tmp_path: Path) -> None:
+    policy = _parsed_policy()
+    ledger = SQLiteSchedulerLedger(tmp_path / "runtime", policy)
+    window = build_session_window(
+        MarketSession(date(2026, 8, 28)),
+        policy.advance_minutes_before_open,
+        policy.maximum_lateness_minutes,
+    )
+    assert window is not None
+
+    with pytest.raises(SchedulerPersistenceError):
+        ledger.claim(
+            policy,
+            window,
+            UtcInstant.from_datetime(datetime(2026, 8, 28, 12, 15, tzinfo=UTC)),
+        )
+
+    assert ledger.snapshot(policy).sessions == ()
+
+
 def test_lifecycle_oserror_preserves_its_failure_domain(tmp_path: Path) -> None:
     scheduler = _scheduler(
         tmp_path / "runtime",
@@ -490,19 +686,202 @@ def test_scheduler_normalizes_explicit_host_zone_and_refuses_naive_time(
         naive()
 
 
-def test_scheduler_refuses_when_pinned_calendar_does_not_cover_current_year(
+def test_scheduler_records_bounded_missed_work_then_refuses_unsupported_year(
     tmp_path: Path,
 ) -> None:
+    calls: list[tuple[object, object, object]] = []
+    observed_at = datetime(2027, 1, 4, 12, 45, tzinfo=UTC)
     scheduler = _scheduler(
         tmp_path / "unsupported-year",
-        now=datetime(2027, 1, 4, 12, 45, tzinfo=UTC),
-        advance=RefusingAdvance([]),
+        now=observed_at,
+        advance=RefusingAdvance(calls),
+    )
+    expected_sessions = len(
+        session_windows_through(
+            scheduler.policy,
+            UtcInstant.from_datetime(observed_at),
+        )
     )
 
     with pytest.raises(SchedulerCalendarError, match="calendar"):
         scheduler()
+    status = scheduler.status()
+    assert calls == []
+    assert len(status.sessions) == scheduler.policy.maximum_actions_per_run
+    assert all(session.disposition is ScheduledRunDisposition.MISSED for session in status.sessions)
+    assert status.pending is not None
+
+    while len(status.sessions) < expected_sessions:
+        previous_count = len(status.sessions)
+        with pytest.raises(SchedulerCalendarError, match="calendar"):
+            scheduler()
+        status = scheduler.status()
+        assert 0 < len(status.sessions) - previous_count <= scheduler.policy.maximum_actions_per_run
+        assert calls == []
+
+    assert len(status.sessions) == expected_sessions
+    assert all(session.disposition is ScheduledRunDisposition.MISSED for session in status.sessions)
+    assert status.pending is None
+
+
+def test_scheduler_records_final_supported_session_missed_after_calendar_horizon(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "runtime"
+    policy = _policy(first_session="2026-12-31")
+    calls: list[tuple[object, object, object]] = []
+    scheduler = _scheduler(
+        root,
+        now=datetime(2027, 1, 1, 14, 1, tzinfo=UTC),
+        advance=RefusingAdvance(calls),
+        policy=policy,
+    )
+
     with pytest.raises(SchedulerCalendarError, match="calendar"):
-        scheduler.status()
+        scheduler()
+
+    assert calls == []
+    status = scheduler.status()
+    assert len(status.sessions) == 1
+    assert status.sessions[0].cycle == MarketSession(date(2026, 12, 31))
+    assert status.sessions[0].disposition is ScheduledRunDisposition.MISSED
+    assert status.pending is None
+
+
+def test_scheduler_recovers_supported_incomplete_work_after_calendar_horizon(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "runtime"
+    policy = _policy(first_session="2026-12-31")
+    calls: list[tuple[object, object, object]] = []
+    interrupted = _scheduler(
+        root,
+        now=datetime(2026, 12, 31, 13, 45, tzinfo=UTC),
+        advance=RaisingAdvance(calls),
+        policy=policy,
+    )
+    with pytest.raises(RuntimeError, match="simulated process interruption"):
+        interrupted()
+
+    recovery = _scheduler(
+        root,
+        now=datetime(2027, 1, 1, 13, 45, tzinfo=UTC),
+        advance=RefusingAdvance(calls),
+        policy=policy,
+    )
+    before = recovery.status()
+    assert before.sessions[0].disposition is ScheduledRunDisposition.STARTED
+    with pytest.raises(SchedulerCalendarError, match="calendar"):
+        recovery()
+
+    assert [call[0] for call in calls] == [
+        MarketSession(date(2026, 12, 31)).to_payload(),
+        MarketSession(date(2026, 12, 31)).to_payload(),
+    ]
+    after = recovery.status()
+    assert after.sessions[0].disposition is ScheduledRunDisposition.REFUSED
+    assert after.sessions[0].attempts == len(calls)
+    assert after.pending is None
+
+
+def test_scheduler_does_not_start_new_work_after_calendar_horizon(tmp_path: Path) -> None:
+    root = tmp_path / "runtime"
+    policy = _policy(first_session="2026-12-31", maximum_lateness_minutes=1_440)
+    calls: list[tuple[object, object, object]] = []
+    configured = configure_scheduler(
+        runtime_configuration(root),
+        scheduler_policy=policy,
+        repository_root=Path(__file__).resolve().parents[2],
+        advance=RefusingAdvance(calls),
+        status=NotStartedStatus(),
+        clock=SequenceClock(
+            [
+                datetime(2026, 12, 31, 13, 45, tzinfo=UTC),
+                datetime(2027, 1, 1, 5, 1, tzinfo=UTC),
+            ]
+        ),
+    )
+    assert isinstance(configured, Scheduler)
+
+    with pytest.raises(SchedulerCalendarError, match="calendar"):
+        configured()
+
+    assert calls == []
+    status = _scheduler(
+        root,
+        now=datetime(2027, 1, 1, 5, 1, tzinfo=UTC),
+        advance=RefusingAdvance(calls),
+        policy=policy,
+    ).status()
+    assert status.sessions == ()
+    assert status.pending is None
+
+
+def test_scheduler_records_a_missed_session_when_claim_observation_crosses_horizon(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "runtime"
+    policy = _policy(first_session="2026-12-31")
+    calls: list[tuple[object, object, object]] = []
+    crossed_horizon = datetime(2027, 1, 1, 5, 1, tzinfo=UTC)
+    configured = configure_scheduler(
+        runtime_configuration(root),
+        scheduler_policy=policy,
+        repository_root=Path(__file__).resolve().parents[2],
+        advance=RefusingAdvance(calls),
+        status=NotStartedStatus(),
+        clock=SequenceClock(
+            [
+                datetime(2026, 12, 31, 13, 45, tzinfo=UTC),
+                crossed_horizon,
+                crossed_horizon,
+            ]
+        ),
+    )
+    assert isinstance(configured, Scheduler)
+
+    with pytest.raises(SchedulerCalendarError, match="calendar"):
+        configured()
+
+    assert calls == []
+    status = _scheduler(
+        root,
+        now=crossed_horizon,
+        advance=RefusingAdvance(calls),
+        policy=policy,
+    ).status()
+    assert status.sessions[0].disposition is ScheduledRunDisposition.MISSED
+    assert status.pending is None
+
+
+def test_scheduler_records_an_outcome_then_refuses_a_cross_horizon_completion(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "runtime"
+    policy = _policy(first_session="2026-12-31")
+    calls: list[tuple[object, object, object]] = []
+    clock = FrozenClock(datetime(2026, 12, 31, 13, 45, tzinfo=UTC))
+    configured = configure_scheduler(
+        runtime_configuration(root),
+        scheduler_policy=policy,
+        repository_root=Path(__file__).resolve().parents[2],
+        advance=ClockAdvancingRefusingAdvance(
+            calls,
+            clock,
+            datetime(2027, 1, 1, 5, 1, tzinfo=UTC),
+        ),
+        status=NotStartedStatus(),
+        clock=clock,
+    )
+    assert isinstance(configured, Scheduler)
+
+    with pytest.raises(SchedulerCalendarError, match="calendar"):
+        configured()
+
+    assert len(calls) == 1
+    status = configured.status()
+    assert status.sessions[0].disposition is ScheduledRunDisposition.REFUSED
+    assert status.pending is None
 
 
 def test_scheduler_history_is_append_only_and_schema_validated_on_every_read(
@@ -837,7 +1216,10 @@ def test_scheduler_ledger_rejects_invalid_claim_and_terminal_redelivery(
     later = UtcInstant.from_datetime(datetime(2026, 8, 28, 12, 46, tzinfo=UTC))
     ledger = SQLiteSchedulerLedger(tmp_path / "terminal", policy)
     claim = ledger.claim(policy, window, now)
-    receipt = AdvanceReceipt.failed_closed(AdvanceFailureReason.INVALID_DURABLE_STATE)
+    receipt = AdvanceReceipt.failed_closed(
+        AdvanceFailureReason.INVALID_DURABLE_STATE,
+        cycle=window.cycle,
+    )
     ledger.record_outcome(policy, claim, receipt, now)
 
     replay = ledger.claim(policy, window, later)

@@ -89,7 +89,12 @@ def test_scheduler_receipt_binding_rejects_inexact_boundary_types() -> None:
         pass
 
     cycle = MarketSession(date(2026, 8, 28))
-    receipt = AdvanceReceipt.failed_closed(AdvanceFailureReason.INVALID_DURABLE_STATE)
+    receipt = AdvanceReceipt.failed_closed(
+        AdvanceFailureReason.INVALID_DURABLE_STATE,
+        cycle=cycle,
+    )
+    unbound = AdvanceReceipt.failed_closed(AdvanceFailureReason.INVALID_DURABLE_STATE)
 
     assert receipt_matches_session(receipt, cycle)
+    assert not receipt_matches_session(unbound, cycle)
     assert not receipt_matches_session(object.__new__(InexactReceipt), cycle)

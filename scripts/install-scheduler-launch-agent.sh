@@ -9,6 +9,36 @@ fail() {
     exit 1
 }
 
+require_trusted_ancestry() {
+    inspected=${1%/*}
+    if [ -z "$inspected" ]; then
+        inspected=/
+    fi
+    while :; do
+        if [ ! -d "$inspected" ] || [ -L "$inspected" ]; then
+            fail "runner ancestry must contain only real directories"
+        fi
+        inspected_owner=$(stat -f '%u' "$inspected") || fail "cannot inspect runner ancestry ownership"
+        inspected_mode=$(stat -f '%Lp' "$inspected") || fail "cannot inspect runner ancestry permissions"
+        case "$inspected_owner:$inspected_mode" in
+            *[!0-9:]* | *:*[!0-7]* | :* | *:) fail "runner ancestry ownership or permissions are invalid" ;;
+        esac
+        if [ "$inspected_owner" -ne 0 ] && [ "$inspected_owner" -ne "$uid" ]; then
+            fail "runner ancestry must be owned by root or the installing operator"
+        fi
+        if [ $((0$inspected_mode & 022)) -ne 0 ]; then
+            fail "runner ancestry must not be writable by group or other users"
+        fi
+        if [ "$inspected" = / ]; then
+            break
+        fi
+        inspected=${inspected%/*}
+        if [ -z "$inspected" ]; then
+            inspected=/
+        fi
+    done
+}
+
 if [ "$#" -ne 1 ]; then
     fail "usage: ./scripts/install-scheduler-launch-agent.sh <absolute-runner-path>"
 fi
@@ -36,6 +66,7 @@ fi
 if [ $((0$runner_mode & 022)) -ne 0 ]; then
     fail "runner must not be writable by group or other users"
 fi
+require_trusted_ancestry "$runner"
 case "${HOME-}" in
     /*) ;;
     *) fail "HOME must be an absolute directory" ;;

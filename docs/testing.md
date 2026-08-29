@@ -49,9 +49,11 @@ validity.
 The scheduler journey uses the code-pinned NYSE calendar, an injected aware clock, recorded source
 and model adapters, private temporary state, and fresh processes. Focused tests own holiday,
 early-close, DST, explicit host-zone normalization, naive and unsupported time refusal, bounded
-lateness, missed-session behavior, interruption recovery, policy conflict, append-only corruption,
-and concurrent live-instance serialization. CI never waits for wall time, loads a LaunchAgent,
-consults a provider calendar, or infers liveness from a process heartbeat.
+lateness, missed-session behavior, interruption recovery across calendar expiry, status visibility
+after expiry, bounded post-expiry missed classification and backlog visibility without lifecycle
+effects, policy conflict, append-only corruption, and concurrent live-instance serialization.
+CI never waits for wall time, loads a LaunchAgent, consults a provider calendar, or infers liveness
+from a process heartbeat.
 
 ## Selection
 

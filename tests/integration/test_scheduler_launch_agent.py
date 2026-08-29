@@ -80,6 +80,61 @@ esac
         assert expected in completed.stderr
 
 
+def test_installer_refuses_mutable_or_symbolic_runner_ancestry(tmp_path: Path) -> None:
+    trusted = tmp_path / "trusted"
+    trusted.mkdir()
+    runner = trusted / "runner"
+    runner.write_text("#!/bin/sh\nexit 0\n")
+    runner.chmod(0o755)
+    symbolic = tmp_path / "symbolic"
+    symbolic.symlink_to(trusted, target_is_directory=True)
+    commands = tmp_path / "commands"
+    commands.mkdir()
+    _write_command(commands / "uname", "printf 'Darwin\\n'\n")
+    _write_command(commands / "id", "printf '501\\n'\n")
+    _write_command(
+        commands / "stat",
+        """
+case "$2" in
+    %u)
+        if [ "$3" = "${TEST_UNSAFE_ANCESTOR-}" ]; then printf '502\\n'; else printf '501\\n'; fi
+        ;;
+    %Lp)
+        if [ "$3" = "${TEST_UNSAFE_ANCESTOR-}" ]; then printf '775\\n'; else printf '755\\n'; fi
+        ;;
+    *) exit 2 ;;
+esac
+""",
+    )
+    environment = {
+        **os.environ,
+        "HOME": str(tmp_path / "home"),
+        "PATH": f"{commands}:{os.defpath}",
+    }
+
+    symbolic_result = subprocess.run(  # noqa: S603
+        ("/bin/sh", str(SCRIPTS[0]), str(symbolic / "runner")),
+        cwd=REPOSITORY_ROOT,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    mutable_result = subprocess.run(  # noqa: S603
+        ("/bin/sh", str(SCRIPTS[0]), str(runner)),
+        cwd=REPOSITORY_ROOT,
+        env={**environment, "TEST_UNSAFE_ANCESTOR": str(trusted)},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert symbolic_result.returncode != 0
+    assert "only real directories" in symbolic_result.stderr
+    assert mutable_result.returncode != 0
+    assert "runner ancestry" in mutable_result.stderr
+
+
 def test_uninstaller_retains_plist_when_loaded_agent_cannot_be_unloaded(
     tmp_path: Path,
 ) -> None:

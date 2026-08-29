@@ -340,9 +340,13 @@ an NYSE trading date, not an instant. Equity policy resolves exchange-calendar r
 `America/New_York` deadlines to Absolute Instants; host, display, and provider time are never
 authority, and timeout measurement is monotonic.
 [ADR 0006](adr/0006-separate-absolute-instants-from-market-time.md) owns the representation.
-The local scheduler additionally pins the complete supported calendar identity and refuses another
-year rather than consulting an ambient calendar. [ADR 0010](adr/0010-isolate-market-session-scheduler-history.md)
-owns its authority, persistence, concurrency, and recovery boundary.
+The local scheduler additionally pins the complete supported calendar identity and refuses new
+eligible effects in another year rather than consulting an ambient calendar. Calendar expiry does
+not hide durable status, suppress bounded missed classification for overdue supported sessions, or
+prevent recovery of an already-started supported session. Missed classification has no lifecycle
+effect, and a recovered observation is appended before the unsupported-year invocation refuses.
+[ADR 0010](adr/0010-isolate-market-session-scheduler-history.md) owns its authority, persistence,
+concurrency, and recovery boundary.
 
 ## Configuration and deployment
 

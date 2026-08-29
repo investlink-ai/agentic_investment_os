@@ -15,6 +15,7 @@ from agentic_investment_os.domain.scheduler import (
     SchedulerReceipt,
     SchedulerStatus,
     SessionWindow,
+    build_session_window,
     calendar_supports,
     next_session_window,
     receipt_matches_session,
@@ -24,6 +25,8 @@ from agentic_investment_os.domain.temporal import InvalidUtcInstantError, UtcIns
 
 if TYPE_CHECKING:
     from datetime import datetime
+
+    from agentic_investment_os.domain.identity import MarketSession
 
 __all__ = (
     "AdvanceCapability",
@@ -85,19 +88,17 @@ class Scheduler:
 
     def _run_due(self) -> SchedulerReceipt:
         observed_at = self._now()
-        self._require_calendar(observed_at)
         snapshot = self.ledger.snapshot(self.policy)
         self._require_current_clock(observed_at, snapshot.sessions)
         completed = {item.cycle: item for item in snapshot.sessions}
         actions = 0
-        due_windows = session_windows_through(self.policy, observed_at)
+        due_windows = _due_session_windows(self.policy, observed_at, snapshot.sessions)
+        if not due_windows:
+            self._require_calendar(observed_at)
         due_windows = tuple(
             sorted(
                 due_windows,
-                key=lambda window: (
-                    window.missed_at.value < observed_at.value,
-                    window.cycle.trading_date,
-                ),
+                key=lambda window: _due_priority(window, observed_at, completed),
             )
         )
         for window in due_windows:
@@ -109,10 +110,18 @@ class Scheduler:
                 continue
             if actions >= self.policy.maximum_actions_per_run:
                 break
-            claim = self.ledger.claim(self.policy, window, observed_at)
+            claim_at = self._now()
+            self._require_current_clock(claim_at, tuple(completed.values()))
+            if claim_at.value < observed_at.value:
+                raise RuntimeError(_CLOCK_ROLLBACK)
+            if existing is None and claim_at.value <= window.missed_at.value:
+                self._require_calendar(claim_at)
+            claim = self.ledger.claim(self.policy, window, claim_at)
             actions += 1
+            if claim.disposition is SchedulerClaimDisposition.WAIT:
+                completed[window.cycle] = claim.status
+                break
             if claim.disposition in (
-                SchedulerClaimDisposition.WAIT,
                 SchedulerClaimDisposition.TERMINAL,
                 SchedulerClaimDisposition.MISSED,
             ):
@@ -146,6 +155,7 @@ class Scheduler:
         snapshot = self.ledger.snapshot(self.policy)
         recorded_at = self._now()
         self._require_current_clock(recorded_at, snapshot.sessions)
+        self._require_calendar(recorded_at)
         next_window = _next_pending_window(self.policy, recorded_at, snapshot.sessions)
         return SchedulerReceipt(
             self.policy.policy_id,
@@ -157,7 +167,6 @@ class Scheduler:
     def status(self) -> SchedulerStatus:
         """Rebuild scheduler status without invoking lifecycle behavior."""
         recorded_at = self._now()
-        self._require_calendar(recorded_at)
         snapshot = self.ledger.snapshot(self.policy)
         self._require_current_clock(recorded_at, snapshot.sessions)
         next_window = _next_pending_window(self.policy, recorded_at, snapshot.sessions)
@@ -191,6 +200,52 @@ def _advance_identity(policy: SchedulerPolicy, session: str) -> str:
     return f"schedule:{policy.policy_id}:{session}:advance"
 
 
+def _due_priority(
+    window: SessionWindow,
+    observed_at: UtcInstant,
+    completed: dict[MarketSession, ScheduledSessionStatus],
+) -> tuple[int, int]:
+    existing = completed.get(window.cycle)
+    if existing is not None and existing.disposition in (
+        ScheduledRunDisposition.STARTED,
+        ScheduledRunDisposition.RESUMED,
+    ):
+        priority = 0
+    elif window.missed_at.value >= observed_at.value:
+        priority = 1
+    else:
+        priority = 2
+    return priority, window.cycle.trading_date.toordinal()
+
+
+def _due_session_windows(
+    policy: SchedulerPolicy,
+    observed_at: UtcInstant,
+    sessions: tuple[ScheduledSessionStatus, ...],
+) -> tuple[SessionWindow, ...]:
+    current_calendar = calendar_supports(observed_at)
+    windows = {
+        window.cycle: window
+        for window in session_windows_through(policy, observed_at)
+        if current_calendar or window.missed_at.value < observed_at.value
+    }
+    for session in sessions:
+        if session.disposition not in (
+            ScheduledRunDisposition.STARTED,
+            ScheduledRunDisposition.RESUMED,
+        ):
+            continue
+        window = build_session_window(
+            session.cycle,
+            policy.advance_minutes_before_open,
+            policy.maximum_lateness_minutes,
+        )
+        if window is None:
+            raise SchedulerCalendarError(_CALENDAR_UNAVAILABLE)
+        windows[window.cycle] = window
+    return tuple(windows.values())
+
+
 def _pending(
     window: SessionWindow | None,
     recorded_at: UtcInstant,
@@ -212,8 +267,12 @@ def _next_pending_window(
     recorded_at: UtcInstant,
     sessions: tuple[ScheduledSessionStatus, ...],
 ) -> SessionWindow | None:
+    next_window = next_session_window(policy, recorded_at)
+    current_calendar = calendar_supports(recorded_at)
     observed = {session.cycle for session in sessions}
     for window in session_windows_through(policy, recorded_at):
-        if window.cycle not in observed:
+        if window.cycle not in observed and (
+            current_calendar or window.missed_at.value < recorded_at.value
+        ):
             return window
-    return next_session_window(policy, recorded_at)
+    return next_window

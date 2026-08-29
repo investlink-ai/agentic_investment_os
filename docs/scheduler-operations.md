@@ -29,8 +29,10 @@ Pass the runner's absolute path to the installer:
 ```
 
 The installer refuses non-macOS hosts, relative paths, symlinks, non-executable runners, runners not
-owned by the installing operator, group- or world-writable runners, and an existing plist. It creates
-a mode-`0600` user LaunchAgent at
+owned by the installing operator, group- or world-writable runners, mutable or symbolic runner
+ancestry, and an existing plist. Every runner ancestor must be a real directory, owned by the
+operator or root, and not writable by group or other users. The installer creates a mode-`0600` user
+LaunchAgent at
 `~/Library/LaunchAgents/ai.investlink.agentic-investment-os.scheduler.plist`, runs once when loaded,
 and polls every five minutes. The generated plist contains the fixed label, absolute runner path,
 launch flags, and interval only. Installation fails closed and removes the new plist if `launchctl`
@@ -64,5 +66,9 @@ authoritative state according to the repository's append-only and recovery polic
   idempotency identity. Concurrent live polls serialize and exact terminal replay causes no new
   lifecycle request.
 - Corrupt schema, hashes, permissions, timestamps, policy identity, or unsupported calendar years
-  fail closed. Restore trusted state through an approved recovery procedure; never edit an event or
-  manufacture completion.
+  fail closed. Calendar expiry blocks new eligible effects but leaves prior status inspectable and
+  already-started supported sessions recoverable. Each poll may also append a bounded set of overdue
+  supported sessions as `missed` without invoking `Advance`; status keeps the oldest unclassified
+  overdue session visible as pending until later polls drain the backlog. Recovery outcomes are
+  recorded before the invocation reports the unsupported year. Restore trusted state through an
+  approved recovery procedure; never edit an event or manufacture completion.

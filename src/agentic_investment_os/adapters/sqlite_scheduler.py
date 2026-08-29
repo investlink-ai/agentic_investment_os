@@ -188,6 +188,8 @@ class SQLiteSchedulerLedger:
             if recorded_at.value > window.missed_at.value:
                 status = _append_event(connection, window, "missed", 0, recorded_at)
                 return SchedulerClaim(window, SchedulerClaimDisposition.MISSED, 0, status)
+            if recorded_at.value < window.scheduled_at.value:
+                raise _invalid()
             status = _append_event(connection, window, "started", 1, recorded_at)
             return SchedulerClaim(window, SchedulerClaimDisposition.START, 1, status)
 
