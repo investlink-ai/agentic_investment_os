@@ -7,7 +7,7 @@ from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, timedelta
-from decimal import Decimal
+from decimal import ROUND_DOWN, Decimal, localcontext
 from pathlib import Path
 from threading import Barrier
 from typing import TYPE_CHECKING, cast
@@ -811,6 +811,30 @@ def test_advance_constructs_and_status_rebuilds_one_portfolio_checkpoint(
         )
     status = _configured_status(state_root)()
     assert status.portfolio_checkpoint == receipt.portfolio_checkpoint
+
+
+def test_portfolio_reference_replay_owns_decimal_context(tmp_path: Path) -> None:
+    state_root = tmp_path / "state"
+    capability = _configure(
+        state_root,
+        universe=recorded_universe(),
+        model=_ValidProductionModel(),
+    )
+    receipt = _advance(capability, "ambient-decimal-context")
+    assert receipt.pinned_run_identity is not None
+    assert receipt.portfolio_checkpoint is not None
+    reference = PortfolioCheckpointReference(
+        receipt.pinned_run_identity.run_id,
+        receipt.portfolio_checkpoint,
+        receipt.portfolio_checkpoint.recorded_at,
+    )
+
+    with localcontext() as context:
+        context.prec = 2
+        context.rounding = ROUND_DOWN
+        SQLitePortfolioLedger.open_existing(state_root / "lifecycle.sqlite3").validate_reference(
+            reference
+        )
 
 
 def test_shadow_cycle_resumes_after_write_interruption_and_projection_rebuild(

@@ -235,16 +235,15 @@ class PortfolioShadowAccount:
             or type(self.retained_cash_weight) is not Decimal
             or not self.retained_cash_weight.is_finite()
             or not Decimal(0) <= self.retained_cash_weight <= Decimal(1)
-            or sum(item.target_weight for item in self.targets) + self.retained_cash_weight != 1
+            or _shadow_total_weight(self) != 1
             or type(self.modeled_turnover_weight) is not Decimal
             or type(self.modeled_turnover_notional) is not Decimal
             or not self.modeled_turnover_weight.is_finite()
             or not self.modeled_turnover_notional.is_finite()
             or self.modeled_turnover_weight < 0
             or self.modeled_turnover_notional < 0
-            or self.modeled_turnover_weight
-            != sum(abs(item.adjustment_weight - item.current_weight) for item in self.cost_inputs)
-            or self.modeled_turnover_notional != self.modeled_turnover_weight * self.starting_equity
+            or self.modeled_turnover_weight != _shadow_turnover_weight(self)
+            or self.modeled_turnover_notional != _shadow_turnover_notional(self)
             or self.position_snapshot_id != self.portfolio_inputs.position_snapshot.fingerprint
             or self.starting_cash != self.portfolio_inputs.cash
             or self.starting_equity != _input_equity(self.portfolio_inputs)
@@ -288,7 +287,32 @@ class PortfolioShadowAccount:
         return {**material, "content_hash": self.content_hash}
 
 
+def _shadow_total_weight(account: PortfolioShadowAccount) -> Decimal:
+    return _sum_decimals(
+        (
+            *(item.target_weight for item in account.targets),
+            account.retained_cash_weight,
+        )
+    )
+
+
+def _shadow_turnover_weight(account: PortfolioShadowAccount) -> Decimal:
+    return _sum_decimals(
+        abs(item.adjustment_weight - item.current_weight) for item in account.cost_inputs
+    )
+
+
+def _shadow_turnover_notional(account: PortfolioShadowAccount) -> Decimal:
+    with localcontext(_PORTFOLIO_DECIMAL_CONTEXT):
+        return account.modeled_turnover_weight * account.starting_equity
+
+
 def _shadow_constraints_are_valid(account: PortfolioShadowAccount) -> bool:
+    with localcontext(_PORTFOLIO_DECIMAL_CONTEXT):
+        return _shadow_constraints_are_valid_in_context(account)
+
+
+def _shadow_constraints_are_valid_in_context(account: PortfolioShadowAccount) -> bool:
     sizing_method, maximum_gross, maximum_name, maximum_sector = _SHADOW_ENVELOPES[
         account.account_kind
     ]
@@ -346,14 +370,27 @@ def _house_view_fingerprints(house_view: HouseView) -> tuple[tuple[str, str], ..
 
 
 def _input_equity(inputs: PortfolioInputSet) -> Decimal:
-    return inputs.cash + sum(
-        position.valuation.amount
-        for position in inputs.position_snapshot.positions
-        if type(position) is EquityPosition
+    return _sum_decimals(
+        (
+            inputs.cash,
+            *(
+                position.valuation.amount
+                for position in inputs.position_snapshot.positions
+                if type(position) is EquityPosition
+            ),
+        )
     )
 
 
 def _shadow_matches_cycle(account: PortfolioShadowAccount, house_view: HouseView) -> bool:
+    with localcontext(_PORTFOLIO_DECIMAL_CONTEXT):
+        return _shadow_matches_cycle_in_context(account, house_view)
+
+
+def _shadow_matches_cycle_in_context(
+    account: PortfolioShadowAccount,
+    house_view: HouseView,
+) -> bool:
     policy = next(
         item
         for item in account.portfolio_policy.shadow_policies

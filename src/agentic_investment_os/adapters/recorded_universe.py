@@ -649,8 +649,11 @@ def _decimal(value: object) -> Decimal | None:
     ):
         return None
     parsed = Decimal(value)
-    normalized = parsed.normalize()
-    canonical = "0" if normalized == 0 else format(normalized, "f")
+    canonical = format(parsed, "f")
+    if "." in canonical:
+        canonical = canonical.rstrip("0").rstrip(".")
+    if parsed == 0:
+        canonical = "0"
     return parsed if canonical == value else None
 
 

@@ -5,7 +5,7 @@ import json
 from copy import deepcopy
 from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
-from decimal import Decimal, localcontext
+from decimal import ROUND_UP, Decimal, localcontext
 
 import pytest
 from hypothesis import example, given
@@ -499,6 +499,21 @@ def test_shadow_parser_rejects_resealed_gross_and_group_limit_breaches() -> None
     assert parse_portfolio_shadow_account(group_payload) is None
 
 
+def test_shadow_liquidity_validation_owns_decimal_context() -> None:
+    account = construct_portfolio_cycle(_request((_resolution(_AAPL, _HASH_A),))).shadows[0]
+    substituted = _shadow_with_substituted_target(account, Decimal("0.0125"))
+    payload = deepcopy(substituted.to_payload())
+    mutable_mapping(mutable_mapping_list(payload["cost_inputs"])[0])["median_dollar_volume"] = (
+        "123456"
+    )
+    _reseal_shadow_payload(payload)
+
+    with localcontext() as context:
+        context.prec = 2
+        context.rounding = ROUND_UP
+        assert parse_portfolio_shadow_account(payload) is None
+
+
 def test_shadow_cycle_rejects_targets_incompatible_with_house_view_authority() -> None:
     event = MaterialEventRisk(
         "scheduled-event",
@@ -651,6 +666,41 @@ def test_shadow_calculation_is_independent_of_the_ambient_decimal_context() -> N
         actual = construct_portfolio_cycle(request)
 
     assert actual == expected
+
+
+def test_shadow_reconstruction_is_independent_of_ambient_decimal_context() -> None:
+    identities = tuple(_identity(index) for index in range(20))
+    request = _request(
+        tuple(
+            _resolution(identity, _hash(str(index))) for index, identity in enumerate(identities)
+        ),
+        inputs=_inputs_for(
+            tuple(
+                _risk_input(
+                    identity,
+                    f"sector-{index}",
+                    common=f"cause-{index}",
+                    cluster=f"cluster-{index}",
+                    amplitude=index + 1,
+                )
+                for index, identity in enumerate(identities)
+            )
+        ),
+    )
+    expected = construct_portfolio_cycle(request)
+    payloads = tuple(account.to_payload() for account in expected.shadows)
+
+    with localcontext() as context:
+        context.prec = 2
+        context.rounding = ROUND_UP
+        parsed = tuple(parse_portfolio_shadow_account(payload) for payload in payloads)
+        reconstructed = PortfolioCycleResult(
+            expected.balanced,
+            tuple(item for item in parsed if item is not None),
+        )
+
+    assert parsed == expected.shadows
+    assert reconstructed == expected
 
 
 @given(st.integers(min_value=2, max_value=30))
