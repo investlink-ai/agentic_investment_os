@@ -23,6 +23,7 @@ from agentic_investment_os.domain.scheduler import (
     SchedulerSnapshot,
     SessionWindow,
     build_session_window,
+    receipt_matches_session,
 )
 from agentic_investment_os.domain.temporal import InvalidUtcInstantError, UtcInstant
 
@@ -137,13 +138,15 @@ class SQLiteSchedulerLedger:
         try:
             descriptor = os.open(self._lock, os.O_RDWR | os.O_NOFOLLOW)
             fcntl.flock(descriptor, fcntl.LOCK_EX)
-            yield
         except OSError as error:
-            raise _invalid() from error
-        finally:
             if descriptor is not None:
-                fcntl.flock(descriptor, fcntl.LOCK_UN)
                 os.close(descriptor)
+            raise _invalid() from error
+        try:
+            yield
+        finally:
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+            os.close(descriptor)
 
     def claim(
         self,
@@ -198,6 +201,8 @@ class SQLiteSchedulerLedger:
         """Append the exact public lifecycle receipt observed for an owned claim."""
         _require_policy(policy)
         if type(receipt) is not AdvanceReceipt:
+            raise _invalid()
+        if not receipt_matches_session(receipt, claim.window.cycle):
             raise _invalid()
         payload = receipt.to_payload()
         receipt_text = _canonical_json(payload)
@@ -455,7 +460,7 @@ def _validate_history(  # noqa: PLR0912 - each invalid event transition fails cl
         elif kind in ("completed", "refused"):
             if attempts == 0 or attempt != attempts or type(row[6]) is not str:
                 raise _invalid()
-            _validate_receipt_text(row[6], row[7], kind)
+            _validate_receipt_text(row[6], row[7], kind, window.cycle)
             terminal = True
         elif kind == "missed":
             if (
@@ -469,7 +474,12 @@ def _validate_history(  # noqa: PLR0912 - each invalid event transition fails cl
             raise _invalid()
 
 
-def _validate_receipt_text(value: str, expected_hash: object, event_kind: object) -> None:
+def _validate_receipt_text(
+    value: str,
+    expected_hash: object,
+    event_kind: object,
+    cycle: MarketSession,
+) -> None:
     try:
         payload = json.loads(value)
     except (json.JSONDecodeError, TypeError) as error:
@@ -482,6 +492,7 @@ def _validate_receipt_text(value: str, expected_hash: object, event_kind: object
         or _canonical_json(parsed.to_payload()) != value
         or payload.get("content_hash") != expected_hash
         or (parsed.disposition.value == "failed_closed") != (event_kind == "refused")
+        or not receipt_matches_session(parsed, cycle)
     ):
         raise _invalid()
 

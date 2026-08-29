@@ -95,6 +95,24 @@ class RaisingAdvance:
 
 
 @dataclass
+class RaisingOSErrorAdvance:
+    def __call__(self, *, cycle: object, mode: object, idempotency_key: object) -> AdvanceReceipt:
+        _ = cycle, mode, idempotency_key
+        message = "simulated lifecycle filesystem failure"
+        raise OSError(message)
+
+
+@dataclass
+class WrongCycleAdvance:
+    def __call__(self, *, cycle: object, mode: object, idempotency_key: object) -> AdvanceReceipt:
+        _ = cycle, mode, idempotency_key
+        return AdvanceReceipt.failed_closed(
+            AdvanceFailureReason.INVALID_DURABLE_STATE,
+            cycle=MarketSession(date(2026, 9, 1)),
+        )
+
+
+@dataclass
 class BlockingAdvance:
     calls: list[tuple[object, object, object]]
     entered: Event
@@ -192,6 +210,23 @@ def test_scheduler_records_missed_sessions_without_backfilling_lifecycle(tmp_pat
     assert status.pending.cycle.trading_date.isoformat() == "2026-09-01"
 
 
+def test_scheduler_reports_no_pending_session_after_the_pinned_calendar_horizon(
+    tmp_path: Path,
+) -> None:
+    scheduler = _scheduler(
+        tmp_path / "runtime",
+        now=datetime(2026, 12, 31, 20, 0, tzinfo=UTC),
+        advance=RefusingAdvance([]),
+        policy=_policy(first_session="2026-12-31"),
+    )
+
+    receipt = scheduler()
+
+    assert receipt.sessions[0].disposition is ScheduledRunDisposition.MISSED
+    assert receipt.pending is None
+    assert receipt.next_scheduled_at is None
+
+
 def test_action_bound_reports_oldest_unclaimed_due_session_as_pending(tmp_path: Path) -> None:
     scheduler = _scheduler(
         tmp_path / "runtime",
@@ -206,6 +241,26 @@ def test_action_bound_reports_oldest_unclaimed_due_session_as_pending(tmp_path: 
     assert receipt.pending is not None
     assert receipt.pending.disposition is ScheduledRunDisposition.PENDING
     assert receipt.pending.cycle.isoformat() == "2026-08-31"
+
+
+def test_action_bound_prioritizes_a_currently_eligible_session_over_missed_bookkeeping(
+    tmp_path: Path,
+) -> None:
+    calls: list[tuple[object, object, object]] = []
+    scheduler = _scheduler(
+        tmp_path / "runtime",
+        now=datetime(2026, 8, 28, 12, 45, tzinfo=UTC),
+        advance=RefusingAdvance(calls),
+        policy=_policy(first_session="2026-08-25", maximum_actions_per_run=1),
+    )
+
+    receipt = scheduler()
+
+    assert len(calls) == 1
+    assert calls[0][0] == MarketSession(date(2026, 8, 28)).to_payload()
+    assert receipt.sessions[0].cycle == MarketSession(date(2026, 8, 28))
+    assert receipt.pending is not None
+    assert receipt.pending.cycle == MarketSession(date(2026, 8, 25))
 
 
 def test_scheduler_invokes_one_public_advance_with_a_stable_identity(tmp_path: Path) -> None:
@@ -254,6 +309,14 @@ def test_scheduler_rejects_invalid_public_lifecycle_observations(tmp_path: Path)
     )
     with pytest.raises(RuntimeError, match="Status"):
         mismatched_status()
+
+    wrong_cycle = _scheduler(
+        tmp_path / "wrong-cycle",
+        now=datetime(2026, 8, 28, 12, 45, tzinfo=UTC),
+        advance=WrongCycleAdvance(),
+    )
+    with pytest.raises(RuntimeError, match="Advance"):
+        wrong_cycle()
 
 
 def test_interrupted_run_waits_then_resumes_with_the_same_advance_identity(
@@ -317,8 +380,39 @@ def test_clock_rollback_after_a_started_attempt_fails_closed(tmp_path: Path) -> 
         now=datetime(2026, 8, 28, 12, 44, tzinfo=UTC),
         advance=RefusingAdvance([]),
     )
-    with pytest.raises(SchedulerPersistenceError):
+    with pytest.raises(RuntimeError, match="precedes durable scheduler history"):
         rolled_back()
+
+
+def test_clock_rollback_after_a_terminal_observation_fails_closed(tmp_path: Path) -> None:
+    root = tmp_path / "runtime"
+    _scheduler(
+        root,
+        now=datetime(2026, 8, 28, 12, 45, tzinfo=UTC),
+        advance=RefusingAdvance([]),
+    )()
+    rolled_back = _scheduler(
+        root,
+        now=datetime(2026, 8, 28, 12, 0, tzinfo=UTC),
+        advance=RefusingAdvance([]),
+    )
+
+    with pytest.raises(RuntimeError, match="precedes durable scheduler history"):
+        rolled_back.status()
+    with pytest.raises(RuntimeError, match="precedes durable scheduler history"):
+        rolled_back()
+
+
+def test_lifecycle_oserror_preserves_its_failure_domain(tmp_path: Path) -> None:
+    scheduler = _scheduler(
+        tmp_path / "runtime",
+        now=datetime(2026, 8, 28, 12, 45, tzinfo=UTC),
+        advance=RaisingOSErrorAdvance(),
+    )
+
+    with pytest.raises(OSError, match="lifecycle filesystem failure"):
+        scheduler()
+    assert scheduler.status().sessions[0].disposition is ScheduledRunDisposition.STARTED
 
 
 def test_changed_scheduler_policy_conflicts_without_invoking_advance(tmp_path: Path) -> None:
@@ -483,6 +577,12 @@ def test_scheduler_storage_refuses_unsafe_root_database_and_lock_paths(
     with pytest.raises(SchedulerPersistenceError):
         SQLiteSchedulerLedger(public_lock_root, policy)
 
+    missing_lock_root = tmp_path / "missing-lock-root"
+    missing_lock = SQLiteSchedulerLedger(missing_lock_root, policy)
+    (missing_lock_root / "scheduler.lock").unlink()
+    with pytest.raises(SchedulerPersistenceError), missing_lock.exclusive_run():
+        pass
+
 
 def test_scheduler_rejects_terminal_suffix_and_unknown_calendar_cycle(
     tmp_path: Path,
@@ -579,6 +679,65 @@ def test_scheduler_reparses_durable_lifecycle_receipt(tmp_path: Path) -> None:
             (bad_receipt, bad_hash, _scheduler_hash(material)),
         )
         connection.execute(trigger[0])
+    with pytest.raises(SchedulerPersistenceError):
+        scheduler.status()
+
+
+def test_scheduler_rejects_a_reopened_receipt_bound_to_another_cycle(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "runtime"
+    scheduler = _scheduler(
+        root,
+        now=datetime(2026, 8, 28, 12, 45, tzinfo=UTC),
+        advance=RefusingAdvance([]),
+    )
+    scheduler()
+    database = root / "scheduler.sqlite3"
+    wrong_receipt = AdvanceReceipt.failed_closed(
+        AdvanceFailureReason.INVALID_DURABLE_STATE,
+        cycle=MarketSession(date(2026, 9, 1)),
+    ).to_payload()
+    wrong_receipt_text = json.dumps(wrong_receipt, sort_keys=True, separators=(",", ":"))
+    with sqlite3.connect(database) as connection:
+        trigger = connection.execute(
+            "SELECT sql FROM sqlite_schema WHERE name = 'scheduler_events_no_update'"
+        ).fetchone()
+        row = connection.execute(
+            """
+            SELECT cycle, sequence, event_kind, scheduled_at, missed_at, attempt, recorded_at
+            FROM scheduler_events WHERE event_kind = 'refused'
+            """
+        ).fetchone()
+        assert trigger is not None
+        assert isinstance(trigger[0], str)
+        assert row is not None
+        material = {
+            "cycle": row[0],
+            "sequence": row[1],
+            "event_kind": row[2],
+            "scheduled_at": row[3],
+            "missed_at": row[4],
+            "attempt": row[5],
+            "lifecycle_receipt": wrong_receipt_text,
+            "lifecycle_receipt_hash": wrong_receipt["content_hash"],
+            "recorded_at": row[6],
+        }
+        connection.execute("DROP TRIGGER scheduler_events_no_update")
+        connection.execute(
+            """
+            UPDATE scheduler_events
+            SET lifecycle_receipt = ?, lifecycle_receipt_hash = ?, event_hash = ?
+            WHERE event_kind = 'refused'
+            """,
+            (
+                wrong_receipt_text,
+                wrong_receipt["content_hash"],
+                _scheduler_hash(material),
+            ),
+        )
+        connection.execute(trigger[0])
+
     with pytest.raises(SchedulerPersistenceError):
         scheduler.status()
 
@@ -698,6 +857,13 @@ def test_scheduler_ledger_rejects_invalid_claim_and_terminal_redelivery(
     invalid_receipt = object.__new__(InvalidReceipt)
     with pytest.raises(SchedulerPersistenceError):
         active.record_outcome(policy, active_claim, invalid_receipt, later)
+
+    wrong_cycle_receipt = AdvanceReceipt.failed_closed(
+        AdvanceFailureReason.INVALID_DURABLE_STATE,
+        cycle=MarketSession(date(2026, 9, 1)),
+    )
+    with pytest.raises(SchedulerPersistenceError):
+        active.record_outcome(policy, active_claim, wrong_cycle_receipt, later)
 
 
 def test_scheduler_claim_rejects_an_unrelated_calendar_cycle_in_history(

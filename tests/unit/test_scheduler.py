@@ -5,10 +5,12 @@ from datetime import UTC, date, datetime
 import pytest
 
 from agentic_investment_os.domain.identity import MarketSession
+from agentic_investment_os.domain.lifecycle import AdvanceFailureReason, AdvanceReceipt
 from agentic_investment_os.domain.scheduler import (
     PINNED_XNYS_CALENDAR_ID,
     SchedulerPolicy,
     build_session_window,
+    receipt_matches_session,
 )
 from agentic_investment_os.domain.temporal import UtcInstant
 
@@ -80,3 +82,14 @@ def test_pinned_calendar_resolves_dst_holidays_and_early_closes() -> None:
     )
     assert build_session_window(MarketSession(date(2026, 9, 7)), 60, 30) is None
     assert build_session_window(MarketSession(date(2027, 1, 4)), 60, 30) is None
+
+
+def test_scheduler_receipt_binding_rejects_inexact_boundary_types() -> None:
+    class InexactReceipt(AdvanceReceipt):
+        pass
+
+    cycle = MarketSession(date(2026, 8, 28))
+    receipt = AdvanceReceipt.failed_closed(AdvanceFailureReason.INVALID_DURABLE_STATE)
+
+    assert receipt_matches_session(receipt, cycle)
+    assert not receipt_matches_session(object.__new__(InexactReceipt), cycle)

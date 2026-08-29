@@ -24,6 +24,18 @@ esac
 if [ ! -f "$runner" ] || [ ! -x "$runner" ] || [ -L "$runner" ]; then
     fail "runner must be an executable regular file, not a symbolic link"
 fi
+uid=$(id -u)
+runner_owner=$(stat -f '%u' "$runner") || fail "cannot inspect runner ownership"
+runner_mode=$(stat -f '%Lp' "$runner") || fail "cannot inspect runner permissions"
+case "$runner_owner:$runner_mode" in
+    *[!0-9:]* | *:*[!0-7]* | :* | *:) fail "runner ownership or permissions are invalid" ;;
+esac
+if [ "$runner_owner" -ne "$uid" ]; then
+    fail "runner must be owned by the installing operator"
+fi
+if [ $((0$runner_mode & 022)) -ne 0 ]; then
+    fail "runner must not be writable by group or other users"
+fi
 case "${HOME-}" in
     /*) ;;
     *) fail "HOME must be an absolute directory" ;;
@@ -60,7 +72,6 @@ fi
 unlink "$temporary_path"
 temporary_path=
 
-uid=$(id -u)
 if ! launchctl bootstrap "gui/$uid" "$agent_path"; then
     unlink "$agent_path"
     fail "launchctl refused the agent; generated plist was removed"

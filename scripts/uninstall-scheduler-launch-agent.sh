@@ -29,6 +29,15 @@ if [ -L "$agent_path" ] || [ ! -f "$agent_path" ]; then
 fi
 
 uid=$(id -u)
-launchctl bootout "gui/$uid" "$agent_path" >/dev/null 2>&1 || true
+if ! domain_state=$(launchctl print "gui/$uid" 2>/dev/null); then
+    fail "cannot inspect the operator launchd domain; plist was retained"
+fi
+case "$domain_state" in
+    *"$label"*)
+        if ! launchctl bootout "gui/$uid" "$agent_path" >/dev/null 2>&1; then
+            fail "launchctl did not unload the installed agent; plist was retained"
+        fi
+        ;;
+esac
 unlink "$agent_path"
 printf 'Removed %s\n' "$agent_path"

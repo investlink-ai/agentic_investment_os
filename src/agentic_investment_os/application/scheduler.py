@@ -17,6 +17,7 @@ from agentic_investment_os.domain.scheduler import (
     SessionWindow,
     calendar_supports,
     next_session_window,
+    receipt_matches_session,
     session_windows_through,
 )
 from agentic_investment_os.domain.temporal import InvalidUtcInstantError, UtcInstant
@@ -36,6 +37,7 @@ _CLOCK_INVALID = "scheduler clock must return a timezone-aware instant represent
 _ADVANCE_RESULT_INVALID = "Advance returned an invalid scheduler observation"
 _STATUS_RESULT_INVALID = "Status returned an invalid scheduler observation"
 _CALENDAR_UNAVAILABLE = "scheduler calendar does not cover the current New York year"
+_CLOCK_ROLLBACK = "scheduler clock precedes durable scheduler history"
 
 
 class SchedulerCalendarError(RuntimeError):
@@ -84,9 +86,21 @@ class Scheduler:
     def _run_due(self) -> SchedulerReceipt:
         observed_at = self._now()
         self._require_calendar(observed_at)
-        completed = {item.cycle: item for item in self.ledger.snapshot(self.policy).sessions}
+        snapshot = self.ledger.snapshot(self.policy)
+        self._require_current_clock(observed_at, snapshot.sessions)
+        completed = {item.cycle: item for item in snapshot.sessions}
         actions = 0
-        for window in session_windows_through(self.policy, observed_at):
+        due_windows = session_windows_through(self.policy, observed_at)
+        due_windows = tuple(
+            sorted(
+                due_windows,
+                key=lambda window: (
+                    window.missed_at.value < observed_at.value,
+                    window.cycle.trading_date,
+                ),
+            )
+        )
+        for window in due_windows:
             existing = completed.get(window.cycle)
             if existing is not None and existing.disposition not in (
                 ScheduledRunDisposition.STARTED,
@@ -121,6 +135,8 @@ class Scheduler:
                 or status.pinned_run_identity.cycle != window.cycle
             ):
                 raise RuntimeError(_STATUS_RESULT_INVALID)
+            if not receipt_matches_session(lifecycle_receipt, window.cycle):
+                raise RuntimeError(_ADVANCE_RESULT_INVALID)
             completed[window.cycle] = self.ledger.record_outcome(
                 self.policy,
                 claim,
@@ -129,6 +145,7 @@ class Scheduler:
             )
         snapshot = self.ledger.snapshot(self.policy)
         recorded_at = self._now()
+        self._require_current_clock(recorded_at, snapshot.sessions)
         next_window = _next_pending_window(self.policy, recorded_at, snapshot.sessions)
         return SchedulerReceipt(
             self.policy.policy_id,
@@ -142,6 +159,7 @@ class Scheduler:
         recorded_at = self._now()
         self._require_calendar(recorded_at)
         snapshot = self.ledger.snapshot(self.policy)
+        self._require_current_clock(recorded_at, snapshot.sessions)
         next_window = _next_pending_window(self.policy, recorded_at, snapshot.sessions)
         return SchedulerStatus(
             snapshot.policy_id,
@@ -159,6 +177,14 @@ class Scheduler:
     def _require_calendar(recorded_at: UtcInstant) -> None:
         if not calendar_supports(recorded_at):
             raise SchedulerCalendarError(_CALENDAR_UNAVAILABLE)
+
+    @staticmethod
+    def _require_current_clock(
+        recorded_at: UtcInstant,
+        sessions: tuple[ScheduledSessionStatus, ...],
+    ) -> None:
+        if any(session.recorded_at.value > recorded_at.value for session in sessions):
+            raise RuntimeError(_CLOCK_ROLLBACK)
 
 
 def _advance_identity(policy: SchedulerPolicy, session: str) -> str:

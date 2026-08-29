@@ -3,9 +3,10 @@
 This catalog records implemented configuration only. `investment-domain.md` owns approved policy
 semantics; do not invent future runtime keys before their implementation slice.
 
-The typed schema and resolver live in
-`src/agentic_investment_os/entrypoints/configuration.py`. This catalog owns the field-level operator
-contract and points to that executable source of truth.
+The runtime schema and resolver live in
+`src/agentic_investment_os/entrypoints/configuration.py`; capability policy schemas live with their
+owning domain modules. This catalog owns the field-level operator contract and points to each
+executable source of truth.
 
 ## Configuration rules
 

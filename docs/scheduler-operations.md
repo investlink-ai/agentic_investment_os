@@ -28,8 +28,9 @@ Pass the runner's absolute path to the installer:
 ./scripts/install-scheduler-launch-agent.sh /absolute/path/to/operator-scheduler-runner
 ```
 
-The installer refuses non-macOS hosts, relative paths, symlinks, non-executable runners, and an
-existing plist. It creates a mode-`0600` user LaunchAgent at
+The installer refuses non-macOS hosts, relative paths, symlinks, non-executable runners, runners not
+owned by the installing operator, group- or world-writable runners, and an existing plist. It creates
+a mode-`0600` user LaunchAgent at
 `~/Library/LaunchAgents/ai.investlink.agentic-investment-os.scheduler.plist`, runs once when loaded,
 and polls every five minutes. The generated plist contains the fixed label, absolute runner path,
 launch flags, and interval only. Installation fails closed and removes the new plist if `launchctl`
@@ -48,9 +49,10 @@ Removal is idempotent:
 ./scripts/uninstall-scheduler-launch-agent.sh
 ```
 
-The remover unloads the fixed user agent and deletes only its fixed plist. It does not delete the
-runner, configuration, logs, `scheduler.sqlite3`, `scheduler.lock`, lifecycle state, or evidence.
-Retain authoritative state according to the repository's append-only and recovery policy.
+The remover unloads the fixed user agent and deletes only its fixed plist. If a loaded agent cannot
+be unloaded, removal fails and retains the plist for a safe retry. It does not delete the runner,
+configuration, logs, `scheduler.sqlite3`, `scheduler.lock`, lifecycle state, or evidence. Retain
+authoritative state according to the repository's append-only and recovery policy.
 
 ## Verification and recovery
 

@@ -11,12 +11,11 @@ from typing import TYPE_CHECKING, Protocol
 from zoneinfo import ZoneInfo
 
 from agentic_investment_os.domain.identity import MarketSession
+from agentic_investment_os.domain.lifecycle import AdvanceReceipt
 from agentic_investment_os.domain.temporal import UtcInstant
 
 if TYPE_CHECKING:
     from contextlib import AbstractContextManager
-
-    from agentic_investment_os.domain.lifecycle import AdvanceReceipt
 
 __all__ = (
     "PINNED_XNYS_CALENDAR_ID",
@@ -33,6 +32,7 @@ __all__ = (
     "build_session_window",
     "calendar_supports",
     "next_session_window",
+    "receipt_matches_session",
     "session_windows_through",
 )
 
@@ -277,6 +277,16 @@ def next_session_window(
             return window
         current += timedelta(days=1)
     return None
+
+
+def receipt_matches_session(receipt: AdvanceReceipt, cycle: MarketSession) -> bool:
+    """Bind one public lifecycle observation to its requested scheduler session."""
+    if type(receipt) is not AdvanceReceipt or type(cycle) is not MarketSession:
+        return False
+    observed_cycle = receipt.cycle
+    return observed_cycle == cycle or (
+        receipt.disposition.value == "failed_closed" and observed_cycle is None
+    )
 
 
 class ScheduledRunDisposition(StrEnum):
