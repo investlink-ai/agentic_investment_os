@@ -294,6 +294,7 @@ critical_paths = [
   "portfolio/**/*.py",
 ]
 safety_supporting_paths = [
+  "adapters/decision_signing.py",
   "adapters/filesystem_evidence.py",
   "adapters/recorded_evidence.py",
   "adapters/recorded_model.py",
@@ -301,6 +302,7 @@ safety_supporting_paths = [
   "adapters/recorded_universe.py",
   "adapters/sqlite_lab.py",
   "adapters/sqlite_memory.py",
+  "adapters/sqlite_decision.py",
   "adapters/sqlite_portfolio.py",
   "adapters/sqlite_scheduler.py",
   "application/scheduler.py",
@@ -329,6 +331,7 @@ only_mutate = [
   "src/agentic_investment_os/memory/reducer.py",
   "src/agentic_investment_os/portfolio/__init__.py",
   "src/agentic_investment_os/portfolio/construction.py",
+  "src/agentic_investment_os/portfolio/publication.py",
   "src/agentic_investment_os/portfolio/shadows.py",
 ]
 pytest_add_cli_args = [
@@ -338,6 +341,7 @@ pytest_add_cli_args = [
 pytest_add_cli_args_test_selection = [
   "tests/unit/test_beliefs.py",
   "tests/contract/test_belief_event_contract.py",
+  "tests/contract/test_decision_packet_contract.py",
   "tests/unit/test_portfolio.py",
 ]
 mutate_only_covered_lines = false

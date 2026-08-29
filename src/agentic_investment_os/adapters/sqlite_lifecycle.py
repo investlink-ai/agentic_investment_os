@@ -50,6 +50,9 @@ from agentic_investment_os.domain.lifecycle import (
     AdvanceRequest,
     AppendLifecycleRecord,
     AppendTerminalLifecycleRecord,
+    DecisionCheckpoint,
+    DecisionCheckpointReference,
+    DecisionPublicationRefusalReason,
     DurableAdvanceConflict,
     DurableAdvanceRefusal,
     EvidenceCaptureCheckpoint,
@@ -68,6 +71,7 @@ from agentic_investment_os.domain.lifecycle import (
     LifecycleStatus,
     NoActionReason,
     PerformAttentionSelection,
+    PerformDecisionPublication,
     PerformDossierBuild,
     PerformEvidenceCapture,
     PerformMemoryUpdate,
@@ -85,11 +89,13 @@ from agentic_investment_os.domain.lifecycle import (
     decide_terminal_refusal,
     derive_lifecycle_status,
     is_sha256,
+    parse_decision_checkpoint,
     parse_lifecycle_checkpoint,
     parse_portfolio_checkpoint,
     parse_research_checkpoint,
     parse_research_refusal,
     reconstruct_constitution_uses,
+    reconstruct_decision_checkpoints,
     reconstruct_evidence_checkpoints,
     reconstruct_memory_event_ids,
     reconstruct_portfolio_checkpoints,
@@ -181,7 +187,7 @@ CREATE TABLE lifecycle_events (
             'advance_requested', 'phase_completed', 'run_inputs_pinned',
             'universe_snapshotted', 'evidence_captured', 'attention_selected',
             'dossiers_built', 'research_run', 'memory_updated',
-            'portfolio_constructed'
+            'portfolio_constructed', 'decision_published'
         )
     ),
     completed_phase TEXT,
@@ -200,6 +206,7 @@ CREATE TABLE lifecycle_events (
     attention_artifact TEXT,
     research_checkpoint TEXT,
     portfolio_checkpoint TEXT,
+    decision_checkpoint TEXT,
     no_action_reason TEXT CHECK (
         no_action_reason IS NULL OR no_action_reason IN (
             'no_attention', 'no_valid_thesis', 'skeptic_rejected', 'cio_abstained'
@@ -218,6 +225,7 @@ CREATE TABLE lifecycle_events (
             AND attention_artifact IS NULL
             AND research_checkpoint IS NULL
             AND portfolio_checkpoint IS NULL
+            AND decision_checkpoint IS NULL
             AND no_action_reason IS NULL)
         OR (event_kind = 'universe_snapshotted'
             AND universe_snapshot_id IS NOT NULL
@@ -229,6 +237,7 @@ CREATE TABLE lifecycle_events (
             AND attention_artifact IS NULL
             AND research_checkpoint IS NULL
             AND portfolio_checkpoint IS NULL
+            AND decision_checkpoint IS NULL
             AND no_action_reason IS NULL)
         OR (event_kind = 'evidence_captured'
             AND universe_snapshot_id IS NULL
@@ -240,6 +249,7 @@ CREATE TABLE lifecycle_events (
             AND attention_artifact IS NULL
             AND research_checkpoint IS NULL
             AND portfolio_checkpoint IS NULL
+            AND decision_checkpoint IS NULL
             AND no_action_reason IS NULL)
         OR (event_kind = 'attention_selected'
             AND universe_snapshot_id IS NULL
@@ -251,6 +261,7 @@ CREATE TABLE lifecycle_events (
             AND attention_artifact IS NOT NULL
             AND research_checkpoint IS NULL
             AND portfolio_checkpoint IS NULL
+            AND decision_checkpoint IS NULL
             AND no_action_reason IS NULL)
         OR (event_kind IN ('dossiers_built', 'research_run')
             AND universe_snapshot_id IS NULL
@@ -262,6 +273,7 @@ CREATE TABLE lifecycle_events (
             AND attention_artifact IS NULL
             AND research_checkpoint IS NOT NULL
             AND portfolio_checkpoint IS NULL
+            AND decision_checkpoint IS NULL
             AND no_action_reason IS NULL)
         OR (event_kind = 'memory_updated'
             AND universe_snapshot_id IS NULL
@@ -272,7 +284,8 @@ CREATE TABLE lifecycle_events (
             AND attention_artifact_id IS NULL
             AND attention_artifact IS NULL
             AND research_checkpoint IS NOT NULL
-            AND portfolio_checkpoint IS NULL)
+            AND portfolio_checkpoint IS NULL
+            AND decision_checkpoint IS NULL)
         OR (event_kind = 'portfolio_constructed'
             AND universe_snapshot_id IS NULL
             AND universe_snapshot IS NULL
@@ -283,11 +296,24 @@ CREATE TABLE lifecycle_events (
             AND attention_artifact IS NULL
             AND research_checkpoint IS NULL
             AND portfolio_checkpoint IS NOT NULL
+            AND decision_checkpoint IS NULL
+            AND no_action_reason IS NULL)
+        OR (event_kind = 'decision_published'
+            AND universe_snapshot_id IS NULL
+            AND universe_snapshot IS NULL
+            AND evidence_policy_id IS NULL
+            AND evidence_artifact_ids IS NULL
+            AND evidence_refusal_ids IS NULL
+            AND attention_artifact_id IS NULL
+            AND attention_artifact IS NULL
+            AND research_checkpoint IS NULL
+            AND portfolio_checkpoint IS NULL
+            AND decision_checkpoint IS NOT NULL
             AND no_action_reason IS NULL)
         OR (event_kind NOT IN (
                 'run_inputs_pinned', 'universe_snapshotted', 'evidence_captured',
                 'attention_selected', 'dossiers_built', 'research_run', 'memory_updated',
-                'portfolio_constructed'
+                'portfolio_constructed', 'decision_published'
             )
             AND universe_snapshot_id IS NULL
             AND universe_snapshot IS NULL
@@ -298,6 +324,7 @@ CREATE TABLE lifecycle_events (
             AND attention_artifact IS NULL
             AND research_checkpoint IS NULL
             AND portfolio_checkpoint IS NULL
+            AND decision_checkpoint IS NULL
             AND no_action_reason IS NULL)
     ),
     PRIMARY KEY (stream_id, sequence),
@@ -323,7 +350,8 @@ CREATE TABLE advance_refusals (
             'stale_portfolio_input', 'contradictory_portfolio_input',
             'session_stream_conflict', 'idempotency_key_conflict',
             'invalid_durable_state', 'evidence_capture_failed',
-            'attention_selection_failed', 'research_failed', 'memory_update_failed'
+            'attention_selection_failed', 'research_failed', 'memory_update_failed',
+            'decision_publication_failed'
         )
     ),
     evidence_policy_id TEXT CHECK (
@@ -341,6 +369,12 @@ CREATE TABLE advance_refusals (
         research_refusal_id IS NULL OR length(research_refusal_id) = 64
     ),
     research_refusal TEXT,
+    decision_publication_refusal TEXT CHECK (
+        decision_publication_refusal IS NULL OR decision_publication_refusal IN (
+            'invalid_portfolio', 'invalid_forecasts', 'missing_benchmark_state',
+            'invalid_validity_window', 'signing_failed'
+        )
+    ),
     recorded_at TEXT NOT NULL,
     CHECK (
         (reason_code = 'evidence_capture_failed'
@@ -350,7 +384,8 @@ CREATE TABLE advance_refusals (
             AND evidence_refusal_ids != '[]'
             AND attention_refusal_reason IS NULL
             AND research_refusal_id IS NULL
-            AND research_refusal IS NULL)
+            AND research_refusal IS NULL
+            AND decision_publication_refusal IS NULL)
         OR (reason_code = 'attention_selection_failed'
             AND evidence_policy_id IS NOT NULL
             AND evidence_artifact_ids IS NOT NULL
@@ -358,24 +393,35 @@ CREATE TABLE advance_refusals (
             AND evidence_refusal_ids = '[]'
             AND attention_refusal_reason IS NOT NULL
             AND research_refusal_id IS NULL
-            AND research_refusal IS NULL)
+            AND research_refusal IS NULL
+            AND decision_publication_refusal IS NULL)
         OR (reason_code IN ('research_failed', 'memory_update_failed')
             AND evidence_policy_id IS NULL
             AND evidence_artifact_ids IS NULL
             AND evidence_refusal_ids IS NULL
             AND attention_refusal_reason IS NULL
             AND research_refusal_id IS NOT NULL
-            AND research_refusal IS NOT NULL)
+            AND research_refusal IS NOT NULL
+            AND decision_publication_refusal IS NULL)
+        OR (reason_code = 'decision_publication_failed'
+            AND evidence_policy_id IS NULL
+            AND evidence_artifact_ids IS NULL
+            AND evidence_refusal_ids IS NULL
+            AND attention_refusal_reason IS NULL
+            AND research_refusal_id IS NULL
+            AND research_refusal IS NULL
+            AND decision_publication_refusal IS NOT NULL)
         OR (reason_code NOT IN (
                 'evidence_capture_failed', 'attention_selection_failed',
-                'research_failed', 'memory_update_failed'
+                'research_failed', 'memory_update_failed', 'decision_publication_failed'
             )
             AND evidence_policy_id IS NULL
             AND evidence_artifact_ids IS NULL
             AND evidence_refusal_ids IS NULL
             AND attention_refusal_reason IS NULL
             AND research_refusal_id IS NULL
-            AND research_refusal IS NULL)
+            AND research_refusal IS NULL
+            AND decision_publication_refusal IS NULL)
     )
 ) STRICT
 """,
@@ -450,6 +496,38 @@ BEGIN SELECT RAISE(ABORT, 'append-only portfolio shadow account'); END
 CREATE TRIGGER portfolio_shadow_accounts_are_append_only_delete
 BEFORE DELETE ON portfolio_shadow_accounts
 BEGIN SELECT RAISE(ABORT, 'append-only portfolio shadow account'); END
+""",
+    """
+CREATE TABLE decision_publications (
+    run_id TEXT PRIMARY KEY CHECK (length(run_id) = 64),
+    cycle_identity TEXT NOT NULL UNIQUE,
+    decision_record_id TEXT NOT NULL UNIQUE CHECK (length(decision_record_id) = 64),
+    decision_record_json TEXT NOT NULL,
+    packet_id TEXT UNIQUE CHECK (packet_id IS NULL OR length(packet_id) = 64),
+    packet_expires_at TEXT,
+    packet_json TEXT,
+    no_action_reason TEXT CHECK (
+        no_action_reason IS NULL OR no_action_reason = 'no_authorized_adjustments'
+    ),
+    recorded_at TEXT NOT NULL,
+    FOREIGN KEY (run_id) REFERENCES portfolio_constructions(run_id),
+    CHECK (
+        (packet_id IS NOT NULL AND packet_expires_at IS NOT NULL
+            AND packet_json IS NOT NULL AND no_action_reason IS NULL)
+        OR (packet_id IS NULL AND packet_expires_at IS NULL
+            AND packet_json IS NULL AND no_action_reason = 'no_authorized_adjustments')
+    )
+) STRICT
+""",
+    """
+CREATE TRIGGER decision_publications_are_append_only_update
+BEFORE UPDATE ON decision_publications
+BEGIN SELECT RAISE(ABORT, 'append-only decision publication'); END
+""",
+    """
+CREATE TRIGGER decision_publications_are_append_only_delete
+BEFORE DELETE ON decision_publications
+BEGIN SELECT RAISE(ABORT, 'append-only decision publication'); END
 """,
     """
 CREATE TRIGGER advance_refusals_are_append_only_update
@@ -655,7 +733,7 @@ class _DatabaseOpenMode(StrEnum):
     EXISTING_ONLY = "rw"
 
 
-_CURRENT_DATABASE_VERSION = 14
+_CURRENT_DATABASE_VERSION = 15
 _CURRENT_SCHEMA_SIGNATURE = frozenset(" ".join(statement.split()) for statement in _CURRENT_SCHEMA)
 
 _PROJECTION_SCHEMA = """
@@ -682,7 +760,8 @@ CREATE TABLE lifecycle_status_projection (
     universe_snapshot_id TEXT,
     attention_artifact_cycle TEXT,
     attention_artifact_id TEXT,
-    portfolio_checkpoint TEXT
+    portfolio_checkpoint TEXT,
+    decision_checkpoint TEXT
 ) STRICT;
 """
 
@@ -908,6 +987,7 @@ class SQLiteLifecycleLedger:
                 terminal.evidence_artifact_ids
                 or terminal.evidence_refusal_ids
                 or terminal.research_refusal_id
+                or any(refusal.decision_publication_refusal is not None for refusal in refusals)
             )
             if terminal is not None and not terminal_requires_history:
                 return terminal
@@ -981,6 +1061,8 @@ class SQLiteLifecycleLedger:
                 return decision
             if isinstance(decision, PerformPortfolioConstruction):
                 return decision
+            if isinstance(decision, PerformDecisionPublication):
+                return decision
             # Strict mypy proves this line unreachable; removing it is runtime-equivalent.
             assert_never(decision)  # pragma: no cover
 
@@ -1008,6 +1090,18 @@ class SQLiteLifecycleLedger:
             connection: sqlite3.Connection,
         ) -> tuple[PortfolioCheckpointReference, ...]:
             return reconstruct_portfolio_checkpoints(
+                LifecycleHistory(events=tuple(_load_events(connection)))
+            )
+
+        return self._write(operation)
+
+    def rebuild_decision_checkpoints(self) -> tuple[DecisionCheckpointReference, ...]:
+        """Rebuild immutable publication references from validated lifecycle history."""
+
+        def operation(
+            connection: sqlite3.Connection,
+        ) -> tuple[DecisionCheckpointReference, ...]:
+            return reconstruct_decision_checkpoints(
                 LifecycleHistory(events=tuple(_load_events(connection)))
             )
 
@@ -1355,7 +1449,8 @@ def _load_events(
                    universe_snapshot, evidence_policy_id,
                    evidence_artifact_ids, evidence_refusal_ids,
                    attention_artifact_id, attention_artifact,
-                   research_checkpoint, portfolio_checkpoint, no_action_reason,
+                   research_checkpoint, portfolio_checkpoint, decision_checkpoint,
+                   no_action_reason,
                    event_envelope, recorded_at
             FROM lifecycle_events ORDER BY stream_id, sequence
             """
@@ -1374,7 +1469,8 @@ def _load_events(
                    universe_snapshot, evidence_policy_id,
                    evidence_artifact_ids, evidence_refusal_ids,
                    attention_artifact_id, attention_artifact,
-                   research_checkpoint, portfolio_checkpoint, no_action_reason,
+                   research_checkpoint, portfolio_checkpoint, decision_checkpoint,
+                   no_action_reason,
                    event_envelope, recorded_at
             FROM lifecycle_events
             WHERE idempotency_key = ? OR stream_id IN (
@@ -1399,7 +1495,8 @@ def _load_events(
                    universe_snapshot, evidence_policy_id,
                    evidence_artifact_ids, evidence_refusal_ids,
                    attention_artifact_id, attention_artifact,
-                   research_checkpoint, portfolio_checkpoint, no_action_reason,
+                   research_checkpoint, portfolio_checkpoint, decision_checkpoint,
+                   no_action_reason,
                    event_envelope, recorded_at
             FROM lifecycle_events WHERE idempotency_key = ? ORDER BY sequence
             """,
@@ -1462,7 +1559,7 @@ def _load_event(row: tuple[object, ...]) -> LifecycleEvent:
     eligibility_policy_hash = _hash(row[15], "eligibility_policy_hash")
     portfolio_policy_hash = _hash(row[16], "portfolio_policy_hash")
     portfolio_input_hash = _hash(row[17], "portfolio_input_hash")
-    recorded_at = _canonical_timestamp(row[31], "recorded_at")
+    recorded_at = _canonical_timestamp(row[32], "recorded_at")
     if evidence_cutoff.value > recorded_at.value:
         raise InvalidLifecycleStateError(_FUTURE_EVIDENCE_CUTOFF)
     try:
@@ -1486,10 +1583,11 @@ def _load_event(row: tuple[object, ...]) -> LifecycleEvent:
     )
     research_checkpoint, no_action_reason = _load_research_checkpoint(
         row[27],
-        row[29],
+        row[30],
         event_kind=event_kind,
     )
     portfolio_checkpoint = _load_portfolio_checkpoint(row[28], event_kind=event_kind)
+    decision_checkpoint = _load_decision_checkpoint(row[29], event_kind=event_kind)
     event = LifecycleEvent(
         stream_id=stream_id,
         sequence=sequence,
@@ -1519,9 +1617,10 @@ def _load_event(row: tuple[object, ...]) -> LifecycleEvent:
         attention_artifact=attention_artifact,
         research_checkpoint=research_checkpoint,
         portfolio_checkpoint=portfolio_checkpoint,
+        decision_checkpoint=decision_checkpoint,
         no_action_reason=no_action_reason,
     )
-    envelope = _text(row[30], "event_envelope")
+    envelope = _text(row[31], "event_envelope")
     if _canonical_json(event.to_envelope()) != envelope:
         raise InvalidLifecycleStateError(_INVALID_CHECKPOINT_ORDER)
     return event
@@ -1682,6 +1781,26 @@ def _load_portfolio_checkpoint(
     return checkpoint
 
 
+def _load_decision_checkpoint(
+    checkpoint_value: object,
+    *,
+    event_kind: LifecycleEventKind,
+) -> DecisionCheckpoint | None:
+    if event_kind is not LifecycleEventKind.DECISION_PUBLISHED:
+        if checkpoint_value is not None:
+            raise InvalidLifecycleStateError(_INVALID_CHECKPOINT_ORDER)
+        return None
+    encoded = _text(checkpoint_value, "decision_checkpoint")
+    try:
+        decoded: object = json.loads(encoded)
+    except (ValueError, RecursionError) as error:
+        raise InvalidLifecycleStateError(_INVALID_CHECKPOINT_ORDER) from error
+    checkpoint = parse_decision_checkpoint(decoded)
+    if checkpoint is None or _canonical_json(checkpoint.to_payload()) != encoded:
+        raise InvalidLifecycleStateError(_INVALID_CHECKPOINT_ORDER)
+    return checkpoint
+
+
 def _hash_tuple_json(value: object, field: str) -> tuple[str, ...]:
     encoded = _text(value, field)
     try:
@@ -1708,7 +1827,8 @@ def _load_refusals(
             """
             SELECT refusal_id, idempotency_key, cycle_identity, reason_code,
                    evidence_policy_id, evidence_artifact_ids, evidence_refusal_ids,
-                   attention_refusal_reason, research_refusal_id, research_refusal, recorded_at
+                   attention_refusal_reason, research_refusal_id, research_refusal,
+                   decision_publication_refusal, recorded_at
             FROM advance_refusals ORDER BY refusal_id
             """
         ).fetchall()
@@ -1720,7 +1840,8 @@ def _load_refusals(
                 """
                 SELECT refusal_id, idempotency_key, cycle_identity, reason_code,
                        evidence_policy_id, evidence_artifact_ids, evidence_refusal_ids,
-                       attention_refusal_reason, research_refusal_id, research_refusal, recorded_at
+                       attention_refusal_reason, research_refusal_id, research_refusal,
+                       decision_publication_refusal, recorded_at
                 FROM advance_refusals
                 WHERE idempotency_key IS NULL AND reason_code = ?
                     AND cycle_identity IS ?
@@ -1736,7 +1857,8 @@ def _load_refusals(
                 """
                 SELECT refusal_id, idempotency_key, cycle_identity, reason_code,
                        evidence_policy_id, evidence_artifact_ids, evidence_refusal_ids,
-                       attention_refusal_reason, research_refusal_id, research_refusal, recorded_at
+                       attention_refusal_reason, research_refusal_id, research_refusal,
+                       decision_publication_refusal, recorded_at
                 FROM advance_refusals WHERE idempotency_key = ? ORDER BY refusal_id
                 """,
                 (refusal_key.value,),
@@ -1746,7 +1868,8 @@ def _load_refusals(
             """
             SELECT refusal_id, idempotency_key, cycle_identity, reason_code,
                    evidence_policy_id, evidence_artifact_ids, evidence_refusal_ids,
-                   attention_refusal_reason, research_refusal_id, research_refusal, recorded_at
+                   attention_refusal_reason, research_refusal_id, research_refusal,
+                   decision_publication_refusal, recorded_at
             FROM advance_refusals WHERE idempotency_key = ? ORDER BY refusal_id
             """,
             (command.request.idempotency_key.value,),
@@ -1765,7 +1888,8 @@ def _load_refusals(
         )
         attention_refusal_reason = _load_attention_refusal_reason(row[7], reason=reason)
         research_refusal = _load_research_refusal(row[8], row[9], reason=reason)
-        recorded_at = _canonical_timestamp(row[10], "recorded_at")
+        decision_publication_refusal = _load_decision_publication_refusal(row[10], reason=reason)
+        recorded_at = _canonical_timestamp(row[11], "recorded_at")
         refusals.append(
             DurableAdvanceRefusal(
                 sequence,
@@ -1776,6 +1900,7 @@ def _load_refusals(
                 evidence_capture,
                 attention_refusal_reason,
                 research_refusal,
+                decision_publication_refusal,
             )
         )
     return refusals
@@ -1853,6 +1978,21 @@ def _load_research_refusal(
     ):
         raise InvalidLifecycleStateError(_INVALID_REFUSAL_KEY)
     return refusal
+
+
+def _load_decision_publication_refusal(
+    value: object,
+    *,
+    reason: AdvanceFailureReason,
+) -> DecisionPublicationRefusalReason | None:
+    if reason is not AdvanceFailureReason.DECISION_PUBLICATION_FAILED:
+        if value is not None:
+            raise InvalidLifecycleStateError(_INVALID_REFUSAL_KEY)
+        return None
+    try:
+        return DecisionPublicationRefusalReason(_text(value, "decision_publication_refusal"))
+    except ValueError as error:
+        raise InvalidLifecycleStateError(_INVALID_REFUSAL_KEY) from error
 
 
 def _load_conflicts(
@@ -1939,11 +2079,12 @@ def _append_record(
                 universe_snapshot, evidence_policy_id,
                 evidence_artifact_ids, evidence_refusal_ids,
                 attention_artifact_id, attention_artifact,
-                research_checkpoint, portfolio_checkpoint, no_action_reason,
+                research_checkpoint, portfolio_checkpoint, decision_checkpoint,
+                no_action_reason,
                 event_envelope, recorded_at
             ) VALUES (
                 ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
             )
             """,
             (
@@ -2008,6 +2149,11 @@ def _append_record(
                     if record.portfolio_checkpoint is None
                     else _canonical_json(record.portfolio_checkpoint.to_payload())
                 ),
+                (
+                    None
+                    if record.decision_checkpoint is None
+                    else _canonical_json(record.decision_checkpoint.to_payload())
+                ),
                 (None if record.no_action_reason is None else record.no_action_reason.value),
                 _canonical_json(record.to_envelope()),
                 timestamp,
@@ -2022,8 +2168,9 @@ def _append_record(
             INSERT INTO advance_refusals (
                 refusal_id, idempotency_key, cycle_identity, reason_code,
                 evidence_policy_id, evidence_artifact_ids, evidence_refusal_ids,
-                attention_refusal_reason, research_refusal_id, research_refusal, recorded_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                attention_refusal_reason, research_refusal_id, research_refusal,
+                decision_publication_refusal, recorded_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 record.sequence,
@@ -2051,6 +2198,11 @@ def _append_record(
                     None
                     if record.research_refusal is None
                     else _canonical_json(record.research_refusal.to_payload())
+                ),
+                (
+                    None
+                    if record.decision_publication_refusal is None
+                    else record.decision_publication_refusal.value
                 ),
                 timestamp,
             ),
@@ -2086,8 +2238,9 @@ def _replace_status_projection(
             instrument_snapshot_hash, position_snapshot_hash, eligibility_policy_hash,
             portfolio_policy_hash, portfolio_input_hash,
             liveness, durable_reason, universe_snapshot_cycle, universe_snapshot_id,
-            attention_artifact_cycle, attention_artifact_id, portfolio_checkpoint
-        ) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            attention_artifact_cycle, attention_artifact_id, portfolio_checkpoint,
+            decision_checkpoint
+        ) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             (
@@ -2131,6 +2284,11 @@ def _replace_status_projection(
                 None
                 if status.portfolio_checkpoint is None
                 else _canonical_json(status.portfolio_checkpoint.to_payload())
+            ),
+            (
+                None
+                if status.decision_checkpoint is None
+                else _canonical_json(status.decision_checkpoint.to_payload())
             ),
         ),
     )

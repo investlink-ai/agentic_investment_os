@@ -16,6 +16,9 @@ from agentic_investment_os.domain.lifecycle import (
     AdvanceRequest,
     AppendLifecycleRecord,
     AppendTerminalLifecycleRecord,
+    DecisionCheckpoint,
+    DecisionCheckpointReference,
+    DecisionPublicationRefusalReason,
     DurableAdvanceConflict,
     DurableAdvanceRefusal,
     EvidenceCaptureCheckpoint,
@@ -33,6 +36,7 @@ from agentic_investment_os.domain.lifecycle import (
     LifecycleProgress,
     NoActionReason,
     PerformAttentionSelection,
+    PerformDecisionPublication,
     PerformDossierBuild,
     PerformEvidenceCapture,
     PerformMemoryUpdate,
@@ -44,6 +48,7 @@ from agentic_investment_os.domain.lifecycle import (
     decide_invalid_history,
     decide_terminal_refusal,
     derive_lifecycle_status,
+    parse_decision_checkpoint,
     reconstruct_lifecycle,
 )
 from agentic_investment_os.domain.lifecycle import (
@@ -78,6 +83,12 @@ KERNEL_RECORDED_AT = UtcInstant.from_datetime(datetime(2026, 8, 21, 22, 0, tzinf
 DOSSIER_CHECKPOINT = ResearchCheckpoint(("1" * SHA256_HEX_LENGTH,))
 RESEARCH_CHECKPOINT = ResearchCheckpoint(("2" * SHA256_HEX_LENGTH,))
 MEMORY_CHECKPOINT = ResearchCheckpoint(("3" * SHA256_HEX_LENGTH,))
+DECISION_CHECKPOINT = DecisionCheckpoint(
+    "7" * SHA256_HEX_LENGTH,
+    "8" * SHA256_HEX_LENGTH,
+    UtcInstant.from_datetime(datetime(2026, 8, 21, 22, 5, tzinfo=UTC)),
+    KERNEL_RECORDED_AT,
+)
 
 
 def _portfolio_checkpoint(command: AdvanceCommand) -> PortfolioCheckpoint:
@@ -157,6 +168,10 @@ def _append_decision(
         assert isinstance(command, AdvanceCommand)
         command = replace(command, portfolio_construction=_portfolio_checkpoint(command))
         decision = decide_advance(history, command, attempt)
+    if isinstance(decision, PerformDecisionPublication):
+        assert isinstance(command, AdvanceCommand)
+        command = replace(command, decision_publication=DECISION_CHECKPOINT)
+        decision = decide_advance(history, command, attempt)
     assert not isinstance(decision, AdvanceReceipt)
     assert not isinstance(decision, PerformEvidenceCapture)
     assert not isinstance(decision, PerformAttentionSelection)
@@ -164,6 +179,7 @@ def _append_decision(
     assert not isinstance(decision, PerformResearch)
     assert not isinstance(decision, PerformMemoryUpdate)
     assert not isinstance(decision, PerformPortfolioConstruction)
+    assert not isinstance(decision, PerformDecisionPublication)
     next_history = history.append(decision.record)
     if isinstance(decision, AppendTerminalLifecycleRecord):
         return next_history, attempt, decision.receipt
@@ -205,6 +221,9 @@ def _complete(
             continue
         if isinstance(decision, PerformPortfolioConstruction):
             command = replace(command, portfolio_construction=_portfolio_checkpoint(command))
+            continue
+        if isinstance(decision, PerformDecisionPublication):
+            command = replace(command, decision_publication=DECISION_CHECKPOINT)
             continue
         history = history.append(decision.record)
         if isinstance(decision, AppendTerminalLifecycleRecord):
@@ -262,6 +281,7 @@ def test_kernel_assigns_universe_events_and_fresh_recovery() -> None:
         (7, LifecycleEventKind.RESEARCH_RUN),
         (8, LifecycleEventKind.MEMORY_UPDATED),
         (9, LifecycleEventKind.PORTFOLIO_CONSTRUCTED),
+        (10, LifecycleEventKind.DECISION_PUBLISHED),
     )
     completed: AppendTerminalLifecycleRecord | None = None
     for sequence, event_kind in expected:
@@ -292,6 +312,9 @@ def test_kernel_assigns_universe_events_and_fresh_recovery() -> None:
         if isinstance(decision, PerformPortfolioConstruction):
             command = replace(command, portfolio_construction=_portfolio_checkpoint(command))
             decision = decide_advance(history, command, attempt)
+        if isinstance(decision, PerformDecisionPublication):
+            command = replace(command, decision_publication=DECISION_CHECKPOINT)
+            decision = decide_advance(history, command, attempt)
         assert not isinstance(decision, AdvanceReceipt)
         assert not isinstance(decision, PerformEvidenceCapture)
         assert not isinstance(decision, PerformAttentionSelection)
@@ -299,6 +322,7 @@ def test_kernel_assigns_universe_events_and_fresh_recovery() -> None:
         assert not isinstance(decision, PerformResearch)
         assert not isinstance(decision, PerformMemoryUpdate)
         assert not isinstance(decision, PerformPortfolioConstruction)
+        assert not isinstance(decision, PerformDecisionPublication)
         assert isinstance(decision.record, LifecycleEvent)
         assert decision.record.sequence == sequence
         assert decision.record.event_kind is event_kind
@@ -370,6 +394,106 @@ def test_kernel_rejects_invalid_portfolio_checkpoint_results(invalid_result: str
         decide_advance(history, invalid_command, attempt)
 
 
+@pytest.mark.parametrize("invalid_result", ["wrong_type", "future_recording"])
+def test_kernel_rejects_invalid_decision_checkpoint_results(invalid_result: str) -> None:
+    command = _command()
+    history = LifecycleHistory()
+    attempt = AdvanceAttempt()
+    for _ in range(10):
+        history, attempt, receipt = _append_decision(history, command, attempt)
+        assert receipt is None
+    decision = decide_advance(history, command, attempt)
+    assert isinstance(decision, PerformDecisionPublication)
+    if invalid_result == "wrong_type":
+        checkpoint = cast("DecisionCheckpoint", "invalid")
+        expected_message = "lifecycle stream checkpoint order is invalid"
+    else:
+        assert invalid_result == "future_recording"
+        checkpoint = replace(
+            DECISION_CHECKPOINT,
+            recorded_at=UtcInstant.from_datetime(KERNEL_RECORDED_AT.value + timedelta(seconds=1)),
+        )
+        expected_message = "lifecycle stream changed pinned request facts"
+
+    with pytest.raises(InvalidLifecycleStateError, match=expected_message):
+        decide_advance(
+            history,
+            replace(command, decision_publication=checkpoint),
+            attempt,
+        )
+
+
+def test_kernel_persists_an_exact_decision_publication_refusal() -> None:
+    command = _command()
+    history = LifecycleHistory()
+    attempt = AdvanceAttempt()
+    for _ in range(10):
+        history, attempt, receipt = _append_decision(history, command, attempt)
+        assert receipt is None
+
+    decision = decide_advance(
+        history,
+        replace(
+            command,
+            decision_publication=DecisionPublicationRefusalReason.SIGNING_FAILED,
+        ),
+        attempt,
+    )
+
+    assert isinstance(decision, AppendTerminalLifecycleRecord)
+    assert isinstance(decision.record, DurableAdvanceRefusal)
+    assert decision.record.decision_publication_refusal is (
+        DecisionPublicationRefusalReason.SIGNING_FAILED
+    )
+    assert decision.receipt == AdvanceReceipt.failed_closed(
+        AdvanceFailureReason.DECISION_PUBLICATION_FAILED,
+        cycle=command.request.session,
+    )
+
+
+def test_decision_checkpoint_types_reject_invalid_values() -> None:
+    with pytest.raises(ValueError, match="lifecycle stream checkpoint order is invalid"):
+        DecisionCheckpoint(
+            "invalid",
+            DECISION_CHECKPOINT.packet_id,
+            DECISION_CHECKPOINT.packet_expires_at,
+            KERNEL_RECORDED_AT,
+        )
+    with pytest.raises(ValueError, match="lifecycle stream checkpoint order is invalid"):
+        DecisionCheckpointReference(
+            "invalid",
+            _command().request.session,
+            DECISION_CHECKPOINT,
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("decision_record_id", "invalid"),
+        ("recorded_at", "invalid"),
+        ("packet_expires_at", "invalid"),
+        ("no_action_reason", "invalid"),
+    ],
+)
+def test_decision_checkpoint_parser_rejects_invalid_fields(field: str, value: object) -> None:
+    payload = DECISION_CHECKPOINT.to_payload()
+    payload[field] = value
+
+    assert parse_decision_checkpoint(payload) is None
+
+
+def test_decision_checkpoint_parser_rejects_an_invalid_field_combination() -> None:
+    payload = DECISION_CHECKPOINT.to_payload()
+    payload.update(
+        packet_id=None,
+        packet_expires_at=None,
+        no_action_reason=None,
+    )
+
+    assert parse_decision_checkpoint(payload) is None
+
+
 def test_partial_progress_refuses_attention_access_before_its_checkpoint() -> None:
     command = _command()
     progress = LifecycleProgress(
@@ -391,6 +515,7 @@ def test_partial_progress_refuses_attention_access_before_its_checkpoint() -> No
         progress.require_research_checkpoint,
         progress.require_memory_checkpoint,
         progress.require_portfolio_checkpoint,
+        progress.require_decision_checkpoint,
     ):
         with pytest.raises(
             InvalidLifecycleStateError,
@@ -474,6 +599,7 @@ def test_kernel_resumes_partial_history_and_replays_completion() -> None:
         RESEARCH_CHECKPOINT,
         MEMORY_CHECKPOINT,
         _portfolio_checkpoint(command),
+        DECISION_CHECKPOINT,
         None,
     )
     assert replay == AdvanceReceipt.advanced(
@@ -491,6 +617,7 @@ def test_kernel_resumes_partial_history_and_replays_completion() -> None:
         RESEARCH_CHECKPOINT,
         MEMORY_CHECKPOINT,
         _portfolio_checkpoint(command),
+        DECISION_CHECKPOINT,
         None,
     )
 
@@ -522,18 +649,48 @@ def test_reconstruction_binds_portfolio_checkpoint_to_its_terminal_phase(
 ) -> None:
     command = _command()
     history, _ = _complete(LifecycleHistory(), command)
-    terminal = history.events[-1]
-    checkpoint = terminal.portfolio_checkpoint
+    portfolio_event = history.events[-2]
+    checkpoint = portfolio_event.portfolio_checkpoint
     assert checkpoint is not None
     if corruption == "missing_checkpoint":
-        object.__setattr__(terminal, "portfolio_checkpoint", None)
+        object.__setattr__(portfolio_event, "portfolio_checkpoint", None)
         expected_message = "lifecycle stream checkpoint order is invalid"
     else:
         assert corruption == "changed_policy"
         object.__setattr__(
-            terminal,
+            portfolio_event,
             "portfolio_checkpoint",
             replace(checkpoint, policy_id="f" * SHA256_HEX_LENGTH),
+        )
+        expected_message = "lifecycle stream changed pinned request facts"
+
+    with pytest.raises(InvalidLifecycleStateError, match=expected_message):
+        reconstruct_lifecycle(history)
+
+
+@pytest.mark.parametrize("corruption", ["missing_checkpoint", "before_portfolio"])
+def test_reconstruction_binds_decision_checkpoint_to_its_terminal_phase(
+    corruption: str,
+) -> None:
+    command = _command()
+    history, _ = _complete(LifecycleHistory(), command)
+    decision_event = history.events[-1]
+    checkpoint = decision_event.decision_checkpoint
+    assert checkpoint is not None
+    if corruption == "missing_checkpoint":
+        object.__setattr__(decision_event, "decision_checkpoint", None)
+        expected_message = "lifecycle stream checkpoint order is invalid"
+    else:
+        assert corruption == "before_portfolio"
+        object.__setattr__(
+            decision_event,
+            "decision_checkpoint",
+            replace(
+                checkpoint,
+                recorded_at=UtcInstant.from_datetime(
+                    KERNEL_RECORDED_AT.value - timedelta(seconds=1)
+                ),
+            ),
         )
         expected_message = "lifecycle stream changed pinned request facts"
 
@@ -1409,7 +1566,8 @@ def test_status_uses_the_kernel_transition_sequence() -> None:
         LifecyclePhase.RUN_RESEARCH,
         LifecyclePhase.UPDATE_MEMORY,
         LifecyclePhase.CONSTRUCT_PORTFOLIO,
-        None,
+        LifecyclePhase.PUBLISH_DECISION,
+        LifecyclePhase.AWAIT_EXECUTION,
     )
 
     for expected_phase in expected_phases:

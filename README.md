@@ -12,13 +12,13 @@ isolated Research Lab.
 
 | Surface | Delivery state | Code owner | Verification surface |
 | --- | --- | --- | --- |
-| Production lifecycle, research, memory, and portfolio construction | **Implemented:** `Advance` persists `SnapshotUniverse` through `ConstructPortfolio`; `Status` cross-validates lifecycle, evidence, governance, production calls, memory, and portfolio history | `application`, `domain`, `evidence`, `research`, `memory`, `portfolio`, `adapters` | [Lifecycle journey](tests/integration/system/test_lifecycle_journey.py), [production and portfolio lifecycle](tests/integration/test_production_research_lifecycle.py), [portfolio properties](tests/unit/test_portfolio.py) |
+| Production lifecycle, research, memory, portfolio construction, and decision publication | **Implemented:** `Advance` persists `SnapshotUniverse` through `PublishDecision`, then stops at `AwaitExecution`; `Status` cross-validates lifecycle, evidence, governance, production calls, memory, portfolio, and decision history | `application`, `domain`, `evidence`, `research`, `memory`, `portfolio`, `adapters` | [Signed-packet lifecycle journey](tests/integration/system/test_lifecycle_journey.py), [production lifecycle](tests/integration/test_production_research_lifecycle.py), [packet contract](tests/contract/test_decision_packet_contract.py) |
 | Belief memory | **Implemented:** `Record` appends evidence-bound Belief Events and rebuilds bounded as-of Belief Graphs | `application`, `memory`, `adapters` | [Belief journey](tests/integration/system/test_belief_record_journey.py), [Belief Event contract](tests/contract/test_belief_event_contract.py) |
 | Constitution governance | **Implemented:** operator-only `Govern` schedules signed amendments; `Advance` pins the active version before work | `application`, `domain`, `adapters`, `entrypoints` | [Governance integration](tests/integration/test_constitution_governance.py), [governance contract](tests/contract/test_constitution_governance.py) |
 | Isolated Research Lab | **Implemented:** `Replay` validates a non-production Dossier and runs Thesis, Skeptic, Scenario, and CIO roles | `application`, `research`, `adapters`, `entrypoints` | [Resolution journey](tests/integration/system/test_research_lab_resolution_journey.py), [model contract](tests/contract/test_research_lab_model.py) |
 | Same-input portfolio shadows | **Implemented:** every accepted Balanced result durably accounts for Conservative, Growth, and equal-weight variants without packet or broker authority | `portfolio`, `application`, `adapters` | [Production lifecycle](tests/integration/test_production_research_lifecycle.py), [shadow properties](tests/unit/test_portfolio.py) |
 | Market Session scheduler | **Implemented:** a pinned 2026 NYSE calendar reconstructs due, missed, interrupted, and terminal sessions and invokes only public `Advance` and `Status` | `domain`, `application`, `adapters`, `entrypoints` | [Scheduler journey](tests/integration/system/test_scheduler_journey.py), [calendar and recovery tests](tests/integration/test_scheduler.py) |
-| Packet publication, execution, evaluation, and later lifecycle phases | **Scaffolded:** accepted contracts exist, but production behavior and composition are not enabled | `portfolio`, `execution`, `evaluation`, `application` | No production behavior gate yet; [stage acceptance](docs/product-requirements.md) remains authoritative |
+| Paper execution, reconciliation, evaluation, and later lifecycle phases | **Scaffolded:** packet publication is enabled, but no executor, broker effect, outcome admission, or evaluation behavior is reachable | `execution`, `evaluation`, `application` | [Stage acceptance](docs/product-requirements.md) remains authoritative |
 | Crypto spot and listed options | **Reserved and disabled:** shared typed contracts exist; V0 composition remains US-equity-only | `domain`, `entrypoints` | [Identity unit tests](tests/unit/test_identity.py), [runtime configuration](tests/integration/test_runtime_configuration.py) |
 
 Implemented production retries reproduce durable identities, transitions, bounded refusals, and
@@ -29,9 +29,13 @@ through intent-first recorded model effects, admits only validated non-abstainin
 the Belief Ledger, and has no sizing, packet, credential, or broker capability. `ConstructPortfolio`
 reconstructs that exact durable resolution set without another model effect, persists one fully bound
 HouseView, and applies deterministic capped inverse-volatility sizing, uncertainty downside, risk
-clamps, cash preservation, and Target Bands. It constructs no packet and reaches no broker.
+clamps, cash preservation, and Target Bands. After the complete Balanced-plus-shadow cycle is durable,
+`PublishDecision` records one immutable Champion Decision Record and at most one signed, scoped,
+expiring Balanced packet. It stops at `AwaitExecution` and reaches no broker.
 The same accepted input also produces immutable Conservative, Growth, and equal-weight accounting
-records whose available-at-time cost inputs remain explicitly non-executable.
+records whose available-at-time cost inputs remain explicitly non-executable. The decision packet
+contains only deterministic risk-clamped authority; signer material and synthetic account scope enter
+through typed composition ports without model, executor, credential, network, or broker capability.
 Authoritative records are append-only; projections remain disposable and rebuildable.
 
 Research Lab calls use copied or synthetic inputs and a separate durable namespace. A completed call

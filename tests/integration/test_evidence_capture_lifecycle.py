@@ -25,8 +25,8 @@ from agentic_investment_os.domain.lifecycle import (
 )
 from agentic_investment_os.domain.temporal import UtcInstant
 from agentic_investment_os.entrypoints.configuration import ConfigurationSource
-from agentic_investment_os.entrypoints.lifecycle import configure_advance, configure_status
 from agentic_investment_os.evidence.capture import EvidencePersistenceError, InvalidEvidenceError
+from tests._decision import configure_advance, configure_status
 from tests._evidence import evidence_item, recorded_evidence
 from tests._governance import RecordedSessionEligibility
 from tests._production_research import (
@@ -81,9 +81,9 @@ def test_advance_captures_market_and_news_after_the_pinned_universe(
         idempotency_key="issue-20",
     )
 
-    assert receipt.disposition is AdvanceDisposition.ADVANCED
+    assert receipt.disposition is AdvanceDisposition.NO_ACTION
     assert receipt.completed_phase is not None
-    assert receipt.completed_phase.phase is LifecyclePhase.CONSTRUCT_PORTFOLIO
+    assert receipt.completed_phase.phase is LifecyclePhase.PUBLISH_DECISION
     assert len(receipt.evidence_artifact_ids) == REQUIRED_EVIDENCE_ARTIFACTS
     assert receipt.evidence_refusal_ids == ()
     assert receipt.attention_artifact is not None
@@ -98,7 +98,7 @@ def test_advance_captures_market_and_news_after_the_pinned_universe(
         events = connection.execute(
             "SELECT event_kind FROM lifecycle_events ORDER BY sequence"
         ).fetchall()
-    assert events[-1] == ("portfolio_constructed",)
+    assert events[-1] == ("decision_published",)
     assert sorted(path.name for path in state_root.iterdir()) == [
         "evidence-vault",
         "lifecycle.sqlite3",
@@ -684,7 +684,8 @@ def test_evidence_failure_row_cannot_claim_a_complete_capture(tmp_path: Path) ->
         row = connection.execute(
             "SELECT refusal_id, idempotency_key, cycle_identity, reason_code, "
             "evidence_policy_id, evidence_artifact_ids, evidence_refusal_ids, "
-            "attention_refusal_reason, research_refusal_id, research_refusal, recorded_at "
+            "attention_refusal_reason, research_refusal_id, research_refusal, "
+            "decision_publication_refusal, recorded_at "
             "FROM advance_refusals"
         ).fetchone()
         assert row is not None
@@ -693,10 +694,11 @@ def test_evidence_failure_row_cannot_claim_a_complete_capture(tmp_path: Path) ->
             "CREATE TABLE advance_refusals "
             "(refusal_id, idempotency_key, cycle_identity, reason_code, "
             "evidence_policy_id, evidence_artifact_ids, evidence_refusal_ids, "
-            "attention_refusal_reason, research_refusal_id, research_refusal, recorded_at)"
+            "attention_refusal_reason, research_refusal_id, research_refusal, "
+            "decision_publication_refusal, recorded_at)"
         )
         connection.execute(
-            "INSERT INTO advance_refusals VALUES (?, ?, ?, ?, ?, ?, '[]', ?, ?, ?, ?)",
+            "INSERT INTO advance_refusals VALUES (?, ?, ?, ?, ?, ?, '[]', ?, ?, ?, ?, ?)",
             (
                 row[0],
                 row[1],
@@ -708,6 +710,7 @@ def test_evidence_failure_row_cannot_claim_a_complete_capture(tmp_path: Path) ->
                 row[8],
                 row[9],
                 row[10],
+                row[11],
             ),
         )
 

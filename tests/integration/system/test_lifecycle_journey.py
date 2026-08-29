@@ -175,7 +175,7 @@ def test_lifecycle_journey_resumes_replays_and_rebuilds_status_across_processes(
     resumed = _advance_observation(_run_process("advance", state_root))
 
     assert resumed.disposition == "advanced"
-    assert resumed.completed_phase == "ConstructPortfolio"
+    assert resumed.completed_phase == "PublishDecision"
     assert resumed.recovery == "resumed"
     assert resumed.configuration_version == 1
     assert len(resumed.run_id) == SHA256_HEX_LENGTH
@@ -193,6 +193,7 @@ def test_lifecycle_journey_resumes_replays_and_rebuilds_status_across_processes(
         (7, "research_run", "RunResearch"),
         (8, "memory_updated", "UpdateMemory"),
         (9, "portfolio_constructed", "ConstructPortfolio"),
+        (10, "decision_published", "PublishDecision"),
     ]
     assert {str(row[3]) for row in completed_history} == {resumed.run_id}
     assert {str(row[4]) for row in completed_history} == {resumed.configuration_hash}
@@ -207,8 +208,13 @@ def test_lifecycle_journey_resumes_replays_and_rebuilds_status_across_processes(
             "SELECT portfolio_checkpoint FROM lifecycle_events "
             "WHERE event_kind = 'portfolio_constructed'"
         ).fetchone()
+        decision_row = connection.execute(
+            "SELECT decision_record_id, packet_id, packet_json, no_action_reason "
+            "FROM decision_publications"
+        ).fetchone()
     assert balanced_row is not None
     assert checkpoint_row is not None
+    assert decision_row is not None
     balanced_payload = json.loads(balanced_row[0])
     checkpoint_payload = json.loads(checkpoint_row[0])
     house_view = balanced_payload["house_view"]
@@ -222,17 +228,34 @@ def test_lifecycle_journey_resumes_replays_and_rebuilds_status_across_processes(
         assert shadow["authority_scope"] == "non_executable_shadow_account"
     assert len(checkpoint_payload["shadow_accounts"]) == SHADOW_ACCOUNT_COUNT
     assert "targets" not in checkpoint_payload["shadow_accounts"][0]
+    packet_id = decision_row[1]
+    assert isinstance(packet_id, str)
+    assert len(packet_id) == SHA256_HEX_LENGTH
+    assert decision_row[0] != packet_id
+    assert decision_row[3] is None
+    packet_payload = json.loads(decision_row[2])
+    assert packet_payload["packet_id"] == packet_id
+    assert packet_payload["decision_record_id"] == decision_row[0]
+    assert packet_payload["authority_scope"] == "balanced_paper_execution"
+    assert packet_payload["risk_profile"] == "balanced"
+    assert packet_payload["asset_class"] == "us_equity"
+    assert packet_payload["quantity_unit"] == "whole_share"
+    assert packet_payload["order_policy"] == "regular_session_day_limit_v1"
+    assert packet_payload["leverage_allowed"] is False
+    assert packet_payload["instructions"]
+    assert packet_payload["signature"]["scheme"] == "hmac-sha256-v1"
 
     expected_status = _status_observation(_run_process("status", state_root))
 
+    expected_cycle = (
+        '{"asset_class":"us_equity","cycle_type":"market_session",'
+        '"payload":{"trading_date":"2026-08-21"},'
+        '"payload_schema_version":1,"schema_version":1}'
+    )
     assert expected_status == StatusObservation(
-        active_phase="",
-        last_completed_cycle="",
-        universe_snapshot_cycle=(
-            '{"asset_class":"us_equity","cycle_type":"market_session",'
-            '"payload":{"trading_date":"2026-08-21"},'
-            '"payload_schema_version":1,"schema_version":1}'
-        ),
+        active_phase="AwaitExecution",
+        last_completed_cycle=expected_cycle,
+        universe_snapshot_cycle=expected_cycle,
         liveness="active",
         durable_reason="",
         run_id=resumed.run_id,

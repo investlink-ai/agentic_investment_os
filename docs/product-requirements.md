@@ -159,7 +159,8 @@ Implement independently verifiable vertical slices in this dependency order:
 1. domain events, SQLite ledgers, projections, lifecycle checkpoints, and invariants;
 2. recorded adapters, Evidence Vault, as-of provenance, universe, and attention funnel;
 3. model role contracts, validation, Constitution, and Research Lab isolation;
-4. HouseView, deterministic portfolio construction, Target Bands, and shadow accounting;
+4. HouseView, deterministic portfolio construction, Target Bands, shadow accounting, and atomic
+   Champion decision and Balanced packet publication;
 5. Alpaca paper executor, reconciliation, scheduler, and operator digest; and
 6. forecast resolution, evaluation, Journal Lessons, and Champion–Challenger governance.
 

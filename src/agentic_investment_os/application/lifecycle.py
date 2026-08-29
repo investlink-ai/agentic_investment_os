@@ -32,6 +32,7 @@ from agentic_investment_os.domain.lifecycle import (
     AdvanceRequest,
     AppendLifecycleRecord,
     AppendTerminalLifecycleRecord,
+    DecisionCheckpointReference,
     EvidenceCaptureCheckpoint,
     InputRefusal,
     InputRefusalCode,
@@ -44,6 +45,7 @@ from agentic_investment_os.domain.lifecycle import (
     MemoryUpdateRefusal,
     MemoryUpdateRefusalReason,
     PerformAttentionSelection,
+    PerformDecisionPublication,
     PerformDossierBuild,
     PerformEvidenceCapture,
     PerformMemoryUpdate,
@@ -53,6 +55,9 @@ from agentic_investment_os.domain.lifecycle import (
     PortfolioCheckpointReference,
     ResearchCheckpoint,
     ResearchRefusal,
+)
+from agentic_investment_os.domain.lifecycle import (
+    DecisionPublicationRefusalReason as LifecycleDecisionPublicationRefusalReason,
 )
 from agentic_investment_os.domain.temporal import InvalidUtcInstantError, UtcInstant
 from agentic_investment_os.domain.universe import (
@@ -93,6 +98,16 @@ from agentic_investment_os.portfolio.construction import (
     PortfolioInputSource,
     PortfolioRefusalReason,
     PortfolioStance,
+)
+from agentic_investment_os.portfolio.publication import (
+    DecisionPacketAccountScope,
+    DecisionPacketSigner,
+    DecisionPacketWindowSource,
+    DecisionPublicationHistoryValidator,
+    DecisionPublicationLedger,
+    DecisionPublicationRefusalReason,
+    DecisionPublicationResult,
+    construct_decision_publication,
 )
 from agentic_investment_os.portfolio.shadows import (
     PortfolioCycleHistoryValidator,
@@ -197,6 +212,11 @@ class Advance:
     portfolio_policy: BalancedPortfolioPolicy
     portfolio_input_source: PortfolioInputSource
     portfolio_ledger: PortfolioCycleResultLedger
+    decision_ledger: DecisionPublicationLedger
+    decision_signer: DecisionPacketSigner
+    decision_window_source: DecisionPacketWindowSource
+    decision_account_scope: DecisionPacketAccountScope
+    benchmark_identity: EquityInstrumentIdentity
 
     def __call__(  # noqa: PLR0912, PLR0915 - exhaust each typed lifecycle decision.
         self,
@@ -229,10 +249,12 @@ class Advance:
             if isinstance(decision, AdvanceReceipt):
                 self._validate_evidence_receipt(command, decision)
                 self._validate_portfolio_receipt(decision)
+                self._validate_decision_receipt(decision)
                 return decision
             if isinstance(decision, AppendTerminalLifecycleRecord):
                 self._validate_evidence_receipt(command, decision.receipt)
                 self._validate_portfolio_receipt(decision.receipt)
+                self._validate_decision_receipt(decision.receipt)
                 return decision.receipt
             if isinstance(decision, AppendLifecycleRecord):
                 if decision.attempt.last_sequence is None or (
@@ -373,6 +395,82 @@ class Advance:
                         recorded_at,
                     ),
                     no_action_reason=decision.no_action_reason,
+                )
+                continue
+            if isinstance(decision, PerformDecisionPublication):
+                if not isinstance(command, AdvanceCommand):
+                    raise InvalidLifecycleStateError(_INCOMPLETE_CHECKPOINT_RESULT)
+                replayed_publication = self.decision_ledger.replay_publication(
+                    decision.pinned_run_identity.run_id,
+                    command.request.session,
+                )
+                if replayed_publication is not None:
+                    command = replace(command, decision_publication=replayed_publication)
+                    continue
+                cycle_result = self.portfolio_ledger.load_cycle(
+                    PortfolioCheckpointReference(
+                        decision.pinned_run_identity.run_id,
+                        decision.portfolio_checkpoint,
+                        decision.portfolio_checkpoint.recorded_at,
+                    )
+                )
+                replayed_run = self.production_research.replay_run(
+                    run_id=decision.pinned_run_identity.run_id,
+                    dossier_checkpoint=decision.dossier_checkpoint,
+                    research_checkpoint=decision.research_checkpoint,
+                    no_action_reason=decision.no_action_reason,
+                )
+                if replayed_run is None:
+                    raise InvalidLifecycleStateError(_INCOMPLETE_CHECKPOINT_RESULT)
+                forecast_ids = tuple(
+                    sorted(
+                        resolution.forecast.content_hash
+                        for resolution in replayed_run.resolutions
+                        if resolution.forecast is not None
+                    )
+                )
+                validity_window = self.decision_window_source.window_for(
+                    command.request.session,
+                    recorded_at,
+                )
+                publication: DecisionPublicationResult | DecisionPublicationRefusalReason
+                if isinstance(validity_window, DecisionPublicationRefusalReason):
+                    publication = validity_window
+                else:
+                    publication = construct_decision_publication(
+                        cycle_result,
+                        forecast_ids=forecast_ids,
+                        model_fingerprint=_content_hash(
+                            [
+                                {
+                                    "role": contract.role.value,
+                                    "model_configuration": (
+                                        contract.model_configuration.to_payload()
+                                    ),
+                                }
+                                for contract in self.production_research.policy.role_contracts
+                            ]
+                        ),
+                        benchmark_identity=self.benchmark_identity,
+                        account_scope=self.decision_account_scope,
+                        validity_window=validity_window,
+                        signer=self.decision_signer,
+                    )
+                if isinstance(publication, DecisionPublicationRefusalReason):
+                    command = replace(
+                        command,
+                        decision_publication=LifecycleDecisionPublicationRefusalReason(
+                            publication.value
+                        ),
+                    )
+                    continue
+                command = replace(
+                    command,
+                    decision_publication=self.decision_ledger.record_publication(
+                        decision.pinned_run_identity.run_id,
+                        publication,
+                        recorded_at,
+                    ),
                 )
                 continue
             # Strict mypy proves this line unreachable; removing it is runtime-equivalent.
@@ -740,6 +838,17 @@ class Advance:
             )
         )
 
+    def _validate_decision_receipt(self, receipt: AdvanceReceipt) -> None:
+        checkpoint = receipt.decision_checkpoint
+        identity = receipt.pinned_run_identity
+        if checkpoint is None:
+            return
+        if identity is None or type(identity.cycle) is not MarketSession:
+            raise InvalidLifecycleStateError(_INCOMPLETE_CHECKPOINT_RESULT)
+        self.decision_ledger.validate_reference(
+            DecisionCheckpointReference(identity.run_id, identity.cycle, checkpoint)
+        )
+
     def _prepare_command(  # noqa: PLR0911 - map each hostile input refusal explicitly.
         self,
         parsed: AdvanceRequest | InputRefusal,
@@ -1018,6 +1127,7 @@ class Status:
     research_history_validator: ProductionResearchHistoryValidator
     memory_history_validator: BeliefHistoryValidator
     portfolio_history_validator: PortfolioCycleHistoryValidator
+    decision_history_validator: DecisionPublicationHistoryValidator
 
     def __call__(self) -> LifecycleStatus:
         status = self.projection.rebuild_status()
@@ -1028,6 +1138,9 @@ class Status:
         self.memory_history_validator.validate_history(self.projection.rebuild_memory_event_ids())
         self.portfolio_history_validator.validate_history(
             self.projection.rebuild_portfolio_checkpoints()
+        )
+        self.decision_history_validator.validate_history(
+            self.projection.rebuild_decision_checkpoints()
         )
         uses = self.projection.rebuild_constitution_uses()
         return replace(status, constitution_governance=self.constitution_status(uses))

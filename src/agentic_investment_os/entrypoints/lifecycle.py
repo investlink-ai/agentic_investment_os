@@ -6,10 +6,12 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, assert_never
 
+from agentic_investment_os.adapters.decision_window import ShortLivedDecisionPacketWindowSource
 from agentic_investment_os.adapters.filesystem_evidence import FilesystemEvidenceVault
 from agentic_investment_os.adapters.recorded_evidence import RecordedEvidenceSource
 from agentic_investment_os.adapters.recorded_portfolio import RecordedPortfolioSource
 from agentic_investment_os.adapters.recorded_universe import RecordedUniverseSource
+from agentic_investment_os.adapters.sqlite_decision import SQLiteDecisionPublicationLedger
 from agentic_investment_os.adapters.sqlite_lifecycle import (
     PreparedRuntimeDatabase,
     RuntimeRootRefusal,
@@ -26,6 +28,7 @@ from agentic_investment_os.adapters.sqlite_production_research import (
 from agentic_investment_os.application.governance import ConstitutionRegistry, ConstitutionStatus
 from agentic_investment_os.application.lifecycle import Advance, Status
 from agentic_investment_os.application.memory import Record
+from agentic_investment_os.domain.identity import EquityInstrumentIdentity
 from agentic_investment_os.entrypoints.configuration import (
     ConfigurationRefusal,
     ConfigurationRefusalCode,
@@ -45,6 +48,11 @@ if TYPE_CHECKING:
     from agentic_investment_os.domain.governance import (
         MarketSessionEligibility,
         OperatorApprovalVerifier,
+    )
+    from agentic_investment_os.portfolio.publication import (
+        DecisionPacketAccountScope,
+        DecisionPacketSigner,
+        DecisionPacketVerifier,
     )
     from agentic_investment_os.research.model import ResearchRoleModel
 
@@ -66,6 +74,9 @@ def configure_advance(  # noqa: PLR0913 - composition names each untrusted bound
     recorded_evidence: object,
     session_eligibility: MarketSessionEligibility,
     recorded_model: ResearchRoleModel,
+    decision_signer: DecisionPacketSigner,
+    decision_verifier: DecisionPacketVerifier,
+    decision_account_scope: DecisionPacketAccountScope,
     recorded_official_evidence: object = None,
     clock: Clock | None = None,
     approval_verifier: OperatorApprovalVerifier | None = None,
@@ -91,6 +102,12 @@ def configure_advance(  # noqa: PLR0913 - composition names each untrusted bound
         evidence_vault = FilesystemEvidenceVault(resolution.state_root / "evidence-vault")
         trusted_clock = clock if clock is not None else SystemClock()
         belief_ledger = SQLiteBeliefLedger(database.path)
+        portfolio_ledger = SQLitePortfolioLedger(database.path)
+        decision_ledger = SQLiteDecisionPublicationLedger(
+            database.path,
+            decision_verifier,
+            portfolio_ledger,
+        )
         return Advance(
             ledger=SQLiteLifecycleLedger(database.path),
             configuration_version=resolution.schema_version,
@@ -134,7 +151,16 @@ def configure_advance(  # noqa: PLR0913 - composition names each untrusted bound
             memory_refusal_ledger=belief_ledger,
             portfolio_policy=resolution.portfolio_policy,
             portfolio_input_source=RecordedPortfolioSource(recorded_portfolio),
-            portfolio_ledger=SQLitePortfolioLedger(database.path),
+            portfolio_ledger=portfolio_ledger,
+            decision_ledger=decision_ledger,
+            decision_signer=decision_signer,
+            decision_window_source=ShortLivedDecisionPacketWindowSource(),
+            decision_account_scope=decision_account_scope,
+            benchmark_identity=EquityInstrumentIdentity(
+                "alpaca-paper",
+                "equity-spy",
+                "ARCA",
+            ),
         )
     # Strict mypy proves this line unreachable; removing it is runtime-equivalent.
     assert_never(database)  # pragma: no cover
@@ -144,6 +170,7 @@ def configure_status(
     sources: Sequence[ConfigurationSource],
     *,
     repository_root: Path,
+    decision_verifier: DecisionPacketVerifier,
     approval_verifier: OperatorApprovalVerifier | None = None,
 ) -> Status | ConfigurationRefusal:
     """Validate configuration and compose rebuildable lifecycle status.
@@ -169,6 +196,7 @@ def configure_status(
             resolution.state_root / "evidence-vault"
         )
         belief_ledger = SQLiteBeliefLedger.open_existing(database.path)
+        portfolio_ledger = SQLitePortfolioLedger.open_existing(database.path)
         return Status(
             SQLiteLifecycleLedger.open_existing(database.path),
             evidence_vault,
@@ -187,7 +215,12 @@ def configure_status(
                 evidence_vault,
                 SystemClock(),
             ),
-            SQLitePortfolioLedger.open_existing(database.path),
+            portfolio_ledger,
+            SQLiteDecisionPublicationLedger.open_existing(
+                database.path,
+                verifier=decision_verifier,
+                portfolio_ledger=portfolio_ledger,
+            ),
         )
     # Strict mypy proves this line unreachable; removing it is runtime-equivalent.
     assert_never(database)  # pragma: no cover

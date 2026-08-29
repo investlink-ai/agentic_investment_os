@@ -16,10 +16,12 @@ from agentic_investment_os.domain.lifecycle import (
     AdvanceRequest,
     AppendLifecycleRecord,
     AppendTerminalLifecycleRecord,
+    DecisionCheckpoint,
     InvalidLifecycleStateError,
     LifecycleEvent,
     LifecyclePersistenceError,
     PerformAttentionSelection,
+    PerformDecisionPublication,
     PerformDossierBuild,
     PerformEvidenceCapture,
     PerformMemoryUpdate,
@@ -34,12 +36,12 @@ from tests._attention import attention_artifact
 from tests._evidence import evidence_capture_checkpoint
 from tests._universe import advance_command, portfolio_shadow_references
 
-CURRENT_DATABASE_VERSION = 14
+CURRENT_DATABASE_VERSION = 15
 CONFIGURATION_HASH = "a" * 64
 RECORDED_AT = "2026-08-21T22:00:00.000000+00:00"
 MAX_DIAGNOSTIC_LENGTH = 100
 SQLiteValue = str | bytes | int | float | None
-PORTFOLIO_EVENT_SEQUENCE = 9
+DECISION_EVENT_SEQUENCE = 10
 DOSSIER_CHECKPOINT = ResearchCheckpoint(("1" * 64,))
 RESEARCH_CHECKPOINT = ResearchCheckpoint(("2" * 64,))
 MEMORY_CHECKPOINT = ResearchCheckpoint(("3" * 64,))
@@ -105,7 +107,7 @@ def _populate_current_history(database: Path) -> tuple[AdvanceRequest, PinnedRun
     attempt = AdvanceAttempt()
     recorded_at = UtcInstant.parse(RECORDED_AT)
     capture = evidence_capture_checkpoint()
-    for expected_sequence in range(PORTFOLIO_EVENT_SEQUENCE + 1):
+    for expected_sequence in range(DECISION_EVENT_SEQUENCE + 1):
         decision = ledger.advance_step(command, attempt, recorded_at)
         if isinstance(decision, PerformEvidenceCapture):
             command = replace(command, evidence_capture=capture)
@@ -144,7 +146,18 @@ def _populate_current_history(database: Path) -> tuple[AdvanceRequest, PinnedRun
                 ),
             )
             decision = ledger.advance_step(command, attempt, recorded_at)
-        if expected_sequence < PORTFOLIO_EVENT_SEQUENCE:
+        if isinstance(decision, PerformDecisionPublication):
+            command = replace(
+                command,
+                decision_publication=DecisionCheckpoint(
+                    "7" * 64,
+                    "8" * 64,
+                    UtcInstant.from_datetime(datetime(2026, 8, 21, 22, 5, tzinfo=UTC)),
+                    recorded_at,
+                ),
+            )
+            decision = ledger.advance_step(command, attempt, recorded_at)
+        if expected_sequence < DECISION_EVENT_SEQUENCE:
             assert isinstance(decision, AppendLifecycleRecord)
             attempt = decision.attempt
         else:
@@ -226,6 +239,9 @@ def test_fresh_database_records_its_physical_schema_version(tmp_path: Path) -> N
         "constitution_governance_events",
         "constitution_governance_events_are_append_only_delete",
         "constitution_governance_events_are_append_only_update",
+        "decision_publications",
+        "decision_publications_are_append_only_delete",
+        "decision_publications_are_append_only_update",
         "lifecycle_events",
         "lifecycle_events_are_append_only_delete",
         "lifecycle_events_are_append_only_update",

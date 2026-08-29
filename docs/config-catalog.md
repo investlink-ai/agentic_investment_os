@@ -202,8 +202,32 @@ HouseView. The calendar identity is a code-owned safety constant, not a tunable 
 only consecutive regular 2026 NYSE sessions and fails closed for another version or year. Each known
 event records calendar provenance; clearing it also requires the captured release artifact and exact
 fresh terminal research request and resolution identities. A schedule remains evidence about a
-future event but cannot substitute for the publication. No model, packet store, broker port, account
-credential, or live data fallback is part of portfolio composition.
+future event but cannot substitute for the publication. No model, broker port, account credential, or
+live data fallback is part of portfolio composition.
+
+## Decision publication composition
+
+Decision publication adds no runtime-configuration field, environment variable, or default account.
+`configure_advance` requires explicit signer, verifier, and non-secret account-scope values;
+`configure_status` requires the verifier needed to reconstruct stored packets. These typed ports are
+composition inputs rather than policy values and never enter the runtime configuration fingerprint,
+model context, lifecycle receipt, or durable research. The operating-system composition receives no
+broker credential, account lookup, executor port, network client, or model capability through them.
+
+The implemented HMAC-SHA256 adapter receives non-empty private key bytes directly from its caller,
+retains them only in memory, exposes only a SHA-256 key identity, and redacts them from representation.
+Key generation, secret resolution, storage, rotation, revocation, and sharing with the future
+credentialed executor are deployment obligations outside the current configuration schema. A future
+key reference must remain typed and non-secret and may resolve key bytes only at a composition
+boundary. The packet carries only `broker=alpaca`, `environment=paper`, and a caller-supplied SHA-256
+scope identity; a real provider account identifier is invalid packet material.
+
+The default lifecycle composition derives a five-minute packet validity interval from its injected
+clock. The interval length and HMAC scheme are code-owned safety constants, not operator-tunable
+defaults. The fixed benchmark identity is the canonical Alpaca-paper SPY catalog identity required by
+the official V0 benchmark policy. Scheduler alignment with the approved pre-open freeze and any
+future change to the validity-window source require their owning implementation slice and authority
+document update; ambient local time is never a fallback.
 
 ## Constitution governance composition
 

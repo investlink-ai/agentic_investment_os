@@ -62,8 +62,11 @@ the dependency. Prefer passing typed values and ports over adding an edge.
   capability, but it receives no Champion, portfolio, packet, execution, broker, or credential port.
 - `execution` never imports `research`, a model client, or a Codex adapter.
 - `portfolio` consumes validated typed research outcomes and deterministic market/risk inputs; it does
-  not invoke a model. Its shadow-account types are non-executable accounting contracts and never
-  cross into `execution`.
+  not invoke a model. It owns Champion Decision Record and DecisionPacket construction from the
+  complete durable portfolio cycle. Its signer, verifier, validity-window, and publication-ledger
+  ports expose only their bounded operation; they grant no key storage, account lookup, model,
+  executor, network, credential, or broker capability. Shadow-account types are non-executable
+  accounting contracts and never cross into `execution`.
 - `domain` owns the asset-neutral `UtcInstant`, `InstrumentIdentity`, `DecisionCycleIdentity`,
   durable-envelope, and receipt contracts. A capability owns its asset-class policy and payload
   variants; adding a variant does not add a reverse dependency or a top-level asset plugin module.
@@ -83,8 +86,11 @@ the dependency. Prefer passing typed values and ports over adding an edge.
   evidence, research, memory, and deterministic portfolio construction through public contracts;
   `research` owns production role policy and model-call ports; `portfolio` owns HouseView admission,
   Balanced and shadow sizing, clamps, Target Bands, ex-ante shadow accounting, and its input and result
-  ports. Recorded and SQLite adapters translate or persist those owner-defined contracts without
-  gaining lifecycle, belief-admission, sizing, packet, broker, or execution authority.
+  ports, then constructs the Champion decision and optional Balanced packet. Recorded and SQLite
+  adapters translate, sign, verify, or persist those owner-defined contracts without gaining
+  lifecycle, belief-admission, sizing, model, broker, or execution authority. `entrypoints.lifecycle`
+  assembles the non-secret packet account scope and typed cryptographic ports without resolving broker
+  credentials.
 - A cycle, a reverse edge into adapters, or a new cross-capability edge requires an architecture
   review. Record a durable exception in an ADR.
 

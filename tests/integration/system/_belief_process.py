@@ -14,7 +14,6 @@ from agentic_investment_os.application.memory import Record
 from agentic_investment_os.domain.identity import EquityInstrumentIdentity, MarketSession
 from agentic_investment_os.domain.temporal import UtcInstant
 from agentic_investment_os.entrypoints.configuration import ConfigurationSource
-from agentic_investment_os.entrypoints.lifecycle import configure_advance
 from agentic_investment_os.entrypoints.memory import configure_record
 from agentic_investment_os.memory.admission import (
     BeliefClaimKind,
@@ -29,6 +28,7 @@ from agentic_investment_os.memory.beliefs import (
     BeliefGraph,
     BeliefGraphQuery,
 )
+from tests._decision import configure_advance
 from tests._governance import RecordedSessionEligibility
 from tests._production_research import ValidProductionModel, production_recorded_evidence
 from tests._universe import recorded_portfolio, recorded_universe, runtime_configuration
