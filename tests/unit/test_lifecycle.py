@@ -1415,7 +1415,7 @@ def test_portfolio_request_rejects_incomplete_internal_material(
         InvalidLifecycleStateError,
         match="lifecycle ledger returned an incomplete checkpoint result",
     ):
-        capability._portfolio_request(command, run, MEMORY_CHECKPOINT)
+        capability._portfolio_request(command, run, DOSSIER_CHECKPOINT, MEMORY_CHECKPOINT)
 
 
 def test_advance_receipts_round_trip_through_one_versioned_public_envelope() -> None:

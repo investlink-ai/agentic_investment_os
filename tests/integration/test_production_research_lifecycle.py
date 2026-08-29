@@ -105,7 +105,7 @@ from tests._universe import (
     runtime_configuration,
 )
 
-type _EventClearanceCase = tuple[str, str, str, str, str | None, bool]
+type _EventClearanceCase = tuple[str, str, str, str, str | None, bool, bool]
 
 if TYPE_CHECKING:
     from agentic_investment_os.application.memory import Record
@@ -196,6 +196,40 @@ class _ValidProductionModel:
             turns=1,
             elapsed_milliseconds=10,
             timing_disposition=ModelTimingDisposition.WITHIN_BUDGET,
+        )
+
+
+@dataclass(slots=True)
+class _DossierOnlyReleaseModel:
+    delegate: _ValidProductionModel
+
+    def call(self, request: ModelCallRequest) -> ModelCallResponse:
+        response = self.delegate.call(request)
+        if request.role is not ResearchRole.EVIDENCE_COLLECTOR:
+            return response
+        assert response.raw_response is not None
+        model_input = json.loads(request.model_input_json)
+        payload = json.loads(response.raw_response)
+        assert isinstance(model_input, dict)
+        assert isinstance(payload, dict)
+        evidence = model_input["evidence"]
+        facts = payload["facts"]
+        assert isinstance(evidence, list)
+        assert isinstance(facts, list)
+        fact = facts[0]
+        assert isinstance(fact, dict)
+        selected_ids = fact["citation_artifact_ids"]
+        assert isinstance(selected_ids, list)
+        selected_id = selected_ids[0]
+        alternative_id = next(
+            item["artifact_id"]
+            for item in evidence
+            if isinstance(item, dict) and item["artifact_id"] != selected_id
+        )
+        fact["citation_artifact_ids"] = [alternative_id]
+        return replace(
+            response,
+            raw_response=json.dumps(payload, sort_keys=True, separators=(",", ":")).encode(),
         )
 
 
@@ -641,9 +675,22 @@ def test_advance_constructs_and_status_rebuilds_one_portfolio_checkpoint(
         row = connection.execute(
             "SELECT run_id, result_json FROM portfolio_constructions"
         ).fetchone()
+        checkpoint_rows = connection.execute(
+            "SELECT event_kind, research_checkpoint FROM lifecycle_events "
+            "WHERE event_kind IN ('dossiers_built', 'research_run')"
+        ).fetchall()
     assert row is not None
     result = parse_portfolio_construction_result(json.loads(row[1]))
     assert result is not None
+    assert result.house_view is not None
+    expected_research_artifact_ids = tuple(
+        sorted(
+            artifact_id
+            for _, checkpoint_json in checkpoint_rows
+            for artifact_id in json.loads(checkpoint_json)["artifact_ids"]
+        )
+    )
+    assert result.house_view.research_artifact_ids == expected_research_artifact_ids
     assert receipt.pinned_run_identity is not None
     ledger = SQLitePortfolioLedger.open_existing(state_root / "lifecycle.sqlite3")
     mismatched_run_id = "f" * 64
@@ -832,7 +879,17 @@ def test_advance_and_status_persist_in_band_event_block_and_hard_risk_outcomes(
             "2026-08-21T18:10:00.000000+00:00",
             "issuer_release_evidence",
             None,
+            True,
             False,
+        ),
+        (
+            "company_release",
+            "issuer-release-1",
+            "2026-08-21T18:10:00.000000+00:00",
+            "issuer_release_evidence",
+            None,
+            False,
+            True,
         ),
         (
             "macro_release",
@@ -840,6 +897,7 @@ def test_advance_and_status_persist_in_band_event_block_and_hard_risk_outcomes(
             "2026-08-21T16:00:00.000000+00:00",
             "official_macro_evidence",
             "schedule",
+            True,
             True,
         ),
     ],
@@ -854,6 +912,7 @@ def test_advance_requires_a_typed_release_and_current_citation_to_clear_an_event
         releases_at,
         preferred_evidence_discriminator,
         macro_artifact_type,
+        cio_cites_release,
         expected_blocked,
     ) = case
     universe = recorded_universe()
@@ -901,6 +960,12 @@ def test_advance_requires_a_typed_release_and_current_citation_to_clear_an_event
             _advance_on(discovery, f"typed-release-discovery-{day}", date(2026, 8, day)).disposition
             is AdvanceDisposition.NO_ACTION
         )
+    base_model = _ValidProductionModel(
+        preferred_evidence_discriminator=preferred_evidence_discriminator
+    )
+    model: ResearchRoleModel = (
+        base_model if cio_cites_release else _DossierOnlyReleaseModel(base_model)
+    )
     capability = _configure(
         state_root,
         universe=universe,
@@ -908,9 +973,7 @@ def test_advance_requires_a_typed_release_and_current_citation_to_clear_an_event
             portfolio=portfolio,
             official_evidence=official_evidence,
         ),
-        model=_ValidProductionModel(
-            preferred_evidence_discriminator=preferred_evidence_discriminator
-        ),
+        model=model,
     )
 
     receipt = _advance(capability, "typed-released-event")

@@ -1219,6 +1219,7 @@ def _request_is_valid(request: object) -> bool:
         == request.expected_research_request_ids
         and all(_is_hash(item) for item in request.expected_research_request_ids)
         and all(type(item) is HouseViewResolution for item in request.resolutions)
+        and all(type(item.identity) is EquityInstrumentIdentity for item in request.resolutions)
         and len({canonical_instrument_bytes(item.identity) for item in request.resolutions})
         == len(request.resolutions)
         and len({item.request_id for item in request.resolutions}) == len(request.resolutions)

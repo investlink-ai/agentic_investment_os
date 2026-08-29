@@ -1198,6 +1198,7 @@ def test_forged_future_adjusted_close_timestamp_fails_closed(field: str) -> None
 @pytest.mark.parametrize(
     ("field", "invalid_value"),
     [
+        ("identity", "not-an-equity-identity"),
         ("request_id", "a" * 63),
         ("resolution_id", "A" * 64),
         ("stance", "long"),

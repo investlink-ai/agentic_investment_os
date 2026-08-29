@@ -353,7 +353,12 @@ class Advance:
                 if replayed_run is None:
                     raise InvalidLifecycleStateError(_INCOMPLETE_CHECKPOINT_RESULT)
                 result = construct_balanced_portfolio(
-                    self._portfolio_request(command, replayed_run, decision.memory_checkpoint)
+                    self._portfolio_request(
+                        command,
+                        replayed_run,
+                        decision.dossier_checkpoint,
+                        decision.memory_checkpoint,
+                    )
                 )
                 command = replace(
                     command,
@@ -821,6 +826,7 @@ class Advance:
         self,
         command: AdvanceCommand,
         run: ProductionResearchRun,
+        dossier_checkpoint: ResearchCheckpoint,
         memory_checkpoint: ResearchCheckpoint,
     ) -> PortfolioConstructionRequest:
         subjects = {
@@ -851,18 +857,13 @@ class Advance:
                     evidence_artifact_ids=tuple(
                         sorted(
                             {
-                                *(
-                                    artifact_id
-                                    for assertion in (
-                                        *resolution.dossier.facts,
-                                        *resolution.dossier.interpretations,
-                                    )
-                                    for artifact_id in assertion.citation_artifact_ids
-                                ),
-                                *(
-                                    item.artifact_id
-                                    for item in resolution.dossier.contradicting_evidence
-                                ),
+                                artifact_id
+                                for assertion in (
+                                    *resolution.dossier.facts,
+                                    *resolution.dossier.interpretations,
+                                )
+                                if assertion.assertion_id in cio.rationale.assertion_ids
+                                for artifact_id in assertion.citation_artifact_ids
                             }
                         )
                     ),
@@ -928,7 +929,14 @@ class Advance:
             constitution_version=identity.constitution_version,
             constitution_hash=identity.constitution_hash,
             research_policy_hash=identity.research_policy_hash,
-            research_artifact_ids=(() if run.checkpoint is None else run.checkpoint.artifact_ids),
+            research_artifact_ids=tuple(
+                sorted(
+                    {
+                        *dossier_checkpoint.artifact_ids,
+                        *(() if run.checkpoint is None else run.checkpoint.artifact_ids),
+                    }
+                )
+            ),
             memory_event_ids=memory_checkpoint.artifact_ids,
             universe_snapshot_id=command.universe_snapshot.snapshot_id,
             expected_research_request_ids=expected_request_ids,
