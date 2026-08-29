@@ -51,6 +51,9 @@ the dependency. Prefer passing typed values and ports over adding an edge.
 - `domain` imports only the Python standard library and other files inside `domain`.
 - Capability modules never import `adapters` or `entrypoints`.
 - `application` orchestrates public capability APIs; it does not reach into their private stages.
+- The local scheduler depends only on owner-defined scheduler persistence plus public `Advance` and
+  `Status` interfaces. It never imports or constructs evidence, research, model, memory, portfolio,
+  packet, signing, executor, broker, credential, or private lifecycle-stage behavior.
 - Adapters implement ports owned by `domain` or the capability they serve. They do not own domain
   policy.
 - Entrypoints are the only modules that construct concrete adapters, read credential references, or

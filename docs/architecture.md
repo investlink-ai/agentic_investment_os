@@ -14,10 +14,11 @@ risk without changing the contracts declared here.
 
 ## Architectural spine
 
-The system is a local Python modular monolith with three process and trust seams:
+The system is a local Python modular monolith with four process and trust seams:
 
 | Process | Public capabilities | Permitted effects and authoritative state |
 | --- | --- | --- |
+| Local scheduler, without credentials or private lifecycle stages | `Scheduler`, scheduler `status` | Public `Advance` and `Status` calls plus private append-only scheduler history; no research, portfolio, packet, signing, executor, model, or broker authority |
 | Investment Operating System, without broker credentials | `Advance`, `Status`, `Record`, `Govern` | Source, model, and persistence effects through owned ports; Evidence Vault, production ledgers, and published packets |
 | Order Execution Module, without model capability | `Apply`, `Reconcile` | Packet reads, executor persistence, and paper-broker effects through owned ports; order intents, observations, and receipts |
 | Research Lab, isolated from production authority | `Replay` | Model and Lab-persistence effects through research-owned ports; copied or synthetic inputs and a Lab-local ledger |
@@ -186,6 +187,7 @@ Entrypoints expose complete capabilities, never individual research stages:
 
 | Capability | Architectural contract |
 | --- | --- |
+| `Scheduler` | Resolve due 2026 NYSE Market Sessions from one pinned policy and trusted UTC clock; durably classify started, resumed, completed, missed, and refused work; serialize concurrent local invocations; call only public `Advance` and `Status` with a stable policy-and-session identity; and report bounded scheduler status without claiming lifecycle liveness. |
 | `Advance` | Resolve or resume one supported cycle; validate governance and pinned inputs; build bounded Dossiers; run the fixed stateless production research roles; admit validated CIO resolutions to memory; construct and persist one deterministic HouseView, cash-preserving Balanced target set and Target Bands, and the required same-input shadow accounts; and return an explicit fresh, resumed, replayed, no-action, conflict, or failed-closed disposition. V0 accepts only `MarketSession`. |
 | `Status` | Validate authoritative lifecycle, evidence, Constitution, production model-call, memory, and Balanced-plus-shadow portfolio history; rebuild disposable projections; and report the durable checkpoint, liveness, terminal reason, pins, and bounded cycle-qualified references. Only `Complete` advances the completed cycle. |
 | `Record` | Atomically append or replay evidence-bound belief and outcome facts; rebuild bounded as-of views without changing ex-ante decisions. |
@@ -275,6 +277,7 @@ stateDiagram-v2
 
 | Authority | Owner and mutation contract |
 | --- | --- |
+| Scheduler history | Separate private ledger; immutable policy plus appended start, resume, completion, missed, and refusal observations. It never becomes lifecycle liveness or permission to backfill. |
 | Evidence | Content-addressed Vault; immutable content and appended observations, mappings, availability, and refusals |
 | Production ledgers | Belief, decision, outcome, governance, lifecycle, and attention facts appended under their owner contracts |
 | Production research calls | Effect-local intent before each model call, followed by one raw-response identity and validated role artifact or bounded refusal |
@@ -337,6 +340,9 @@ an NYSE trading date, not an instant. Equity policy resolves exchange-calendar r
 `America/New_York` deadlines to Absolute Instants; host, display, and provider time are never
 authority, and timeout measurement is monotonic.
 [ADR 0006](adr/0006-separate-absolute-instants-from-market-time.md) owns the representation.
+The local scheduler additionally pins the complete supported calendar identity and refuses another
+year rather than consulting an ambient calendar. [ADR 0010](adr/0010-isolate-market-session-scheduler-history.md)
+owns its authority, persistence, concurrency, and recovery boundary.
 
 ## Configuration and deployment
 
@@ -344,7 +350,9 @@ Entrypoints resolve validated, typed configuration, explicit defaults, paths, an
 before composition. Material policy is versioned and hashed into the run. Secrets remain inside the
 credentialed entrypoint or adapter environment and never enter logs, fixtures, durable research, or
 model context. [The configuration catalog](config-catalog.md) owns implemented values. V0 runs under
-an NYSE-calendar-aware local scheduler; network and paper-broker rehearsals are explicit operations.
+an NYSE-calendar-aware local scheduler; its reversible macOS procedure is owned by
+[scheduler operations](scheduler-operations.md). Network and paper-broker rehearsals are explicit
+operations.
 
 ## Multi-asset extension constraint
 

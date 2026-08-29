@@ -217,6 +217,36 @@ Signing secrets never enter the database, configuration fingerprint, receipt, li
 model context. Any future configurable key reference must be typed, non-secret, resolved only at
 composition, and documented here before use.
 
+## Market Session scheduler policy
+
+`configure_scheduler` requires one complete scheduler-policy object in addition to the validated
+runtime configuration. The policy is parsed before scheduler storage is opened, serialized as
+canonical JSON, identified by SHA-256, and stored as immutable metadata in the separate private
+`scheduler.sqlite3` ledger. Unknown, missing, malformed, unsupported, non-equity, or boolean-as-
+integer material returns a bounded configuration refusal before any scheduler file or external effect.
+An existing ledger admits only its exact policy; changed material conflicts instead of altering prior
+session meaning. No field grants research, model, portfolio, packet, signing, execution, broker,
+credential, or account authority.
+
+| Field | Type and validation | Effect |
+| --- | --- | --- |
+| `schema_version` | Integer; must equal `1` | Versions the complete policy representation |
+| `policy_type` | String; must equal `market_session_advance` | Limits the scheduler to the public lifecycle operation |
+| `asset_class` | String; must equal `us_equity` | Refuses crypto, options, mixed assets, and provider-driven activation |
+| `calendar_id` | String; must equal `xnys-regular-2026a` | Pins the code-owned 2026 NYSE weekday, holiday, early-close, and `America/New_York` rules sourced from the [NYSE trading calendar](https://www.nyse.com/trade/hours-calendars) |
+| `first_session` | Canonical `YYYY-MM-DD` regular session within the pinned calendar | Activates due-set reconstruction without implying that earlier sessions ran |
+| `advance_minutes_before_open` | Integer from `1` through `1,440` | Places the eligible invocation relative to the pinned NYSE open |
+| `maximum_lateness_minutes` | Integer from `0` through `1,440` | Bounds when a due session may still call `Advance`; a later observation appends `missed` and never backfills |
+| `recovery_delay_seconds` | Integer from `1` through `86,400` | Delays retry of an incomplete durable attempt after process interruption; it is not a heartbeat or live-process lease |
+| `maximum_actions_per_run` | Integer from `1` through `252` | Bounds due or recovery claims evaluated by one launch |
+
+The scheduler uses the runtime `state_root` but adds no field to the lifecycle runtime fingerprint.
+Its fixed `scheduler.sqlite3` and `scheduler.lock` children use mode `0600`; the existing root remains
+mode `0700`. The lock serializes live processes and is released by the operating system on death. It
+does not record status or replace the append-only ledger. The host timezone, wall-clock defaults below
+composition, launch interval, provider calendars, and lifecycle internals are not policy sources.
+See [scheduler operations](scheduler-operations.md) for installation and recovery.
+
 ## Research Lab composition
 
 Research Lab replay adds no production runtime configuration field or default. `configure_replay`

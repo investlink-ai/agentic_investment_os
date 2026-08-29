@@ -1,0 +1,66 @@
+# ADR 0010: Isolate Market Session scheduler history
+
+- Status: Accepted
+- Date: 2026-08-29
+
+## Context
+
+The operating system needs automatic NYSE-relative invocation without allowing an OS timer, calendar
+provider, or scheduler process to become lifecycle authority. Startup, sleep, wake, interruption, and
+retry also make a process heartbeat an unreliable account of whether a Market Session was requested,
+missed, refused, or completed. Reusing lifecycle rows for scheduling intent would couple timer policy
+to financial checkpoints and make a scheduler schema change capable of changing lifecycle truth.
+
+Concurrent local invocations introduce a second distinction. Durable intent must precede `Advance`,
+but a retry timeout alone can overlap a still-running process. Holding a SQLite transaction across the
+complete lifecycle would serialize the effect while violating the checkpoint boundary and increasing
+database-lock blast radius.
+
+## Decision
+
+The scheduler is an uncredentialed local capability outside the lifecycle state machine. A complete,
+versioned `SchedulerPolicy` pins the `xnys-regular-2026a` code calendar, first session, NYSE-open
+offset, lateness window, interruption recovery delay, and per-invocation action bound. The calendar
+contains the official 2026 NYSE weekday, holiday, early-close, and `America/New_York` rules. Another
+calendar identity or year refuses; the host timezone and provider calendar never become authority.
+
+Scheduling calls only public `Advance` and `Status`. It constructs the exact Market Session envelope,
+fixed Champion mode, and stable policy-and-session idempotency identity. It has no private lifecycle
+stage, research, model, portfolio, packet, signing, executor, broker, credential, or account port.
+Lifecycle `Status` remains the only lifecycle-liveness authority.
+
+A private `scheduler.sqlite3` ledger stores immutable policy metadata and append-only `started`,
+`resumed`, `completed`, `missed`, and `refused` events. `started` or `resumed` is appended before
+`Advance`; a terminal event appends the exact public lifecycle receipt and hash afterward. Rebuild
+validates the complete current schema, canonical UTC times, calendar-derived windows, sequence,
+transitions, receipt identity, and event hashes. Changed policy conflicts. Missed sessions are
+reported and never backfilled.
+
+A mode-`0600` advisory lock is held across one scheduler reconstruction, claim, public lifecycle
+invocation, and observation. The operating system releases it on process death, allowing durable
+recovery; concurrent live instances serialize without duplicate public requests. The lock is only
+live-process exclusion and never status, liveness, or completion truth.
+
+## Alternatives considered
+
+- Treat `launchd` execution or a heartbeat as completion. Rejected because sleep, wake, delay, and
+  process death cannot prove a lifecycle effect or durable checkpoint.
+- Put scheduler claims in the lifecycle database. Rejected because timer policy does not own
+  financial lifecycle truth and should not widen that schema or transaction boundary.
+- Backfill every overdue session. Rejected because late research would violate the approved as-of
+  timing contract; overdue eligible sessions become durable `missed` observations.
+- Use only an expiring durable lease. Rejected because expiry can overlap a slow live `Advance`.
+- Hold a SQLite write transaction across `Advance`. Rejected because external effects belong between
+  durable checkpoints, not inside an open database transaction.
+
+## Consequences
+
+- Operators can distinguish pending future work, incomplete attempts, completed lifecycle requests,
+  lifecycle refusals, and missed sessions without granting scheduling state lifecycle authority.
+- Scheduler and lifecycle histories can be inspected and recovered independently; neither may be
+  rewritten to repair the other.
+- The code-pinned calendar must be replaced by an explicitly reviewed future version before its
+  supported year ends. Availability stops rather than consulting an ambient or mutable calendar.
+- macOS installation is reversible and contains no tracked machine path, credential, account
+  identifier, or generated state. CI uses injected clocks, the pinned calendar, recorded adapters,
+  private temporary roots, and fresh processes.

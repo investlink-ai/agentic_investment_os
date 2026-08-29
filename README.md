@@ -17,6 +17,7 @@ isolated Research Lab.
 | Constitution governance | **Implemented:** operator-only `Govern` schedules signed amendments; `Advance` pins the active version before work | `application`, `domain`, `adapters`, `entrypoints` | [Governance integration](tests/integration/test_constitution_governance.py), [governance contract](tests/contract/test_constitution_governance.py) |
 | Isolated Research Lab | **Implemented:** `Replay` validates a non-production Dossier and runs Thesis, Skeptic, Scenario, and CIO roles | `application`, `research`, `adapters`, `entrypoints` | [Resolution journey](tests/integration/system/test_research_lab_resolution_journey.py), [model contract](tests/contract/test_research_lab_model.py) |
 | Same-input portfolio shadows | **Implemented:** every accepted Balanced result durably accounts for Conservative, Growth, and equal-weight variants without packet or broker authority | `portfolio`, `application`, `adapters` | [Production lifecycle](tests/integration/test_production_research_lifecycle.py), [shadow properties](tests/unit/test_portfolio.py) |
+| Market Session scheduler | **Implemented:** a pinned 2026 NYSE calendar reconstructs due, missed, interrupted, and terminal sessions and invokes only public `Advance` and `Status` | `domain`, `application`, `adapters`, `entrypoints` | [Scheduler journey](tests/integration/system/test_scheduler_journey.py), [calendar and recovery tests](tests/integration/test_scheduler.py) |
 | Packet publication, execution, evaluation, and later lifecycle phases | **Scaffolded:** accepted contracts exist, but production behavior and composition are not enabled | `portfolio`, `execution`, `evaluation`, `application` | No production behavior gate yet; [stage acceptance](docs/product-requirements.md) remains authoritative |
 | Crypto spot and listed options | **Reserved and disabled:** shared typed contracts exist; V0 composition remains US-equity-only | `domain`, `entrypoints` | [Identity unit tests](tests/unit/test_identity.py), [runtime configuration](tests/integration/test_runtime_configuration.py) |
 
@@ -65,6 +66,7 @@ Git hooks. Dependencies live only in `pyproject.toml` and `uv.lock`.
 - `docs/threat-model.md`: material threats, control coverage, verification, and residual risk
 - `docs/investment-domain.md`: evidence, research, memory, portfolio, execution, and evaluation rules
 - `docs/config-catalog.md`: implemented configuration sources and ownership
+- `docs/scheduler-operations.md`: reversible macOS scheduler installation, status, and recovery
 - `docs/defensive-patterns.md`: reusable prevention rules for high-risk bug classes
 - `docs/testing.md`: deterministic, contract, integration, and live-test policy
 - `docs/module-graph.md`: allowed Python import directions
