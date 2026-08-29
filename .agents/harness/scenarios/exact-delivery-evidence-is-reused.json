@@ -6,7 +6,7 @@
   "fixture": "exact-delivery-evidence-is-reused",
   "fixture_sha256": "1fe408d01c6de95ea804976a04ed014690eb4da1e64eedd794ae99e290fa4071",
   "active_delivery_context": "exact-delivery-evidence-is-reused",
-  "active_delivery_context_sha256": "a58a7f9fdd89feb9633be3d2e8bd8b9c0d63109bfc0c825791594886405c3d74",
+  "active_delivery_context_sha256": "d92022130f4a3f7536332b434a8c4d1992b6b960fcab4a2dd7d57f284e6950b3",
   "expected_issue_number": 45,
   "expected_repository": "investlink-ai/fixture",
   "repository_paths": [

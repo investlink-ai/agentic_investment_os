@@ -2,7 +2,7 @@
   "schema_version": 1,
   "id": "changed-authority-refuses-review-reuse",
   "title": "Changed authority invalidates review reuse",
-  "request": "Assess review equivalence after the base update. The effective feature patch and paths are unchanged, but an active authority now requires another refusal observation. Reject equivalence and require every affected full review axis. Do not edit, verify, publish, or execute reviewers in this scenario.",
+  "request": "Assess review equivalence after the base update. The effective feature patch and paths are unchanged, but an active authority now requires another refusal observation. Decide whether review may be retained and identify the necessary review mode. Do not edit, verify, publish, or execute reviewers in this scenario.",
   "fixture": "changed-authority-refuses-review-reuse",
   "fixture_sha256": "f1a8959cc5eed3011680c7f0380011f2ef18dd99c01a79d22ab5864292996db0",
   "repository_paths": [

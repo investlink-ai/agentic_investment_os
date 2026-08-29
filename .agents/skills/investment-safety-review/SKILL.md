@@ -9,6 +9,12 @@ Report one complete batch of substantiated defects in severity order. Give every
 `SAFE-###` identifier that remains unchanged during remediation verification. Prefer one reproducible
 authority or data-integrity failure over a list of stylistic observations.
 
+Select this axis for reachable or uncertain changes to investment authority, deterministic portfolio
+or execution behavior, durability, provenance or time, retry or idempotency, fail-closed behavior,
+credentials, hostile-input or external-effect seams, review routing, or another model-visible safety
+contract. Unresolved transitive reachability selects review. A mechanical change with no reachable or
+uncertain safety surface does not. Record the selection reason in the caller's review plan.
+
 ## Keep the review independent
 
 Apply this skill as a domain-safety axis alongside general code review. Use the same pinned base and

@@ -33,10 +33,12 @@
           "classify_review_finding_must_fix",
           "demote_ready_pull_request",
           "defer_ungrounded_scope",
+          "decline_unrequested_review",
           "limit_incomplete_reflection_evidence",
           "recommend_evidence_backed_follow_up",
           "reflect_on_merged_pull_request",
           "refuse_blocked_issue",
+          "refuse_blocking_follow_up",
           "refuse_closed_issue",
           "refuse_model_execution_authority",
           "reject_self_approval",
@@ -47,10 +49,14 @@
           "require_fresh_affected_review",
           "require_focused_conflict_review",
           "require_human_review_at_cap",
+          "route_late_medium_to_human",
+          "select_general_review",
+          "select_incremental_affected_review",
           "retain_equivalent_review",
           "reuse_exact_delivery_evidence",
           "reuse_existing_issue",
-          "select_investment_safety_review"
+          "select_investment_safety_review",
+          "skip_absent_spec_review"
         ]
       }
     },
@@ -65,6 +71,7 @@
         "reflection_ready",
         "refused",
         "review_required",
+        "review_not_requested",
         "review_retained",
         "review_triaged",
         "scope_ready"

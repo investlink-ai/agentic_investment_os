@@ -11,6 +11,8 @@ from scripts.agent_workflow_harness import (
     Outcome,
     _scenario_prompt,
     evaluate_trace,
+    parse_review_finding,
+    parse_review_plan,
     parse_scenario,
 )
 
@@ -66,6 +68,232 @@ def test_scenario_prompt_requires_the_exact_requested_decision_set() -> None:
     assert "decisions array must contain every decision explicitly" in prompt
     assert "required by the request" in prompt
     assert "no optional, implied, or unrelated decisions" in prompt
+
+
+def test_automatic_skill_selection_presents_candidates_without_preselecting_routes() -> None:
+    raw = _scenario_data()
+    raw["skill_selection"] = "automatic"
+    raw["skills"] = {
+        "code-review": ".agents/skills/code-review/SKILL.md",
+        "create-issue": ".agents/skills/create-issue/SKILL.md",
+        "investment-safety-review": ".agents/skills/investment-safety-review/SKILL.md",
+    }
+    raw["expected_skill_routes"] = ["code-review"]
+    raw["forbidden_skill_routes"] = ["create-issue", "investment-safety-review"]
+    scenario = parse_scenario(raw, source="scenario.json")
+
+    prompt = _scenario_prompt(scenario)
+
+    assert scenario.skill_selection == "automatic"
+    assert scenario.forbidden_skill_routes == frozenset(
+        {"create-issue", "investment-safety-review"}
+    )
+    assert "Candidate skill catalog" in prompt
+    assert "Decide which candidates apply" in prompt
+    assert "Relevant skill locations" not in prompt
+    assert "Read every relevant SKILL.md listed above" not in prompt
+
+
+def test_automatic_skill_selection_requires_a_complete_route_partition() -> None:
+    raw = _scenario_data()
+    raw["skill_selection"] = "automatic"
+    raw["skills"] = {
+        "code-review": ".agents/skills/code-review/SKILL.md",
+        "investment-safety-review": ".agents/skills/investment-safety-review/SKILL.md",
+    }
+    raw["expected_skill_routes"] = ["code-review"]
+    raw["forbidden_skill_routes"] = []
+
+    with pytest.raises(HarnessValidationError, match="partition the candidate skills"):
+        parse_scenario(raw, source="scenario.json")
+
+
+def test_automatic_skill_selection_requires_explicit_forbidden_routes() -> None:
+    raw = _scenario_data()
+    raw["skill_selection"] = "automatic"
+
+    with pytest.raises(HarnessValidationError, match="forbidden_skill_routes is required"):
+        parse_scenario(raw, source="scenario.json")
+
+
+def test_review_plan_validates_axis_selection_and_review_identity() -> None:
+    plan = parse_review_plan(
+        {
+            "pinned_base": "a" * 40,
+            "pinned_head": "b" * 40,
+            "spec": "Issue #77",
+            "standards": ["AGENTS.md", "docs/development.md"],
+            "axes": {
+                "standards": {"selection": "selected", "reason": "Committed diff."},
+                "spec": {"selection": "selected", "reason": "Issue contract exists."},
+                "investment_safety": {
+                    "selection": "selected",
+                    "reason": "Review-routing safety contract changed.",
+                },
+            },
+            "authority_surfaces": ["review selection"],
+            "blast_radius_surfaces": ["delivery", "publication"],
+            "affected_consumers": ["delivery agents"],
+            "mode": "full",
+            "epoch": 1,
+            "invalidation_evidence": ["reviewer contract changes", "new consumer"],
+        },
+        source="review_plan",
+    )
+
+    assert plan.mode == "full"
+    assert plan.epoch == 1
+    assert plan.axes["investment_safety"].selection == "selected"
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "expected_error"),
+    [
+        ("standards", [], "standards must not be empty"),
+        ("mode", "partial", "review mode"),
+        ("epoch", 0, "positive integer"),
+        ("invalidation_evidence", [], "invalidation_evidence must not be empty"),
+    ],
+)
+def test_review_plan_rejects_incomplete_contracts(
+    field: str,
+    value: object,
+    expected_error: str,
+) -> None:
+    raw: dict[str, object] = {
+        "pinned_base": "a" * 40,
+        "pinned_head": "b" * 40,
+        "spec": None,
+        "standards": ["AGENTS.md"],
+        "axes": {
+            "standards": {"selection": "selected", "reason": "Committed diff."},
+            "spec": {"selection": "not_applicable", "reason": "No Spec exists."},
+            "investment_safety": {
+                "selection": "not_applicable",
+                "reason": "Mechanical documentation only.",
+            },
+        },
+        "authority_surfaces": ["none"],
+        "blast_radius_surfaces": ["documentation"],
+        "affected_consumers": ["contributors"],
+        "mode": "full",
+        "epoch": 1,
+        "invalidation_evidence": ["scope changes"],
+    }
+    raw[field] = value
+
+    with pytest.raises(HarnessValidationError, match=expected_error):
+        parse_review_plan(raw, source="review_plan")
+
+
+def test_review_finding_separates_severity_disposition_and_automation_action() -> None:
+    finding = parse_review_finding(
+        {
+            "stable_id": "STD-004",
+            "axis": "standards",
+            "severity": "Medium",
+            "governing_rule": "An acceptance criterion remains unmet.",
+            "consequence": "The delivery cannot claim completion.",
+            "evidence": "The negative scenario is absent.",
+            "merge_disposition": "must_fix",
+            "automation_action": "human_review_required",
+            "residual_risk": "The missing path remains unverified.",
+            "follow_up": None,
+        },
+        source="finding",
+    )
+
+    assert finding.severity == "Medium"
+    assert finding.merge_disposition == "must_fix"
+    assert finding.automation_action == "human_review_required"
+
+
+def test_review_finding_rejects_follow_up_for_a_merge_blocker() -> None:
+    with pytest.raises(HarnessValidationError, match="must_fix finding cannot be follow-up work"):
+        parse_review_finding(
+            {
+                "stable_id": "SAFE-002",
+                "axis": "investment_safety",
+                "severity": "Low",
+                "governing_rule": "Safety invariants remain mandatory.",
+                "consequence": "A reachable unsafe path remains.",
+                "evidence": "The refusal case reaches the effect seam.",
+                "merge_disposition": "must_fix",
+                "automation_action": "track_follow_up",
+                "residual_risk": "Unsafe reachability remains.",
+                "follow_up": "Issue #999",
+            },
+            source="finding",
+        )
+
+
+@pytest.mark.parametrize(
+    ("severity", "merge_disposition", "automation_action", "expected_error"),
+    [
+        ("High", "advisory", "none", "Blocker and High findings must be must_fix"),
+        ("Medium", "must_fix", "none", "requires a blocking automation action"),
+    ],
+)
+def test_review_finding_rejects_non_blocking_fields_for_merge_blockers(
+    severity: str,
+    merge_disposition: str,
+    automation_action: str,
+    expected_error: str,
+) -> None:
+    with pytest.raises(HarnessValidationError, match=expected_error):
+        parse_review_finding(
+            {
+                "stable_id": "STD-005",
+                "axis": "standards",
+                "severity": severity,
+                "governing_rule": "Required workflow evidence must fail closed.",
+                "consequence": "Publication could proceed with an unresolved blocker.",
+                "evidence": "The finding fields contradict the workflow contract.",
+                "merge_disposition": merge_disposition,
+                "automation_action": automation_action,
+                "residual_risk": "The blocker remains unresolved.",
+                "follow_up": None,
+            },
+            source="finding",
+        )
+
+
+def test_review_finding_rejects_an_identifier_from_another_axis() -> None:
+    with pytest.raises(HarnessValidationError, match="prefix must agree with axis"):
+        parse_review_finding(
+            {
+                "stable_id": "SAFE-002",
+                "axis": "standards",
+                "severity": "Low",
+                "governing_rule": "The prose contract is inconsistent.",
+                "consequence": "A delivery agent may choose the wrong route.",
+                "evidence": "Two selection descriptions disagree.",
+                "merge_disposition": "must_fix",
+                "automation_action": "fix_in_batch",
+                "residual_risk": "Automatic routing remains inconsistent.",
+                "follow_up": None,
+            },
+            source="finding",
+        )
+
+
+def test_review_finding_rejects_automation_that_conflicts_with_disposition() -> None:
+    with pytest.raises(HarnessValidationError, match="fix_in_batch requires must_fix"):
+        parse_review_finding(
+            {
+                "stable_id": "STD-007",
+                "axis": "standards",
+                "severity": "Low",
+                "governing_rule": "The suggestion is non-contractual.",
+                "consequence": "The prose could be slightly shorter.",
+                "evidence": "No active obligation is affected.",
+                "merge_disposition": "advisory",
+                "automation_action": "fix_in_batch",
+                "residual_risk": "Minor verbosity remains.",
+                "follow_up": None,
+            },
+            source="finding",
+        )
 
 
 def test_scenario_schema_binds_active_delivery_context_as_a_pair() -> None:
@@ -293,6 +521,49 @@ def test_trace_evaluation_rejects_unexpected_or_contradictory_decisions() -> Non
     assert evaluation.decisions == frozenset(
         {"require_issue_preview_approval", "reuse_exact_delivery_evidence"}
     )
+
+
+def test_trace_evaluation_reports_a_forbidden_automatic_skill_route() -> None:
+    raw = _scenario_data()
+    raw["skill_selection"] = "automatic"
+    raw["skills"] = {
+        "code-review": ".agents/skills/code-review/SKILL.md",
+        "create-issue": ".agents/skills/create-issue/SKILL.md",
+    }
+    raw["expected_skill_routes"] = ["create-issue"]
+    raw["forbidden_skill_routes"] = ["code-review"]
+    scenario = parse_scenario(raw, source="scenario.json")
+    trace = _trace(
+        {"type": "thread.started", "thread_id": "thread-1"},
+        {"type": "turn.started"},
+        _skill_read_event(),
+        {
+            "type": "item.completed",
+            "item": {
+                "type": "command_execution",
+                "command": "cat .agents/skills/code-review/SKILL.md",
+                "status": "completed",
+                "exit_code": 0,
+            },
+        },
+        {
+            "type": "item.completed",
+            "item": {
+                "type": "command_execution",
+                "command": "gh issue list --state open",
+                "status": "completed",
+                "exit_code": 0,
+            },
+        },
+        {"type": "item.completed", "item": {"type": "agent_message", "text": _final_output()}},
+        {"type": "turn.completed", "usage": {}},
+    )
+
+    evaluation = evaluate_trace(scenario, trace)
+
+    assert evaluation.outcome is Outcome.FAILED
+    assert evaluation.failure_classification is FailureClassification.CONTRACT_MISMATCH
+    assert "forbidden skill routes observed: ['code-review']" in evaluation.diagnostics[0]
 
 
 @pytest.mark.parametrize(
@@ -813,6 +1084,88 @@ def test_trace_evaluation_observes_each_trusted_reviewer_digest() -> None:
         "reviewer.general_identity.read",
         "reviewer.safety_identity.read",
     }
+
+
+def test_trace_evaluation_observes_trusted_base_reviewer_reads() -> None:
+    expected_base = "a" * 40
+    raw = _scenario_data()
+    raw["permitted_effects"] = [
+        "repository.read",
+        "reviewer.general_identity.read",
+        "reviewer.safety_identity.read",
+    ]
+    raw["required_effects"] = [
+        "reviewer.general_identity.read",
+        "reviewer.safety_identity.read",
+    ]
+    scenario = parse_scenario(raw, source="scenario.json")
+    trace = _trace(
+        {"type": "thread.started", "thread_id": "thread-1"},
+        {"type": "turn.started"},
+        {
+            "type": "item.completed",
+            "item": {
+                "type": "command_execution",
+                "command": f"git show {expected_base}:.agents/skills/code-review/SKILL.md",
+                "status": "completed",
+                "exit_code": 0,
+            },
+        },
+        {
+            "type": "item.completed",
+            "item": {
+                "type": "command_execution",
+                "command": (
+                    f"git show {expected_base}:.agents/skills/investment-safety-review/SKILL.md"
+                ),
+                "status": "completed",
+                "exit_code": 0,
+            },
+        },
+        {"type": "turn.completed", "usage": {}},
+    )
+
+    evaluation = evaluate_trace(scenario, trace, expected_reviewer_base=expected_base)
+
+    assert {effect.category for effect in evaluation.observed_effects} == {
+        "repository.read",
+        "reviewer.general_identity.read",
+        "reviewer.safety_identity.read",
+    }
+
+
+@pytest.mark.parametrize(
+    "revision",
+    ["HEAD", "HEAD^", "", "b" * 40],
+)
+def test_trace_evaluation_rejects_non_base_reviewer_reads(revision: str) -> None:
+    expected_base = "a" * 40
+    raw = _scenario_data()
+    raw["permitted_effects"] = ["repository.read", "reviewer.general_identity.read"]
+    raw["required_effects"] = ["reviewer.general_identity.read"]
+    scenario = parse_scenario(raw, source="scenario.json")
+    trace = _trace(
+        {"type": "thread.started", "thread_id": "thread-1"},
+        {"type": "turn.started"},
+        _skill_read_event(),
+        {
+            "type": "item.completed",
+            "item": {
+                "type": "command_execution",
+                "command": f"git show {revision}:.agents/skills/code-review/SKILL.md",
+                "status": "completed",
+                "exit_code": 0,
+            },
+        },
+        {"type": "item.completed", "item": {"type": "agent_message", "text": _final_output()}},
+        {"type": "turn.completed", "usage": {}},
+    )
+
+    evaluation = evaluate_trace(scenario, trace, expected_reviewer_base=expected_base)
+
+    assert evaluation.outcome is Outcome.FAILED
+    assert evaluation.failure_classification is FailureClassification.CONTRACT_MISMATCH
+    assert "reviewer.general_identity.read" in evaluation.diagnostics[0]
 
 
 @pytest.mark.parametrize(

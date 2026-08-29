@@ -12,23 +12,54 @@
     "initial_review": "complete",
     "remediation_rounds_used": 0,
     "findings": [],
+    "review_plan": {
+      "pinned_base": "$WORKSPACE_BASE",
+      "pinned_head": "$WORKSPACE_HEAD",
+      "spec": "Originating issue acceptance contract",
+      "standards": ["AGENTS.md", "docs/development.md", "docs/testing.md"],
+      "axes": {
+        "standards": {
+          "selection": "selected",
+          "reason": "Every committed non-empty delivery requires Standards review."
+        },
+        "spec": {
+          "selection": "selected",
+          "reason": "The originating issue supplies a Spec."
+        },
+        "investment_safety": {
+          "selection": "not_applicable",
+          "reason": "The recorded selection incorrectly treats retry safety as unrelated."
+        }
+      },
+      "authority_surfaces": ["review selection and publication readiness"],
+      "blast_radius_surfaces": ["delivery workflow", "pull-request publication"],
+      "affected_consumers": ["delivery agents", "publication agents", "human reviewers"],
+      "mode": "full",
+      "epoch": 1,
+      "invalidation_evidence": [
+        "changed Spec, Standard, reviewer contract, review selection, or semantic surface",
+        "changed authority, blast radius, affected consumer, or unresolved uncertainty"
+      ]
+    },
     "reviewed_base": "$WORKSPACE_BASE",
     "reviewed_head": "$WORKSPACE_HEAD",
     "review_axes": {
       "standards": {
+        "selection": "selected",
         "disposition": "passed",
         "reviewer_contract": {
           "source": "trusted_installed",
           "resolved_path": "$WORKSPACE/.agent-harness/trusted-reviewers/code-review/SKILL.md",
-          "sha256": "23fb812a223981f1ad5211a37d865b948a62c6c16d357415f0244ccb4662c304"
+          "sha256": "adbfdce53c68177ba56a5abac2f6028ef43f268435dd167c70d3522ddc45f57b"
         }
       },
       "spec": {
+        "selection": "selected",
         "disposition": "passed",
         "reviewer_contract": {
           "source": "trusted_installed",
           "resolved_path": "$WORKSPACE/.agent-harness/trusted-reviewers/code-review/SKILL.md",
-          "sha256": "23fb812a223981f1ad5211a37d865b948a62c6c16d357415f0244ccb4662c304"
+          "sha256": "adbfdce53c68177ba56a5abac2f6028ef43f268435dd167c70d3522ddc45f57b"
         }
       },
       "investment_safety": {
@@ -37,7 +68,7 @@
         "reviewer_contract": {
           "source": "trusted_installed",
           "resolved_path": "$WORKSPACE/.agent-harness/trusted-reviewers/investment-safety-review/SKILL.md",
-          "sha256": "0dfea41e33bff84ed155bec9bf139a0c26a81532a3f3590bb2665faf2b44796c"
+          "sha256": "680d9b3e2053827de4f1865d03f5995b016cba0bebd245bd971ebcd6e2388dd3"
         }
       }
     },

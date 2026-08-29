@@ -132,20 +132,50 @@ reviewers are read-only subagents. The stable local loop remains:
    documentation.
 5. Run `make check` before handoff or commit.
 
-The review loop separates severity from delivery disposition. Blocker and High findings, reachable
-Medium correctness, safety, or maintainability defects, and every unmet acceptance criterion, gate,
-explicit repository obligation, or safety invariant are must-fix regardless of severity. Only a Low
-non-contractual judgment call may remain advisory. Pre-existing conditions are out of scope only when
-the change does not introduce, worsen, rely on, or make them reachable; disproved findings retain the
-evidence that refuted them.
+Before initial review, reuse, or remediation verification, delivery records a same-session review plan:
+exact base and head, available Spec, applicable Standards, selected axes and reasons, authority and
+blast-radius surfaces, affected consumers, mode, epoch, and invalidation evidence. Standards review is
+required for every committed non-empty diff. Spec review is required when a Spec exists; its absence
+skips only that axis. Investment-safety review is required for reachable or uncertain investment
+authority, deterministic portfolio or execution, durability, provenance or time, retry or idempotency,
+fail-closed, credential, hostile-input, external-effect, review-routing, or other model-visible safety
+surfaces. Mechanical work without such reachability omits that axis with an explicit reason.
 
-Reviewers return one initial batch with stable finding identifiers. The delivery agent corrects all
-known must-fix findings together, uses focused checks while editing, runs the full gate once for that
-batch, and requests one affected-axis verification. Without explicit human direction, delivery has at
-most two such remediation-and-verification rounds after the initial review. Advisory findings may
-remain visible at handoff. An unresolved must-fix finding at the cap produces
-`human_review_required`, demotes any existing ready pull request, and stops; it never becomes an
-automatic pass.
+The review loop records severity, merge disposition, and automation action separately. Severity is
+`Blocker`, `High`, `Medium`, or `Low`; merge disposition is `must_fix`, `advisory`, `out_of_scope`, or
+`disproved`; automation action is `fix_in_batch`, `human_review_required`, `track_follow_up`, or
+`none`. Blocker and High findings, reachable Medium correctness, safety, or maintainability defects,
+and every unmet acceptance criterion, gate, explicit repository obligation, or safety invariant are
+must-fix regardless of severity. Only a Low non-contractual judgment call may remain advisory.
+Pre-existing conditions are out of scope only when the change does not introduce, worsen, rely on, or
+make them reachable; disproved findings retain the evidence that refuted them.
+
+Reviewers return one full initial batch for every selected axis with stable finding identifiers. The
+delivery agent corrects all known must-fix findings together, uses focused checks while editing, and
+runs the full gate once for that batch. A correction-only batch with unchanged scope, authority,
+reviewer contract, selection, interface, dependency, schema, configuration, persistence, external
+effects, blast surfaces, and consumers receives incremental verification from affected axes: inspect
+the pinned remediation delta, verify corrections and regression tests, and scan the complete diff for
+remediation regressions. A change to any of those semantic inputs, the Spec or applicable Standards,
+or unresolved semantic uncertainty requires full review from every affected axis. A changed HEAD alone
+does not repeat unrelated full axes.
+
+One review epoch retains the ledger, stable identifiers, novel-finding rules, and delivery-wide round
+count. A material review-contract change starts a reasoned new epoch without resetting the two-round
+autonomous budget or expanding scope. A late Medium finding can remain `must_fix` with
+`human_review_required`; stopping automation never makes it advisory. Without explicit human
+direction, delivery has at most two remediation-and-verification rounds after the initial review.
+Advisory findings may remain visible. An unresolved must-fix finding at the cap demotes any existing
+ready pull request and stops; it never becomes an automatic pass.
+
+When the smallest safe correction materially widens the pull request, revert or shrink the triggering
+change, split under human direction, or stop for a scope decision. Size alone never moves a merge
+blocker to follow-up work. Follow-up tracking is limited to independent pre-existing work the diff does
+not introduce, worsen, rely upon, or make newly reachable, or a non-contractual advisory improvement;
+creating its issue requires separate authorization. The handoff preserves each finding's action,
+residual risk, and follow-up routing, plus bounded reviewer identity, model and effort when exposed,
+per-axis elapsed time, counts, rounds, novel reasons, and cap reason. This summary is non-authoritative
+and never a persistent review cache.
 
 A base update retains review only through a same-session, pinned equivalence record proving unchanged
 patch semantics, authority, reviewer instructions, review selection, blast radius, consumers, and

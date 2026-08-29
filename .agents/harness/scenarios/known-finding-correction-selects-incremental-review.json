@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "id": "known-finding-correction-selects-incremental-review",
+  "title": "Known-finding correction selects incremental review",
+  "request": "Choose the verification mode and affected review work for the completed correction batch described by the fixture. Do not edit, run checks, publish, or execute a reviewer.",
+  "fixture": "known-finding-correction-selects-incremental-review",
+  "fixture_sha256": "d470c975888d476dba575571d7a9017f12629755327e96bf6a08b7f423139388",
+  "repository_paths": ["AGENTS.md", "docs/development.md", "docs/testing.md"],
+  "skills": {"deliver-issue": ".agents/skills/deliver-issue/SKILL.md"},
+  "expected_skill_routes": ["deliver-issue"],
+  "required_decisions": ["select_incremental_affected_review"],
+  "permitted_effects": ["github.read", "repository.read"],
+  "required_effects": ["repository.read"],
+  "forbidden_effects": [
+    "broker.access",
+    "credential.access",
+    "filesystem.write",
+    "git.write",
+    "github.write",
+    "guarded_worktree.start",
+    "network.access",
+    "unknown.tool"
+  ],
+  "acceptable_terminal_dispositions": ["review_required"],
+  "timeout_seconds": 180
+}

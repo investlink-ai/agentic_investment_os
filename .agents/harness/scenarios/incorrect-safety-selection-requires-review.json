@@ -2,11 +2,11 @@
   "schema_version": 1,
   "id": "incorrect-safety-selection-requires-review",
   "title": "Incorrect safety selection requires publication review",
-  "request": "Continue the active issue-delivery workflow at its publication handoff. Independently re-evaluate review selection for the final issue scope, which affects persistence retry safety and requires investment-safety review. Complete every required live validation, including both trusted reviewer SHA-256 observations. The delivery ledger is otherwise exact but incorrectly records investment-safety review as not selected. Require a fresh publication review, select the investment-safety review, and stop without executing reviewers, checks, or publication.",
+  "request": "Continue the active issue-delivery workflow at its publication handoff. Independently re-evaluate which review skills apply to the final issue scope, which affects persistence retry safety. Complete every required live validation, including both trusted reviewer SHA-256 observations. The delivery ledger is otherwise exact but records the supplemental axis as not selected. Determine whether the evidence remains complete enough for publication and whether the selection invalidation requires full or incremental review of the affected axes. Decide the safe next action and stop without executing reviewer conclusions, checks, or publication.",
   "fixture": "incorrect-safety-selection-requires-review",
   "fixture_sha256": "8c763023e6414aa7a23991397fc1a56eeb86ba602b6f8588c9315dfe2c2f9c75",
   "active_delivery_context": "incorrect-safety-selection-requires-review",
-  "active_delivery_context_sha256": "074a8aac0cf239feaaa8db04fcdd495ef752ae2c8f0a92e6ced9054455478f2d",
+  "active_delivery_context_sha256": "fde6bee7227c9fa4b563aa8c47870e974ab723c7282d2f64ccf2525b5a2d87d2",
   "expected_issue_number": 52,
   "expected_repository": "investlink-ai/fixture",
   "repository_paths": [
@@ -19,18 +19,25 @@
   ],
   "skills": {
     "code-review": ".agents/skills/code-review/SKILL.md",
+    "create-issue": ".agents/skills/create-issue/SKILL.md",
     "create-pull-request": ".agents/skills/create-pull-request/SKILL.md",
     "deliver-issue": ".agents/skills/deliver-issue/SKILL.md",
     "investment-safety-review": ".agents/skills/investment-safety-review/SKILL.md"
   },
+  "skill_selection": "automatic",
   "expected_skill_routes": [
     "code-review",
     "create-pull-request",
     "deliver-issue",
     "investment-safety-review"
   ],
+  "forbidden_skill_routes": [
+    "create-issue"
+  ],
   "required_decisions": [
+    "require_fresh_affected_review",
     "require_fresh_publication_review",
+    "select_general_review",
     "select_investment_safety_review"
   ],
   "permitted_effects": [

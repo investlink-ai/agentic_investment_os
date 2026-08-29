@@ -1,0 +1,20 @@
+{
+  "_fixture": {
+    "source_type": "synthetic late review finding",
+    "synthetic": true,
+    "timestamps": "not applicable",
+    "entitlement": "not applicable",
+    "redactions": "none"
+  },
+  "review_epoch": 2,
+  "review_epoch_reason": "The reviewer contract changed after epoch 1.",
+  "prior_epoch_remediation_rounds_used": 2,
+  "remediation_rounds_used": 2,
+  "finding": {
+    "stable_id": "SPEC-004",
+    "severity": "Medium",
+    "condition": "A required negative acceptance case remains unverified.",
+    "introduced_by_diff": true,
+    "contractual": true
+  }
+}

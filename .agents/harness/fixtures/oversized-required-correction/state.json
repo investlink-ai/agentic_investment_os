@@ -1,0 +1,17 @@
+{
+  "_fixture": {
+    "source_type": "synthetic review scope decision",
+    "synthetic": true,
+    "timestamps": "not applicable",
+    "entitlement": "not applicable",
+    "redactions": "none"
+  },
+  "finding": {
+    "stable_id": "STD-006",
+    "severity": "Medium",
+    "merge_disposition": "must_fix",
+    "introduced_by_diff": true,
+    "smallest_safe_correction": "Adds a new public interface and two consumers outside issue scope.",
+    "triggering_change_can_be_reverted": true
+  }
+}
