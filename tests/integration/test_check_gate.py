@@ -10,6 +10,9 @@ from typing import NamedTuple
 import pytest
 
 REPOSITORY_ROOT = Path(__file__).parents[2]
+CI_WORKFLOW = REPOSITORY_ROOT / ".github" / "workflows" / "ci.yml"
+MAKEFILE = REPOSITORY_ROOT / "Makefile"
+EXPECTED_HOSTED_GATE_LEGS = 2
 STATE_MACHINE_NODE = (
     "tests/integration/test_advance_lifecycle.py::TestLifecycleStateMachine::runTest"
 )
@@ -153,3 +156,21 @@ def test_test_gate_fails_when_either_parallel_leg_fails(
         "coverage",
         "state-machine",
     }
+
+
+def test_ci_isolates_gate_legs_and_preserves_fail_closed_check_name() -> None:
+    workflow = CI_WORKFLOW.read_text(encoding="utf-8")
+    makefile = MAKEFILE.read_text(encoding="utf-8")
+
+    assert "fail-fast: false" in workflow
+    assert workflow.count("target:") == EXPECTED_HOSTED_GATE_LEGS
+    assert "target: check-coverage" in workflow
+    assert "target: test-lifecycle-state-machine" in workflow
+    assert "run: make ${{ matrix.target }}" in workflow
+    assert "name: make check" in workflow
+    assert "needs: gate" in workflow
+    assert "if: ${{ always() }}" in workflow
+    assert "GATE_RESULT: ${{ needs.gate.result }}" in workflow
+    assert 'run: test "$GATE_RESULT" = success' in workflow
+    assert "run: make check" not in workflow
+    assert "check-coverage: harness architecture lint typecheck test-coverage" in makefile

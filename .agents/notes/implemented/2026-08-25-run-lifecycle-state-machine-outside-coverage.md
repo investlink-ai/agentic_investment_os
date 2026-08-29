@@ -15,11 +15,14 @@ source-kind, schema, and payload variants.
 
 Keep the full derandomized Hypothesis budget in the handoff gate, but collect coverage from the rest
 of the deterministic suite concurrently. The [testing policy](../../../docs/testing.md#selection)
-owns the required behavior, and the [Makefile](../../../Makefile) owns its local, hook, and hosted-CI
-orchestration. The state machine uses an explicitly named minimal fixture containing the required
-market and news evidence while focused deterministic tests retain every optional official-source
-contract. Both pytest legs report their slowest tests so cost growth remains visible without a flaky
-shared-runner duration threshold.
+owns the required behavior, the [Makefile](../../../Makefile) owns each gate leg and their local
+orchestration, and the [CI workflow](../../../.github/workflows/ci.yml) schedules those legs on
+separate hosted runners. The workflow preserves the existing `make check` status as an aggregate
+that fails unless both legs pass, so branch protection retains one stable mandatory identity. The
+state machine uses an explicitly named minimal fixture containing the required market and news
+evidence while focused deterministic tests retain every optional official-source contract. Both
+pytest legs report their slowest tests so cost growth remains visible without a flaky shared-runner
+duration threshold.
 
 ## Alternatives considered
 
@@ -29,8 +32,10 @@ shared-runner duration threshold.
   time collecting coverage that does not determine whether any configured tier passes.
 - Remove the state machine from the default gate. This loses mandatory generated interruption,
   replay, and reopen evidence.
-- Split hosted CI into separately named jobs. This introduces another branch-protection check and
-  does not improve local or pre-push feedback.
+- Keep both hosted legs inside one parallel Make process. This avoids another runner setup, but the
+  CPU-heavy state machine can starve the coverage suite on a small shared runner and make both slower.
+- Publish the hosted legs as independent required check names. This exposes each result directly but
+  requires a synchronized branch-protection change; a stable aggregate retains the existing contract.
 - Add optional provider and source variants to every generated example. This multiplies setup and
   persistence work across a dimension owned more precisely by focused tests without increasing
   lifecycle-state exploration.
@@ -40,17 +45,20 @@ shared-runner duration threshold.
 
 ## Consequences
 
-Parallel pytest processes share no intentional writable state. The state-machine leg disables pytest
-caching, uses the disabled Hypothesis database, and retains per-example temporary directories. Future
-coverage changes must preserve the explicit deselection boundary and tier check. A fixture reduction
-must retain direct accepted and refused evidence for every removed orthogonal variant; it cannot
-remove a state, persistence, or safety seam owned by the generated test.
+Local parallel pytest processes share no intentional writable state. Hosted legs receive isolated
+runners and locked environments, while the aggregate performs no repository or dependency work.
+The state-machine leg disables pytest caching, uses the disabled Hypothesis database, and retains
+per-example temporary directories. Future coverage changes must preserve the explicit deselection
+boundary, tier check, both hosted jobs, and fail-closed aggregate. A fixture reduction must retain
+direct accepted and refused evidence for every removed orthogonal variant; it cannot remove a state,
+persistence, or safety seam owned by the generated test.
 
 ## Verification
 
 The [gate integration test](../../../tests/integration/test_check_gate.py) exercises the public target
-with controlled commands to prove the exact partition, concurrency, and failure propagation from
-either leg. The complete gate confirms that the independently collected report passes every coverage
-tier while the state machine passes at its full Hypothesis budget. Dedicated lifecycle and contract
-tests retain all five optional source types plus cutoff, required-source, malformed-input, and
-provenance refusal evidence.
+with controlled commands to prove the exact local partition, concurrency, and failure propagation
+from either leg. It also pins the hosted matrix targets, independent scheduling, and stable
+fail-closed aggregate. The complete gate confirms that the independently collected report passes
+every coverage tier while the state machine passes at its full Hypothesis budget. Dedicated lifecycle
+and contract tests retain all five optional source types plus cutoff, required-source,
+malformed-input, and provenance refusal evidence.

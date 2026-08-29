@@ -61,6 +61,12 @@ the deterministic pytest suite. Its test phase concurrently runs the coverage-pr
 full lifecycle state machine. Both legs are mandatory; the state-machine leg disables pytest caching
 and coverage instrumentation but retains the default Hypothesis example and step budgets.
 
+Hosted CI gives those same Makefile-owned legs separate runners so the coverage suite and generated
+state machine do not contend for one shared CPU allocation. A stable `make check` aggregate reports
+failure unless both jobs pass; splitting execution therefore changes scheduling, not gate strength or
+branch-protection identity. The local and pre-push gate remains one command and runs the legs
+concurrently on the developer machine.
+
 The default Hypothesis profile in `tests/conftest.py` uses derandomized generation, no example
 database or wall-clock deadline, bounded example and state-machine step counts, one reported failure,
 and printed replay blobs. Generated tests remain credential-free and network-free, inject any clock,
@@ -74,10 +80,10 @@ focused contract or integration tests and does not enter every generated sequenc
 from a generated fixture is valid only when direct deterministic evidence retains its accepted and
 refused forms; never reduce the Hypothesis example or step budget to hide fixture amplification.
 
-Both parallel pytest legs report their slowest tests and wall time. These timings are diagnostic rather
-than a hard shared-runner performance threshold. A material increase, especially a near doubling of
-one leg or encroachment on the hosted-CI timeout, requires a test-cost investigation before increasing
-the timeout, reducing exploration, or moving evidence out of the handoff gate.
+Both pytest legs report their slowest tests and wall time. These timings are diagnostic rather than a
+hard shared-runner performance threshold. A material increase, especially a near doubling of one leg
+or encroachment on the hosted-CI timeout, requires a test-cost investigation before increasing the
+timeout, reducing exploration, or moving evidence out of the handoff gate.
 
 ## Static architecture gates
 
