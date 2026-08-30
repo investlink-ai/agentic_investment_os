@@ -6,7 +6,7 @@ import json
 from dataclasses import dataclass, replace
 from decimal import Decimal
 from enum import StrEnum
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 
 from agentic_investment_os.domain.identity import (
     EquityInstrumentIdentity,
@@ -35,6 +35,9 @@ from agentic_investment_os.portfolio.construction import (
 )
 from agentic_investment_os.portfolio.shadows import PortfolioCycleResult
 
+if TYPE_CHECKING:
+    from datetime import datetime
+
 __all__ = (
     "ChampionDecisionRecord",
     "DecisionPacket",
@@ -43,6 +46,7 @@ __all__ = (
     "DecisionPacketValidityWindow",
     "DecisionPacketVerifier",
     "DecisionPacketWindowSource",
+    "DecisionPublicationClock",
     "DecisionPublicationHistoryValidator",
     "DecisionPublicationLedger",
     "DecisionPublicationRefusalReason",
@@ -191,6 +195,12 @@ class DecisionPacketWindowSource(Protocol):
         window: DecisionPacketValidityWindow,
         recorded_at: UtcInstant,
     ) -> bool: ...
+
+
+class DecisionPublicationClock(Protocol):
+    """Supply trusted wall-clock time to the atomic publication boundary."""
+
+    def now(self) -> datetime: ...
 
 
 class DecisionPublicationLedger(Protocol):

@@ -117,6 +117,7 @@ def configure_advance(  # noqa: PLR0913 - composition names each untrusted bound
             portfolio_ledger,
             _OFFICIAL_BENCHMARK_IDENTITY,
             decision_window_source,
+            trusted_clock,
         )
         return Advance(
             ledger=SQLiteLifecycleLedger(database.path),
@@ -198,6 +199,7 @@ def configure_status(
             fields=("state_root",),
         )
     if isinstance(database, PreparedRuntimeDatabase):
+        trusted_clock = SystemClock()
         evidence_vault = FilesystemEvidenceVault.reference_validator(
             resolution.state_root / "evidence-vault"
         )
@@ -219,7 +221,7 @@ def configure_status(
             Record(
                 belief_ledger,
                 evidence_vault,
-                SystemClock(),
+                trusted_clock,
             ),
             portfolio_ledger,
             SQLiteDecisionPublicationLedger.open_existing(
@@ -228,6 +230,7 @@ def configure_status(
                 portfolio_ledger=portfolio_ledger,
                 benchmark_identity=_OFFICIAL_BENCHMARK_IDENTITY,
                 decision_window_source=PreOpenDecisionPacketWindowSource(),
+                clock=trusted_clock,
             ),
         )
     # Strict mypy proves this line unreachable; removing it is runtime-equivalent.

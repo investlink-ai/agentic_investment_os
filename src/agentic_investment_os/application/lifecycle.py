@@ -481,13 +481,13 @@ class Advance:
                         ),
                     )
                     continue
-                recorded_at = visible_at
                 admitted = self.decision_ledger.record_publication(
                     decision.pinned_run_identity.run_id,
                     publication,
-                    recorded_at,
+                    visible_at,
                 )
                 if isinstance(admitted, DecisionPublicationRefusalReason):
+                    recorded_at = visible_at
                     command = replace(
                         command,
                         decision_publication=LifecycleDecisionPublicationRefusalReason(
@@ -495,6 +495,7 @@ class Advance:
                         ),
                     )
                     continue
+                recorded_at = admitted.recorded_at
                 command = replace(
                     command,
                     decision_publication=admitted,

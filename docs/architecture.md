@@ -174,10 +174,11 @@ Balanced paper packet from trade-eligible Target Bands. A typed signer and non-s
 enter through uncredentialed composition; no broker credential or execution port enters `Advance`.
 The decision and packet share one append-only SQLite row so neither can become independently visible.
 Fresh packet publication requires the exact code-owned issue and expiry times and durable visibility
-before the regular open; no-action decisions remain publishable without packet timing authority. Exact
-replay reparses the signature, reconstructs semantics from the durable portfolio cycle, and
-revalidates recorded visibility against the same calendar policy without resigning; changed
-authorization conflicts.
+before the regular open. The publication ledger resamples the shared trusted clock after acquiring
+its write transaction and persists that ledger-owned instant; no-action decisions remain publishable
+without packet timing authority. Exact replay reparses the signature, reconstructs semantics from the
+durable portfolio cycle, and revalidates recorded visibility against the same calendar policy without
+resigning; changed authorization conflicts.
 [ADR 0011](adr/0011-atomically-publish-one-balanced-decision.md) owns this boundary.
 
 ## Module ownership
@@ -290,8 +291,9 @@ stateDiagram-v2
   freezes its cycle, account scope, validity window, policies, complete risk limits including the
   maximum fraction of median dollar volume, canonical instruments, whole-share units, direction,
   weights, Target Bands, long-only/no-leverage constraint, and regular-session day-limit policy. The
-  lifecycle revalidates packet timing after signing, and the ledger revalidates all content, signature,
-  exact official times, and actual visibility before atomically appending the Decision Record and
+  lifecycle revalidates packet timing after signing. After acquiring the write transaction and
+  validating the candidate, the ledger samples the shared trusted clock immediately before insertion,
+  revalidates exact official times against that instant, and atomically appends the Decision Record and
   optional packet. A no-action Decision Record has no packet window and remains publishable. Lifecycle
   history exposes only their bounded identities, packet expiry, recorded time, and a typed no-action
   reason. The terminal receipt completes `PublishDecision`; `Status` reports `AwaitExecution`. No later

@@ -342,10 +342,11 @@ evidence. A scenario becomes mandatory when its owning behavior is implemented.
   scope, changed-policy, or expired material produces no visible packet.
 - Packet publication admits only the pinned fifteen-minute pre-open window and derives the immutable
   expiry at thirty minutes after open across UTC-offset and calendar boundaries. The lifecycle checks
-  again after signing, and atomic insertion plus reopen validate the exact issue, expiry, and recorded
-  visibility with the same policy. Early, at-open, post-open, signing-across-open, wrongly expired,
-  resealed off-window, weekend, holiday, or unsupported-year publication produces no packet. A valid
-  no-action Decision Record remains durable before, during, or after the packet window.
+  again after signing. Atomic insertion resamples the shared trusted clock after write-lock acquisition,
+  and insertion plus reopen validate the exact issue, expiry, and ledger-owned visibility with the same
+  policy. Early, at-open, post-open, signing-across-open, lock-acquisition-across-open, wrongly expired,
+  resealed off-window, weekend, holiday, or unsupported-year publication produces no packet or row. A
+  valid no-action Decision Record remains durable before, during, or after the packet window.
 - The Decision Record and optional packet become visible in one transaction. Interruptions on both
   sides of that transaction, reopen, exact retry, projection rebuild, and concurrent equivalent
   delivery return the same identities without another row; changed decision or authorization

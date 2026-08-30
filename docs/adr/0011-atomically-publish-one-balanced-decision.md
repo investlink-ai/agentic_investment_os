@@ -38,8 +38,11 @@ it.
 One SQLite transaction inserts the complete Decision Record and optional packet in a single
 append-only row. Unique run and cycle keys permit one publication per Market Session. A fresh packet
 must carry the exact official issue and expiry times and become durably visible before the regular
-open. Exact replay reparses, verifies, and semantically reconstructs the stored publication without
-resigning it, including revalidating its recorded visibility against the same calendar policy.
+open. After acquiring the write transaction and validating the complete candidate, the ledger samples
+the shared trusted clock immediately before insertion, reapplies the calendar policy, and persists
+that ledger-owned visibility instant. Exact replay reparses, verifies, and semantically reconstructs
+the stored publication without resigning it, including revalidating its recorded visibility against
+the same calendar policy.
 Concurrent candidates with the same decision and authorization intent return the first complete
 winner even when issue time or signature differs; changed decision, account, risk, or instruction
 material conflicts. Lifecycle history retains only the bounded Decision Record identity, optional
@@ -49,10 +52,11 @@ packet identity and expiry, publication time, and typed no-action reason. `Advan
 The code-owned validity source admits publication from the approved fifteen-minute pre-open freeze
 until the regular open and expires the packet thirty minutes after open. It derives those instants
 from the same pinned Market Session calendar used by scheduling. The lifecycle uses that policy before
-signing and again after signing; the durable ledger applies it at insertion and reopen. Early,
-at-open, post-open, unsupported, wrongly expired, or otherwise invalid packet windows produce no
-publication. This timing gate applies only to executable packets: a valid no-action result retains and
-atomically publishes its Champion Decision Record outside the packet window.
+signing and again after signing; the durable ledger owns a final clock sample after write-lock
+acquisition and applies the policy at insertion and reopen. Early, at-open, post-open, lock-delayed,
+unsupported, wrongly expired, or otherwise invalid packet windows produce no publication. This timing
+gate applies only to executable packets: a valid no-action result retains and atomically publishes its
+Champion Decision Record outside the packet window.
 
 Signing and verification enter through typed ports assembled by the uncredentialed operating-system
 entrypoint. The concrete signer owns private key bytes only in memory, exposes a derived key identity,

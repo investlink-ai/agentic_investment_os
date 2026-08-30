@@ -2134,6 +2134,8 @@ def test_retry_waits_for_clock_to_recover_after_the_portfolio_checkpoint(
     )
     ledger = capability.ledger
     assert isinstance(ledger, SQLiteLifecycleLedger)
+    decision_ledger = capability.decision_ledger
+    assert isinstance(decision_ledger, SQLiteDecisionPublicationLedger)
     interrupted = replace(
         capability,
         ledger=InterruptingLedger(ledger, "portfolio", "after"),
@@ -2146,9 +2148,11 @@ def test_retry_waits_for_clock_to_recover_after_the_portfolio_checkpoint(
 
     with pytest.raises(SimulatedInterruptionError):
         interrupted(**request)
+    regressed_clock = FixedClock(checkpoint_at - timedelta(seconds=1))
     regressed = replace(
         capability,
-        clock=FixedClock(checkpoint_at - timedelta(seconds=1)),
+        clock=regressed_clock,
+        decision_ledger=replace(decision_ledger, clock=regressed_clock),
     )
     with pytest.raises(
         LifecyclePersistenceError,
@@ -2171,9 +2175,11 @@ def test_retry_waits_for_clock_to_recover_after_the_portfolio_checkpoint(
     assert incomplete.active_phase.phase is LifecyclePhase.PUBLISH_DECISION
     assert incomplete.durable_reason is None
 
+    recovered_clock = FixedClock(checkpoint_at + timedelta(seconds=1))
     recovered = replace(
         capability,
-        clock=FixedClock(checkpoint_at + timedelta(seconds=1)),
+        clock=recovered_clock,
+        decision_ledger=replace(decision_ledger, clock=recovered_clock),
     )
     receipt = recovered(**request)
 
@@ -2201,6 +2207,7 @@ def test_wrong_packet_verifier_is_a_durable_publication_refusal(tmp_path: Path) 
             portfolio_ledger=capability.portfolio_ledger,
             benchmark_identity=capability.benchmark_identity,
             decision_window_source=capability.decision_window_source,
+            clock=capability.clock,
         ),
     )
 

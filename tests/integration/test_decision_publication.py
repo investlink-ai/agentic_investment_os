@@ -3,9 +3,10 @@ from __future__ import annotations
 import json
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
+from threading import Event
 from typing import TYPE_CHECKING
 
 import pytest
@@ -54,6 +55,14 @@ _PORTFOLIO_RECORDED_AT = UtcInstant.from_datetime(datetime(2026, 8, 24, 13, 10, 
 _PUBLISHED_AT = UtcInstant.from_datetime(datetime(2026, 8, 24, 13, 15, tzinfo=UTC))
 
 
+@dataclass
+class _MutableClock:
+    instant: datetime
+
+    def now(self) -> datetime:
+        return self.instant
+
+
 def synthetic_portfolio_cycle(
     *,
     run_id: str = "1" * 64,
@@ -75,6 +84,7 @@ def _ledgers(
     cycle_result: PortfolioCycleResult,
     *,
     portfolio_recorded_at: UtcInstant = _PORTFOLIO_RECORDED_AT,
+    decision_clock: _MutableClock | None = None,
 ) -> tuple[Path, SQLitePortfolioLedger, SQLiteDecisionPublicationLedger]:
     prepared = prepare_runtime_database(tmp_path / "runtime")
     assert isinstance(prepared, PreparedRuntimeDatabase)
@@ -91,6 +101,7 @@ def _ledgers(
         portfolio,
         SYNTHETIC_SPY,
         PreOpenDecisionPacketWindowSource(),
+        _MutableClock(_PUBLISHED_AT.value) if decision_clock is None else decision_clock,
     )
     return prepared.path, portfolio, decisions
 
@@ -183,6 +194,7 @@ def test_publication_is_atomic_and_replays_exactly_after_reopen(tmp_path: Path) 
         portfolio_ledger=SQLitePortfolioLedger.open_existing(database),
         benchmark_identity=SYNTHETIC_SPY,
         decision_window_source=PreOpenDecisionPacketWindowSource(),
+        clock=_MutableClock(_PUBLISHED_AT.value),
     )
 
     assert reopened.replay_publication(run_id, publication.decision_record.cycle) == checkpoint
@@ -226,6 +238,109 @@ def test_official_packet_window_is_revalidated_at_the_durable_boundary(
         )
         is DecisionPublicationRefusalReason.INVALID_VALIDITY_WINDOW
     )
+    with sqlite3.connect(database) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM decision_publications").fetchone() == (0,)
+
+
+def test_sqlite_lock_crossing_open_refuses_packet_with_no_visible_row(tmp_path: Path) -> None:
+    cycle_result = synthetic_portfolio_cycle()
+    pre_open = datetime(2026, 8, 24, 13, 29, 59, 500000, tzinfo=UTC)
+    regular_open = datetime(2026, 8, 24, 13, 30, tzinfo=UTC)
+    clock = _MutableClock(pre_open)
+    database, _, decisions = _ledgers(tmp_path, cycle_result, decision_clock=clock)
+    publication = _publication(cycle_result)
+    entered = Event()
+
+    def record_while_locked() -> DecisionCheckpoint | DecisionPublicationRefusalReason:
+        entered.set()
+        return decisions.record_publication(
+            publication.decision_record.run_id,
+            publication,
+            UtcInstant.from_datetime(pre_open),
+        )
+
+    with sqlite3.connect(database, timeout=5.0) as blocker:
+        blocker.execute("BEGIN IMMEDIATE")
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(record_while_locked)
+            assert entered.wait(timeout=1.0)
+            clock.instant = regular_open
+            blocker.rollback()
+            assert (
+                future.result(timeout=2.0)
+                is DecisionPublicationRefusalReason.INVALID_VALIDITY_WINDOW
+            )
+
+    with sqlite3.connect(database) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM decision_publications").fetchone() == (0,)
+
+
+def test_durable_boundary_persists_its_own_visibility_instant(tmp_path: Path) -> None:
+    cycle_result = synthetic_portfolio_cycle()
+    ledger_visibility = UtcInstant.from_datetime(_PUBLISHED_AT.value + timedelta(seconds=1))
+    database, _, decisions = _ledgers(
+        tmp_path,
+        cycle_result,
+        decision_clock=_MutableClock(ledger_visibility.value),
+    )
+    publication = _publication(cycle_result)
+
+    checkpoint = _checkpoint(
+        decisions.record_publication(
+            publication.decision_record.run_id,
+            publication,
+            _PUBLISHED_AT,
+        )
+    )
+
+    assert checkpoint.recorded_at == ledger_visibility
+    with sqlite3.connect(database) as connection:
+        assert connection.execute("SELECT recorded_at FROM decision_publications").fetchone() == (
+            ledger_visibility.isoformat(),
+        )
+
+
+def test_durable_boundary_refuses_a_regressed_clock(tmp_path: Path) -> None:
+    cycle_result = synthetic_portfolio_cycle()
+    clock_at = datetime(2026, 8, 24, 13, 15, tzinfo=UTC)
+    requested_at = UtcInstant.from_datetime(clock_at + timedelta(microseconds=1))
+    database, _, decisions = _ledgers(
+        tmp_path,
+        cycle_result,
+        decision_clock=_MutableClock(clock_at),
+    )
+    publication = _publication(cycle_result)
+
+    assert (
+        decisions.record_publication(
+            publication.decision_record.run_id,
+            publication,
+            requested_at,
+        )
+        is DecisionPublicationRefusalReason.INVALID_VALIDITY_WINDOW
+    )
+    with sqlite3.connect(database) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM decision_publications").fetchone() == (0,)
+
+
+def test_durable_boundary_rejects_an_invalid_clock_value(tmp_path: Path) -> None:
+    cycle_result = synthetic_portfolio_cycle()
+    database, _, decisions = _ledgers(
+        tmp_path,
+        cycle_result,
+        decision_clock=_MutableClock(datetime(2026, 8, 24, 13, 15)),  # noqa: DTZ001
+    )
+    publication = _publication(cycle_result)
+
+    with pytest.raises(
+        LifecyclePersistenceError,
+        match="decision publication clock must return a timezone-aware UTC instant",
+    ):
+        decisions.record_publication(
+            publication.decision_record.run_id,
+            publication,
+            _PUBLISHED_AT,
+        )
     with sqlite3.connect(database) as connection:
         assert connection.execute("SELECT COUNT(*) FROM decision_publications").fetchone() == (0,)
 
@@ -281,6 +396,7 @@ def test_publication_at_the_exact_evidence_cutoff_is_valid_history(tmp_path: Pat
         tmp_path,
         cycle_result,
         portfolio_recorded_at=cutoff,
+        decision_clock=_MutableClock(cutoff.value),
     )
 
     checkpoint = _checkpoint(
@@ -299,9 +415,13 @@ def test_publication_at_the_exact_evidence_cutoff_is_valid_history(tmp_path: Pat
 
 def test_concurrent_changed_publication_times_return_one_winning_packet(tmp_path: Path) -> None:
     cycle_result = synthetic_portfolio_cycle()
-    database, _, decisions = _ledgers(tmp_path, cycle_result)
-    run_id = cycle_result.balanced.require_house_view().run_id
     later = UtcInstant.from_datetime(_PUBLISHED_AT.value + timedelta(seconds=1))
+    database, _, decisions = _ledgers(
+        tmp_path,
+        cycle_result,
+        decision_clock=_MutableClock(later.value),
+    )
+    run_id = cycle_result.balanced.require_house_view().run_id
     candidates = (_publication(cycle_result), _publication(cycle_result, published_at=later))
 
     with ThreadPoolExecutor(max_workers=2) as executor:
@@ -444,6 +564,7 @@ def test_coherently_hashed_wrong_key_signature_never_becomes_visible(tmp_path: P
         portfolio,
         SYNTHETIC_SPY,
         PreOpenDecisionPacketWindowSource(),
+        _MutableClock(_PUBLISHED_AT.value),
     )
 
     assert (
@@ -628,6 +749,7 @@ def test_checkpoint_rejects_visibility_before_issue_if_timing_adapter_misbehaves
     invalid = replace(
         decisions,
         decision_window_source=_AlwaysAllowingDecisionWindowSource(),
+        clock=_MutableClock(before_issue.value),
     )
 
     with pytest.raises(InvalidLifecycleStateError, match="durable decision publication is invalid"):
@@ -784,6 +906,7 @@ def test_unreadable_publication_storage_fails_closed_at_public_boundaries(
         portfolio,
         SYNTHETIC_SPY,
         PreOpenDecisionPacketWindowSource(),
+        _MutableClock(_PUBLISHED_AT.value),
     )
 
     with pytest.raises(InvalidLifecycleStateError, match="durable decision publication is invalid"):

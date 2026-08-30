@@ -27,6 +27,7 @@ from agentic_investment_os.portfolio.publication import (
     DecisionPacketValidityWindow,
     DecisionPacketVerifier,
     DecisionPacketWindowSource,
+    DecisionPublicationClock,
     DecisionPublicationRefusalReason,
     DecisionPublicationResult,
     PacketNoActionReason,
@@ -44,6 +45,7 @@ __all__ = ("SQLiteDecisionPublicationLedger",)
 
 _CHECKPOINT_FAILED = "SQLite decision publication checkpoint failed"
 _INVALID_HISTORY = "durable decision publication is invalid"
+_INVALID_CLOCK = "decision publication clock must return a timezone-aware UTC instant"
 
 
 @dataclass(frozen=True, slots=True)
@@ -55,9 +57,10 @@ class SQLiteDecisionPublicationLedger:
     portfolio_ledger: PortfolioCycleResultLedger
     benchmark_identity: EquityInstrumentIdentity
     decision_window_source: DecisionPacketWindowSource
+    clock: DecisionPublicationClock
 
     @classmethod
-    def open_existing(
+    def open_existing(  # noqa: PLR0913 - reconstruction names each authority dependency.
         cls,
         database: Path,
         *,
@@ -65,6 +68,7 @@ class SQLiteDecisionPublicationLedger:
         portfolio_ledger: PortfolioCycleResultLedger,
         benchmark_identity: EquityInstrumentIdentity,
         decision_window_source: DecisionPacketWindowSource,
+        clock: DecisionPublicationClock,
     ) -> Self:
         """Open the already startup-validated runtime database."""
         return cls(
@@ -73,6 +77,7 @@ class SQLiteDecisionPublicationLedger:
             portfolio_ledger,
             benchmark_identity,
             decision_window_source,
+            clock,
         )
 
     def record_publication(
@@ -116,7 +121,14 @@ class SQLiteDecisionPublicationLedger:
                     return refusal
                 decision_json = _canonical_json(result.decision_record.to_payload())
                 packet_json = None if packet is None else _canonical_json(packet.to_payload())
-                checkpoint = _checkpoint(result, recorded_at)
+                visibility_at = _clock_instant(self.clock)
+                if visibility_at.value < recorded_at.value or not _packet_window_is_valid(
+                    packet,
+                    visibility_at,
+                    self.decision_window_source,
+                ):
+                    return DecisionPublicationRefusalReason.INVALID_VALIDITY_WINDOW
+                checkpoint = _checkpoint(result, visibility_at)
                 connection.execute(
                     """
                     INSERT INTO decision_publications (
@@ -138,7 +150,7 @@ class SQLiteDecisionPublicationLedger:
                             if result.no_action_reason is None
                             else result.no_action_reason.value
                         ),
-                        recorded_at.isoformat(),
+                        visibility_at.isoformat(),
                     ),
                 )
                 return checkpoint
@@ -369,6 +381,13 @@ def _packet_window_is_valid(
         DecisionPacketValidityWindow(packet.cycle, packet.issued_at, packet.expires_at),
         recorded_at,
     )
+
+
+def _clock_instant(clock: DecisionPublicationClock) -> UtcInstant:
+    try:
+        return UtcInstant.from_datetime(clock.now())
+    except InvalidUtcInstantError as error:
+        raise LifecyclePersistenceError(_INVALID_CLOCK) from error
 
 
 def _cycle(value: object) -> MarketSession:
