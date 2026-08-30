@@ -1,0 +1,111 @@
+#!/bin/sh
+set -eu
+
+label=ai.investlink.agentic-investment-os.scheduler
+interval_seconds=300
+
+fail() {
+    printf 'install-scheduler-launch-agent: %s\n' "$*" >&2
+    exit 1
+}
+
+require_trusted_ancestry() {
+    inspected=${1%/*}
+    if [ -z "$inspected" ]; then
+        inspected=/
+    fi
+    while :; do
+        if [ ! -d "$inspected" ] || [ -L "$inspected" ]; then
+            fail "runner ancestry must contain only real directories"
+        fi
+        inspected_owner=$(stat -f '%u' "$inspected") || fail "cannot inspect runner ancestry ownership"
+        inspected_mode=$(stat -f '%Lp' "$inspected") || fail "cannot inspect runner ancestry permissions"
+        case "$inspected_owner:$inspected_mode" in
+            *[!0-9:]* | *:*[!0-7]* | :* | *:) fail "runner ancestry ownership or permissions are invalid" ;;
+        esac
+        if [ "$inspected_owner" -ne 0 ] && [ "$inspected_owner" -ne "$uid" ]; then
+            fail "runner ancestry must be owned by root or the installing operator"
+        fi
+        if [ $((0$inspected_mode & 022)) -ne 0 ]; then
+            fail "runner ancestry must not be writable by group or other users"
+        fi
+        if [ "$inspected" = / ]; then
+            break
+        fi
+        inspected=${inspected%/*}
+        if [ -z "$inspected" ]; then
+            inspected=/
+        fi
+    done
+}
+
+if [ "$#" -ne 1 ]; then
+    fail "usage: ./scripts/install-scheduler-launch-agent.sh <absolute-runner-path>"
+fi
+if [ "$(uname -s)" != Darwin ]; then
+    fail "launch-agent installation is supported only on macOS"
+fi
+
+runner=$1
+case "$runner" in
+    /*) ;;
+    *) fail "runner path must be absolute" ;;
+esac
+if [ ! -f "$runner" ] || [ ! -x "$runner" ] || [ -L "$runner" ]; then
+    fail "runner must be an executable regular file, not a symbolic link"
+fi
+uid=$(id -u)
+runner_owner=$(stat -f '%u' "$runner") || fail "cannot inspect runner ownership"
+runner_mode=$(stat -f '%Lp' "$runner") || fail "cannot inspect runner permissions"
+case "$runner_owner:$runner_mode" in
+    *[!0-9:]* | *:*[!0-7]* | :* | *:) fail "runner ownership or permissions are invalid" ;;
+esac
+if [ "$runner_owner" -ne "$uid" ]; then
+    fail "runner must be owned by the installing operator"
+fi
+if [ $((0$runner_mode & 022)) -ne 0 ]; then
+    fail "runner must not be writable by group or other users"
+fi
+require_trusted_ancestry "$runner"
+case "${HOME-}" in
+    /*) ;;
+    *) fail "HOME must be an absolute directory" ;;
+esac
+
+agent_directory=$HOME/Library/LaunchAgents
+agent_path=$agent_directory/$label.plist
+if [ -e "$agent_path" ] || [ -L "$agent_path" ]; then
+    fail "launch agent already exists; remove it explicitly before reinstalling"
+fi
+
+umask 077
+mkdir -p "$agent_directory"
+temporary_path=$(mktemp "$agent_directory/.scheduler.XXXXXX") || fail "cannot create plist"
+cleanup() {
+    if [ -n "$temporary_path" ] && [ -e "$temporary_path" ]; then
+        unlink "$temporary_path"
+    fi
+}
+trap cleanup EXIT HUP INT TERM
+
+plutil -create xml1 "$temporary_path"
+plutil -insert Label -string "$label" "$temporary_path"
+plutil -insert ProgramArguments -array "$temporary_path"
+plutil -insert ProgramArguments.0 -string "$runner" "$temporary_path"
+plutil -insert RunAtLoad -bool true "$temporary_path"
+plutil -insert StartInterval -integer "$interval_seconds" "$temporary_path"
+plutil -insert ProcessType -string Background "$temporary_path"
+plutil -lint "$temporary_path" >/dev/null
+chmod 600 "$temporary_path"
+if ! ln "$temporary_path" "$agent_path"; then
+    fail "launch-agent path appeared during installation"
+fi
+unlink "$temporary_path"
+temporary_path=
+
+if ! launchctl bootstrap "gui/$uid" "$agent_path"; then
+    unlink "$agent_path"
+    fail "launchctl refused the agent; generated plist was removed"
+fi
+trap - EXIT HUP INT TERM
+printf 'Installed %s\n' "$agent_path"

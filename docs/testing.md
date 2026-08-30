@@ -46,6 +46,15 @@ owning vertical slice exists. Live model, public-source, and Alpaca paper rehear
 operator actions outside deterministic CI and do not certify deterministic correctness or investment
 validity.
 
+The scheduler journey uses the code-pinned NYSE calendar, an injected aware clock, recorded source
+and model adapters, private temporary state, and fresh processes. Focused tests own holiday,
+early-close, DST, explicit host-zone normalization, naive and unsupported time refusal, bounded
+lateness, missed-session behavior, interruption recovery across calendar expiry, status visibility
+after expiry, bounded post-expiry missed classification and backlog visibility without lifecycle
+effects, policy conflict, append-only corruption, and concurrent live-instance serialization.
+CI never waits for wall time, loads a LaunchAgent, consults a provider calendar, or infers liveness
+from a process heartbeat.
+
 ## Selection
 
 Run the narrowest relevant node while iterating:
@@ -215,14 +224,17 @@ The implemented candidate inventory is:
 | `adapters/sqlite_memory.py` | Non-critical belief SQL mechanics and authoritative-history validation; integration, concurrency, corruption, and coverage evidence |
 | `adapters/sqlite_portfolio.py` | Safety-supporting append-only portfolio-result persistence, exact retry, canonical reconstruction, and lifecycle-reference validation; integration, corruption, and coverage evidence |
 | `adapters/sqlite_production_research.py` | Safety-supporting production intent-before-effect durability, append-only observation reconstruction, and lifecycle-reference validation; integration, interruption, corruption, and coverage evidence |
+| `adapters/sqlite_scheduler.py` | Safety-supporting scheduler intent-before-effect durability, exact-policy reconstruction, concurrent-process serialization, and private-root validation with no financial lifecycle authority; integration, interruption, concurrency, corruption, and system-journey evidence |
 | `application/governance.py` | Non-critical Constitution scheduling and resolution orchestration with no packet or broker authority; unit, integration, and critical-coverage evidence |
 | `application/lifecycle.py` | Non-critical orchestration through Constitution pinning, evidence capture, bounded attention, production research, Belief Event admission, and the portfolio-owned construction interface with no sizing or broker authority; unit, integration, system-journey, and critical-coverage evidence |
 | `application/memory.py` | Non-critical Record orchestration; integration, system-journey, and coverage evidence |
 | `application/replay.py` | Safety-supporting hostile-input admission and Lab replay orchestration with no production or execution authority; unit, contract, integration, interruption, and coverage evidence |
+| `application/scheduler.py` | Safety-supporting due-set and public-lifecycle orchestration with no research-stage, portfolio, packet, signing, broker, or credential authority; integration, interruption, concurrency, and system-journey evidence |
 | `domain/attention.py` | Safety-supporting, non-authorizing admission to bounded research capacity with no stance, sizing, packet, order, or execution effect; unit, property, integration, hostile-input, and coverage evidence |
 | `domain/governance.py` | Non-critical Constitution validation, reconstruction, idempotency, and session-bound regime selection with no packet or broker authority; unit, hostile-input, integration, and critical-coverage evidence |
 | `domain/identity.py` | Non-critical current identity serialization with no implemented packet or broker effect; unit, property, contract, and coverage evidence |
 | `domain/lifecycle.py` | Non-authorizing lifecycle, evidence-intent, and reconstruction decisions; unit, state-machine, integration, corruption, and coverage evidence |
+| `domain/scheduler.py` | Safety-supporting pinned-calendar, policy, and session-window decisions with no portfolio, packet, broker, or execution authority; unit, calendar-boundary, integration, and coverage evidence |
 | `domain/temporal.py` | Non-critical time and provenance validation; unit, property, contract, and coverage evidence |
 | `domain/universe.py` | Non-critical universe construction; unit, property, integration, contract, and coverage evidence |
 | `evidence/capture.py` | Non-critical evidence identity, availability, staleness, and capture policy; unit, integration, contract, corruption, and coverage evidence |
@@ -232,6 +244,7 @@ The implemented candidate inventory is:
 | `entrypoints/lifecycle.py` | Non-critical composition; integration, system-journey, architecture, and coverage evidence |
 | `entrypoints/memory.py` | Non-critical Record composition; integration, system-journey, architecture, and coverage evidence |
 | `entrypoints/lab.py` | Safety-supporting isolated Lab composition and production-root refusal; integration, architecture, and coverage evidence |
+| `entrypoints/scheduler.py` | Safety-supporting scheduler composition and fail-closed policy/storage admission with no credential or private-stage capability; integration, architecture, and system-journey evidence |
 | `memory/admission.py` | Critical canonical Belief Event types, hostile-input parsing, serialization, and evidence admission; unit, contract, refusal, and mutation evidence |
 | `memory/beliefs.py` | Non-critical typed belief history, receipt, and bounded as-of graph projection; unit, property, contract, integration, corruption, and coverage evidence |
 | `memory/reducer.py` | Critical append-only belief-transition reducer, projection identity, and ledger commitment; unit, property, refusal, and mutation evidence |
