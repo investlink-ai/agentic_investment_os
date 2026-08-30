@@ -249,7 +249,7 @@ def test_lifecycle_journey_resumes_replays_and_rebuilds_status_across_processes(
 
     expected_cycle = (
         '{"asset_class":"us_equity","cycle_type":"market_session",'
-        '"payload":{"trading_date":"2026-08-21"},'
+        '"payload":{"trading_date":"2026-08-24"},'
         '"payload_schema_version":1,"schema_version":1}'
     )
     assert expected_status == StatusObservation(

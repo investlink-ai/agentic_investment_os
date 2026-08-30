@@ -216,7 +216,7 @@ The implemented candidate inventory is:
 | Candidate source | Classification and evidence owner |
 | --- | --- |
 | `adapters/decision_signing.py` | Safety-supporting typed HMAC signing and verification boundary with in-memory key isolation; unit, hostile-input, system-journey, and coverage evidence |
-| `adapters/decision_window.py` | Non-critical composition-time derivation of the fixed short validity interval from an injected authoritative instant; unit, lifecycle, and coverage evidence |
+| `adapters/decision_window.py` | Critical admission of the pinned pre-open publication window and derivation of the post-open execution deadline; unit, lifecycle, system-journey, coverage, and mutation evidence |
 | `adapters/filesystem_evidence.py` | Non-critical Evidence Vault filesystem mechanics and append-only observation durability; integration, corruption, and coverage evidence |
 | `adapters/recorded_evidence.py` | Non-critical recorded-boundary validation and normalization; contract, hostile-input, and coverage evidence |
 | `adapters/recorded_model.py` | Safety-supporting scripted model-call idempotency and recorded resource observations; contract, interruption, and coverage evidence |
@@ -224,7 +224,7 @@ The implemented candidate inventory is:
 | `adapters/sqlite_lab.py` | Safety-supporting namespace isolation, intent-before-effect durability, append-only reconstruction, and private-root validation; integration, interruption, corruption, and coverage evidence |
 | `adapters/sqlite_lifecycle.py` | Non-critical SQL mechanics and non-authorizing lifecycle and Constitution-governance durability; integration, corruption, architecture, and critical-coverage evidence |
 | `adapters/sqlite_memory.py` | Non-critical belief SQL mechanics and authoritative-history validation; integration, concurrency, corruption, and coverage evidence |
-| `adapters/sqlite_decision.py` | Safety-supporting atomic decision-plus-packet persistence, signature and semantic reconstruction, exact retry, concurrency, expiry-at-publication, append-only history, and lifecycle-reference validation; integration, interruption, corruption, and coverage evidence |
+| `adapters/sqlite_decision.py` | Critical atomic decision-plus-packet admission and persistence, signature and semantic reconstruction, exact retry, concurrency, expiry-at-publication, append-only history, and lifecycle-reference validation; integration, interruption, corruption, coverage, and mutation evidence |
 | `adapters/sqlite_portfolio.py` | Safety-supporting append-only portfolio-result persistence, exact retry, canonical reconstruction, and lifecycle-reference validation; integration, corruption, and coverage evidence |
 | `adapters/sqlite_production_research.py` | Safety-supporting production intent-before-effect durability, append-only observation reconstruction, and lifecycle-reference validation; integration, interruption, corruption, and coverage evidence |
 | `adapters/sqlite_scheduler.py` | Safety-supporting scheduler intent-before-effect durability, exact-policy reconstruction, concurrent-process serialization, and private-root validation with no financial lifecycle authority; integration, interruption, concurrency, corruption, and system-journey evidence |
@@ -266,12 +266,13 @@ The implemented candidate inventory is:
 `tool.mutmut.only_mutate` is the single static mutation source allowlist. It contains exact implemented
 critical module paths, never package globs or an engine exclusion list. `source_paths = ["src"]` is only
 the engine's copy root and confers no mutation scope. The current exact entries are the critical
-`memory/admission.py`, `memory/reducer.py`, `portfolio/construction.py`, `portfolio/publication.py`, and
-`portfolio/shadows.py`
-kernels and the empty
-`execution` and `portfolio` initializers. Their exact test selection is `tests/unit/test_beliefs.py`,
+`adapters/decision_window.py`, `adapters/sqlite_decision.py`, `memory/admission.py`, `memory/reducer.py`,
+`portfolio/construction.py`, `portfolio/publication.py`, and `portfolio/shadows.py` modules plus the
+empty `execution` and `portfolio` initializers. Their exact test selection is
+`tests/integration/test_decision_publication.py`, `tests/unit/test_beliefs.py`,
 `tests/contract/test_belief_event_contract.py`, `tests/contract/test_decision_packet_contract.py`, and
-`tests/unit/test_portfolio.py`; the scaffold files add no unrelated tests. The separate
+`tests/unit/test_decision_window.py` and `tests/unit/test_portfolio.py`; the scaffold files add no
+unrelated tests. The separate
 `tool.mutation_gate` inventory names the authority-owning capability roots and any callable module a
 human has classified as non-critical; it never adds or removes a mutation source. A callable below
 those roots that appears in neither exact classification fails the gate, so a scaffold exemption
@@ -338,6 +339,9 @@ evidence. A scenario becomes mandatory when its owning behavior is implemented.
   exact durable decision and risk envelope. Hostile missing, extra, unknown, malformed,
   hash-inconsistent, wrongly signed, Lab, shadow, symbol-keyed, implicit-unit, disabled-asset, changed-
   scope, changed-policy, or expired material produces no visible packet.
+- Packet publication admits only the pinned fifteen-minute pre-open window and derives the immutable
+  expiry at thirty minutes after open across UTC-offset and calendar boundaries. Early, at-open,
+  post-open, weekend, holiday, or unsupported-year publication produces no packet.
 - The Decision Record and optional packet become visible in one transaction. Interruptions on both
   sides of that transaction, reopen, exact retry, projection rebuild, and concurrent equivalent
   delivery return the same identities without another row; changed decision or authorization

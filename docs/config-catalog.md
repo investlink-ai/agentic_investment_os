@@ -222,12 +222,14 @@ key reference must remain typed and non-secret and may resolve key bytes only at
 boundary. The packet carries only `broker=alpaca`, `environment=paper`, and a caller-supplied SHA-256
 scope identity; a real provider account identifier is invalid packet material.
 
-The default lifecycle composition derives a five-minute packet validity interval from its injected
-clock. The interval length and HMAC scheme are code-owned safety constants, not operator-tunable
-defaults. The fixed benchmark identity is the canonical Alpaca-paper SPY catalog identity required by
-the official V0 benchmark policy. Scheduler alignment with the approved pre-open freeze and any
-future change to the validity-window source require their owning implementation slice and authority
-document update; ambient local time is never a fallback.
+The default lifecycle composition admits packet publication only from fifteen minutes before the
+pinned regular-session open until, but not including, the open. It sets expiry to thirty minutes after
+that open so the independent executor can perform its approved five-to-thirty-minute post-open
+validation without refreshing immutable authority. The freeze, deadline, pinned calendar, and HMAC
+scheme are code-owned safety constants, not operator-tunable defaults. An unsupported session or an
+early or post-open publication attempt produces the typed invalid-validity-window refusal and no
+packet. The fixed benchmark identity is the canonical Alpaca-paper SPY catalog identity required by
+the official V0 benchmark policy; ambient local time is never a fallback.
 
 ## Constitution governance composition
 
@@ -271,6 +273,11 @@ mode `0700`. The lock serializes live processes and is released by the operating
 does not record status or replace the append-only ledger. The host timezone, wall-clock defaults below
 composition, launch interval, provider calendars, and lifecycle internals are not policy sources.
 See [scheduler operations](scheduler-operations.md) for installation and recovery.
+
+The generic scheduler-policy ranges do not widen packet timing authority. The current complete
+publication path uses `advance_minutes_before_open = 15` and a lateness bound below fifteen minutes;
+the lifecycle validity-window source independently refuses packet publication outside its pre-open
+window.
 
 ## Research Lab composition
 

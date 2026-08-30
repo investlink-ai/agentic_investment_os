@@ -28,6 +28,11 @@ Capabilities expose lifecycle outcomes, not internal stages; evidence, beliefs, 
 outcomes remain append-only and reconstructable. Deterministic code alone owns portfolio, risk,
 packet, order, and reconciliation decisions; invalid required state produces a durable refusal.
 
+The scheduler reaches public `Advance` and `Status` through a process client. The separately composed
+operating-system process owns lifecycle adapters, the model port, packet signing and verification,
+and account scope; none is imported into or retained by the scheduler process. A callable that closes
+over an in-process lifecycle object does not satisfy this process boundary.
+
 Navigate by [topology and trust](#system-topology), [authority and effects](#authority-and-trust),
 [module and capability seams](#module-ownership), [lifecycle](#session-lifecycle),
 [durable state](#durable-state), [time and configuration](#temporal-semantics), and

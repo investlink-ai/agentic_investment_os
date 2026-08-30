@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, assert_never
 
-from agentic_investment_os.adapters.decision_window import ShortLivedDecisionPacketWindowSource
+from agentic_investment_os.adapters.decision_window import PreOpenDecisionPacketWindowSource
 from agentic_investment_os.adapters.filesystem_evidence import FilesystemEvidenceVault
 from agentic_investment_os.adapters.recorded_evidence import RecordedEvidenceSource
 from agentic_investment_os.adapters.recorded_portfolio import RecordedPortfolioSource
@@ -162,7 +162,7 @@ def configure_advance(  # noqa: PLR0913 - composition names each untrusted bound
             portfolio_ledger=portfolio_ledger,
             decision_ledger=decision_ledger,
             decision_signer=decision_signer,
-            decision_window_source=ShortLivedDecisionPacketWindowSource(),
+            decision_window_source=PreOpenDecisionPacketWindowSource(),
             decision_account_scope=decision_account_scope,
             benchmark_identity=_OFFICIAL_BENCHMARK_IDENTITY,
         )

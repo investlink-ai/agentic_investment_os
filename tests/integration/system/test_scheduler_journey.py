@@ -9,7 +9,7 @@ from pathlib import Path
 REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
 PROCESS_MODULE = "tests.integration.system._scheduler_process"
 SHA256_HEX_LENGTH = 64
-COMPLETED_LIFECYCLE_EVENT_COUNT = 10
+COMPLETED_LIFECYCLE_EVENT_COUNT = 11
 
 
 def _run(state_root: Path) -> subprocess.CompletedProcess[str]:
@@ -47,8 +47,9 @@ def test_scheduler_invokes_and_replays_public_lifecycle_across_processes(
     fields = first.stdout.split("\t")
     assert len(fields[0]) == SHA256_HEX_LENGTH
     assert fields[1] == "completed"
-    assert fields[2] == "2026-08-21T12:45:00.000000+00:00"
-    assert fields[3] == "2026-08-24T12:30:00.000000+00:00"
+    assert fields[2] == "2026-08-24T13:15:00.000000+00:00"
+    assert fields[3] == "2026-08-25T13:15:00.000000+00:00"
+    assert fields[4] == "true"
 
     scheduler_database = state_root / "scheduler.sqlite3"
     lifecycle_database = state_root / "lifecycle.sqlite3"

@@ -149,6 +149,7 @@ __all__ = ("Advance", "Clock", "ConstitutionResolver", "Status")
 
 _INCOMPLETE_CHECKPOINT_RESULT = "lifecycle ledger returned an incomplete checkpoint result"
 _CLOCK_INVALID = "lifecycle clock must return a timezone-aware instant representable in UTC"
+_CLOCK_REGRESSED = "lifecycle clock precedes the latest durable checkpoint"
 _UNIVERSE_SOURCE_INVALID = "universe source returned a noncanonical absolute instant"
 _MEMORY_REFUSAL_CONFLICT = "memory refusal observation conflicts with the accepted event prefix"
 
@@ -404,13 +405,22 @@ class Advance:
                 if replayed_publication is not None:
                     command = replace(command, decision_publication=replayed_publication)
                     continue
-                cycle_result = self.portfolio_ledger.load_cycle(
-                    PortfolioCheckpointReference(
-                        decision.pinned_run_identity.run_id,
-                        decision.portfolio_checkpoint,
-                        decision.portfolio_checkpoint.recorded_at,
+                try:
+                    cycle_result = self.portfolio_ledger.load_cycle(
+                        PortfolioCheckpointReference(
+                            decision.pinned_run_identity.run_id,
+                            decision.portfolio_checkpoint,
+                            decision.portfolio_checkpoint.recorded_at,
+                        )
                     )
-                )
+                except InvalidLifecycleStateError:
+                    command = replace(
+                        command,
+                        decision_publication=(
+                            LifecycleDecisionPublicationRefusalReason.INVALID_PORTFOLIO
+                        ),
+                    )
+                    continue
                 replayed_run = self.production_research.replay_run(
                     run_id=decision.pinned_run_identity.run_id,
                     dossier_checkpoint=decision.dossier_checkpoint,
@@ -421,13 +431,7 @@ class Advance:
                     raise InvalidLifecycleStateError(_INCOMPLETE_CHECKPOINT_RESULT)
                 issued_at = _clock_instant(self.clock)
                 if issued_at.value < decision.portfolio_checkpoint.recorded_at.value:
-                    command = replace(
-                        command,
-                        decision_publication=(
-                            LifecycleDecisionPublicationRefusalReason.INVALID_VALIDITY_WINDOW
-                        ),
-                    )
-                    continue
+                    raise LifecyclePersistenceError(_CLOCK_REGRESSED)
                 validity_window = self.decision_window_source.window_for(
                     command.request.session,
                     issued_at,
@@ -466,13 +470,22 @@ class Advance:
                     )
                     continue
                 recorded_at = visible_at
+                admitted = self.decision_ledger.record_publication(
+                    decision.pinned_run_identity.run_id,
+                    publication,
+                    recorded_at,
+                )
+                if isinstance(admitted, DecisionPublicationRefusalReason):
+                    command = replace(
+                        command,
+                        decision_publication=LifecycleDecisionPublicationRefusalReason(
+                            admitted.value
+                        ),
+                    )
+                    continue
                 command = replace(
                     command,
-                    decision_publication=self.decision_ledger.record_publication(
-                        decision.pinned_run_identity.run_id,
-                        publication,
-                        recorded_at,
-                    ),
+                    decision_publication=admitted,
                 )
                 continue
             # Strict mypy proves this line unreachable; removing it is runtime-equivalent.

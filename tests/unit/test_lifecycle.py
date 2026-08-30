@@ -9,7 +9,6 @@ from typing import TYPE_CHECKING, cast, override
 
 import pytest
 
-from agentic_investment_os.adapters.decision_window import ShortLivedDecisionPacketWindowSource
 from agentic_investment_os.adapters.recorded_portfolio import RecordedPortfolioSource
 from agentic_investment_os.adapters.recorded_universe import RecordedUniverseSource
 from agentic_investment_os.application.lifecycle import Advance
@@ -93,6 +92,9 @@ from agentic_investment_os.evidence.capture import EvidenceKind, EvidencePersist
 from agentic_investment_os.portfolio.construction import (
     PortfolioInputSet,
     PortfolioRefusalReason,
+)
+from agentic_investment_os.portfolio.publication import (
+    DecisionPacketValidityWindow,
 )
 from agentic_investment_os.portfolio.publication import (
     DecisionPublicationRefusalReason as PacketPublicationRefusalReason,
@@ -362,6 +364,22 @@ class _RefusingDecisionWindowSource:
         return self.refusal
 
 
+@dataclass(frozen=True, slots=True)
+class _RelativeDecisionWindowSource:
+    """Keep lifecycle-unit timing independent from the production session calendar."""
+
+    def window_for(
+        self,
+        cycle: MarketSession,
+        recorded_at: UtcInstant,
+    ) -> DecisionPacketValidityWindow:
+        return DecisionPacketValidityWindow(
+            cycle,
+            recorded_at,
+            UtcInstant(recorded_at.value + timedelta(minutes=5)),
+        )
+
+
 def _advance(
     ledger: LifecycleLedger,
     portfolio_history: _FixturePortfolioHistory | None = None,
@@ -396,7 +414,7 @@ def _advance(
         ),
         decision_ledger=cast("DecisionPublicationLedger", _FixtureDecisionHistory()),
         decision_signer=TEST_PACKET_CRYPTOGRAPHY,
-        decision_window_source=ShortLivedDecisionPacketWindowSource(),
+        decision_window_source=_RelativeDecisionWindowSource(),
         decision_account_scope=TEST_DECISION_ACCOUNT_SCOPE,
         benchmark_identity=EquityInstrumentIdentity(
             "alpaca-paper",

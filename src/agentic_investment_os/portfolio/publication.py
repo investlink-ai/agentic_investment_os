@@ -195,7 +195,7 @@ class DecisionPublicationLedger(Protocol):
         run_id: str,
         result: DecisionPublicationResult,
         recorded_at: UtcInstant,
-    ) -> DecisionCheckpoint: ...
+    ) -> DecisionCheckpoint | DecisionPublicationRefusalReason: ...
 
     def replay_publication(
         self,

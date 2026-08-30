@@ -8,17 +8,23 @@ wake, interruption, and retry all rebuild due work from the append-only schedule
 ## Prepare the runner
 
 Create an operator-owned executable outside the repository. It must load complete non-secret runtime
-and scheduler policy, compose the production `Advance` and `Status` capabilities, pass both to
-`configure_scheduler`, invoke the returned `Scheduler`, and render its bounded receipt or
-`scheduler.status()`. Keep the runner, configuration, runtime root, and logs untracked. Do not put
-broker or model credentials, account identifiers, generated state, or a repository working directory
-in the runner or launch-agent plist.
+and scheduler policy, compose process clients for the public `Advance` and `Status` capabilities,
+pass those clients to `configure_scheduler`, invoke the returned `Scheduler`, and render its bounded
+receipt or `scheduler.status()`. The clients invoke a separately composed Investment Operating System
+process; they must not close over or retain an in-process lifecycle object, signer, verifier, account
+scope, model adapter, or private lifecycle dependency. Keep the runner, configuration, runtime root,
+and logs untracked. Do not put broker or model credentials, signing material, account identifiers,
+generated state, or a repository working directory in the runner or launch-agent plist.
 
 The scheduler policy contract is defined in the
 [configuration catalog](config-catalog.md#market-session-scheduler-policy). The runner must treat a
 configuration refusal, unsupported calendar year, persistence error, started or resumed session, missed
 session, or refused lifecycle receipt as an operator-visible failure. Lifecycle liveness still comes
 only from public `Status`; a successful launch or resident process is not liveness evidence.
+For the implemented packet-publication lifecycle, configure the scheduler fifteen minutes before
+the regular open with less than fifteen minutes of lateness. Publication independently refuses any
+call before that freeze or at or after the open, so a broader scheduler policy cannot create a stale
+or post-open packet.
 
 ## Install on macOS
 

@@ -1,4 +1,4 @@
-"""Resolve a short explicit DecisionPacket validity window from the injected clock."""
+"""Resolve the code-owned pre-open DecisionPacket validity window."""
 
 from __future__ import annotations
 
@@ -6,28 +6,40 @@ from dataclasses import dataclass
 from datetime import timedelta
 from typing import TYPE_CHECKING
 
+from agentic_investment_os.domain.scheduler import build_session_window
 from agentic_investment_os.domain.temporal import UtcInstant
-from agentic_investment_os.portfolio.publication import DecisionPacketValidityWindow
+from agentic_investment_os.portfolio.publication import (
+    DecisionPacketValidityWindow,
+    DecisionPublicationRefusalReason,
+)
 
 if TYPE_CHECKING:
     from agentic_investment_os.domain.identity import MarketSession
 
-__all__ = ("ShortLivedDecisionPacketWindowSource",)
+__all__ = ("PreOpenDecisionPacketWindowSource",)
 
-_PACKET_LIFETIME = timedelta(minutes=5)
+_FREEZE_MINUTES_BEFORE_OPEN = 15
+_EXECUTION_DEADLINE_AFTER_OPEN = timedelta(minutes=30)
 
 
 @dataclass(frozen=True, slots=True)
-class ShortLivedDecisionPacketWindowSource:
-    """Expire publication authority five minutes after its durable issue instant."""
+class PreOpenDecisionPacketWindowSource:
+    """Admit publication only from the approved freeze until the regular open."""
 
     def window_for(
         self,
         cycle: MarketSession,
         recorded_at: UtcInstant,
-    ) -> DecisionPacketValidityWindow:
+    ) -> DecisionPacketValidityWindow | DecisionPublicationRefusalReason:
+        session = build_session_window(cycle, _FREEZE_MINUTES_BEFORE_OPEN, 0)
+        if (
+            session is None
+            or recorded_at.value < session.missed_at.value
+            or recorded_at.value >= session.opens_at.value
+        ):
+            return DecisionPublicationRefusalReason.INVALID_VALIDITY_WINDOW
         return DecisionPacketValidityWindow(
             cycle,
             recorded_at,
-            UtcInstant(recorded_at.value + _PACKET_LIFETIME),
+            UtcInstant(session.opens_at.value + _EXECUTION_DEADLINE_AFTER_OPEN),
         )

@@ -19,6 +19,8 @@ import pytest
 from hypothesis import strategies as st
 from hypothesis.stateful import RuleBasedStateMachine, invariant, precondition, rule
 
+from agentic_investment_os.adapters.decision_signing import HmacSha256DecisionPacketSigner
+from agentic_investment_os.adapters.sqlite_decision import SQLiteDecisionPublicationLedger
 from agentic_investment_os.adapters.sqlite_lifecycle import (
     RuntimeRootRefusal,
     SQLiteLifecycleLedger,
@@ -63,6 +65,7 @@ from agentic_investment_os.domain.lifecycle import (
     LifecycleDecision,
     LifecycleEvent,
     LifecycleEventKind,
+    LifecycleLiveness,
     LifecyclePersistenceError,
     LifecyclePhase,
     LifecycleStatus,
@@ -1999,31 +2002,182 @@ def test_decision_publication_refuses_a_backward_clock_without_an_orphan_packet(
         packet_capable_universe=True,
     )
 
-    receipt = capability(
-        cycle=_cycle_payload("2026-08-21"),
-        mode="champion",
-        idempotency_key=f"backward-publication-clock-{regression_point}",
-    )
+    request = {
+        "cycle": _cycle_payload("2026-08-21"),
+        "mode": "champion",
+        "idempotency_key": f"backward-publication-clock-{regression_point}",
+    }
+    if regression_point == "before_signing":
+        with pytest.raises(
+            LifecyclePersistenceError,
+            match="lifecycle clock precedes the latest durable checkpoint",
+        ):
+            capability(**request)
+        receipt = None
+    else:
+        receipt = capability(**request)
 
-    assert receipt.failure_reason is AdvanceFailureReason.DECISION_PUBLICATION_FAILED
-    assert receipt.decision_checkpoint is None
     database = state_root / "lifecycle.sqlite3"
     with sqlite3.connect(database) as connection:
         assert connection.execute("SELECT COUNT(*) FROM decision_publications").fetchone() == (0,)
         refusal = connection.execute(
             "SELECT decision_publication_refusal, recorded_at FROM advance_refusals"
         ).fetchone()
-    assert refusal == (
-        PacketPublicationRefusalReason.INVALID_VALIDITY_WINDOW.value,
-        UtcInstant.from_datetime(started_at).isoformat(),
-    )
+    if regression_point == "before_signing":
+        assert refusal is None
+    else:
+        assert receipt is not None
+        assert receipt.failure_reason is AdvanceFailureReason.DECISION_PUBLICATION_FAILED
+        assert receipt.decision_checkpoint is None
+        assert refusal == (
+            PacketPublicationRefusalReason.INVALID_VALIDITY_WINDOW.value,
+            UtcInstant.from_datetime(started_at).isoformat(),
+        )
     assert _events(database)[-1] == ("portfolio_constructed", "ConstructPortfolio")
     status = configure_status(
         (ConfigurationSource("test", runtime_configuration(state_root)),),
         repository_root=REPOSITORY_ROOT,
     )
     assert isinstance(status, Status)
-    assert status().durable_reason is AdvanceFailureReason.DECISION_PUBLICATION_FAILED
+    assert status().durable_reason is (
+        None
+        if regression_point == "before_signing"
+        else AdvanceFailureReason.DECISION_PUBLICATION_FAILED
+    )
+
+
+def test_retry_waits_for_clock_to_recover_after_the_portfolio_checkpoint(
+    tmp_path: Path,
+) -> None:
+    state_root = tmp_path / "runtime"
+    checkpoint_at = datetime(2026, 8, 21, 22, 0, tzinfo=UTC)
+    capability = _configure(
+        state_root,
+        clock=FixedClock(checkpoint_at),
+        cio_stance="long",
+        packet_capable_universe=True,
+    )
+    ledger = capability.ledger
+    assert isinstance(ledger, SQLiteLifecycleLedger)
+    interrupted = replace(
+        capability,
+        ledger=InterruptingLedger(ledger, "portfolio", "after"),
+    )
+    request = {
+        "cycle": _cycle_payload("2026-08-21"),
+        "mode": "champion",
+        "idempotency_key": "recover-after-clock-regression",
+    }
+
+    with pytest.raises(SimulatedInterruptionError):
+        interrupted(**request)
+    regressed = replace(
+        capability,
+        clock=FixedClock(checkpoint_at - timedelta(seconds=1)),
+    )
+    with pytest.raises(
+        LifecyclePersistenceError,
+        match="lifecycle clock precedes the latest durable checkpoint",
+    ):
+        regressed(**request)
+
+    database = state_root / "lifecycle.sqlite3"
+    with sqlite3.connect(database) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM decision_publications").fetchone() == (0,)
+        assert connection.execute("SELECT COUNT(*) FROM advance_refusals").fetchone() == (0,)
+    status = configure_status(
+        (ConfigurationSource("test", runtime_configuration(state_root)),),
+        repository_root=REPOSITORY_ROOT,
+    )
+    assert isinstance(status, Status)
+    incomplete = status()
+    assert incomplete.liveness is LifecycleLiveness.ACTIVE
+    assert incomplete.active_phase is not None
+    assert incomplete.active_phase.phase is LifecyclePhase.PUBLISH_DECISION
+    assert incomplete.durable_reason is None
+
+    recovered = replace(
+        capability,
+        clock=FixedClock(checkpoint_at + timedelta(seconds=1)),
+    )
+    receipt = recovered(**request)
+
+    assert receipt.recovery is AdvanceRecovery.RESUMED
+    assert receipt.failure_reason is None
+    assert receipt.decision_checkpoint is not None
+    with sqlite3.connect(database) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM decision_publications").fetchone() == (1,)
+        assert connection.execute("SELECT COUNT(*) FROM advance_refusals").fetchone() == (0,)
+
+
+def test_wrong_packet_verifier_is_a_durable_publication_refusal(tmp_path: Path) -> None:
+    state_root = tmp_path / "runtime"
+    capability = _configure(
+        state_root,
+        cio_stance="long",
+        packet_capable_universe=True,
+    )
+    database = state_root / "lifecycle.sqlite3"
+    invalid = replace(
+        capability,
+        decision_ledger=SQLiteDecisionPublicationLedger.open_existing(
+            database,
+            verifier=HmacSha256DecisionPacketSigner(b"wrong-synthetic-verification-key"),
+            portfolio_ledger=capability.portfolio_ledger,
+            benchmark_identity=capability.benchmark_identity,
+        ),
+    )
+
+    receipt = invalid(
+        cycle=_cycle_payload("2026-08-21"),
+        mode="champion",
+        idempotency_key="wrong-publication-verifier",
+    )
+
+    assert receipt.failure_reason is AdvanceFailureReason.DECISION_PUBLICATION_FAILED
+    assert receipt.decision_checkpoint is None
+    with sqlite3.connect(database) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM decision_publications").fetchone() == (0,)
+        assert connection.execute(
+            "SELECT decision_publication_refusal FROM advance_refusals"
+        ).fetchone() == (PacketPublicationRefusalReason.SIGNING_FAILED.value,)
+
+
+def test_missing_required_shadow_is_a_durable_publication_refusal(tmp_path: Path) -> None:
+    state_root = tmp_path / "runtime"
+    capability = _configure(
+        state_root,
+        cio_stance="long",
+        packet_capable_universe=True,
+    )
+    ledger = capability.ledger
+    assert isinstance(ledger, SQLiteLifecycleLedger)
+    interrupted = replace(
+        capability,
+        ledger=InterruptingLedger(ledger, "portfolio", "after"),
+    )
+    request = {
+        "cycle": _cycle_payload("2026-08-21"),
+        "mode": "champion",
+        "idempotency_key": "missing-shadow-at-publication",
+    }
+
+    with pytest.raises(SimulatedInterruptionError):
+        interrupted(**request)
+    database = state_root / "lifecycle.sqlite3"
+    with sqlite3.connect(database) as connection:
+        connection.execute("DROP TRIGGER portfolio_shadow_accounts_are_append_only_delete")
+        connection.execute("DELETE FROM portfolio_shadow_accounts WHERE account_kind = 'growth'")
+
+    receipt = capability(**request)
+
+    assert receipt.failure_reason is AdvanceFailureReason.DECISION_PUBLICATION_FAILED
+    assert receipt.decision_checkpoint is None
+    with sqlite3.connect(database) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM decision_publications").fetchone() == (0,)
+        assert connection.execute(
+            "SELECT decision_publication_refusal FROM advance_refusals"
+        ).fetchone() == (PacketPublicationRefusalReason.INVALID_PORTFOLIO.value,)
 
 
 def test_advance_captures_all_recorded_official_sources_without_network_access(

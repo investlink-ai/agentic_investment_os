@@ -6,7 +6,7 @@ import json
 import sqlite3
 from contextlib import closing
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Self
+from typing import TYPE_CHECKING, Self, TypeGuard
 
 from agentic_investment_os.domain.identity import (
     EquityInstrumentIdentity,
@@ -23,7 +23,9 @@ from agentic_investment_os.domain.lifecycle import (
 )
 from agentic_investment_os.domain.temporal import InvalidUtcInstantError, UtcInstant
 from agentic_investment_os.portfolio.publication import (
+    DecisionPacket,
     DecisionPacketVerifier,
+    DecisionPublicationRefusalReason,
     DecisionPublicationResult,
     PacketNoActionReason,
     parse_champion_decision_record,
@@ -68,7 +70,7 @@ class SQLiteDecisionPublicationLedger:
         run_id: str,
         result: DecisionPublicationResult,
         recorded_at: UtcInstant,
-    ) -> DecisionCheckpoint:
+    ) -> DecisionCheckpoint | DecisionPublicationRefusalReason:
         """Atomically insert or exactly replay a decision and optional complete packet."""
         if (
             not is_sha256(run_id)
@@ -78,25 +80,7 @@ class SQLiteDecisionPublicationLedger:
             or result.decision_record.evidence_cutoff.value > recorded_at.value
         ):
             raise InvalidLifecycleStateError(_INVALID_HISTORY)
-        cycle_result, portfolio_reference = self.portfolio_ledger.load_cycle_with_reference_for_run(
-            run_id
-        )
-        if (
-            recorded_at.value < portfolio_reference.recorded_at.value
-            or not validate_decision_publication(
-                result,
-                cycle_result,
-                benchmark_identity=self.benchmark_identity,
-            )
-        ):
-            raise InvalidLifecycleStateError(_INVALID_HISTORY)
         packet = result.packet
-        if packet is not None and (
-            parse_decision_packet(packet.to_payload(), verifier=self.verifier) != packet
-        ):
-            raise InvalidLifecycleStateError(_INVALID_HISTORY)
-        decision_json = _canonical_json(result.decision_record.to_payload())
-        packet_json = None if packet is None else _canonical_json(packet.to_payload())
         try:
             with closing(sqlite3.connect(self.database, timeout=5.0)) as connection, connection:
                 connection.execute("PRAGMA foreign_keys = ON")
@@ -117,11 +101,11 @@ class SQLiteDecisionPublicationLedger:
                     if not _same_publication_intent(stored_result, result):
                         raise InvalidLifecycleStateError(_INVALID_HISTORY)
                     return stored_reference.checkpoint
-                if result.packet is not None and (
-                    result.packet.issued_at.value > recorded_at.value
-                    or result.packet.expires_at.value <= recorded_at.value
-                ):
-                    raise InvalidLifecycleStateError(_INVALID_HISTORY)
+                refusal = self._fresh_publication_refusal(run_id, result, recorded_at)
+                if refusal is not None:
+                    return refusal
+                decision_json = _canonical_json(result.decision_record.to_payload())
+                packet_json = None if packet is None else _canonical_json(packet.to_payload())
                 checkpoint = _checkpoint(result, recorded_at)
                 connection.execute(
                     """
@@ -152,6 +136,38 @@ class SQLiteDecisionPublicationLedger:
             raise
         except (sqlite3.Error, TypeError, ValueError) as error:
             raise LifecyclePersistenceError(_CHECKPOINT_FAILED) from error
+
+    def _fresh_publication_refusal(
+        self,
+        run_id: str,
+        result: DecisionPublicationResult,
+        recorded_at: UtcInstant,
+    ) -> DecisionPublicationRefusalReason | None:
+        try:
+            cycle_result, portfolio_reference = (
+                self.portfolio_ledger.load_cycle_with_reference_for_run(run_id)
+            )
+        except InvalidLifecycleStateError:
+            return DecisionPublicationRefusalReason.INVALID_PORTFOLIO
+        if recorded_at.value < portfolio_reference.recorded_at.value:
+            return DecisionPublicationRefusalReason.INVALID_VALIDITY_WINDOW
+        if not validate_decision_publication(
+            result,
+            cycle_result,
+            benchmark_identity=self.benchmark_identity,
+        ):
+            return DecisionPublicationRefusalReason.INVALID_PORTFOLIO
+        packet = result.packet
+        if packet is not None and (
+            parse_decision_packet(packet.to_payload(), verifier=self.verifier) != packet
+        ):
+            return DecisionPublicationRefusalReason.SIGNING_FAILED
+        if packet is not None and (
+            packet.issued_at.value > recorded_at.value
+            or packet.expires_at.value <= recorded_at.value
+        ):
+            return DecisionPublicationRefusalReason.INVALID_VALIDITY_WINDOW
+        return None
 
     def replay_publication(
         self,
@@ -297,54 +313,39 @@ def _same_publication_intent(
     stored: DecisionPublicationResult,
     candidate: DecisionPublicationResult,
 ) -> bool:
-    if (
-        stored.decision_record != candidate.decision_record
-        or stored.no_action_reason != candidate.no_action_reason
-        or (stored.packet is None) != (candidate.packet is None)
-    ):
-        return False
-    if stored.packet is None or candidate.packet is None:
-        return True
-    left = stored.packet
-    right = candidate.packet
     return (
-        left.run_id,
-        left.cycle,
-        left.account_scope,
-        left.decision_record_id,
-        left.portfolio_policy_id,
-        left.cost_policy_id,
-        left.maximum_gross_weight,
-        left.maximum_name_weight,
-        left.maximum_sector_weight,
-        left.maximum_common_cause_weight,
-        left.maximum_correlation_cluster_weight,
-        left.instructions,
-        left.authority_scope,
-        left.risk_profile,
-        left.asset_class,
-        left.quantity_unit,
-        left.order_policy,
-        left.leverage_allowed,
+        stored.decision_record,
+        stored.no_action_reason,
+        _packet_authorization_intent(stored.packet),
     ) == (
-        right.run_id,
-        right.cycle,
-        right.account_scope,
-        right.decision_record_id,
-        right.portfolio_policy_id,
-        right.cost_policy_id,
-        right.maximum_gross_weight,
-        right.maximum_name_weight,
-        right.maximum_sector_weight,
-        right.maximum_common_cause_weight,
-        right.maximum_correlation_cluster_weight,
-        right.instructions,
-        right.authority_scope,
-        right.risk_profile,
-        right.asset_class,
-        right.quantity_unit,
-        right.order_policy,
-        right.leverage_allowed,
+        candidate.decision_record,
+        candidate.no_action_reason,
+        _packet_authorization_intent(candidate.packet),
+    )
+
+
+def _packet_authorization_intent(packet: DecisionPacket | None) -> tuple[object, ...] | None:
+    if packet is None:
+        return None
+    return (
+        packet.run_id,
+        packet.cycle,
+        packet.account_scope,
+        packet.decision_record_id,
+        packet.portfolio_policy_id,
+        packet.cost_policy_id,
+        packet.maximum_gross_weight,
+        packet.maximum_name_weight,
+        packet.maximum_sector_weight,
+        packet.maximum_common_cause_weight,
+        packet.maximum_correlation_cluster_weight,
+        packet.instructions,
+        packet.authority_scope,
+        packet.risk_profile,
+        packet.asset_class,
+        packet.quantity_unit,
+        packet.order_policy,
+        packet.leverage_allowed,
     )
 
 
@@ -374,9 +375,13 @@ def _hash(value: object) -> str:
 
 
 def _text(value: object) -> str:
-    if type(value) is not str or not value:
-        raise InvalidLifecycleStateError(_INVALID_HISTORY)
-    return value
+    if _is_non_empty_exact_text(value):
+        return value
+    raise InvalidLifecycleStateError(_INVALID_HISTORY)
+
+
+def _is_non_empty_exact_text(value: object) -> TypeGuard[str]:
+    return all((type(value) is str, bool(value)))
 
 
 def _canonical_json(value: object) -> str:

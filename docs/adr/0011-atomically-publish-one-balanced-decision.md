@@ -44,6 +44,11 @@ the bounded Decision Record identity, optional packet identity and expiry, publi
 typed no-action reason. `Advance` then terminates at `PublishDecision`; `Status` reports
 `AwaitExecution` and revalidates authoritative decision history.
 
+The code-owned validity source admits publication from the approved fifteen-minute pre-open freeze
+until the regular open and expires the packet thirty minutes after open. It derives those instants
+from the same pinned Market Session calendar used by scheduling. Early, post-open, unsupported, or
+otherwise invalid windows produce no packet.
+
 Signing and verification enter through typed ports assembled by the uncredentialed operating-system
 entrypoint. The concrete signer owns private key bytes only in memory, exposes a derived key identity,
 and has no broker, model, network, or account-identifier capability. Packet account scope is a
@@ -71,8 +76,9 @@ limit policy, order effects, reconciliation, and outcomes remain outside this pr
   revalidates the complete upstream portfolio cycle on replay and status.
 - An expired stored packet remains immutable historical authority and cannot be refreshed in place;
   later retry returns that exact publication.
-- Account-scope provisioning, signing-key lifecycle, scheduler alignment with the approved pre-open
-  freeze, and future executor verification remain explicit composition or later-stage obligations.
+- Account-scope provisioning, signing-key lifecycle, and future executor verification remain explicit
+  composition or later-stage obligations. Scheduler composition must use the approved pre-open
+  policy, while packet admission independently enforces the freeze and execution deadline.
 - Packet construction and admission are critical financial-authority behavior and require complete
   branch coverage, hostile-contract tests, mutation certification, atomicity, replay, concurrency,
   corruption, and process-boundary journey evidence.

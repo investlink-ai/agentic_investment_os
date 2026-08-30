@@ -22,7 +22,8 @@ from agentic_investment_os.domain.lifecycle import (
     LifecyclePhase,
 )
 from agentic_investment_os.entrypoints.configuration import ConfigurationSource
-from tests._decision import configure_advance, configure_status
+from tests._decision import configure_production_advance as configure_advance
+from tests._decision import configure_status
 from tests._governance import RecordedSessionEligibility
 from tests._production_research import (
     ValidProductionModel,
@@ -42,7 +43,7 @@ if TYPE_CHECKING:
 REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
 INTERRUPTED_EXIT_CODE = 75
 ARGUMENT_COUNT = 3
-SESSION = "2026-08-21"
+SESSION = "2026-08-24"
 MODE = "champion"
 IDEMPOTENCY_KEY = "lifecycle-system-journey"
 AUTHORITY_SENTINEL_NAMES = frozenset(
@@ -63,7 +64,7 @@ UNKNOWN_ACTION = "unknown system journey action"
 
 @dataclass(frozen=True, slots=True)
 class FixedClock:
-    instant: datetime = datetime(2026, 8, 21, 22, 0, tzinfo=UTC)
+    instant: datetime = datetime(2026, 8, 24, 13, 15, tzinfo=UTC)
 
     def now(self) -> datetime:
         return self.instant
