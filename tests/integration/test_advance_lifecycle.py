@@ -98,10 +98,13 @@ from agentic_investment_os.memory.beliefs import (
     BeliefGraphRefusalCode,
 )
 from agentic_investment_os.portfolio.publication import (
+    DecisionPacketValidityWindow,
+)
+from agentic_investment_os.portfolio.publication import (
     DecisionPublicationRefusalReason as PacketPublicationRefusalReason,
 )
 from tests._attention import attention_artifact
-from tests._decision import configure_advance, configure_status
+from tests._decision import configure_advance, configure_production_advance, configure_status
 from tests._evidence import (
     evidence_capture_checkpoint,
     materialized_evidence_capture_checkpoint,
@@ -839,6 +842,14 @@ class RefusingDecisionWindowSource:
     ) -> PacketPublicationRefusalReason:
         _ = (cycle, recorded_at)
         return self.refusal
+
+    def allows_publication(
+        self,
+        window: DecisionPacketValidityWindow,
+        recorded_at: UtcInstant,
+    ) -> bool:
+        _ = (window, recorded_at)
+        return False
 
 
 class NoncanonicalDatetime(datetime):
@@ -1587,13 +1598,14 @@ class _LifecycleReferenceModel:
         return _reference_fingerprint(material)
 
 
-def _configure(
+def _configure(  # noqa: PLR0913 - fixture exposes independent lifecycle dimensions.
     state_root: Path,
     *,
     clock: Clock | None = None,
     cio_stance: Literal["long", "hold", "abstain"] = "hold",
     evidence_fixture: Literal["complete", "required"] = "complete",
     packet_capable_universe: bool = False,
+    production_window: bool = False,
 ) -> Advance:
     if evidence_fixture == "complete":
         recorded_official_evidence: object = production_recorded_official_evidence()
@@ -1602,7 +1614,8 @@ def _configure(
     else:
         assert_never(evidence_fixture)
     universe = recorded_packet_universe() if packet_capable_universe else recorded_universe()
-    configured = configure_advance(
+    configure = configure_production_advance if production_window else configure_advance
+    configured = configure(
         (
             ConfigurationSource(
                 "test",
@@ -1982,6 +1995,68 @@ def test_decision_publication_refuses_a_packet_that_expires_during_signing(
     )
 
 
+def test_decision_publication_refuses_when_signing_crosses_the_regular_open(
+    tmp_path: Path,
+) -> None:
+    state_root = tmp_path / "runtime"
+    started_at = datetime(2026, 8, 24, 13, 15, tzinfo=UTC)
+    issued_at = datetime(2026, 8, 24, 13, 29, 59, tzinfo=UTC)
+    visible_at = datetime(2026, 8, 24, 13, 30, 1, tzinfo=UTC)
+    clock = SequenceClock((started_at, started_at, issued_at, visible_at))
+
+    receipt = _configure(
+        state_root,
+        clock=clock,
+        cio_stance="long",
+        packet_capable_universe=True,
+        production_window=True,
+    )(
+        cycle=_cycle_payload("2026-08-24"),
+        mode="champion",
+        idempotency_key="packet-crossed-regular-open",
+    )
+
+    assert receipt.failure_reason is AdvanceFailureReason.DECISION_PUBLICATION_FAILED
+    assert receipt.decision_checkpoint is None
+    with sqlite3.connect(state_root / "lifecycle.sqlite3") as connection:
+        assert connection.execute("SELECT COUNT(*) FROM decision_publications").fetchone() == (0,)
+
+
+@pytest.mark.parametrize(
+    "recorded_at",
+    [
+        datetime(2026, 8, 24, 13, 14, 59, tzinfo=UTC),
+        datetime(2026, 8, 24, 13, 30, tzinfo=UTC),
+        datetime(2026, 8, 24, 13, 31, tzinfo=UTC),
+    ],
+)
+def test_no_action_decision_is_retained_outside_the_packet_window(
+    tmp_path: Path,
+    recorded_at: datetime,
+) -> None:
+    state_root = tmp_path / "runtime"
+
+    receipt = _configure(
+        state_root,
+        clock=FixedClock(recorded_at),
+        production_window=True,
+    )(
+        cycle=_cycle_payload("2026-08-24"),
+        mode="champion",
+        idempotency_key=f"no-action-{int(recorded_at.timestamp())}",
+    )
+
+    assert receipt.disposition is AdvanceDisposition.NO_ACTION
+    assert receipt.failure_reason is None
+    assert receipt.decision_checkpoint is not None
+    assert receipt.decision_checkpoint.packet_id is None
+    assert receipt.decision_checkpoint.no_action_reason is NoActionReason.NO_AUTHORIZED_ADJUSTMENTS
+    with sqlite3.connect(state_root / "lifecycle.sqlite3") as connection:
+        assert connection.execute(
+            "SELECT packet_id, no_action_reason FROM decision_publications"
+        ).fetchall() == [(None, "no_authorized_adjustments")]
+
+
 @pytest.mark.parametrize("regression_point", ["before_signing", "after_signing"])
 def test_decision_publication_refuses_a_backward_clock_without_an_orphan_packet(
     tmp_path: Path,
@@ -2125,6 +2200,7 @@ def test_wrong_packet_verifier_is_a_durable_publication_refusal(tmp_path: Path) 
             verifier=HmacSha256DecisionPacketSigner(b"wrong-synthetic-verification-key"),
             portfolio_ledger=capability.portfolio_ledger,
             benchmark_identity=capability.benchmark_identity,
+            decision_window_source=capability.decision_window_source,
         ),
     )
 
@@ -4507,8 +4583,12 @@ def test_corrupt_attention_refusal_reason_fails_closed(
 
 def test_decision_publication_refusal_rebuilds_from_its_exact_reason(tmp_path: Path) -> None:
     state_root = tmp_path / "runtime"
-    capability = _configure(state_root)
-    refusal = PacketPublicationRefusalReason.SIGNING_FAILED
+    capability = _configure(
+        state_root,
+        cio_stance="long",
+        packet_capable_universe=True,
+    )
+    refusal = PacketPublicationRefusalReason.INVALID_VALIDITY_WINDOW
     refused = replace(
         capability,
         decision_window_source=RefusingDecisionWindowSource(refusal),

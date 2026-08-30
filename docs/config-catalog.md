@@ -227,9 +227,12 @@ pinned regular-session open until, but not including, the open. It sets expiry t
 that open so the independent executor can perform its approved five-to-thirty-minute post-open
 validation without refreshing immutable authority. The freeze, deadline, pinned calendar, and HMAC
 scheme are code-owned safety constants, not operator-tunable defaults. An unsupported session or an
-early or post-open publication attempt produces the typed invalid-validity-window refusal and no
-packet. The fixed benchmark identity is the canonical Alpaca-paper SPY catalog identity required by
-the official V0 benchmark policy; ambient local time is never a fallback.
+early, at-open, post-open, or wrongly expired packet produces the typed invalid-validity-window refusal
+and no publication. Composition shares one concrete calendar policy between lifecycle construction and
+the decision ledger; lifecycle rechecks after signing, while insertion, reopen, and `Status` recheck
+the authoritative recorded visibility. No-action Decision Records carry no packet timing authority and
+remain publishable outside that window. The fixed benchmark identity is the canonical Alpaca-paper SPY
+catalog identity required by the official V0 benchmark policy; ambient local time is never a fallback.
 
 ## Constitution governance composition
 

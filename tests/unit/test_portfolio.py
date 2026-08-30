@@ -135,6 +135,7 @@ def test_decision_publication_binds_complete_balanced_authority_and_signature() 
     assert publication.packet.asset_class == "us_equity"
     assert publication.packet.quantity_unit == "whole_share"
     assert publication.packet.order_policy == "regular_session_day_limit_v1"
+    assert publication.packet.maximum_fraction_of_median_dollar_volume == Decimal("0.01")
     assert tuple(item.identity for item in publication.packet.instructions) == (_AAPL, _SPY)
     assert (
         tuple(
@@ -239,6 +240,16 @@ def test_decision_publication_refuses_invalid_portfolio_window_identity_and_sign
             signer=_SyntheticPacketSigner(),
         )
         is DecisionPublicationRefusalReason.INVALID_PORTFOLIO
+    )
+    assert (
+        construct_decision_publication(
+            cycle,
+            benchmark_identity=_SPY,
+            account_scope=scope,
+            validity_window=None,
+            signer=_SyntheticPacketSigner(),
+        )
+        is DecisionPublicationRefusalReason.INVALID_VALIDITY_WINDOW
     )
     assert (
         construct_decision_publication(

@@ -29,25 +29,30 @@ typed no-action result without a packet.
 The packet is a closed, schema-versioned US-equity contract. It fixes Balanced paper authority,
 canonical instrument identities, whole-share units, increase-or-decrease direction, authorized and
 target weights, Target Band bounds and reason, the complete risk envelope, long-only and no-leverage
-policy, regular-session day-limit policy, cycle, validity window, non-secret account scope, Decision
-Record and policy identities, content identity, and signature. Hostile readers validate exact fields,
-canonical encodings, content identities, scope, signature, and semantic agreement with the durable
-portfolio cycle before admitting it.
+policy, the maximum one-percent fraction of median dollar volume, regular-session day-limit policy,
+cycle, validity window, non-secret account scope, Decision Record and policy identities, content
+identity, and signature. Hostile readers validate exact fields, canonical encodings, content
+identities, scope, signature, and semantic agreement with the durable portfolio cycle before admitting
+it.
 
 One SQLite transaction inserts the complete Decision Record and optional packet in a single
 append-only row. Unique run and cycle keys permit one publication per Market Session. A fresh packet
-must be unexpired when inserted. Exact replay reparses, verifies, and semantically reconstructs the
-stored publication without resigning it. Concurrent candidates with the same decision and
-authorization intent return the first complete winner even when issue time or signature differs;
-changed decision, account, risk, or instruction material conflicts. Lifecycle history retains only
-the bounded Decision Record identity, optional packet identity and expiry, publication time, and
-typed no-action reason. `Advance` then terminates at `PublishDecision`; `Status` reports
-`AwaitExecution` and revalidates authoritative decision history.
+must carry the exact official issue and expiry times and become durably visible before the regular
+open. Exact replay reparses, verifies, and semantically reconstructs the stored publication without
+resigning it, including revalidating its recorded visibility against the same calendar policy.
+Concurrent candidates with the same decision and authorization intent return the first complete
+winner even when issue time or signature differs; changed decision, account, risk, or instruction
+material conflicts. Lifecycle history retains only the bounded Decision Record identity, optional
+packet identity and expiry, publication time, and typed no-action reason. `Advance` then terminates at
+`PublishDecision`; `Status` reports `AwaitExecution` and revalidates authoritative decision history.
 
 The code-owned validity source admits publication from the approved fifteen-minute pre-open freeze
 until the regular open and expires the packet thirty minutes after open. It derives those instants
-from the same pinned Market Session calendar used by scheduling. Early, post-open, unsupported, or
-otherwise invalid windows produce no packet.
+from the same pinned Market Session calendar used by scheduling. The lifecycle uses that policy before
+signing and again after signing; the durable ledger applies it at insertion and reopen. Early,
+at-open, post-open, unsupported, wrongly expired, or otherwise invalid packet windows produce no
+publication. This timing gate applies only to executable packets: a valid no-action result retains and
+atomically publishes its Champion Decision Record outside the packet window.
 
 Signing and verification enter through typed ports assembled by the uncredentialed operating-system
 entrypoint. The concrete signer owns private key bytes only in memory, exposes a derived key identity,
@@ -78,7 +83,8 @@ limit policy, order effects, reconciliation, and outcomes remain outside this pr
   later retry returns that exact publication.
 - Account-scope provisioning, signing-key lifecycle, and future executor verification remain explicit
   composition or later-stage obligations. Scheduler composition must use the approved pre-open
-  policy, while packet admission independently enforces the freeze and execution deadline.
+  policy, while lifecycle and durable packet admission share that policy to enforce issue, visibility,
+  and execution-deadline times.
 - Packet construction and admission are critical financial-authority behavior and require complete
   branch coverage, hostile-contract tests, mutation certification, atomicity, replay, concurrency,
   corruption, and process-boundary journey evidence.

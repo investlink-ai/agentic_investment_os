@@ -32,6 +32,7 @@ from agentic_investment_os.portfolio.shadows import (
 _ADJUSTED_CLOSE_HISTORY_LENGTH = 21
 _WEEKEND_START_DAY = 5
 _SYNTHETIC_CUTOFF = UtcInstant.from_datetime(datetime(2026, 8, 21, 20, tzinfo=UTC))
+_SYNTHETIC_CYCLE = MarketSession(date(2026, 8, 21))
 SYNTHETIC_AAPL = EquityInstrumentIdentity("alpaca-paper", "equity-aapl", "NASDAQ")
 SYNTHETIC_SPY = EquityInstrumentIdentity("alpaca-paper", "equity-spy", "ARCA")
 SYNTHETIC_FORECAST_IDS = ("a" * 64, "b" * 64)
@@ -43,6 +44,7 @@ def synthetic_portfolio_cycle(
     with_authorized_adjustments: bool = True,
     with_authorized_decrease: bool = False,
     model_fingerprint: str = "6" * 64,
+    cycle: MarketSession = _SYNTHETIC_CYCLE,
 ) -> PortfolioCycleResult:
     """Construct one complete deterministic Balanced cycle and all required shadows."""
     resolutions = (
@@ -64,7 +66,7 @@ def synthetic_portfolio_cycle(
     return construct_portfolio_cycle(
         PortfolioConstructionRequest(
             run_id=run_id,
-            cycle=MarketSession(date(2026, 8, 21)),
+            cycle=cycle,
             evidence_cutoff=_SYNTHETIC_CUTOFF,
             data_regime="alpaca-basic-iex-v1",
             configuration_hash="2" * 64,

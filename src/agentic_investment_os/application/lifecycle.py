@@ -102,6 +102,7 @@ from agentic_investment_os.portfolio.construction import (
 from agentic_investment_os.portfolio.publication import (
     DecisionPacketAccountScope,
     DecisionPacketSigner,
+    DecisionPacketValidityWindow,
     DecisionPacketWindowSource,
     DecisionPublicationHistoryValidator,
     DecisionPublicationLedger,
@@ -437,16 +438,17 @@ class Advance:
                     issued_at,
                 )
                 publication: DecisionPublicationResult | DecisionPublicationRefusalReason
-                if isinstance(validity_window, DecisionPublicationRefusalReason):
-                    publication = validity_window
-                else:
-                    publication = construct_decision_publication(
-                        cycle_result,
-                        benchmark_identity=self.benchmark_identity,
-                        account_scope=self.decision_account_scope,
-                        validity_window=validity_window,
-                        signer=self.decision_signer,
-                    )
+                publication = construct_decision_publication(
+                    cycle_result,
+                    benchmark_identity=self.benchmark_identity,
+                    account_scope=self.decision_account_scope,
+                    validity_window=(
+                        None
+                        if isinstance(validity_window, DecisionPublicationRefusalReason)
+                        else validity_window
+                    ),
+                    signer=self.decision_signer,
+                )
                 if isinstance(publication, DecisionPublicationRefusalReason):
                     command = replace(
                         command,
@@ -460,7 +462,17 @@ class Advance:
                 if (
                     visible_at.value < issued_at.value
                     or visible_at.value < decision.portfolio_checkpoint.recorded_at.value
-                    or (packet is not None and packet.expires_at.value <= visible_at.value)
+                    or (
+                        packet is not None
+                        and not self.decision_window_source.allows_publication(
+                            DecisionPacketValidityWindow(
+                                packet.cycle,
+                                packet.issued_at,
+                                packet.expires_at,
+                            ),
+                            visible_at,
+                        )
+                    )
                 ):
                     command = replace(
                         command,

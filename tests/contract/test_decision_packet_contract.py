@@ -32,10 +32,10 @@ _SYNTHETIC_VERIFIER_FAILURE = "synthetic verifier failure"
 _EXPECTED_DECISION_RECORD_ID = "941d9ac80ee47f50de4951298ab03cb870d6b2c4b6d50fff3aed3946b845cdbb"
 _EXPECTED_BENCHMARK_STATE_ID = "8ea61f31ad62764e998529210ebd3cf728d54a9f06f1a383bf0b395a99ff0059"
 _EXPECTED_SOURCE_FINGERPRINT = "3d0dddbcf34ed07d35ada7aeb5bba0e4f0e181216f5d91144f9d08ce1ddffa05"
-_EXPECTED_PACKET_ID = "8bd4ccffc0529bd6ffdaee10cb8a82fe0b8e39f61f6b2fb90817ec1153bb9974"
-_EXPECTED_PACKET_CONTENT_HASH = "575c2b55f1fc4231d188f1d07fe8b3f501bd16b212d81f5a90a41a41c23b6084"
-_EXPECTED_SIGNATURE = "061bb6944ec7d8f31eb4cb9cab2d0335d4206a483ac880a2780c0965bcbde45f"
-_EXPECTED_SIGNING_BYTES_HASH = "e1e0f29c93407336e3ce408b09564a79ee3fe65c383883430604bf821b88b567"
+_EXPECTED_PACKET_ID = "f9dfc7008e2e0d27f7fa24e84f1c9c74a7c17dac940b9f52d381305f308f7f87"
+_EXPECTED_PACKET_CONTENT_HASH = "5b8ef16e3daaa4e2dcfa9b23bbc9a9c3301cb5a9e2c6add7dfa8fc67ff19ecb2"
+_EXPECTED_SIGNATURE = "d4893861cff3883b69b0b5effc35229d89d2dc01443022d5ee432de656f4dff0"
+_EXPECTED_SIGNING_BYTES_HASH = "69bd907713847966fd9345038a5e17330e376df7301f3b524123a2e95e5e5068"
 
 
 def _publication() -> DecisionPublicationResult:
@@ -99,6 +99,7 @@ def test_publication_contract_has_one_exact_material_and_signature_oracle() -> N
         "maximum_sector_weight": "0.25",
         "maximum_common_cause_weight": "0.25",
         "maximum_correlation_cluster_weight": "0.25",
+        "maximum_fraction_of_median_dollar_volume": "0.01",
     }
     assert validate_decision_publication(
         publication,
@@ -113,11 +114,7 @@ def test_no_action_publication_reconstructs_without_packet_authority() -> None:
         cycle,
         benchmark_identity=SYNTHETIC_SPY,
         account_scope=TEST_DECISION_ACCOUNT_SCOPE,
-        validity_window=DecisionPacketValidityWindow(
-            cycle.balanced.require_house_view().cycle,
-            _ISSUED_AT,
-            UtcInstant.from_datetime(_ISSUED_AT.value + timedelta(minutes=5)),
-        ),
+        validity_window=None,
         signer=TEST_PACKET_CRYPTOGRAPHY,
     )
 
@@ -259,6 +256,10 @@ def test_champion_decision_record_rejects_non_hash_forecast_identity() -> None:
         (("decision_record_id",), "invalid"),
         (("risk_limits", "maximum_gross_weight"), "0"),
         (("risk_limits", "maximum_name_weight"), "NaN"),
+        (("risk_limits", "maximum_fraction_of_median_dollar_volume"), "0.02"),
+        (("risk_limits", "maximum_fraction_of_median_dollar_volume"), "0"),
+        (("risk_limits", "maximum_fraction_of_median_dollar_volume"), "0.010"),
+        (("risk_limits", "maximum_fraction_of_median_dollar_volume"), 0.01),
         (("risk_limits",), {}),
         (("instructions",), {}),
         (("instructions",), []),
@@ -300,13 +301,15 @@ def test_decision_packet_contract_requires_every_exact_field_and_no_optional_aut
     packet = _publication().packet
     assert packet is not None
     payload = packet.to_payload()
-    missing_unit = deepcopy(payload)
-    del missing_unit["quantity_unit"]
+    missing_liquidity_limit = deepcopy(payload)
+    risk_limits = missing_liquidity_limit["risk_limits"]
+    assert type(risk_limits) is dict
+    del risk_limits["maximum_fraction_of_median_dollar_volume"]
     extra = deepcopy(payload)
     extra["display_symbol"] = "AAPL"
 
     assert parse_decision_packet(None, verifier=TEST_PACKET_CRYPTOGRAPHY) is None
-    assert parse_decision_packet(missing_unit, verifier=TEST_PACKET_CRYPTOGRAPHY) is None
+    assert parse_decision_packet(missing_liquidity_limit, verifier=TEST_PACKET_CRYPTOGRAPHY) is None
     assert parse_decision_packet(extra, verifier=TEST_PACKET_CRYPTOGRAPHY) is None
     assert parse_decision_packet(payload, verifier=TEST_PACKET_CRYPTOGRAPHY) == packet
 

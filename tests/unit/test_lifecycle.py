@@ -363,6 +363,14 @@ class _RefusingDecisionWindowSource:
         _ = (cycle, recorded_at)
         return self.refusal
 
+    def allows_publication(
+        self,
+        window: DecisionPacketValidityWindow,
+        recorded_at: UtcInstant,
+    ) -> bool:
+        _ = (window, recorded_at)
+        return False
+
 
 @dataclass(frozen=True, slots=True)
 class _RelativeDecisionWindowSource:
@@ -378,6 +386,13 @@ class _RelativeDecisionWindowSource:
             recorded_at,
             UtcInstant(recorded_at.value + timedelta(minutes=5)),
         )
+
+    def allows_publication(
+        self,
+        window: DecisionPacketValidityWindow,
+        recorded_at: UtcInstant,
+    ) -> bool:
+        return window.issued_at.value <= recorded_at.value < window.expires_at.value
 
 
 def _advance(

@@ -11,7 +11,8 @@ from typing import TYPE_CHECKING
 from agentic_investment_os.adapters.decision_signing import (
     HmacSha256DecisionPacketSigner,
 )
-from agentic_investment_os.application.lifecycle import Advance
+from agentic_investment_os.adapters.sqlite_decision import SQLiteDecisionPublicationLedger
+from agentic_investment_os.application.lifecycle import Advance, Status
 from agentic_investment_os.entrypoints.lifecycle import (
     configure_advance as _configure_advance,
 )
@@ -43,7 +44,7 @@ configure_production_advance = partial(
     decision_verifier=TEST_PACKET_CRYPTOGRAPHY,
     decision_account_scope=TEST_DECISION_ACCOUNT_SCOPE,
 )
-configure_status = partial(
+configure_production_status = partial(
     _configure_status,
     decision_verifier=TEST_PACKET_CRYPTOGRAPHY,
 )
@@ -63,6 +64,13 @@ class _RelativeDecisionWindowSource:
             type(recorded_at)(recorded_at.value + timedelta(minutes=5)),
         )
 
+    def allows_publication(
+        self,
+        window: DecisionPacketValidityWindow,
+        recorded_at: UtcInstant,
+    ) -> bool:
+        return window.issued_at.value <= recorded_at.value < window.expires_at.value
+
 
 def _with_relative_window[**P](
     configure: Callable[P, Advance | ConfigurationRefusal],
@@ -70,9 +78,37 @@ def _with_relative_window[**P](
     def configured(*args: P.args, **kwargs: P.kwargs) -> Advance | ConfigurationRefusal:
         capability = configure(*args, **kwargs)
         if isinstance(capability, Advance):
+            window_source = _RelativeDecisionWindowSource()
+            decision_ledger = capability.decision_ledger
+            assert isinstance(decision_ledger, SQLiteDecisionPublicationLedger)
             return replace(
                 capability,
-                decision_window_source=_RelativeDecisionWindowSource(),
+                decision_ledger=replace(
+                    decision_ledger,
+                    decision_window_source=window_source,
+                ),
+                decision_window_source=window_source,
+            )
+        return capability
+
+    return configured
+
+
+def _with_relative_status_window[**P](
+    configure: Callable[P, Status | ConfigurationRefusal],
+) -> Callable[P, Status | ConfigurationRefusal]:
+    def configured(*args: P.args, **kwargs: P.kwargs) -> Status | ConfigurationRefusal:
+        capability = configure(*args, **kwargs)
+        if isinstance(capability, Status):
+            window_source = _RelativeDecisionWindowSource()
+            decision_ledger = capability.decision_history_validator
+            assert isinstance(decision_ledger, SQLiteDecisionPublicationLedger)
+            return replace(
+                capability,
+                decision_history_validator=replace(
+                    decision_ledger,
+                    decision_window_source=window_source,
+                ),
             )
         return capability
 
@@ -80,3 +116,4 @@ def _with_relative_window[**P](
 
 
 configure_advance = _with_relative_window(configure_production_advance)
+configure_status = _with_relative_status_window(configure_production_status)

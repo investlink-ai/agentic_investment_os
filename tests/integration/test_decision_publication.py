@@ -5,11 +5,13 @@ import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
+from decimal import Decimal
 from typing import TYPE_CHECKING
 
 import pytest
 
 from agentic_investment_os.adapters.decision_signing import HmacSha256DecisionPacketSigner
+from agentic_investment_os.adapters.decision_window import PreOpenDecisionPacketWindowSource
 from agentic_investment_os.adapters.sqlite_decision import SQLiteDecisionPublicationLedger
 from agentic_investment_os.adapters.sqlite_lifecycle import (
     PreparedRuntimeDatabase,
@@ -37,7 +39,9 @@ from tests._decision import TEST_DECISION_ACCOUNT_SCOPE, TEST_PACKET_CRYPTOGRAPH
 from tests._portfolio import (
     SYNTHETIC_AAPL,
     SYNTHETIC_SPY,
-    synthetic_portfolio_cycle,
+)
+from tests._portfolio import (
+    synthetic_portfolio_cycle as _synthetic_portfolio_cycle,
 )
 
 if TYPE_CHECKING:
@@ -45,8 +49,25 @@ if TYPE_CHECKING:
 
     from agentic_investment_os.portfolio.shadows import PortfolioCycleResult
 
-_PORTFOLIO_RECORDED_AT = UtcInstant.from_datetime(datetime(2026, 8, 21, 20, 10, tzinfo=UTC))
-_PUBLISHED_AT = UtcInstant.from_datetime(datetime(2026, 8, 21, 20, 30, tzinfo=UTC))
+_SESSION = MarketSession(date(2026, 8, 24))
+_PORTFOLIO_RECORDED_AT = UtcInstant.from_datetime(datetime(2026, 8, 24, 13, 10, tzinfo=UTC))
+_PUBLISHED_AT = UtcInstant.from_datetime(datetime(2026, 8, 24, 13, 15, tzinfo=UTC))
+
+
+def synthetic_portfolio_cycle(
+    *,
+    run_id: str = "1" * 64,
+    with_authorized_adjustments: bool = True,
+    with_authorized_decrease: bool = False,
+    model_fingerprint: str = "6" * 64,
+) -> PortfolioCycleResult:
+    return _synthetic_portfolio_cycle(
+        run_id=run_id,
+        with_authorized_adjustments=with_authorized_adjustments,
+        with_authorized_decrease=with_authorized_decrease,
+        model_fingerprint=model_fingerprint,
+        cycle=_SESSION,
+    )
 
 
 def _ledgers(
@@ -69,6 +90,7 @@ def _ledgers(
         TEST_PACKET_CRYPTOGRAPHY,
         portfolio,
         SYNTHETIC_SPY,
+        PreOpenDecisionPacketWindowSource(),
     )
     return prepared.path, portfolio, decisions
 
@@ -81,15 +103,13 @@ def _publication(
     packet_expected: bool = True,
 ) -> DecisionPublicationResult:
     house_view = cycle_result.balanced.require_house_view()
+    window = PreOpenDecisionPacketWindowSource().window_for(house_view.cycle, published_at)
+    validity_window = window if isinstance(window, DecisionPacketValidityWindow) else None
     result = construct_decision_publication(
         cycle_result,
         benchmark_identity=SYNTHETIC_SPY,
         account_scope=account_scope,
-        validity_window=DecisionPacketValidityWindow(
-            house_view.cycle,
-            published_at,
-            UtcInstant.from_datetime(published_at.value + timedelta(minutes=5)),
-        ),
+        validity_window=validity_window,
         signer=TEST_PACKET_CRYPTOGRAPHY,
     )
     assert isinstance(result, DecisionPublicationResult)
@@ -108,6 +128,29 @@ def _reference(
 def _checkpoint(value: DecisionCheckpoint | DecisionPublicationRefusalReason) -> DecisionCheckpoint:
     assert isinstance(value, DecisionCheckpoint)
     return value
+
+
+class _AlwaysAllowingDecisionWindowSource:
+    """Simulate a timing adapter that violates the portfolio-owned port contract."""
+
+    def window_for(
+        self,
+        cycle: MarketSession,
+        recorded_at: UtcInstant,
+    ) -> DecisionPacketValidityWindow:
+        return DecisionPacketValidityWindow(
+            cycle,
+            recorded_at,
+            UtcInstant(recorded_at.value + timedelta(minutes=5)),
+        )
+
+    def allows_publication(
+        self,
+        window: DecisionPacketValidityWindow,
+        recorded_at: UtcInstant,
+    ) -> bool:
+        _ = (window, recorded_at)
+        return True
 
 
 def test_publication_is_atomic_and_replays_exactly_after_reopen(tmp_path: Path) -> None:
@@ -139,6 +182,7 @@ def test_publication_is_atomic_and_replays_exactly_after_reopen(tmp_path: Path) 
         verifier=TEST_PACKET_CRYPTOGRAPHY,
         portfolio_ledger=SQLitePortfolioLedger.open_existing(database),
         benchmark_identity=SYNTHETIC_SPY,
+        decision_window_source=PreOpenDecisionPacketWindowSource(),
     )
 
     assert reopened.replay_publication(run_id, publication.decision_record.cycle) == checkpoint
@@ -164,6 +208,69 @@ def test_publication_is_atomic_and_replays_exactly_after_reopen(tmp_path: Path) 
         publication.packet.to_payload(), sort_keys=True, separators=(",", ":")
     )
     assert row[5] is None
+
+
+def test_official_packet_window_is_revalidated_at_the_durable_boundary(
+    tmp_path: Path,
+) -> None:
+    cycle_result = synthetic_portfolio_cycle()
+    database, _, decisions = _ledgers(tmp_path, cycle_result)
+    publication = _publication(cycle_result)
+    regular_open = UtcInstant.from_datetime(datetime(2026, 8, 24, 13, 30, tzinfo=UTC))
+
+    assert (
+        decisions.record_publication(
+            publication.decision_record.run_id,
+            publication,
+            regular_open,
+        )
+        is DecisionPublicationRefusalReason.INVALID_VALIDITY_WINDOW
+    )
+    with sqlite3.connect(database) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM decision_publications").fetchone() == (0,)
+
+
+@pytest.mark.parametrize(
+    ("issued_at", "expires_at"),
+    [
+        (
+            datetime(2026, 8, 24, 13, 14, 59, 999999, tzinfo=UTC),
+            datetime(2026, 8, 24, 14, 0, tzinfo=UTC),
+        ),
+        (
+            datetime(2026, 8, 24, 13, 15, tzinfo=UTC),
+            datetime(2026, 8, 24, 14, 0, 0, 1, tzinfo=UTC),
+        ),
+    ],
+)
+def test_coherently_signed_nonofficial_packet_window_never_becomes_visible(
+    tmp_path: Path,
+    issued_at: datetime,
+    expires_at: datetime,
+) -> None:
+    cycle_result = synthetic_portfolio_cycle()
+    database, _, decisions = _ledgers(tmp_path, cycle_result)
+    house_view = cycle_result.balanced.require_house_view()
+    publication = construct_decision_publication(
+        cycle_result,
+        benchmark_identity=SYNTHETIC_SPY,
+        account_scope=TEST_DECISION_ACCOUNT_SCOPE,
+        validity_window=DecisionPacketValidityWindow(
+            house_view.cycle,
+            UtcInstant.from_datetime(issued_at),
+            UtcInstant.from_datetime(expires_at),
+        ),
+        signer=TEST_PACKET_CRYPTOGRAPHY,
+    )
+    assert isinstance(publication, DecisionPublicationResult)
+    assert publication.packet is not None
+
+    assert (
+        decisions.record_publication(house_view.run_id, publication, _PUBLISHED_AT)
+        is DecisionPublicationRefusalReason.INVALID_VALIDITY_WINDOW
+    )
+    with sqlite3.connect(database) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM decision_publications").fetchone() == (0,)
 
 
 def test_publication_at_the_exact_evidence_cutoff_is_valid_history(tmp_path: Path) -> None:
@@ -292,6 +399,17 @@ def test_redelivery_conflicts_on_each_decision_envelope_field(tmp_path: Path) ->
     with pytest.raises(InvalidLifecycleStateError, match="durable decision publication is invalid"):
         decisions.record_publication(run_id, hostile_candidate, _PUBLISHED_AT)
 
+    changed_liquidity = _publication(cycle_result)
+    assert changed_liquidity.packet is not None
+    object.__setattr__(
+        changed_liquidity.packet,
+        "maximum_fraction_of_median_dollar_volume",
+        Decimal("0.02"),
+    )
+
+    with pytest.raises(InvalidLifecycleStateError, match="durable decision publication is invalid"):
+        decisions.record_publication(run_id, changed_liquidity, _PUBLISHED_AT)
+
 
 def test_invalid_signature_material_never_becomes_visible(tmp_path: Path) -> None:
     cycle_result = synthetic_portfolio_cycle()
@@ -325,6 +443,7 @@ def test_coherently_hashed_wrong_key_signature_never_becomes_visible(tmp_path: P
         HmacSha256DecisionPacketSigner(b"wrong-synthetic-signing-key"),
         portfolio,
         SYNTHETIC_SPY,
+        PreOpenDecisionPacketWindowSource(),
     )
 
     assert (
@@ -408,6 +527,49 @@ def test_resealed_no_action_benchmark_substitution_fails_reopen_validation(
         decisions.validate_reference(_reference(cycle_result, checkpoint))
 
 
+def test_resealed_off_window_packet_fails_reopen_validation(tmp_path: Path) -> None:
+    cycle_result = synthetic_portfolio_cycle()
+    database, _, decisions = _ledgers(tmp_path, cycle_result)
+    house_view = cycle_result.balanced.require_house_view()
+    original = _publication(cycle_result)
+    checkpoint = _checkpoint(
+        decisions.record_publication(house_view.run_id, original, _PUBLISHED_AT)
+    )
+    substituted = construct_decision_publication(
+        cycle_result,
+        benchmark_identity=SYNTHETIC_SPY,
+        account_scope=TEST_DECISION_ACCOUNT_SCOPE,
+        validity_window=DecisionPacketValidityWindow(
+            house_view.cycle,
+            UtcInstant.from_datetime(datetime(2026, 8, 24, 13, 14, 59, 999999, tzinfo=UTC)),
+            UtcInstant.from_datetime(datetime(2026, 8, 24, 14, 0, tzinfo=UTC)),
+        ),
+        signer=TEST_PACKET_CRYPTOGRAPHY,
+    )
+    assert isinstance(substituted, DecisionPublicationResult)
+    assert substituted.packet is not None
+    with sqlite3.connect(database) as connection:
+        connection.execute("DROP TRIGGER decision_publications_are_append_only_update")
+        connection.execute(
+            "UPDATE decision_publications "
+            "SET packet_id = ?, packet_expires_at = ?, packet_json = ?",
+            (
+                substituted.packet.packet_id,
+                substituted.packet.expires_at.isoformat(),
+                json.dumps(
+                    substituted.packet.to_payload(),
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+            ),
+        )
+
+    with pytest.raises(InvalidLifecycleStateError, match="durable decision publication is invalid"):
+        decisions.replay_publication(house_view.run_id, house_view.cycle)
+    with pytest.raises(InvalidLifecycleStateError, match="durable decision publication is invalid"):
+        decisions.validate_reference(_reference(cycle_result, checkpoint))
+
+
 def test_corrupt_authoritative_packet_fails_reopen_validation(tmp_path: Path) -> None:
     cycle_result = synthetic_portfolio_cycle()
     database, _, decisions = _ledgers(tmp_path, cycle_result)
@@ -454,6 +616,28 @@ def test_reopen_rejects_publication_recorded_before_its_signed_issue_time(
 
     with pytest.raises(InvalidLifecycleStateError, match="durable decision publication is invalid"):
         decisions.replay_publication(run_id, publication.decision_record.cycle)
+
+
+def test_checkpoint_rejects_visibility_before_issue_if_timing_adapter_misbehaves(
+    tmp_path: Path,
+) -> None:
+    cycle_result = synthetic_portfolio_cycle()
+    database, _, decisions = _ledgers(tmp_path, cycle_result)
+    publication = _publication(cycle_result)
+    before_issue = UtcInstant.from_datetime(_PUBLISHED_AT.value - timedelta(microseconds=1))
+    invalid = replace(
+        decisions,
+        decision_window_source=_AlwaysAllowingDecisionWindowSource(),
+    )
+
+    with pytest.raises(InvalidLifecycleStateError, match="durable decision publication is invalid"):
+        invalid.record_publication(
+            publication.decision_record.run_id,
+            publication,
+            before_issue,
+        )
+    with sqlite3.connect(database) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM decision_publications").fetchone() == (0,)
 
 
 def test_reopen_rejects_no_action_publication_recorded_before_its_evidence_cutoff(
@@ -599,6 +783,7 @@ def test_unreadable_publication_storage_fails_closed_at_public_boundaries(
         TEST_PACKET_CRYPTOGRAPHY,
         portfolio,
         SYNTHETIC_SPY,
+        PreOpenDecisionPacketWindowSource(),
     )
 
     with pytest.raises(InvalidLifecycleStateError, match="durable decision publication is invalid"):

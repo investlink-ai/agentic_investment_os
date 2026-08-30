@@ -64,9 +64,11 @@ the dependency. Prefer passing typed values and ports over adding an edge.
 - `portfolio` consumes validated typed research outcomes and deterministic market/risk inputs; it does
   not invoke a model. It owns Champion Decision Record and DecisionPacket construction from the
   complete durable portfolio cycle. Its signer, verifier, validity-window, and publication-ledger
-  ports expose only their bounded operation; they grant no key storage, account lookup, model,
-  executor, network, credential, or broker capability. Shadow-account types are non-executable
-  accounting contracts and never cross into `execution`.
+  ports expose only their bounded operation. The validity-window port owns both window resolution and
+  revalidation; lifecycle and persistence adapters consume that policy without reimplementing calendar
+  rules. These ports grant no key storage, account lookup, model, executor, network, credential, or
+  broker capability. Shadow-account types are non-executable accounting contracts and never cross into
+  `execution`.
 - `domain` owns the asset-neutral `UtcInstant`, `InstrumentIdentity`, `DecisionCycleIdentity`,
   durable-envelope, and receipt contracts. A capability owns its asset-class policy and payload
   variants; adding a variant does not add a reverse dependency or a top-level asset plugin module.

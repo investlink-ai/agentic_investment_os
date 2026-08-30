@@ -110,11 +110,13 @@ def configure_advance(  # noqa: PLR0913 - composition names each untrusted bound
         trusted_clock = clock if clock is not None else SystemClock()
         belief_ledger = SQLiteBeliefLedger(database.path)
         portfolio_ledger = SQLitePortfolioLedger(database.path)
+        decision_window_source = PreOpenDecisionPacketWindowSource()
         decision_ledger = SQLiteDecisionPublicationLedger(
             database.path,
             decision_verifier,
             portfolio_ledger,
             _OFFICIAL_BENCHMARK_IDENTITY,
+            decision_window_source,
         )
         return Advance(
             ledger=SQLiteLifecycleLedger(database.path),
@@ -162,7 +164,7 @@ def configure_advance(  # noqa: PLR0913 - composition names each untrusted bound
             portfolio_ledger=portfolio_ledger,
             decision_ledger=decision_ledger,
             decision_signer=decision_signer,
-            decision_window_source=PreOpenDecisionPacketWindowSource(),
+            decision_window_source=decision_window_source,
             decision_account_scope=decision_account_scope,
             benchmark_identity=_OFFICIAL_BENCHMARK_IDENTITY,
         )
@@ -225,6 +227,7 @@ def configure_status(
                 verifier=decision_verifier,
                 portfolio_ledger=portfolio_ledger,
                 benchmark_identity=_OFFICIAL_BENCHMARK_IDENTITY,
+                decision_window_source=PreOpenDecisionPacketWindowSource(),
             ),
         )
     # Strict mypy proves this line unreachable; removing it is runtime-equivalent.

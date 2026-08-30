@@ -84,3 +84,106 @@ def test_pre_open_window_refuses_off_window_or_unsupported_sessions(
     )
 
     assert result is DecisionPublicationRefusalReason.INVALID_VALIDITY_WINDOW
+
+
+@pytest.mark.parametrize(
+    "recorded_at",
+    [
+        datetime(2026, 8, 24, 13, 15, tzinfo=UTC),
+        datetime(2026, 8, 24, 13, 29, 59, 999999, tzinfo=UTC),
+    ],
+)
+def test_pre_open_policy_allows_exact_official_packet_visibility(
+    recorded_at: datetime,
+) -> None:
+    cycle = MarketSession(date(2026, 8, 24))
+    issued_at = UtcInstant.from_datetime(datetime(2026, 8, 24, 13, 15, tzinfo=UTC))
+    window = DecisionPacketValidityWindow(
+        cycle,
+        issued_at,
+        UtcInstant.from_datetime(datetime(2026, 8, 24, 14, 0, tzinfo=UTC)),
+    )
+
+    assert PreOpenDecisionPacketWindowSource().allows_publication(
+        window,
+        UtcInstant.from_datetime(recorded_at),
+    )
+
+
+@pytest.mark.parametrize(
+    ("cycle", "issued_at", "expires_at", "recorded_at"),
+    [
+        (
+            date(2026, 8, 24),
+            datetime(2026, 8, 24, 13, 15, tzinfo=UTC),
+            datetime(2026, 8, 24, 14, 0, tzinfo=UTC),
+            datetime(2026, 8, 24, 13, 14, 59, 999999, tzinfo=UTC),
+        ),
+        (
+            date(2026, 8, 24),
+            datetime(2026, 8, 24, 13, 15, tzinfo=UTC),
+            datetime(2026, 8, 24, 14, 0, tzinfo=UTC),
+            datetime(2026, 8, 24, 13, 30, tzinfo=UTC),
+        ),
+        (
+            date(2026, 8, 24),
+            datetime(2026, 8, 24, 13, 14, 59, 999999, tzinfo=UTC),
+            datetime(2026, 8, 24, 14, 0, tzinfo=UTC),
+            datetime(2026, 8, 24, 13, 15, tzinfo=UTC),
+        ),
+        (
+            date(2026, 8, 24),
+            datetime(2026, 8, 24, 13, 30, tzinfo=UTC),
+            datetime(2026, 8, 24, 14, 0, tzinfo=UTC),
+            datetime(2026, 8, 24, 13, 30, tzinfo=UTC),
+        ),
+        (
+            date(2026, 8, 24),
+            datetime(2026, 8, 24, 13, 15, tzinfo=UTC),
+            datetime(2026, 8, 24, 14, 0, 0, 1, tzinfo=UTC),
+            datetime(2026, 8, 24, 13, 15, tzinfo=UTC),
+        ),
+        (
+            date(2026, 8, 22),
+            datetime(2026, 8, 22, 13, 15, tzinfo=UTC),
+            datetime(2026, 8, 22, 14, 0, tzinfo=UTC),
+            datetime(2026, 8, 22, 13, 15, tzinfo=UTC),
+        ),
+    ],
+)
+def test_pre_open_policy_rejects_nonofficial_or_off_window_visibility(
+    cycle: date,
+    issued_at: datetime,
+    expires_at: datetime,
+    recorded_at: datetime,
+) -> None:
+    window = DecisionPacketValidityWindow(
+        MarketSession(cycle),
+        UtcInstant.from_datetime(issued_at),
+        UtcInstant.from_datetime(expires_at),
+    )
+
+    assert not PreOpenDecisionPacketWindowSource().allows_publication(
+        window,
+        UtcInstant.from_datetime(recorded_at),
+    )
+
+
+def test_pre_open_policy_rejects_hostile_runtime_types() -> None:
+    cycle = MarketSession(date(2026, 8, 24))
+    issued_at = UtcInstant.from_datetime(datetime(2026, 8, 24, 13, 15, tzinfo=UTC))
+    window = DecisionPacketValidityWindow(
+        cycle,
+        issued_at,
+        UtcInstant.from_datetime(datetime(2026, 8, 24, 14, 0, tzinfo=UTC)),
+    )
+    source = PreOpenDecisionPacketWindowSource()
+
+    assert not source.allows_publication(
+        object(),  # type: ignore[arg-type]  # Exercise a hostile runtime protocol value.
+        issued_at,
+    )
+    assert not source.allows_publication(
+        window,
+        object(),  # type: ignore[arg-type]  # Exercise a hostile runtime protocol value.
+    )

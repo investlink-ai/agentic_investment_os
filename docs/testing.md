@@ -336,12 +336,16 @@ evidence. A scenario becomes mandatory when its owning behavior is implemented.
   adjustment is authorized.
 - A fresh packet is complete, signed, scoped, unexpired, cycle-bound, canonical-identity keyed,
   whole-share, regular-session day-limit, long-only, no-leverage, and semantically identical to its
-  exact durable decision and risk envelope. Hostile missing, extra, unknown, malformed,
+  exact durable decision and complete risk envelope, including the maximum one-percent fraction of
+  median dollar volume. Hostile missing, extra, unknown, malformed,
   hash-inconsistent, wrongly signed, Lab, shadow, symbol-keyed, implicit-unit, disabled-asset, changed-
   scope, changed-policy, or expired material produces no visible packet.
 - Packet publication admits only the pinned fifteen-minute pre-open window and derives the immutable
-  expiry at thirty minutes after open across UTC-offset and calendar boundaries. Early, at-open,
-  post-open, weekend, holiday, or unsupported-year publication produces no packet.
+  expiry at thirty minutes after open across UTC-offset and calendar boundaries. The lifecycle checks
+  again after signing, and atomic insertion plus reopen validate the exact issue, expiry, and recorded
+  visibility with the same policy. Early, at-open, post-open, signing-across-open, wrongly expired,
+  resealed off-window, weekend, holiday, or unsupported-year publication produces no packet. A valid
+  no-action Decision Record remains durable before, during, or after the packet window.
 - The Decision Record and optional packet become visible in one transaction. Interruptions on both
   sides of that transaction, reopen, exact retry, projection rebuild, and concurrent equivalent
   delivery return the same identities without another row; changed decision or authorization

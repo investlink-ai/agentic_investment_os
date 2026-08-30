@@ -329,19 +329,21 @@ returns that record; later information cannot rewrite it.
 Only trade-eligible Balanced Target Bands can enter the optional DecisionPacket. Each instruction
 fixes one canonical equity identity, increase-or-decrease direction, current, target, authorized,
 lower, and upper weights, the Target Band identity, and the deterministic eligibility reason. The
-packet additionally freezes the complete portfolio risk envelope, validity window, non-secret paper
-account scope, portfolio and cost policy identities, whole-share quantity unit, regular-session
-day-limit policy, long-only Balanced authority, and no-leverage constraint. It authorizes no shadow,
-display symbol, fractional share, market or extended-hours order, quote, price, broker observation,
-or model-selected action. The future executor may deterministically translate the frozen authorized
-weight into a whole-share quantity using independently validated post-open state, but it cannot widen
-direction, target, risk, validity, scope, or order policy.
+packet additionally freezes the complete portfolio risk envelope, including the maximum one-percent
+fraction of median dollar volume, validity window, non-secret paper account scope, portfolio and cost
+policy identities, whole-share quantity unit, regular-session day-limit policy, long-only Balanced
+authority, and no-leverage constraint. It authorizes no shadow, display symbol, fractional share,
+market or extended-hours order, quote, price, broker observation, or model-selected action. The future
+executor may deterministically translate the frozen authorized weight into a whole-share quantity
+using independently validated post-open state, but it cannot widen direction, target, risk, validity,
+scope, or order policy.
 
 When Balanced has no eligible adjustment, publication retains the Champion Decision Record and a
-typed no-action result but emits no packet. A fresh packet must be signed, internally hash-consistent,
-unexpired, and atomically visible with its Decision Record. One Market Session cannot replace or
-refresh that immutable publication. [ADR 0011](adr/0011-atomically-publish-one-balanced-decision.md)
-owns the publication and replay seam.
+typed no-action result but emits no packet; packet-window timing cannot suppress that durable result.
+A fresh packet must be signed, internally hash-consistent, carry the official issue and expiry, and
+become atomically visible with its Decision Record before the regular open. One Market Session cannot
+replace or refresh that immutable publication.
+[ADR 0011](adr/0011-atomically-publish-one-balanced-decision.md) owns the publication and replay seam.
 
 The pre-open DecisionPacket freezes fifteen
 minutes before the regular session. Five minutes after open, execution rechecks quote freshness,

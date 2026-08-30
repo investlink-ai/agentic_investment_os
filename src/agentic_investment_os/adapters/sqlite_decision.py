@@ -24,7 +24,9 @@ from agentic_investment_os.domain.lifecycle import (
 from agentic_investment_os.domain.temporal import InvalidUtcInstantError, UtcInstant
 from agentic_investment_os.portfolio.publication import (
     DecisionPacket,
+    DecisionPacketValidityWindow,
     DecisionPacketVerifier,
+    DecisionPacketWindowSource,
     DecisionPublicationRefusalReason,
     DecisionPublicationResult,
     PacketNoActionReason,
@@ -52,6 +54,7 @@ class SQLiteDecisionPublicationLedger:
     verifier: DecisionPacketVerifier
     portfolio_ledger: PortfolioCycleResultLedger
     benchmark_identity: EquityInstrumentIdentity
+    decision_window_source: DecisionPacketWindowSource
 
     @classmethod
     def open_existing(
@@ -61,9 +64,16 @@ class SQLiteDecisionPublicationLedger:
         verifier: DecisionPacketVerifier,
         portfolio_ledger: PortfolioCycleResultLedger,
         benchmark_identity: EquityInstrumentIdentity,
+        decision_window_source: DecisionPacketWindowSource,
     ) -> Self:
         """Open the already startup-validated runtime database."""
-        return cls(database, verifier, portfolio_ledger, benchmark_identity)
+        return cls(
+            database,
+            verifier,
+            portfolio_ledger,
+            benchmark_identity,
+            decision_window_source,
+        )
 
     def record_publication(
         self,
@@ -162,10 +172,7 @@ class SQLiteDecisionPublicationLedger:
             parse_decision_packet(packet.to_payload(), verifier=self.verifier) != packet
         ):
             return DecisionPublicationRefusalReason.SIGNING_FAILED
-        if packet is not None and (
-            packet.issued_at.value > recorded_at.value
-            or packet.expires_at.value <= recorded_at.value
-        ):
+        if not _packet_window_is_valid(packet, recorded_at, self.decision_window_source):
             return DecisionPublicationRefusalReason.INVALID_VALIDITY_WINDOW
         return None
 
@@ -277,6 +284,7 @@ class SQLiteDecisionPublicationLedger:
             or row[5] != (None if packet is None else packet.expires_at.isoformat())
             or packet_json != (None if packet is None else _canonical_json(packet.to_payload()))
             or row[7] != (None if no_action_reason is None else no_action_reason.value)
+            or not _packet_window_is_valid(packet, recorded_at, self.decision_window_source)
             or not validate_decision_publication(
                 result,
                 cycle_result,
@@ -339,6 +347,7 @@ def _packet_authorization_intent(packet: DecisionPacket | None) -> tuple[object,
         packet.maximum_sector_weight,
         packet.maximum_common_cause_weight,
         packet.maximum_correlation_cluster_weight,
+        packet.maximum_fraction_of_median_dollar_volume,
         packet.instructions,
         packet.authority_scope,
         packet.risk_profile,
@@ -346,6 +355,19 @@ def _packet_authorization_intent(packet: DecisionPacket | None) -> tuple[object,
         packet.quantity_unit,
         packet.order_policy,
         packet.leverage_allowed,
+    )
+
+
+def _packet_window_is_valid(
+    packet: DecisionPacket | None,
+    recorded_at: UtcInstant,
+    decision_window_source: DecisionPacketWindowSource,
+) -> bool:
+    if packet is None:
+        return True
+    return decision_window_source.allows_publication(
+        DecisionPacketValidityWindow(packet.cycle, packet.issued_at, packet.expires_at),
+        recorded_at,
     )
 
 

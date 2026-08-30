@@ -178,13 +178,19 @@ class DecisionPacketVerifier(Protocol):
 
 
 class DecisionPacketWindowSource(Protocol):
-    """Resolve the explicit issue and expiry instants for one market session."""
+    """Resolve and revalidate packet authority times for one market session."""
 
     def window_for(
         self,
         cycle: MarketSession,
         recorded_at: UtcInstant,
     ) -> DecisionPacketValidityWindow | DecisionPublicationRefusalReason: ...
+
+    def allows_publication(
+        self,
+        window: DecisionPacketValidityWindow,
+        recorded_at: UtcInstant,
+    ) -> bool: ...
 
 
 class DecisionPublicationLedger(Protocol):
@@ -385,6 +391,7 @@ class DecisionPacket:
     maximum_sector_weight: Decimal
     maximum_common_cause_weight: Decimal
     maximum_correlation_cluster_weight: Decimal
+    maximum_fraction_of_median_dollar_volume: Decimal
     instructions: tuple[PacketInstruction, ...]
     authority_scope: str
     risk_profile: str
@@ -402,6 +409,7 @@ class DecisionPacket:
             self.maximum_sector_weight,
             self.maximum_common_cause_weight,
             self.maximum_correlation_cluster_weight,
+            self.maximum_fraction_of_median_dollar_volume,
         )
         instruction_keys = tuple(
             canonical_instrument_bytes(item.identity) for item in self.instructions
@@ -574,7 +582,7 @@ def construct_decision_publication(  # noqa: PLR0911 - every authority input is 
     *,
     benchmark_identity: EquityInstrumentIdentity,
     account_scope: DecisionPacketAccountScope,
-    validity_window: DecisionPacketValidityWindow,
+    validity_window: DecisionPacketValidityWindow | None,
     signer: DecisionPacketSigner,
 ) -> DecisionPublicationResult | DecisionPublicationRefusalReason:
     """Construct one ex-ante decision and at most one signed Balanced packet."""
@@ -582,12 +590,6 @@ def construct_decision_publication(  # noqa: PLR0911 - every authority input is 
     if isinstance(source, DecisionPublicationRefusalReason):
         return source
     balanced, house_view = source
-    if (
-        type(validity_window) is not DecisionPacketValidityWindow
-        or validity_window.cycle != house_view.cycle
-        or validity_window.issued_at.value < house_view.evidence_cutoff.value
-    ):
-        return DecisionPublicationRefusalReason.INVALID_VALIDITY_WINDOW
     decision_record = _construct_champion_decision_record(
         cycle_result,
         balanced,
@@ -607,6 +609,12 @@ def construct_decision_publication(  # noqa: PLR0911 - every authority input is 
             None,
             PacketNoActionReason.NO_AUTHORIZED_ADJUSTMENTS,
         )
+    if (
+        type(validity_window) is not DecisionPacketValidityWindow
+        or validity_window.cycle != house_view.cycle
+        or validity_window.issued_at.value < house_view.evidence_cutoff.value
+    ):
+        return DecisionPublicationRefusalReason.INVALID_VALIDITY_WINDOW
     provisional_packet = DecisionPacket(
         schema_version=1,
         packet_id="",
@@ -623,6 +631,7 @@ def construct_decision_publication(  # noqa: PLR0911 - every authority input is 
         maximum_sector_weight=policy.maximum_sector_weight,
         maximum_common_cause_weight=policy.maximum_common_cause_weight,
         maximum_correlation_cluster_weight=policy.maximum_correlation_cluster_weight,
+        maximum_fraction_of_median_dollar_volume=(policy.maximum_fraction_of_median_dollar_volume),
         instructions=instructions,
         authority_scope="balanced_paper_execution",
         risk_profile="balanced",
@@ -956,6 +965,7 @@ def parse_decision_packet(  # noqa: PLR0911 - fail closed at each hostile field.
         maximum_sector_weight,
         maximum_common_cause_weight,
         maximum_correlation_cluster_weight,
+        maximum_fraction_of_median_dollar_volume,
     ) = parsed_limits
     try:
         packet = DecisionPacket(
@@ -974,6 +984,7 @@ def parse_decision_packet(  # noqa: PLR0911 - fail closed at each hostile field.
             maximum_sector_weight=maximum_sector_weight,
             maximum_common_cause_weight=maximum_common_cause_weight,
             maximum_correlation_cluster_weight=maximum_correlation_cluster_weight,
+            maximum_fraction_of_median_dollar_volume=(maximum_fraction_of_median_dollar_volume),
             instructions=parsed_instructions,
             authority_scope=authority_scope,
             risk_profile=risk_profile,
@@ -1068,6 +1079,9 @@ def _packet_identity_material(packet: DecisionPacket) -> dict[str, object]:
             "maximum_common_cause_weight": _decimal_text(packet.maximum_common_cause_weight),
             "maximum_correlation_cluster_weight": _decimal_text(
                 packet.maximum_correlation_cluster_weight
+            ),
+            "maximum_fraction_of_median_dollar_volume": _decimal_text(
+                packet.maximum_fraction_of_median_dollar_volume
             ),
         },
         "instructions": [item.to_payload() for item in packet.instructions],
@@ -1183,7 +1197,9 @@ def _parse_instructions(  # noqa: PLR0911 - reject each malformed instruction bo
     return tuple(parsed)
 
 
-def _parse_risk_limits(value: object) -> tuple[Decimal, Decimal, Decimal, Decimal, Decimal] | None:
+def _parse_risk_limits(
+    value: object,
+) -> tuple[Decimal, Decimal, Decimal, Decimal, Decimal, Decimal] | None:
     fields = _exact_mapping(
         value,
         {
@@ -1192,6 +1208,7 @@ def _parse_risk_limits(value: object) -> tuple[Decimal, Decimal, Decimal, Decima
             "maximum_sector_weight",
             "maximum_common_cause_weight",
             "maximum_correlation_cluster_weight",
+            "maximum_fraction_of_median_dollar_volume",
         },
     )
     if fields is None:
@@ -1204,14 +1221,15 @@ def _parse_risk_limits(value: object) -> tuple[Decimal, Decimal, Decimal, Decima
             _plain_decimal(fields["maximum_sector_weight"]),
             _plain_decimal(fields["maximum_common_cause_weight"]),
             _plain_decimal(fields["maximum_correlation_cluster_weight"]),
+            _plain_decimal(fields["maximum_fraction_of_median_dollar_volume"]),
         )
         if item is not None
     )
     try:
-        gross, name, sector, common_cause, correlation = parsed
+        gross, name, sector, common_cause, correlation, liquidity = parsed
     except ValueError:
         return None
-    return gross, name, sector, common_cause, correlation
+    return gross, name, sector, common_cause, correlation, liquidity
 
 
 def _parse_hash_list(value: object) -> tuple[str, ...] | None:

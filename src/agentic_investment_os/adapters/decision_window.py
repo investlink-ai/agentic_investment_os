@@ -43,3 +43,19 @@ class PreOpenDecisionPacketWindowSource:
             recorded_at,
             UtcInstant(session.opens_at.value + _EXECUTION_DEADLINE_AFTER_OPEN),
         )
+
+    def allows_publication(
+        self,
+        window: DecisionPacketValidityWindow,
+        recorded_at: UtcInstant,
+    ) -> bool:
+        """Require exact official packet times and visibility before the regular open."""
+        if type(window) is not DecisionPacketValidityWindow or type(recorded_at) is not UtcInstant:
+            return False
+        session = build_session_window(window.cycle, _FREEZE_MINUTES_BEFORE_OPEN, 0)
+        return bool(
+            session is not None
+            and session.missed_at.value <= window.issued_at.value < session.opens_at.value
+            and window.expires_at.value == session.opens_at.value + _EXECUTION_DEADLINE_AFTER_OPEN
+            and window.issued_at.value <= recorded_at.value < session.opens_at.value
+        )
