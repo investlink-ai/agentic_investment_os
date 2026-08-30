@@ -404,6 +404,24 @@ def recorded_portfolio(payload: object | None = None) -> dict[str, object]:
     return recorded_portfolio_inputs(inputs.position_snapshot)
 
 
+def recorded_packet_universe() -> dict[str, object]:
+    """Return a universe whose retained holding is an active researched equity."""
+    payload = recorded_universe()
+    positions = mutable_mapping(payload["positions"])
+    position_payload = mutable_mapping(positions["payload"])
+    position = mutable_mapping_list(position_payload["items"])[0]
+    position["identity"] = EquityInstrumentIdentity(
+        "alpaca-paper",
+        "equity-aapl",
+        "NASDAQ",
+    ).to_payload()
+    variant = mutable_mapping(position["payload"])
+    valuation = mutable_mapping(variant["valuation"])
+    valuation["amount"] = "660"
+    reseal_recorded_snapshot(payload, "positions")
+    return payload
+
+
 def typed_portfolio_inputs(payload: object | None = None) -> PortfolioInputSet:
     inputs = typed_universe_inputs(payload)
     parsed = RecordedPortfolioSource(recorded_portfolio_inputs(inputs.position_snapshot)).load(

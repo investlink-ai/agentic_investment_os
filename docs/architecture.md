@@ -28,6 +28,11 @@ Capabilities expose lifecycle outcomes, not internal stages; evidence, beliefs, 
 outcomes remain append-only and reconstructable. Deterministic code alone owns portfolio, risk,
 packet, order, and reconciliation decisions; invalid required state produces a durable refusal.
 
+The scheduler reaches public `Advance` and `Status` through a process client. The separately composed
+operating-system process owns lifecycle adapters, the model port, packet signing and verification,
+and account scope; none is imported into or retained by the scheduler process. A callable that closes
+over an in-process lifecycle object does not satisfy this process boundary.
+
 Navigate by [topology and trust](#system-topology), [authority and effects](#authority-and-trust),
 [module and capability seams](#module-ownership), [lifecycle](#session-lifecycle),
 [durable state](#durable-state), [time and configuration](#temporal-semantics), and
@@ -146,8 +151,8 @@ sequenceDiagram
     Model-->>OS: Untrusted candidate plus effect metadata
     OS->>OS: Validate evidence, provenance, schema, authority
     OS->>Risk: Validated HouseView and market/risk inputs
-    Risk-->>OS: Risk-clamped packet candidate
-    OS->>OSStore: Append decision and atomically publish packet
+    Risk-->>OS: Risk-clamped portfolio and packet candidate
+    OS->>OSStore: Atomically append decision and optional complete packet
     Executor->>ExStore: Load published packet
     Executor->>Executor: Revalidate signature, scope, expiry, account, risk
     Executor->>ExStore: Persist effect-local order intent
@@ -162,6 +167,20 @@ Each external effect has a durable intent and effect-local idempotency identity 
 its observation is appended before lifecycle advance. Timeout and acceptance are independent facts.
 Reconciliation resolves ambiguity from broker facts and stable identities; retry never guesses or
 blindly repeats exposure.
+
+The implemented operating-system side ends after the atomic store operation. `portfolio` constructs
+one Champion Decision Record from the exact durable Balanced-plus-shadow cycle and at most one closed
+Balanced paper packet from trade-eligible Target Bands. A typed signer and non-secret account scope
+enter through uncredentialed composition; no broker credential or execution port enters `Advance`.
+The decision and packet share one append-only SQLite row so neither can become independently visible.
+Fresh packet publication requires the exact code-owned issue and expiry times and durable visibility
+before the regular open. The publication ledger resamples the shared trusted clock after acquiring
+its write transaction and persists that ledger-owned instant. A refusal at that boundary carries the
+same authoritative observation time into lifecycle history; no-action decisions remain publishable
+without packet timing authority. Exact replay reparses the signature, reconstructs semantics from the
+durable portfolio cycle, and revalidates recorded visibility against the same calendar policy without
+resigning; changed authorization conflicts.
+[ADR 0011](adr/0011-atomically-publish-one-balanced-decision.md) owns this boundary.
 
 ## Module ownership
 
@@ -188,8 +207,8 @@ Entrypoints expose complete capabilities, never individual research stages:
 | Capability | Architectural contract |
 | --- | --- |
 | `Scheduler` | Resolve due 2026 NYSE Market Sessions from one pinned policy and trusted UTC clock; durably classify started, resumed, completed, missed, and refused work; serialize concurrent local invocations; call only public `Advance` and `Status` with a stable policy-and-session identity; and report bounded scheduler status without claiming lifecycle liveness. |
-| `Advance` | Resolve or resume one supported cycle; validate governance and pinned inputs; build bounded Dossiers; run the fixed stateless production research roles; admit validated CIO resolutions to memory; construct and persist one deterministic HouseView, cash-preserving Balanced target set and Target Bands, and the required same-input shadow accounts; and return an explicit fresh, resumed, replayed, no-action, conflict, or failed-closed disposition. V0 accepts only `MarketSession`. |
-| `Status` | Validate authoritative lifecycle, evidence, Constitution, production model-call, memory, and Balanced-plus-shadow portfolio history; rebuild disposable projections; and report the durable checkpoint, liveness, terminal reason, pins, and bounded cycle-qualified references. Only `Complete` advances the completed cycle. |
+| `Advance` | Resolve or resume one supported cycle; validate governance and pinned inputs; build bounded Dossiers; run the fixed stateless production research roles; admit validated CIO resolutions to memory; persist one deterministic HouseView, cash-preserving Balanced result and three same-input shadows; atomically publish one Champion Decision Record and optional complete signed Balanced packet; and return an explicit fresh, resumed, replayed, no-action, conflict, or failed-closed disposition. The implemented lifecycle stops after `PublishDecision`; V0 accepts only `MarketSession`. |
+| `Status` | Validate authoritative lifecycle, evidence, Constitution, production model-call, memory, Balanced-plus-shadow portfolio, and decision-publication history; rebuild disposable projections; and report the durable checkpoint, `AwaitExecution` liveness, reason, pins, Decision Record identity, optional packet identity and expiry, and bounded cycle-qualified references. The published cycle is the latest completed operating-system cycle even though execution and later phases remain unimplemented. |
 | `Record` | Atomically append or replay evidence-bound belief and outcome facts; rebuild bounded as-of views without changing ex-ante decisions. |
 | `Govern` | Schedule an immutable, signed, operator-approved Constitution for one exact eligible future session. Exact retry replays; changed material conflicts. |
 | `Apply` | Independently validate one published packet, manage only its authorized paper orders, and return an execution receipt. |
@@ -265,8 +284,22 @@ stateDiagram-v2
   shadow kind-and-hash set, exact run identity, checkpoint content, and canonical recorded instant so
   another run or incomplete account set cannot
   substitute. [ADR 0009](adr/0009-account-for-required-same-input-portfolio-shadows.md) owns this
-  authority and persistence seam. The implemented lifecycle currently terminates at this checkpoint;
-  packet publication and later phases remain scaffolded.
+  authority and persistence seam.
+- `PublishDecision` first asks the decision ledger to replay the exact run-and-session publication.
+  When none exists, it reloads and reconstructs the complete portfolio cycle, derives the exact
+  forecast and model fingerprints from durable production research, constructs one Champion Decision
+  Record, and constructs a packet only when Balanced contains an authorized adjustment. The packet
+  freezes its cycle, account scope, validity window, policies, complete risk limits including the
+  maximum fraction of median dollar volume, canonical instruments, whole-share units, direction,
+  weights, Target Bands, long-only/no-leverage constraint, and regular-session day-limit policy. The
+  lifecycle revalidates packet timing after signing. After acquiring the write transaction and
+  validating the candidate, the ledger samples the shared trusted clock immediately before insertion,
+  revalidates exact official times against that instant, and atomically appends the Decision Record and
+  optional packet. A no-action Decision Record has no packet window and remains publishable. Lifecycle
+  history exposes only their bounded identities, packet expiry, recorded time, and a typed no-action
+  reason. The terminal receipt completes `PublishDecision`; `Status` reports `AwaitExecution`. No later
+  phase or broker effect is reachable.
+  [ADR 0011](adr/0011-atomically-publish-one-balanced-decision.md) owns this seam.
 - `NoAction` is an expected durable outcome; `FailedClosed` records why progress is unsafe. Neither
   publishes a discretionary order. No admitted attention, Skeptic rejection, and CIO abstention are
   durable no-action reasons. Missing reconciliation obligations require `FailedClosed`.
@@ -283,7 +316,7 @@ stateDiagram-v2
 | Production research calls | Effect-local intent before each model call, followed by one raw-response identity and validated role artifact or bounded refusal |
 | Portfolio constructions | One immutable HouseView, Balanced target set, cash remainder, Target Bands, policy identity, input identity, or typed refusal per run; exact replay only |
 | Portfolio shadow accounts | Conservative, Growth, and capped equal-weight ex-ante accounting rows bound to the same successful HouseView and input identity; append all three or none, exact replay only, never executable |
-| Published packets | Atomic store; complete, validated, immutable packets only |
+| Champion decisions and published packets | One append-only row per Market Session; complete content-identified Decision Record and optional signed, scoped Balanced packet with exact official issue, expiry, and pre-open visibility become visible atomically; exact semantic and timing replay only |
 | Execution | Executor ledger; intent first, then independent broker observations and receipts |
 | Research Lab | Namespace-local ledger; role intent first, then observation or bounded refusal |
 | Graphs, reports, indexes, status | Non-authoritative projections replaceable only by deterministic rebuild |
@@ -325,9 +358,13 @@ stateDiagram-v2
   reparses its complete canonical Balanced result and every required shadow account, reconstructs
   target-band and shadow identities, authenticates each shadow's complete portfolio input and policy
   against Balanced, and re-derives the approved allocation, Target Band, cash, position, cost, and risk
-  behavior. Terminal `Advance` validates only its requested portfolio reference; `Status` validates
-  global portfolio history and treats the status projection as disposable. Exact process retry returns
-  the same result set; missing, changed, or corrupt run material fails closed. SQLite
+  behavior. Decision publication then reparses and semantically reconstructs the exact portfolio cycle,
+  Champion Decision Record, optional packet, signature, account scope, exact official issue, expiry,
+  recorded visibility, policies, complete risk envelope including the liquidity fraction, and
+  authorized Target Band instructions. Terminal `Advance` validates only its requested portfolio and
+  decision references; `Status` validates global portfolio and decision history and treats the status
+  projection as disposable. Exact process retry returns the same result set; missing, changed,
+  off-window-at-first-publication, wrongly expired, or corrupt run material fails closed. SQLite
   initializes or validates one exact current physical schema; other non-empty shapes fail before writes.
   [ADR 0004](adr/0004-require-current-sqlite-schema.md) owns that decision. Runtime stores use explicit
   ignored roots; source directories never hold runtime state.

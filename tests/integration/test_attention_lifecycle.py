@@ -33,11 +33,11 @@ from agentic_investment_os.domain.lifecycle import (
     ResearchCheckpoint,
 )
 from agentic_investment_os.entrypoints.configuration import ConfigurationSource
-from agentic_investment_os.entrypoints.lifecycle import configure_advance
 from agentic_investment_os.research.production import (
     ProductionResearchBuild,
     ProductionResearchRun,
 )
+from tests._decision import configure_advance
 from tests._evidence import recorded_evidence
 from tests._governance import RecordedSessionEligibility
 from tests._production_research import (

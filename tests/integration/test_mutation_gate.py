@@ -10,11 +10,14 @@ from scripts import run_mutation
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 MUTATION_WORKFLOW = REPOSITORY_ROOT / ".github/workflows/mutation.yml"
 EXPECTED_MUTATION_SOURCES = [
+    "src/agentic_investment_os/adapters/decision_window.py",
+    "src/agentic_investment_os/adapters/sqlite_decision.py",
     "src/agentic_investment_os/execution/__init__.py",
     "src/agentic_investment_os/memory/admission.py",
     "src/agentic_investment_os/memory/reducer.py",
     "src/agentic_investment_os/portfolio/__init__.py",
     "src/agentic_investment_os/portfolio/construction.py",
+    "src/agentic_investment_os/portfolio/publication.py",
     "src/agentic_investment_os/portfolio/shadows.py",
 ]
 EXPECTED_AUTHORITY_ROOTS = [
@@ -24,8 +27,11 @@ EXPECTED_AUTHORITY_ROOTS = [
 ]
 EXPECTED_NONCRITICAL_MODULES = ["src/agentic_investment_os/memory/beliefs.py"]
 EXPECTED_MUTATION_TESTS = [
+    "tests/integration/test_decision_publication.py",
     "tests/unit/test_beliefs.py",
     "tests/contract/test_belief_event_contract.py",
+    "tests/contract/test_decision_packet_contract.py",
+    "tests/unit/test_decision_window.py",
     "tests/unit/test_portfolio.py",
 ]
 INVALID_CONFIGURATION_EXIT = 2

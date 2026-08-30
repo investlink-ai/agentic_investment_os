@@ -46,7 +46,6 @@ from agentic_investment_os.domain.universe import (
     UniverseRefusal,
 )
 from agentic_investment_os.entrypoints.configuration import ConfigurationSource
-from agentic_investment_os.entrypoints.lifecycle import configure_advance, configure_status
 from agentic_investment_os.memory.admission import (
     BeliefEvent,
     RecordRefusalCode,
@@ -89,6 +88,7 @@ from agentic_investment_os.research.resolution import (
     parse_skeptic_result,
     parse_thesis,
 )
+from tests._decision import configure_advance, configure_status
 from tests._evidence import recorded_official_evidence
 from tests._governance import RecordedSessionEligibility
 from tests._portfolio import recorded_portfolio_inputs
@@ -643,6 +643,15 @@ class _WriteThenInterruptPortfolioLedger:
     def validate_reference(self, reference: PortfolioCheckpointReference) -> None:
         self.delegate.validate_reference(reference)
 
+    def load_cycle(self, reference: PortfolioCheckpointReference) -> PortfolioCycleResult:
+        return self.delegate.load_cycle(reference)
+
+    def load_cycle_with_reference_for_run(
+        self,
+        run_id: str,
+    ) -> tuple[PortfolioCycleResult, PortfolioCheckpointReference]:
+        return self.delegate.load_cycle_with_reference_for_run(run_id)
+
 
 def _configure(
     state_root: Path,
@@ -706,7 +715,7 @@ def test_advance_constructs_and_status_rebuilds_one_portfolio_checkpoint(
     receipt = _advance(capability, "construct-balanced-target-bands")
     replayed = _advance(capability, "construct-balanced-target-bands")
 
-    assert receipt.completed_phase == LifecycleCheckpoint.equity(LifecyclePhase.CONSTRUCT_PORTFOLIO)
+    assert receipt.completed_phase == LifecycleCheckpoint.equity(LifecyclePhase.PUBLISH_DECISION)
     assert receipt.portfolio_checkpoint is not None
     assert receipt.portfolio_checkpoint.house_view_id is not None
     assert receipt.portfolio_checkpoint.target_band_ids
@@ -1259,7 +1268,9 @@ def test_advance_requires_a_typed_release_and_current_citation_to_clear_an_event
 
     receipt = _advance(capability, "typed-released-event")
 
-    assert receipt.disposition is AdvanceDisposition.ADVANCED
+    assert receipt.disposition is (
+        AdvanceDisposition.NO_ACTION if expected_blocked else AdvanceDisposition.ADVANCED
+    )
     assert receipt.pinned_run_identity is not None
     with sqlite3.connect(state_root / "lifecycle.sqlite3") as connection:
         row = connection.execute(
@@ -1599,7 +1610,7 @@ def test_production_advance_completes_stage_three_without_model_effect_for_no_at
 
     assert receipt.disposition is AdvanceDisposition.NO_ACTION
     assert receipt.completed_phase is not None
-    assert receipt.completed_phase.phase is LifecyclePhase.CONSTRUCT_PORTFOLIO
+    assert receipt.completed_phase.phase is LifecyclePhase.PUBLISH_DECISION
     assert receipt.research_resolution_ids == ()
     assert receipt.belief_event_ids == ()
     assert replayed == replace(
@@ -2058,7 +2069,7 @@ def test_partial_terminal_cio_set_constructs_only_resolved_subjects(tmp_path: Pa
 
     receipt = _advance(capability, "partial-terminal-cio-set")
 
-    assert receipt.completed_phase == LifecycleCheckpoint.equity(LifecyclePhase.CONSTRUCT_PORTFOLIO)
+    assert receipt.completed_phase == LifecycleCheckpoint.equity(LifecyclePhase.PUBLISH_DECISION)
     assert receipt.portfolio_checkpoint is not None
     assert receipt.portfolio_checkpoint.refusal_reason is None
     with sqlite3.connect(state_root / "lifecycle.sqlite3") as connection:
@@ -2594,7 +2605,7 @@ def test_completed_research_status_accepts_independent_advancing_clock_reads(
     receipt = _advance(capability, "stage-three-advancing-clock")
     status = _configured_status(state_root)()
 
-    assert receipt.disposition is AdvanceDisposition.ADVANCED
+    assert receipt.disposition is AdvanceDisposition.NO_ACTION
     assert status.liveness is LifecycleLiveness.ACTIVE
 
 
@@ -2648,7 +2659,7 @@ def test_production_advance_records_validated_research_and_belief_events_once(
 
     assert receipt.disposition is AdvanceDisposition.ADVANCED
     assert receipt.completed_phase is not None
-    assert receipt.completed_phase.phase is LifecyclePhase.CONSTRUCT_PORTFOLIO
+    assert receipt.completed_phase.phase is LifecyclePhase.PUBLISH_DECISION
     assert len(receipt.dossier_ids) == EXPECTED_SUBJECTS
     assert len(receipt.research_call_ids) == EXPECTED_CALLS
     assert len(receipt.research_resolution_ids) == EXPECTED_RESOLUTION_ARTIFACTS
@@ -2896,7 +2907,7 @@ def test_memory_retry_replays_committed_event_with_its_original_transaction_time
     )
     receipt = _advance(retry, "stage-three-memory-redelivery")
 
-    assert receipt.disposition is AdvanceDisposition.ADVANCED
+    assert receipt.disposition is AdvanceDisposition.NO_ACTION
     assert len(receipt.belief_event_ids) == 1
     with sqlite3.connect(database) as connection:
         assert connection.execute("SELECT COUNT(*) FROM belief_events").fetchone() == (1,)

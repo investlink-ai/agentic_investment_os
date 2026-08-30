@@ -4,7 +4,7 @@ import hashlib
 import json
 import re
 import sqlite3
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Never
@@ -41,7 +41,7 @@ from agentic_investment_os.entrypoints.configuration import (
     ConfigurationSource,
 )
 from agentic_investment_os.entrypoints.governance import configure_govern
-from agentic_investment_os.entrypoints.lifecycle import configure_advance, configure_status
+from tests._decision import configure_advance, configure_status
 from tests._governance import (
     ACTIVATION_SESSION,
     HashApprovalVerifier,
@@ -472,26 +472,7 @@ def test_interrupted_run_keeps_its_pin_after_a_later_constitution_activates(
     assert isinstance(initial, Advance)
     ledger = initial.ledger
     assert isinstance(ledger, SQLiteLifecycleLedger)
-    interrupted = Advance(
-        ledger=InterruptAfterFirstWrite(ledger),
-        configuration_version=initial.configuration_version,
-        configuration_hash=initial.configuration_hash,
-        universe_source=initial.universe_source,
-        enabled_asset_classes=initial.enabled_asset_classes,
-        universe_policy=initial.universe_policy,
-        evidence_capture=initial.evidence_capture,
-        attention_policy=initial.attention_policy,
-        attention_inputs=initial.attention_inputs,
-        clock=initial.clock,
-        constitution_registry=(initial.constitution_registry),
-        production_research=initial.production_research,
-        evidence_vault=initial.evidence_vault,
-        memory=initial.memory,
-        memory_refusal_ledger=initial.memory_refusal_ledger,
-        portfolio_policy=initial.portfolio_policy,
-        portfolio_input_source=initial.portfolio_input_source,
-        portfolio_ledger=initial.portfolio_ledger,
-    )
+    interrupted = replace(initial, ledger=InterruptAfterFirstWrite(ledger))
     with pytest.raises(SimulatedInterruptionError):
         interrupted(
             cycle=ACTIVATION_SESSION.to_payload(),
@@ -573,26 +554,7 @@ def test_overdue_governance_blocks_a_historical_pin_before_downstream_work(
     assert isinstance(initial, Advance)
     ledger = initial.ledger
     assert isinstance(ledger, SQLiteLifecycleLedger)
-    interrupted = Advance(
-        ledger=InterruptAfterFirstWrite(ledger),
-        configuration_version=initial.configuration_version,
-        configuration_hash=initial.configuration_hash,
-        universe_source=initial.universe_source,
-        enabled_asset_classes=initial.enabled_asset_classes,
-        universe_policy=initial.universe_policy,
-        evidence_capture=initial.evidence_capture,
-        attention_policy=initial.attention_policy,
-        attention_inputs=initial.attention_inputs,
-        clock=initial.clock,
-        constitution_registry=(initial.constitution_registry),
-        production_research=initial.production_research,
-        evidence_vault=initial.evidence_vault,
-        memory=initial.memory,
-        memory_refusal_ledger=initial.memory_refusal_ledger,
-        portfolio_policy=initial.portfolio_policy,
-        portfolio_input_source=initial.portfolio_input_source,
-        portfolio_ledger=initial.portfolio_ledger,
-    )
+    interrupted = replace(initial, ledger=InterruptAfterFirstWrite(ledger))
     with pytest.raises(SimulatedInterruptionError):
         interrupted(
             cycle=ACTIVATION_SESSION.to_payload(),
@@ -618,26 +580,7 @@ def test_overdue_governance_blocks_a_historical_pin_before_downstream_work(
         approval_verifier=HashApprovalVerifier(),
     )
     assert isinstance(configured_retry, Advance)
-    retry = Advance(
-        ledger=configured_retry.ledger,
-        configuration_version=configured_retry.configuration_version,
-        configuration_hash=configured_retry.configuration_hash,
-        universe_source=UnexpectedUniverseSource(),
-        enabled_asset_classes=configured_retry.enabled_asset_classes,
-        universe_policy=configured_retry.universe_policy,
-        evidence_capture=configured_retry.evidence_capture,
-        attention_policy=configured_retry.attention_policy,
-        attention_inputs=configured_retry.attention_inputs,
-        clock=configured_retry.clock,
-        constitution_registry=configured_retry.constitution_registry,
-        production_research=configured_retry.production_research,
-        evidence_vault=configured_retry.evidence_vault,
-        memory=configured_retry.memory,
-        memory_refusal_ledger=configured_retry.memory_refusal_ledger,
-        portfolio_policy=configured_retry.portfolio_policy,
-        portfolio_input_source=configured_retry.portfolio_input_source,
-        portfolio_ledger=configured_retry.portfolio_ledger,
-    )
+    retry = replace(configured_retry, universe_source=UnexpectedUniverseSource())
 
     with pytest.raises(GovernanceStateError, match="missed Constitution activation boundary"):
         retry(

@@ -215,6 +215,8 @@ The implemented candidate inventory is:
 
 | Candidate source | Classification and evidence owner |
 | --- | --- |
+| `adapters/decision_signing.py` | Safety-supporting typed HMAC signing and verification boundary with in-memory key isolation; unit, hostile-input, system-journey, and coverage evidence |
+| `adapters/decision_window.py` | Critical admission of the pinned pre-open publication window and derivation of the post-open execution deadline; unit, lifecycle, system-journey, coverage, and mutation evidence |
 | `adapters/filesystem_evidence.py` | Non-critical Evidence Vault filesystem mechanics and append-only observation durability; integration, corruption, and coverage evidence |
 | `adapters/recorded_evidence.py` | Non-critical recorded-boundary validation and normalization; contract, hostile-input, and coverage evidence |
 | `adapters/recorded_model.py` | Safety-supporting scripted model-call idempotency and recorded resource observations; contract, interruption, and coverage evidence |
@@ -222,11 +224,12 @@ The implemented candidate inventory is:
 | `adapters/sqlite_lab.py` | Safety-supporting namespace isolation, intent-before-effect durability, append-only reconstruction, and private-root validation; integration, interruption, corruption, and coverage evidence |
 | `adapters/sqlite_lifecycle.py` | Non-critical SQL mechanics and non-authorizing lifecycle and Constitution-governance durability; integration, corruption, architecture, and critical-coverage evidence |
 | `adapters/sqlite_memory.py` | Non-critical belief SQL mechanics and authoritative-history validation; integration, concurrency, corruption, and coverage evidence |
+| `adapters/sqlite_decision.py` | Critical atomic decision-plus-packet admission and persistence, signature and semantic reconstruction, exact retry, concurrency, expiry-at-publication, append-only history, and lifecycle-reference validation; integration, interruption, corruption, coverage, and mutation evidence |
 | `adapters/sqlite_portfolio.py` | Safety-supporting append-only portfolio-result persistence, exact retry, canonical reconstruction, and lifecycle-reference validation; integration, corruption, and coverage evidence |
 | `adapters/sqlite_production_research.py` | Safety-supporting production intent-before-effect durability, append-only observation reconstruction, and lifecycle-reference validation; integration, interruption, corruption, and coverage evidence |
 | `adapters/sqlite_scheduler.py` | Safety-supporting scheduler intent-before-effect durability, exact-policy reconstruction, concurrent-process serialization, and private-root validation with no financial lifecycle authority; integration, interruption, concurrency, corruption, and system-journey evidence |
 | `application/governance.py` | Non-critical Constitution scheduling and resolution orchestration with no packet or broker authority; unit, integration, and critical-coverage evidence |
-| `application/lifecycle.py` | Non-critical orchestration through Constitution pinning, evidence capture, bounded attention, production research, Belief Event admission, and the portfolio-owned construction interface with no sizing or broker authority; unit, integration, system-journey, and critical-coverage evidence |
+| `application/lifecycle.py` | Non-critical orchestration through Constitution pinning, evidence capture, bounded attention, production research, Belief Event admission, portfolio construction, and the portfolio-owned decision-publication interface with no sizing, signing-secret, executor, credential, or broker authority; unit, integration, system-journey, and critical-coverage evidence |
 | `application/memory.py` | Non-critical Record orchestration; integration, system-journey, and coverage evidence |
 | `application/replay.py` | Safety-supporting hostile-input admission and Lab replay orchestration with no production or execution authority; unit, contract, integration, interruption, and coverage evidence |
 | `application/scheduler.py` | Safety-supporting due-set and public-lifecycle orchestration with no research-stage, portfolio, packet, signing, broker, or credential authority; integration, interruption, concurrency, and system-journey evidence |
@@ -249,6 +252,7 @@ The implemented candidate inventory is:
 | `memory/beliefs.py` | Non-critical typed belief history, receipt, and bounded as-of graph projection; unit, property, contract, integration, corruption, and coverage evidence |
 | `memory/reducer.py` | Critical append-only belief-transition reducer, projection identity, and ledger commitment; unit, property, refusal, and mutation evidence |
 | `portfolio/construction.py` | Critical HouseView admission, capped inverse-volatility sizing, uncertainty downside, risk clamps, cash preservation, Target Bands, typed refusals, and hostile result reconstruction; hand-oracle, property, contract, lifecycle, corruption, coverage, and mutation evidence |
+| `portfolio/publication.py` | Critical Champion Decision Record and DecisionPacket construction, exact authority and unit constraints, complete material binding, content identity, signature input, hostile admission, and semantic reconstruction; unit, hostile contract, lifecycle, atomic persistence, system-journey, coverage, and mutation evidence |
 | `portfolio/shadows.py` | Critical same-input Conservative, Growth, and equal-weight sizing plus cash, Target Band, turnover-input, non-executable schema, and hostile reconstruction behavior; hand-oracle, property, lifecycle, corruption, coverage, and mutation evidence |
 | `research/authority.py` | Safety-supporting closed production-versus-Lab authority labels with no effect implementation; unit and coverage evidence |
 | `research/dossier.py` | Safety-supporting exact-schema, citation, cutoff, lens, and prohibited-authority validation; unit, hostile-input, and coverage evidence |
@@ -262,11 +266,13 @@ The implemented candidate inventory is:
 `tool.mutmut.only_mutate` is the single static mutation source allowlist. It contains exact implemented
 critical module paths, never package globs or an engine exclusion list. `source_paths = ["src"]` is only
 the engine's copy root and confers no mutation scope. The current exact entries are the critical
-`memory/admission.py`, `memory/reducer.py`, `portfolio/construction.py`, and `portfolio/shadows.py`
-kernels and the empty
-`execution` and `portfolio` initializers. Their exact test selection is `tests/unit/test_beliefs.py`,
-`tests/contract/test_belief_event_contract.py`, and `tests/unit/test_portfolio.py`; the scaffold files
-add no unrelated tests. The separate
+`adapters/decision_window.py`, `adapters/sqlite_decision.py`, `memory/admission.py`, `memory/reducer.py`,
+`portfolio/construction.py`, `portfolio/publication.py`, and `portfolio/shadows.py` modules plus the
+empty `execution` and `portfolio` initializers. Their exact test selection is
+`tests/integration/test_decision_publication.py`, `tests/unit/test_beliefs.py`,
+`tests/contract/test_belief_event_contract.py`, `tests/contract/test_decision_packet_contract.py`, and
+`tests/unit/test_decision_window.py` and `tests/unit/test_portfolio.py`; the scaffold files add no
+unrelated tests. The separate
 `tool.mutation_gate` inventory names the authority-owning capability roots and any callable module a
 human has classified as non-critical; it never adds or removes a mutation source. A callable below
 those roots that appears in neither exact classification fails the gate, so a scaffold exemption
@@ -324,6 +330,32 @@ evidence. A scenario becomes mandatory when its owning behavior is implemented.
 - Advance resumes idempotently across every checkpoint, including termination immediately before and
   after each durable write.
 - One Market Session has exactly one Champion Decision Record and at most one active packet.
+- Decision publication begins only from a semantically revalidated complete Balanced-plus-three-
+  shadow cycle. It freezes complete ex-ante decision material, publishes only Balanced
+  trade-eligible instructions, and retains a typed no-action Decision Record without a packet when no
+  adjustment is authorized.
+- A fresh packet is complete, signed, scoped, unexpired, cycle-bound, canonical-identity keyed,
+  whole-share, regular-session day-limit, long-only, no-leverage, and semantically identical to its
+  exact durable decision and complete risk envelope, including the maximum one-percent fraction of
+  median dollar volume. Hostile missing, extra, unknown, malformed,
+  hash-inconsistent, wrongly signed, Lab, shadow, symbol-keyed, implicit-unit, disabled-asset, changed-
+  scope, changed-policy, or expired material produces no visible packet.
+- Packet publication admits only the pinned fifteen-minute pre-open window and derives the immutable
+  expiry at thirty minutes after open across UTC-offset and calendar boundaries. The lifecycle checks
+  again after signing. Atomic insertion resamples the shared trusted clock after write-lock acquisition,
+  and insertion plus reopen validate the exact issue, expiry, and ledger-owned visibility with the same
+  policy. Early, at-open, post-open, signing-across-open, lock-acquisition-across-open, wrongly expired,
+  resealed off-window, weekend, holiday, or unsupported-year publication produces no packet or row.
+  Lifecycle refusal history retains the ledger-owned boundary instant that made a locked publication
+  invalid. A valid no-action Decision Record remains durable before, during, or after the packet window.
+- The Decision Record and optional packet become visible in one transaction. Interruptions on both
+  sides of that transaction, reopen, exact retry, projection rebuild, and concurrent equivalent
+  delivery return the same identities without another row; changed decision or authorization
+  material conflicts. Corrupt authoritative decision or packet history makes `Advance` or `Status`
+  fail closed.
+- The process-boundary lifecycle journey proves one complete signed Balanced packet, bounded
+  lifecycle references, `AwaitExecution` status, exact replay, and absence of ambient model, account,
+  credential, network, executor, and broker authority.
 - Repeated Record calls do not duplicate Outcome Observations.
 - Repeated Belief Event delivery returns the original bounded receipt without another ledger row;
   this remains true after reopen and a current-clock regression. Changed material under the same event

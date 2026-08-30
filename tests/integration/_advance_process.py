@@ -10,7 +10,7 @@ from pathlib import Path
 from agentic_investment_os.application.lifecycle import Advance
 from agentic_investment_os.domain.identity import MarketSession
 from agentic_investment_os.entrypoints.configuration import ConfigurationSource
-from agentic_investment_os.entrypoints.lifecycle import configure_advance
+from tests._decision import configure_advance
 from tests._governance import RecordedSessionEligibility
 from tests._portfolio import recorded_portfolio_inputs
 from tests._production_research import (

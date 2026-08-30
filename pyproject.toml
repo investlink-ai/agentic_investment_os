@@ -281,6 +281,8 @@ critical_branches = 100
 safety_supporting_lines = 90
 safety_supporting_branches = 85
 critical_paths = [
+  "adapters/decision_window.py",
+  "adapters/sqlite_decision.py",
   "adapters/sqlite_lifecycle.py",
   "application/governance.py",
   "application/lifecycle.py",
@@ -294,6 +296,7 @@ critical_paths = [
   "portfolio/**/*.py",
 ]
 safety_supporting_paths = [
+  "adapters/decision_signing.py",
   "adapters/filesystem_evidence.py",
   "adapters/recorded_evidence.py",
   "adapters/recorded_model.py",
@@ -324,11 +327,14 @@ safety_supporting_paths = [
 [tool.mutmut]
 source_paths = ["src"]
 only_mutate = [
+  "src/agentic_investment_os/adapters/decision_window.py",
+  "src/agentic_investment_os/adapters/sqlite_decision.py",
   "src/agentic_investment_os/execution/__init__.py",
   "src/agentic_investment_os/memory/admission.py",
   "src/agentic_investment_os/memory/reducer.py",
   "src/agentic_investment_os/portfolio/__init__.py",
   "src/agentic_investment_os/portfolio/construction.py",
+  "src/agentic_investment_os/portfolio/publication.py",
   "src/agentic_investment_os/portfolio/shadows.py",
 ]
 pytest_add_cli_args = [
@@ -336,8 +342,11 @@ pytest_add_cli_args = [
   "addopts=--strict-config --strict-markers -ra",
 ]
 pytest_add_cli_args_test_selection = [
+  "tests/integration/test_decision_publication.py",
   "tests/unit/test_beliefs.py",
   "tests/contract/test_belief_event_contract.py",
+  "tests/contract/test_decision_packet_contract.py",
+  "tests/unit/test_decision_window.py",
   "tests/unit/test_portfolio.py",
 ]
 mutate_only_covered_lines = false

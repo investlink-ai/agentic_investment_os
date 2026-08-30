@@ -6,6 +6,7 @@ import sqlite3
 import stat
 import subprocess
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime, timedelta, timezone
@@ -13,18 +14,22 @@ from decimal import Decimal
 from pathlib import Path
 from shutil import copytree
 from tempfile import TemporaryDirectory
+from threading import Event
 from typing import TYPE_CHECKING, Literal, Never, assert_never, cast, override
 
 import pytest
 from hypothesis import strategies as st
 from hypothesis.stateful import RuleBasedStateMachine, invariant, precondition, rule
 
+from agentic_investment_os.adapters.decision_signing import HmacSha256DecisionPacketSigner
+from agentic_investment_os.adapters.sqlite_decision import SQLiteDecisionPublicationLedger
 from agentic_investment_os.adapters.sqlite_lifecycle import (
     RuntimeRootRefusal,
     SQLiteLifecycleLedger,
     prepare_runtime_database,
 )
-from agentic_investment_os.application.lifecycle import Advance, Status
+from agentic_investment_os.adapters.sqlite_portfolio import SQLitePortfolioLedger
+from agentic_investment_os.application.lifecycle import Advance, Clock, Status
 from agentic_investment_os.domain.attention import (
     AttentionArtifact,
     AttentionRefusalReason,
@@ -51,6 +56,7 @@ from agentic_investment_os.domain.lifecycle import (
     AdvanceRequest,
     AppendLifecycleRecord,
     AppendTerminalLifecycleRecord,
+    DecisionCheckpoint,
     DurableAdvanceConflict,
     DurableAdvanceRefusal,
     EvidenceCaptureCheckpoint,
@@ -62,11 +68,13 @@ from agentic_investment_os.domain.lifecycle import (
     LifecycleDecision,
     LifecycleEvent,
     LifecycleEventKind,
+    LifecycleLiveness,
     LifecyclePersistenceError,
     LifecyclePhase,
     LifecycleStatus,
     NoActionReason,
     PerformAttentionSelection,
+    PerformDecisionPublication,
     PerformDossierBuild,
     PerformEvidenceCapture,
     PerformMemoryUpdate,
@@ -86,15 +94,20 @@ from agentic_investment_os.entrypoints.configuration import (
 )
 from agentic_investment_os.entrypoints.lifecycle import (
     SystemClock,
-    configure_advance,
-    configure_status,
 )
 from agentic_investment_os.evidence.capture import EvidencePersistenceError
 from agentic_investment_os.memory.beliefs import (
     BeliefGraphRefusal,
     BeliefGraphRefusalCode,
 )
+from agentic_investment_os.portfolio.publication import (
+    DecisionPacketValidityWindow,
+)
+from agentic_investment_os.portfolio.publication import (
+    DecisionPublicationRefusalReason as PacketPublicationRefusalReason,
+)
 from tests._attention import attention_artifact
+from tests._decision import configure_advance, configure_production_advance, configure_status
 from tests._evidence import (
     evidence_capture_checkpoint,
     materialized_evidence_capture_checkpoint,
@@ -110,6 +123,8 @@ from tests._universe import (
     advance_command,
     pinned_run_identity,
     portfolio_shadow_references,
+    recorded_packet_universe,
+    recorded_portfolio,
     recorded_universe,
     runtime_configuration,
     typed_portfolio_inputs,
@@ -127,7 +142,7 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 SHA256_HEX_LENGTH = 64
 PRIVATE_DIRECTORY_MODE = 0o700
 PRIVATE_FILE_MODE = 0o600
-PINNED_EVENT_COUNT = 10
+PINNED_EVENT_COUNT = 11
 ATTENTION_REFUSAL_EVENT_COUNT = 5
 ATTENTION_PUBLISHED_EVENT_COUNT = 6
 RECEIPT_FIELD_COUNT = 4
@@ -138,6 +153,17 @@ DOSSIER_CHECKPOINT = ResearchCheckpoint(("1" * SHA256_HEX_LENGTH,))
 RESEARCH_CHECKPOINT = ResearchCheckpoint(("2" * SHA256_HEX_LENGTH,))
 MEMORY_CHECKPOINT = ResearchCheckpoint(("3" * SHA256_HEX_LENGTH,))
 SQLiteValue = str | bytes | int | float | None
+
+
+def _decision_checkpoint(recorded_at: UtcInstant) -> DecisionCheckpoint:
+    return DecisionCheckpoint(
+        "7" * SHA256_HEX_LENGTH,
+        "8" * SHA256_HEX_LENGTH,
+        UtcInstant.from_datetime(recorded_at.value + timedelta(minutes=5)),
+        recorded_at,
+    )
+
+
 NONCANONICAL_CHECKPOINT_SQL = (
     "UPDATE lifecycle_events SET completed_phase = ' ' || completed_phase WHERE sequence = 1"
 )
@@ -257,7 +283,8 @@ CORRUPTIONS = {
                    universe_snapshot, evidence_policy_id,
                    evidence_artifact_ids, evidence_refusal_ids,
                    attention_artifact_id, attention_artifact,
-                   research_checkpoint, portfolio_checkpoint, no_action_reason,
+                   research_checkpoint, portfolio_checkpoint, decision_checkpoint,
+                   no_action_reason,
                    event_envelope, recorded_at
             FROM lifecycle_events WHERE sequence = 2
             """,
@@ -669,6 +696,28 @@ CORRUPTIONS = {
         ),
         "lifecycle stream checkpoint order is invalid",
     ),
+    "decision_checkpoint_on_wrong_event": (
+        ("UPDATE lifecycle_events SET decision_checkpoint = '{}' WHERE sequence = 0",),
+        "lifecycle stream checkpoint order is invalid",
+    ),
+    "malformed_decision_checkpoint": (
+        (
+            (
+                "UPDATE lifecycle_events SET decision_checkpoint = '{' "
+                "WHERE event_kind = 'decision_published'"
+            ),
+        ),
+        "lifecycle stream checkpoint order is invalid",
+    ),
+    "invalid_decision_checkpoint": (
+        (
+            (
+                "UPDATE lifecycle_events SET decision_checkpoint = '{}' "
+                "WHERE event_kind = 'decision_published'"
+            ),
+        ),
+        "lifecycle stream checkpoint order is invalid",
+    ),
 }
 
 
@@ -766,12 +815,58 @@ class FixedClock:
         return self.instant
 
 
+@dataclass
+class SequenceClock:
+    instants: tuple[datetime, ...]
+    calls: int = 0
+
+    def now(self) -> datetime:
+        instant = self.instants[min(self.calls, len(self.instants) - 1)]
+        self.calls += 1
+        return instant
+
+
+@dataclass
+class SignaledMutableClock:
+    instant: datetime
+    calls: int = 0
+    notify_on_call: int | None = None
+    sampled: Event = field(default_factory=Event)
+
+    def now(self) -> datetime:
+        self.calls += 1
+        if self.calls == self.notify_on_call:
+            self.sampled.set()
+        return self.instant
+
+
 @dataclass(frozen=True)
 class FixedUniverseSource:
     inputs: UniverseInputs
 
     def load(self) -> UniverseInputs:
         return self.inputs
+
+
+@dataclass(frozen=True)
+class RefusingDecisionWindowSource:
+    refusal: PacketPublicationRefusalReason
+
+    def window_for(
+        self,
+        cycle: MarketSession,
+        recorded_at: UtcInstant,
+    ) -> PacketPublicationRefusalReason:
+        _ = (cycle, recorded_at)
+        return self.refusal
+
+    def allows_publication(
+        self,
+        window: DecisionPacketValidityWindow,
+        recorded_at: UtcInstant,
+    ) -> bool:
+        _ = (window, recorded_at)
+        return False
 
 
 class NoncanonicalDatetime(datetime):
@@ -1019,7 +1114,8 @@ def _attempt_operation(command: LifecycleCommand, attempt: AdvanceAttempt) -> st
         6: "research",
         7: "memory",
         8: "portfolio",
-    }.get(attempt.last_sequence, "portfolio")
+        9: "decision",
+    }.get(attempt.last_sequence, "decision")
 
 
 def _decision_operation(decision: LifecycleDecision, fallback: str) -> str:
@@ -1035,6 +1131,8 @@ def _decision_operation(decision: LifecycleDecision, fallback: str) -> str:
         operation = "memory_effect"
     elif isinstance(decision, PerformPortfolioConstruction):
         operation = "portfolio_effect"
+    elif isinstance(decision, PerformDecisionPublication):
+        operation = "decision_effect"
     elif not isinstance(decision, (AppendLifecycleRecord, AppendTerminalLifecycleRecord)):
         operation = fallback
     elif isinstance(decision.record, DurableAdvanceRefusal):
@@ -1054,6 +1152,7 @@ def _decision_operation(decision: LifecycleDecision, fallback: str) -> str:
             7: "research",
             8: "memory",
             9: "portfolio",
+            10: "decision",
         }[decision.record.sequence]
     return operation
 
@@ -1426,6 +1525,7 @@ class _LifecycleReferenceModel:
                 UtcInstant.from_datetime(RECORDED_AT),
                 shadow_accounts=portfolio_shadow_references(),
             ),
+            _decision_checkpoint(UtcInstant.from_datetime(RECORDED_AT)),
             None,
         )
 
@@ -1515,12 +1615,14 @@ class _LifecycleReferenceModel:
         return _reference_fingerprint(material)
 
 
-def _configure(
+def _configure(  # noqa: PLR0913 - fixture exposes independent lifecycle dimensions.
     state_root: Path,
     *,
-    clock: FixedClock | None = None,
-    cio_stance: Literal["hold", "abstain"] = "hold",
+    clock: Clock | None = None,
+    cio_stance: Literal["long", "hold", "abstain"] = "hold",
     evidence_fixture: Literal["complete", "required"] = "complete",
+    packet_capable_universe: bool = False,
+    production_window: bool = False,
 ) -> Advance:
     if evidence_fixture == "complete":
         recorded_official_evidence: object = production_recorded_official_evidence()
@@ -1528,7 +1630,9 @@ def _configure(
         recorded_official_evidence = None
     else:
         assert_never(evidence_fixture)
-    configured = configure_advance(
+    universe = recorded_packet_universe() if packet_capable_universe else recorded_universe()
+    configure = configure_production_advance if production_window else configure_advance
+    configured = configure(
         (
             ConfigurationSource(
                 "test",
@@ -1536,8 +1640,8 @@ def _configure(
             ),
         ),
         repository_root=REPOSITORY_ROOT,
-        recorded_universe=recorded_universe(),
-        recorded_portfolio=recorded_portfolio_inputs(typed_portfolio_inputs().position_snapshot),
+        recorded_universe=universe,
+        recorded_portfolio=recorded_portfolio(universe),
         recorded_evidence=production_recorded_evidence(),
         recorded_official_evidence=recorded_official_evidence,
         recorded_model=ValidProductionModel(cio_stance=cio_stance),
@@ -1816,9 +1920,9 @@ def test_advance_pins_one_stream_and_reconstructs_its_receipt_after_reopen(
     assert first.disposition is replay.disposition
     assert first.completed_phase == replay.completed_phase
     assert first.pinned_run_identity == replay.pinned_run_identity
-    assert first.disposition is AdvanceDisposition.ADVANCED
+    assert first.disposition is AdvanceDisposition.NO_ACTION
     assert first.completed_phase is not None
-    assert first.completed_phase.phase is LifecyclePhase.CONSTRUCT_PORTFOLIO
+    assert first.completed_phase.phase is LifecyclePhase.PUBLISH_DECISION
     assert first.pinned_run_identity is not None
     assert len(first.pinned_run_identity.run_id) == SHA256_HEX_LENGTH
     assert len(first.pinned_run_identity.configuration_hash) == SHA256_HEX_LENGTH
@@ -1834,9 +1938,417 @@ def test_advance_pins_one_stream_and_reconstructs_its_receipt_after_reopen(
         ("research_run", "RunResearch"),
         ("memory_updated", "UpdateMemory"),
         ("portfolio_constructed", "ConstructPortfolio"),
+        ("decision_published", "PublishDecision"),
     ]
     assert stat.S_IMODE(state_root.stat().st_mode) == PRIVATE_DIRECTORY_MODE
     assert stat.S_IMODE((state_root / "lifecycle.sqlite3").stat().st_mode) == PRIVATE_FILE_MODE
+
+
+def test_decision_publication_resamples_time_after_slow_research(tmp_path: Path) -> None:
+    state_root = tmp_path / "runtime"
+    started_at = datetime(2026, 8, 21, 22, 0, tzinfo=UTC)
+    published_at = started_at + timedelta(minutes=6)
+    clock = SequenceClock((started_at, published_at, published_at))
+
+    receipt = _configure(
+        state_root,
+        clock=clock,
+        cio_stance="long",
+        packet_capable_universe=True,
+    )(
+        cycle=_cycle_payload("2026-08-21"),
+        mode="champion",
+        idempotency_key="resample-publication-time",
+    )
+
+    assert clock.calls >= len(clock.instants)
+    assert receipt.decision_checkpoint is not None
+    assert receipt.decision_checkpoint.recorded_at == UtcInstant.from_datetime(published_at)
+    with sqlite3.connect(state_root / "lifecycle.sqlite3") as connection:
+        row = connection.execute(
+            "SELECT packet_json, recorded_at FROM decision_publications"
+        ).fetchone()
+        event_time = connection.execute(
+            "SELECT recorded_at FROM lifecycle_events WHERE event_kind = 'decision_published'"
+        ).fetchone()
+    assert row is not None
+    assert row[0] is not None
+    packet = json.loads(row[0])
+    assert packet["issued_at"] == UtcInstant.from_datetime(published_at).isoformat()
+    assert row[1] == UtcInstant.from_datetime(published_at).isoformat()
+    assert event_time == (UtcInstant.from_datetime(published_at).isoformat(),)
+
+
+def test_decision_publication_refuses_a_packet_that_expires_during_signing(
+    tmp_path: Path,
+) -> None:
+    state_root = tmp_path / "runtime"
+    started_at = datetime(2026, 8, 21, 22, 0, tzinfo=UTC)
+    issued_at = started_at + timedelta(minutes=6)
+    visible_at = issued_at + timedelta(minutes=5)
+    clock = SequenceClock((started_at, started_at, issued_at, visible_at))
+
+    receipt = _configure(
+        state_root,
+        clock=clock,
+        cio_stance="long",
+        packet_capable_universe=True,
+    )(
+        cycle=_cycle_payload("2026-08-21"),
+        mode="champion",
+        idempotency_key="packet-expired-during-signing",
+    )
+
+    assert receipt.failure_reason is AdvanceFailureReason.DECISION_PUBLICATION_FAILED
+    assert receipt.decision_checkpoint is None
+    with sqlite3.connect(state_root / "lifecycle.sqlite3") as connection:
+        assert connection.execute("SELECT COUNT(*) FROM decision_publications").fetchone() == (0,)
+        refusal = connection.execute(
+            "SELECT decision_publication_refusal, recorded_at FROM advance_refusals"
+        ).fetchone()
+    assert refusal == (
+        PacketPublicationRefusalReason.INVALID_VALIDITY_WINDOW.value,
+        UtcInstant.from_datetime(started_at).isoformat(),
+    )
+
+
+def test_decision_publication_refuses_when_signing_crosses_the_regular_open(
+    tmp_path: Path,
+) -> None:
+    state_root = tmp_path / "runtime"
+    started_at = datetime(2026, 8, 24, 13, 15, tzinfo=UTC)
+    issued_at = datetime(2026, 8, 24, 13, 29, 59, tzinfo=UTC)
+    visible_at = datetime(2026, 8, 24, 13, 30, 1, tzinfo=UTC)
+    clock = SequenceClock((started_at, started_at, issued_at, visible_at))
+
+    receipt = _configure(
+        state_root,
+        clock=clock,
+        cio_stance="long",
+        packet_capable_universe=True,
+        production_window=True,
+    )(
+        cycle=_cycle_payload("2026-08-24"),
+        mode="champion",
+        idempotency_key="packet-crossed-regular-open",
+    )
+
+    assert receipt.failure_reason is AdvanceFailureReason.DECISION_PUBLICATION_FAILED
+    assert receipt.decision_checkpoint is None
+    with sqlite3.connect(state_root / "lifecycle.sqlite3") as connection:
+        assert connection.execute("SELECT COUNT(*) FROM decision_publications").fetchone() == (0,)
+
+
+def test_decision_publication_lock_crossing_open_records_boundary_refusal_time(
+    tmp_path: Path,
+) -> None:
+    state_root = tmp_path / "runtime"
+    pre_open = datetime(2026, 8, 24, 13, 29, 59, 500000, tzinfo=UTC)
+    regular_open = datetime(2026, 8, 24, 13, 30, tzinfo=UTC)
+    clock = SignaledMutableClock(pre_open)
+    capability = _configure(
+        state_root,
+        clock=clock,
+        cio_stance="long",
+        packet_capable_universe=True,
+        production_window=True,
+    )
+    ledger = capability.ledger
+    assert isinstance(ledger, SQLiteLifecycleLedger)
+    interrupted = replace(
+        capability,
+        ledger=InterruptingLedger(ledger, "portfolio", "after"),
+    )
+    request = {
+        "cycle": _cycle_payload("2026-08-24"),
+        "mode": "champion",
+        "idempotency_key": "decision-publication-lock-crossed-open",
+    }
+
+    with pytest.raises(SimulatedInterruptionError):
+        interrupted(**request)
+
+    database = state_root / "lifecycle.sqlite3"
+    decision_database = state_root / "blocked-decision-boundary.sqlite3"
+    with (
+        sqlite3.connect(database) as source,
+        sqlite3.connect(decision_database) as destination,
+    ):
+        source.backup(destination)
+    decision_ledger = capability.decision_ledger
+    assert isinstance(decision_ledger, SQLiteDecisionPublicationLedger)
+    resumed = replace(
+        capability,
+        decision_ledger=replace(
+            decision_ledger,
+            database=decision_database,
+            portfolio_ledger=SQLitePortfolioLedger(decision_database),
+        ),
+    )
+    clock.sampled.clear()
+    clock.notify_on_call = clock.calls + 3
+    with sqlite3.connect(decision_database, timeout=5.0) as blocker:
+        blocker.execute("BEGIN IMMEDIATE")
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(lambda: resumed(**request))
+            assert clock.sampled.wait(timeout=2.0)
+            clock.instant = regular_open
+            blocker.rollback()
+            receipt = future.result(timeout=5.0)
+
+    assert receipt.failure_reason is AdvanceFailureReason.DECISION_PUBLICATION_FAILED
+    assert receipt.decision_checkpoint is None
+    with sqlite3.connect(decision_database) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM decision_publications").fetchone() == (0,)
+    with sqlite3.connect(database) as connection:
+        refusal = connection.execute(
+            "SELECT decision_publication_refusal, recorded_at FROM advance_refusals"
+        ).fetchone()
+    assert refusal == (
+        PacketPublicationRefusalReason.INVALID_VALIDITY_WINDOW.value,
+        UtcInstant.from_datetime(regular_open).isoformat(),
+    )
+
+
+@pytest.mark.parametrize(
+    "recorded_at",
+    [
+        datetime(2026, 8, 24, 13, 14, 59, tzinfo=UTC),
+        datetime(2026, 8, 24, 13, 30, tzinfo=UTC),
+        datetime(2026, 8, 24, 13, 31, tzinfo=UTC),
+    ],
+)
+def test_no_action_decision_is_retained_outside_the_packet_window(
+    tmp_path: Path,
+    recorded_at: datetime,
+) -> None:
+    state_root = tmp_path / "runtime"
+
+    receipt = _configure(
+        state_root,
+        clock=FixedClock(recorded_at),
+        production_window=True,
+    )(
+        cycle=_cycle_payload("2026-08-24"),
+        mode="champion",
+        idempotency_key=f"no-action-{int(recorded_at.timestamp())}",
+    )
+
+    assert receipt.disposition is AdvanceDisposition.NO_ACTION
+    assert receipt.failure_reason is None
+    assert receipt.decision_checkpoint is not None
+    assert receipt.decision_checkpoint.packet_id is None
+    assert receipt.decision_checkpoint.no_action_reason is NoActionReason.NO_AUTHORIZED_ADJUSTMENTS
+    with sqlite3.connect(state_root / "lifecycle.sqlite3") as connection:
+        assert connection.execute(
+            "SELECT packet_id, no_action_reason FROM decision_publications"
+        ).fetchall() == [(None, "no_authorized_adjustments")]
+
+
+@pytest.mark.parametrize("regression_point", ["before_signing", "after_signing"])
+def test_decision_publication_refuses_a_backward_clock_without_an_orphan_packet(
+    tmp_path: Path,
+    regression_point: Literal["before_signing", "after_signing"],
+) -> None:
+    state_root = tmp_path / "runtime"
+    started_at = datetime(2026, 8, 21, 22, 0, tzinfo=UTC)
+    regressed_at = started_at - timedelta(seconds=1)
+    clock = SequenceClock(
+        (started_at, started_at, started_at, regressed_at)
+        if regression_point == "after_signing"
+        else (started_at, started_at, regressed_at)
+    )
+    capability = _configure(
+        state_root,
+        clock=clock,
+        cio_stance="long",
+        packet_capable_universe=True,
+    )
+
+    request = {
+        "cycle": _cycle_payload("2026-08-21"),
+        "mode": "champion",
+        "idempotency_key": f"backward-publication-clock-{regression_point}",
+    }
+    if regression_point == "before_signing":
+        with pytest.raises(
+            LifecyclePersistenceError,
+            match="lifecycle clock precedes the latest durable checkpoint",
+        ):
+            capability(**request)
+        receipt = None
+    else:
+        receipt = capability(**request)
+
+    database = state_root / "lifecycle.sqlite3"
+    with sqlite3.connect(database) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM decision_publications").fetchone() == (0,)
+        refusal = connection.execute(
+            "SELECT decision_publication_refusal, recorded_at FROM advance_refusals"
+        ).fetchone()
+    if regression_point == "before_signing":
+        assert refusal is None
+    else:
+        assert receipt is not None
+        assert receipt.failure_reason is AdvanceFailureReason.DECISION_PUBLICATION_FAILED
+        assert receipt.decision_checkpoint is None
+        assert refusal == (
+            PacketPublicationRefusalReason.INVALID_VALIDITY_WINDOW.value,
+            UtcInstant.from_datetime(started_at).isoformat(),
+        )
+    assert _events(database)[-1] == ("portfolio_constructed", "ConstructPortfolio")
+    status = configure_status(
+        (ConfigurationSource("test", runtime_configuration(state_root)),),
+        repository_root=REPOSITORY_ROOT,
+    )
+    assert isinstance(status, Status)
+    assert status().durable_reason is (
+        None
+        if regression_point == "before_signing"
+        else AdvanceFailureReason.DECISION_PUBLICATION_FAILED
+    )
+
+
+def test_retry_waits_for_clock_to_recover_after_the_portfolio_checkpoint(
+    tmp_path: Path,
+) -> None:
+    state_root = tmp_path / "runtime"
+    checkpoint_at = datetime(2026, 8, 21, 22, 0, tzinfo=UTC)
+    capability = _configure(
+        state_root,
+        clock=FixedClock(checkpoint_at),
+        cio_stance="long",
+        packet_capable_universe=True,
+    )
+    ledger = capability.ledger
+    assert isinstance(ledger, SQLiteLifecycleLedger)
+    decision_ledger = capability.decision_ledger
+    assert isinstance(decision_ledger, SQLiteDecisionPublicationLedger)
+    interrupted = replace(
+        capability,
+        ledger=InterruptingLedger(ledger, "portfolio", "after"),
+    )
+    request = {
+        "cycle": _cycle_payload("2026-08-21"),
+        "mode": "champion",
+        "idempotency_key": "recover-after-clock-regression",
+    }
+
+    with pytest.raises(SimulatedInterruptionError):
+        interrupted(**request)
+    regressed_clock = FixedClock(checkpoint_at - timedelta(seconds=1))
+    regressed = replace(
+        capability,
+        clock=regressed_clock,
+        decision_ledger=replace(decision_ledger, clock=regressed_clock),
+    )
+    with pytest.raises(
+        LifecyclePersistenceError,
+        match="lifecycle clock precedes the latest durable checkpoint",
+    ):
+        regressed(**request)
+
+    database = state_root / "lifecycle.sqlite3"
+    with sqlite3.connect(database) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM decision_publications").fetchone() == (0,)
+        assert connection.execute("SELECT COUNT(*) FROM advance_refusals").fetchone() == (0,)
+    status = configure_status(
+        (ConfigurationSource("test", runtime_configuration(state_root)),),
+        repository_root=REPOSITORY_ROOT,
+    )
+    assert isinstance(status, Status)
+    incomplete = status()
+    assert incomplete.liveness is LifecycleLiveness.ACTIVE
+    assert incomplete.active_phase is not None
+    assert incomplete.active_phase.phase is LifecyclePhase.PUBLISH_DECISION
+    assert incomplete.durable_reason is None
+
+    recovered_clock = FixedClock(checkpoint_at + timedelta(seconds=1))
+    recovered = replace(
+        capability,
+        clock=recovered_clock,
+        decision_ledger=replace(decision_ledger, clock=recovered_clock),
+    )
+    receipt = recovered(**request)
+
+    assert receipt.recovery is AdvanceRecovery.RESUMED
+    assert receipt.failure_reason is None
+    assert receipt.decision_checkpoint is not None
+    with sqlite3.connect(database) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM decision_publications").fetchone() == (1,)
+        assert connection.execute("SELECT COUNT(*) FROM advance_refusals").fetchone() == (0,)
+
+
+def test_wrong_packet_verifier_is_a_durable_publication_refusal(tmp_path: Path) -> None:
+    state_root = tmp_path / "runtime"
+    capability = _configure(
+        state_root,
+        cio_stance="long",
+        packet_capable_universe=True,
+    )
+    database = state_root / "lifecycle.sqlite3"
+    invalid = replace(
+        capability,
+        decision_ledger=SQLiteDecisionPublicationLedger.open_existing(
+            database,
+            verifier=HmacSha256DecisionPacketSigner(b"wrong-synthetic-verification-key"),
+            portfolio_ledger=capability.portfolio_ledger,
+            benchmark_identity=capability.benchmark_identity,
+            decision_window_source=capability.decision_window_source,
+            clock=capability.clock,
+        ),
+    )
+
+    receipt = invalid(
+        cycle=_cycle_payload("2026-08-21"),
+        mode="champion",
+        idempotency_key="wrong-publication-verifier",
+    )
+
+    assert receipt.failure_reason is AdvanceFailureReason.DECISION_PUBLICATION_FAILED
+    assert receipt.decision_checkpoint is None
+    with sqlite3.connect(database) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM decision_publications").fetchone() == (0,)
+        assert connection.execute(
+            "SELECT decision_publication_refusal FROM advance_refusals"
+        ).fetchone() == (PacketPublicationRefusalReason.SIGNING_FAILED.value,)
+
+
+def test_missing_required_shadow_is_a_durable_publication_refusal(tmp_path: Path) -> None:
+    state_root = tmp_path / "runtime"
+    capability = _configure(
+        state_root,
+        cio_stance="long",
+        packet_capable_universe=True,
+    )
+    ledger = capability.ledger
+    assert isinstance(ledger, SQLiteLifecycleLedger)
+    interrupted = replace(
+        capability,
+        ledger=InterruptingLedger(ledger, "portfolio", "after"),
+    )
+    request = {
+        "cycle": _cycle_payload("2026-08-21"),
+        "mode": "champion",
+        "idempotency_key": "missing-shadow-at-publication",
+    }
+
+    with pytest.raises(SimulatedInterruptionError):
+        interrupted(**request)
+    database = state_root / "lifecycle.sqlite3"
+    with sqlite3.connect(database) as connection:
+        connection.execute("DROP TRIGGER portfolio_shadow_accounts_are_append_only_delete")
+        connection.execute("DELETE FROM portfolio_shadow_accounts WHERE account_kind = 'growth'")
+
+    receipt = capability(**request)
+
+    assert receipt.failure_reason is AdvanceFailureReason.DECISION_PUBLICATION_FAILED
+    assert receipt.decision_checkpoint is None
+    with sqlite3.connect(database) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM decision_publications").fetchone() == (0,)
+        assert connection.execute(
+            "SELECT decision_publication_refusal FROM advance_refusals"
+        ).fetchone() == (PacketPublicationRefusalReason.INVALID_PORTFOLIO.value,)
 
 
 def test_advance_captures_all_recorded_official_sources_without_network_access(
@@ -1862,7 +2374,7 @@ def test_advance_captures_all_recorded_official_sources_without_network_access(
         idempotency_key="advance-with-official-evidence",
     )
 
-    assert receipt.disposition is AdvanceDisposition.ADVANCED
+    assert receipt.disposition is AdvanceDisposition.NO_ACTION
     assert len(receipt.evidence_artifact_ids) == COMPLETE_EVIDENCE_ARTIFACT_COUNT
     assert receipt.evidence_refusal_ids == ()
     assert (
@@ -1901,7 +2413,7 @@ def test_optional_official_artifact_after_cutoff_is_not_published_as_admitted_ev
         idempotency_key="optional-future-official-evidence",
     )
 
-    assert receipt.disposition is AdvanceDisposition.ADVANCED
+    assert receipt.disposition is AdvanceDisposition.NO_ACTION
     assert len(receipt.evidence_artifact_ids) == COMPLETE_EVIDENCE_ARTIFACT_COUNT - 1
     assert receipt.evidence_refusal_ids == ()
     assert (
@@ -1999,7 +2511,10 @@ def test_disabled_crypto_cycle_is_refused_before_authoritative_state_changes(
         ("memory", "before", 8, AdvanceRecovery.RESUMED),
         ("memory", "after", 9, AdvanceRecovery.RESUMED),
         ("portfolio", "before", 9, AdvanceRecovery.RESUMED),
-        ("portfolio", "after", 10, AdvanceRecovery.PREVIOUSLY_COMPLETED),
+        ("portfolio", "after", 10, AdvanceRecovery.RESUMED),
+        ("decision_effect", "after", 10, AdvanceRecovery.RESUMED),
+        ("decision", "before", 10, AdvanceRecovery.RESUMED),
+        ("decision", "after", 11, AdvanceRecovery.PREVIOUSLY_COMPLETED),
     ],
 )
 def test_fresh_process_resumes_at_every_universe_snapshot_write_boundary(
@@ -2013,25 +2528,9 @@ def test_fresh_process_resumes_at_every_universe_snapshot_write_boundary(
     capability = _configure(state_root)
     ledger = capability.ledger
     assert isinstance(ledger, SQLiteLifecycleLedger)
-    interrupted = Advance(
+    interrupted = replace(
+        capability,
         ledger=InterruptingLedger(ledger, operation, timing),
-        configuration_version=capability.configuration_version,
-        configuration_hash=capability.configuration_hash,
-        universe_source=capability.universe_source,
-        enabled_asset_classes=capability.enabled_asset_classes,
-        universe_policy=capability.universe_policy,
-        evidence_capture=capability.evidence_capture,
-        attention_policy=capability.attention_policy,
-        attention_inputs=capability.attention_inputs,
-        clock=capability.clock,
-        constitution_registry=(capability.constitution_registry),
-        production_research=capability.production_research,
-        evidence_vault=capability.evidence_vault,
-        memory=capability.memory,
-        memory_refusal_ledger=capability.memory_refusal_ledger,
-        portfolio_policy=capability.portfolio_policy,
-        portfolio_input_source=capability.portfolio_input_source,
-        portfolio_ledger=capability.portfolio_ledger,
     )
 
     with pytest.raises(SimulatedInterruptionError):
@@ -2047,8 +2546,8 @@ def test_fresh_process_resumes_at_every_universe_snapshot_write_boundary(
         state_root, "write-boundary-recovery"
     )
 
-    assert disposition == AdvanceDisposition.ADVANCED.value
-    assert phase == LifecyclePhase.CONSTRUCT_PORTFOLIO.value
+    assert disposition == AdvanceDisposition.NO_ACTION.value
+    assert phase == LifecyclePhase.PUBLISH_DECISION.value
     assert recovery == expected_recovery.value
     assert len(run_id) == SHA256_HEX_LENGTH
     assert len(_events(database)) == PINNED_EVENT_COUNT
@@ -2082,7 +2581,7 @@ def test_portfolio_retry_preserves_the_original_durable_timestamp_across_reopen(
             "SELECT recorded_at FROM portfolio_constructions"
         ).fetchone()
     assert durable_row == (UtcInstant.from_datetime(first_time).isoformat(),)
-    assert len(_events(database)) == PINNED_EVENT_COUNT - 1
+    assert len(_events(database)) == PINNED_EVENT_COUNT - 2
 
     resumed = _configure(state_root, clock=FixedClock(resumed_time))(
         cycle=cycle,
@@ -2090,7 +2589,7 @@ def test_portfolio_retry_preserves_the_original_durable_timestamp_across_reopen(
         idempotency_key="portfolio-timestamp-retry",
     )
 
-    assert resumed.disposition is AdvanceDisposition.ADVANCED
+    assert resumed.disposition is AdvanceDisposition.NO_ACTION
     assert resumed.recovery is AdvanceRecovery.RESUMED
     assert resumed.portfolio_checkpoint is not None
     assert resumed.portfolio_checkpoint.recorded_at == UtcInstant.from_datetime(first_time)
@@ -2218,25 +2717,9 @@ def test_fresh_process_recovers_at_each_refusal_write_boundary(
     capability = _configure(state_root)
     ledger = capability.ledger
     assert isinstance(ledger, SQLiteLifecycleLedger)
-    interrupted = Advance(
+    interrupted = replace(
+        capability,
         ledger=InterruptingLedger(ledger, "refuse", timing),
-        configuration_version=capability.configuration_version,
-        configuration_hash=capability.configuration_hash,
-        universe_source=capability.universe_source,
-        enabled_asset_classes=capability.enabled_asset_classes,
-        universe_policy=capability.universe_policy,
-        evidence_capture=capability.evidence_capture,
-        attention_policy=capability.attention_policy,
-        attention_inputs=capability.attention_inputs,
-        clock=capability.clock,
-        constitution_registry=(capability.constitution_registry),
-        production_research=capability.production_research,
-        evidence_vault=capability.evidence_vault,
-        memory=capability.memory,
-        memory_refusal_ledger=capability.memory_refusal_ledger,
-        portfolio_policy=capability.portfolio_policy,
-        portfolio_input_source=capability.portfolio_input_source,
-        portfolio_ledger=capability.portfolio_ledger,
     )
 
     with pytest.raises(SimulatedInterruptionError):
@@ -2284,25 +2767,9 @@ def test_fresh_process_recovers_at_each_completed_conflict_write_boundary(
     )
     ledger = capability.ledger
     assert isinstance(ledger, SQLiteLifecycleLedger)
-    interrupted = Advance(
+    interrupted = replace(
+        capability,
         ledger=InterruptingLedger(ledger, "start", timing),
-        configuration_version=capability.configuration_version,
-        configuration_hash=capability.configuration_hash,
-        universe_source=capability.universe_source,
-        enabled_asset_classes=capability.enabled_asset_classes,
-        universe_policy=capability.universe_policy,
-        evidence_capture=capability.evidence_capture,
-        attention_policy=capability.attention_policy,
-        attention_inputs=capability.attention_inputs,
-        clock=capability.clock,
-        constitution_registry=(capability.constitution_registry),
-        production_research=capability.production_research,
-        evidence_vault=capability.evidence_vault,
-        memory=capability.memory,
-        memory_refusal_ledger=capability.memory_refusal_ledger,
-        portfolio_policy=capability.portfolio_policy,
-        portfolio_input_source=capability.portfolio_input_source,
-        portfolio_ledger=capability.portfolio_ledger,
     )
 
     with pytest.raises(SimulatedInterruptionError):
@@ -2346,25 +2813,9 @@ def test_duplicate_delivery_reports_progress_committed_by_the_winner_as_resumed(
     capability = _configure(state_root)
     ledger = capability.ledger
     assert isinstance(ledger, SQLiteLifecycleLedger)
-    raced = Advance(
+    raced = replace(
+        capability,
         ledger=RacingStartLedger(ledger, winner_phase),
-        configuration_version=capability.configuration_version,
-        configuration_hash=capability.configuration_hash,
-        universe_source=capability.universe_source,
-        enabled_asset_classes=capability.enabled_asset_classes,
-        universe_policy=capability.universe_policy,
-        evidence_capture=capability.evidence_capture,
-        attention_policy=capability.attention_policy,
-        attention_inputs=capability.attention_inputs,
-        clock=capability.clock,
-        constitution_registry=(capability.constitution_registry),
-        production_research=capability.production_research,
-        evidence_vault=capability.evidence_vault,
-        memory=capability.memory,
-        memory_refusal_ledger=capability.memory_refusal_ledger,
-        portfolio_policy=capability.portfolio_policy,
-        portfolio_input_source=capability.portfolio_input_source,
-        portfolio_ledger=capability.portfolio_ledger,
     )
 
     receipt = raced(
@@ -2373,7 +2824,7 @@ def test_duplicate_delivery_reports_progress_committed_by_the_winner_as_resumed(
         idempotency_key="concurrent-duplicate",
     )
 
-    assert receipt.disposition is AdvanceDisposition.ADVANCED
+    assert receipt.disposition is AdvanceDisposition.NO_ACTION
     assert receipt.recovery is AdvanceRecovery.RESUMED
     assert len(_events(state_root / "lifecycle.sqlite3")) == PINNED_EVENT_COUNT
 
@@ -2566,25 +3017,9 @@ class LifecycleStateMachine(RuleBasedStateMachine):
         operation, committed_events = interrupted_write
         ledger = self.capability.ledger
         assert isinstance(ledger, SQLiteLifecycleLedger)
-        interrupted = Advance(
+        interrupted = replace(
+            self.capability,
             ledger=InterruptingLedger(ledger, operation, "after"),
-            configuration_version=self.capability.configuration_version,
-            configuration_hash=self.capability.configuration_hash,
-            universe_source=self.capability.universe_source,
-            enabled_asset_classes=self.capability.enabled_asset_classes,
-            universe_policy=self.capability.universe_policy,
-            evidence_capture=self.capability.evidence_capture,
-            attention_policy=self.capability.attention_policy,
-            attention_inputs=self.capability.attention_inputs,
-            clock=self.capability.clock,
-            constitution_registry=self.capability.constitution_registry,
-            production_research=self.capability.production_research,
-            evidence_vault=self.capability.evidence_vault,
-            memory=self.capability.memory,
-            memory_refusal_ledger=self.capability.memory_refusal_ledger,
-            portfolio_policy=self.capability.portfolio_policy,
-            portfolio_input_source=self.capability.portfolio_input_source,
-            portfolio_ledger=self.capability.portfolio_ledger,
         )
         try:
             observed = interrupted(
@@ -2678,25 +3113,9 @@ def test_resuming_an_older_partial_cycle_after_a_later_selection_fails_closed(
     capability = _configure(state_root)
     ledger = capability.ledger
     assert isinstance(ledger, SQLiteLifecycleLedger)
-    interrupted = Advance(
+    interrupted = replace(
+        capability,
         ledger=InterruptingLedger(ledger, "start", "after"),
-        configuration_version=capability.configuration_version,
-        configuration_hash=capability.configuration_hash,
-        universe_source=capability.universe_source,
-        enabled_asset_classes=capability.enabled_asset_classes,
-        universe_policy=capability.universe_policy,
-        evidence_capture=capability.evidence_capture,
-        attention_policy=capability.attention_policy,
-        attention_inputs=capability.attention_inputs,
-        clock=capability.clock,
-        constitution_registry=(capability.constitution_registry),
-        production_research=capability.production_research,
-        evidence_vault=capability.evidence_vault,
-        memory=capability.memory,
-        memory_refusal_ledger=capability.memory_refusal_ledger,
-        portfolio_policy=capability.portfolio_policy,
-        portfolio_input_source=capability.portfolio_input_source,
-        portfolio_ledger=capability.portfolio_ledger,
     )
 
     with pytest.raises(SimulatedInterruptionError):
@@ -2721,7 +3140,7 @@ def test_resuming_an_older_partial_cycle_after_a_later_selection_fails_closed(
         idempotency_key="older-partial",
     )
 
-    assert later.disposition is AdvanceDisposition.ADVANCED
+    assert later.disposition is AdvanceDisposition.NO_ACTION
     assert refused.disposition is AdvanceDisposition.FAILED_CLOSED
     assert refused.failure_reason is AdvanceFailureReason.ATTENTION_SELECTION_FAILED
     assert refused.attention_refusal_reason is AttentionRefusalReason.CONTRADICTORY_EVIDENCE
@@ -2772,8 +3191,8 @@ def test_resuming_after_published_attention_preserves_that_older_selection(
         idempotency_key="older-attention-published",
     )
 
-    assert later.disposition is AdvanceDisposition.ADVANCED
-    assert resumed.disposition is AdvanceDisposition.ADVANCED
+    assert later.disposition is AdvanceDisposition.NO_ACTION
+    assert resumed.disposition is AdvanceDisposition.NO_ACTION
     assert resumed.recovery is AdvanceRecovery.RESUMED
     with sqlite3.connect(state_root / "lifecycle.sqlite3") as connection:
         assert connection.execute(
@@ -3042,25 +3461,10 @@ def test_conflicting_pinned_identity_fails_without_rewriting_completed_work(
         idempotency_key="pinned-identity-conflict",
     )
     database = state_root / "lifecycle.sqlite3"
-    conflicting_capability = Advance(
+    conflicting_capability = replace(
+        capability,
         ledger=SQLiteLifecycleLedger(database),
-        configuration_version=capability.configuration_version,
         configuration_hash="f" * SHA256_HEX_LENGTH,
-        universe_source=capability.universe_source,
-        enabled_asset_classes=capability.enabled_asset_classes,
-        universe_policy=capability.universe_policy,
-        evidence_capture=capability.evidence_capture,
-        attention_policy=capability.attention_policy,
-        attention_inputs=capability.attention_inputs,
-        clock=capability.clock,
-        constitution_registry=(capability.constitution_registry),
-        production_research=capability.production_research,
-        evidence_vault=capability.evidence_vault,
-        memory=capability.memory,
-        memory_refusal_ledger=capability.memory_refusal_ledger,
-        portfolio_policy=capability.portfolio_policy,
-        portfolio_input_source=capability.portfolio_input_source,
-        portfolio_ledger=capability.portfolio_ledger,
     )
 
     conflict = conflicting_capability(
@@ -3089,25 +3493,9 @@ def test_terminal_conflict_refusal_prevents_partial_stream_resumption(tmp_path: 
     capability = _configure(state_root)
     ledger = capability.ledger
     assert isinstance(ledger, SQLiteLifecycleLedger)
-    interrupted = Advance(
+    interrupted = replace(
+        capability,
         ledger=InterruptingLedger(ledger, "start", "after"),
-        configuration_version=capability.configuration_version,
-        configuration_hash=capability.configuration_hash,
-        universe_source=capability.universe_source,
-        enabled_asset_classes=capability.enabled_asset_classes,
-        universe_policy=capability.universe_policy,
-        evidence_capture=capability.evidence_capture,
-        attention_policy=capability.attention_policy,
-        attention_inputs=capability.attention_inputs,
-        clock=capability.clock,
-        constitution_registry=(capability.constitution_registry),
-        production_research=capability.production_research,
-        evidence_vault=capability.evidence_vault,
-        memory=capability.memory,
-        memory_refusal_ledger=capability.memory_refusal_ledger,
-        portfolio_policy=capability.portfolio_policy,
-        portfolio_input_source=capability.portfolio_input_source,
-        portfolio_ledger=capability.portfolio_ledger,
     )
     with pytest.raises(SimulatedInterruptionError):
         interrupted(
@@ -3206,8 +3594,8 @@ def test_advance_resumes_after_each_checkpoint_transaction_rolls_back(
 
     disposition, phase, recovery, run_id = _advance_in_fresh_process(state_root, "rollback-key")
 
-    assert disposition == AdvanceDisposition.ADVANCED.value
-    assert phase == LifecyclePhase.CONSTRUCT_PORTFOLIO.value
+    assert disposition == AdvanceDisposition.NO_ACTION.value
+    assert phase == LifecyclePhase.PUBLISH_DECISION.value
     assert recovery == expected_recovery.value
     assert len(run_id) == SHA256_HEX_LENGTH
     assert len(_events(database)) == PINNED_EVENT_COUNT
@@ -3795,6 +4183,9 @@ def test_lifecycle_ledger_appends_generic_checkpoint_records(  # noqa: PLR0915
         if isinstance(decision, PerformPortfolioConstruction):
             command = replace(command, portfolio_construction=portfolio)
             decision = ledger.advance_step(command, attempt, now)
+        if isinstance(decision, PerformDecisionPublication):
+            command = replace(command, decision_publication=_decision_checkpoint(now))
+            decision = ledger.advance_step(command, attempt, now)
         assert not isinstance(decision, AdvanceReceipt)
         assert not isinstance(decision, PerformEvidenceCapture)
         assert not isinstance(decision, PerformAttentionSelection)
@@ -3802,6 +4193,7 @@ def test_lifecycle_ledger_appends_generic_checkpoint_records(  # noqa: PLR0915
         assert not isinstance(decision, PerformResearch)
         assert not isinstance(decision, PerformMemoryUpdate)
         assert not isinstance(decision, PerformPortfolioConstruction)
+        assert not isinstance(decision, PerformDecisionPublication)
         assert isinstance(decision.record, LifecycleEvent)
         assert decision.record.sequence == expected_sequence
         if isinstance(decision, AppendTerminalLifecycleRecord):
@@ -3820,6 +4212,7 @@ def test_lifecycle_ledger_appends_generic_checkpoint_records(  # noqa: PLR0915
         RESEARCH_CHECKPOINT,
         MEMORY_CHECKPOINT,
         portfolio,
+        _decision_checkpoint(now),
         None,
     )
     assert ledger.advance_step(command, AdvanceAttempt(), now) == AdvanceReceipt.advanced(
@@ -3833,6 +4226,7 @@ def test_lifecycle_ledger_appends_generic_checkpoint_records(  # noqa: PLR0915
         RESEARCH_CHECKPOINT,
         MEMORY_CHECKPOINT,
         portfolio,
+        _decision_checkpoint(now),
         None,
     )
 
@@ -3923,25 +4317,9 @@ def test_universe_source_rejects_a_forged_utc_instant_before_append(tmp_path: Pa
     capability = _configure(state_root)
     loaded = capability.universe_source.load()
     assert isinstance(loaded, UniverseInputs)
-    hostile = Advance(
-        ledger=capability.ledger,
-        configuration_version=capability.configuration_version,
-        configuration_hash=capability.configuration_hash,
+    hostile = replace(
+        capability,
         universe_source=FixedUniverseSource(replace(loaded, evidence_cutoff=_forged_utc_instant())),
-        enabled_asset_classes=capability.enabled_asset_classes,
-        universe_policy=capability.universe_policy,
-        evidence_capture=capability.evidence_capture,
-        attention_policy=capability.attention_policy,
-        attention_inputs=capability.attention_inputs,
-        clock=capability.clock,
-        constitution_registry=(capability.constitution_registry),
-        production_research=capability.production_research,
-        evidence_vault=capability.evidence_vault,
-        memory=capability.memory,
-        memory_refusal_ledger=capability.memory_refusal_ledger,
-        portfolio_policy=capability.portfolio_policy,
-        portfolio_input_source=capability.portfolio_input_source,
-        portfolio_ledger=capability.portfolio_ledger,
     )
 
     with pytest.raises(
@@ -4082,25 +4460,9 @@ def test_operational_read_failure_does_not_create_a_terminal_refusal(tmp_path: P
 def test_missing_refusal_sequence_row_fails_closed(tmp_path: Path) -> None:
     state_root = tmp_path / "runtime"
     capability = _configure(state_root)
-    hostile = Advance(
+    hostile = replace(
+        capability,
         ledger=MissingAggregateRowLedger(state_root / "lifecycle.sqlite3"),
-        configuration_version=capability.configuration_version,
-        configuration_hash=capability.configuration_hash,
-        universe_source=capability.universe_source,
-        enabled_asset_classes=capability.enabled_asset_classes,
-        universe_policy=capability.universe_policy,
-        evidence_capture=capability.evidence_capture,
-        attention_policy=capability.attention_policy,
-        attention_inputs=capability.attention_inputs,
-        clock=capability.clock,
-        constitution_registry=(capability.constitution_registry),
-        production_research=capability.production_research,
-        evidence_vault=capability.evidence_vault,
-        memory=capability.memory,
-        memory_refusal_ledger=capability.memory_refusal_ledger,
-        portfolio_policy=capability.portfolio_policy,
-        portfolio_input_source=capability.portfolio_input_source,
-        portfolio_ledger=capability.portfolio_ledger,
     )
 
     with pytest.raises(
@@ -4117,25 +4479,9 @@ def test_missing_refusal_sequence_row_fails_closed(tmp_path: Path) -> None:
 def test_invalid_refusal_sequence_row_has_a_bounded_diagnostic(tmp_path: Path) -> None:
     state_root = tmp_path / "runtime"
     capability = _configure(state_root)
-    hostile = Advance(
+    hostile = replace(
+        capability,
         ledger=InvalidAggregateRowLedger(state_root / "lifecycle.sqlite3"),
-        configuration_version=capability.configuration_version,
-        configuration_hash=capability.configuration_hash,
-        universe_source=capability.universe_source,
-        enabled_asset_classes=capability.enabled_asset_classes,
-        universe_policy=capability.universe_policy,
-        evidence_capture=capability.evidence_capture,
-        attention_policy=capability.attention_policy,
-        attention_inputs=capability.attention_inputs,
-        clock=capability.clock,
-        constitution_registry=(capability.constitution_registry),
-        production_research=capability.production_research,
-        evidence_vault=capability.evidence_vault,
-        memory=capability.memory,
-        memory_refusal_ledger=capability.memory_refusal_ledger,
-        portfolio_policy=capability.portfolio_policy,
-        portfolio_input_source=capability.portfolio_input_source,
-        portfolio_ledger=capability.portfolio_ledger,
     )
 
     with pytest.raises(
@@ -4221,7 +4567,8 @@ def test_corrupt_refusal_rows_fail_closed_with_a_bounded_diagnostic(
         row = connection.execute(
             "SELECT refusal_id, idempotency_key, cycle_identity, reason_code, "
             "evidence_policy_id, evidence_artifact_ids, evidence_refusal_ids, "
-            "attention_refusal_reason, research_refusal_id, research_refusal, recorded_at "
+            "attention_refusal_reason, research_refusal_id, research_refusal, "
+            "decision_publication_refusal, recorded_at "
             "FROM advance_refusals"
         ).fetchone()
         connection.execute("DROP TABLE advance_refusals")
@@ -4229,11 +4576,12 @@ def test_corrupt_refusal_rows_fail_closed_with_a_bounded_diagnostic(
             "CREATE TABLE advance_refusals "
             "(refusal_id, idempotency_key, cycle_identity, reason_code, "
             "evidence_policy_id, evidence_artifact_ids, evidence_refusal_ids, "
-            "attention_refusal_reason, research_refusal_id, research_refusal, recorded_at)"
+            "attention_refusal_reason, research_refusal_id, research_refusal, "
+            "decision_publication_refusal, recorded_at)"
         )
         assert row is not None
         connection.execute(
-            "INSERT INTO advance_refusals VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO advance_refusals VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 row[0],
                 row[1],
@@ -4245,6 +4593,7 @@ def test_corrupt_refusal_rows_fail_closed_with_a_bounded_diagnostic(
                 row[7],
                 row[8],
                 row[9],
+                row[10],
                 recorded_at,
             ),
         )
@@ -4284,6 +4633,7 @@ def test_corrupt_attention_refusal_reason_fails_closed(
             AttentionRefusalReason.MISSING_EVIDENCE.value,
             None,
             None,
+            None,
             UtcInstant.from_datetime(RECORDED_AT).isoformat(),
         )
     else:
@@ -4298,6 +4648,7 @@ def test_corrupt_attention_refusal_reason_fails_closed(
             "unknown",
             None,
             None,
+            None,
             UtcInstant.from_datetime(RECORDED_AT).isoformat(),
         )
     with sqlite3.connect(database) as connection:
@@ -4306,10 +4657,11 @@ def test_corrupt_attention_refusal_reason_fails_closed(
             "CREATE TABLE advance_refusals "
             "(refusal_id, idempotency_key, cycle_identity, reason_code, "
             "evidence_policy_id, evidence_artifact_ids, evidence_refusal_ids, "
-            "attention_refusal_reason, research_refusal_id, research_refusal, recorded_at)"
+            "attention_refusal_reason, research_refusal_id, research_refusal, "
+            "decision_publication_refusal, recorded_at)"
         )
         connection.execute(
-            "INSERT INTO advance_refusals VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO advance_refusals VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             row,
         )
 
@@ -4321,6 +4673,97 @@ def test_corrupt_attention_refusal_reason_fails_closed(
             cycle=_cycle_payload("2026-08-21"),
             mode="champion",
             idempotency_key="corrupt-attention-refusal",
+        )
+
+
+def test_decision_publication_refusal_rebuilds_from_its_exact_reason(tmp_path: Path) -> None:
+    state_root = tmp_path / "runtime"
+    capability = _configure(
+        state_root,
+        cio_stance="long",
+        packet_capable_universe=True,
+    )
+    refusal = PacketPublicationRefusalReason.INVALID_VALIDITY_WINDOW
+    refused = replace(
+        capability,
+        decision_window_source=RefusingDecisionWindowSource(refusal),
+    )
+
+    receipt = refused(
+        cycle=_cycle_payload("2026-08-21"),
+        mode="champion",
+        idempotency_key="decision-publication-refusal",
+    )
+
+    assert receipt.failure_reason is AdvanceFailureReason.DECISION_PUBLICATION_FAILED
+    ledger = refused.ledger
+    assert isinstance(ledger, SQLiteLifecycleLedger)
+    assert ledger.rebuild_status().durable_reason is (
+        AdvanceFailureReason.DECISION_PUBLICATION_FAILED
+    )
+    with sqlite3.connect(state_root / "lifecycle.sqlite3") as connection:
+        assert connection.execute(
+            "SELECT decision_publication_refusal FROM advance_refusals"
+        ).fetchone() == (refusal.value,)
+
+
+@pytest.mark.parametrize("corruption", ["reason_on_other_refusal", "unknown_reason"])
+def test_corrupt_decision_publication_refusal_fails_closed(
+    tmp_path: Path,
+    corruption: str,
+) -> None:
+    state_root = tmp_path / "runtime"
+    capability = _configure(state_root)
+    database = state_root / "lifecycle.sqlite3"
+    cycle = json.dumps(
+        MarketSession(date(2026, 8, 21)).to_payload(),
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    row = (
+        1,
+        "corrupt-decision-refusal",
+        cycle,
+        (
+            AdvanceFailureReason.INVALID_MODE.value
+            if corruption == "reason_on_other_refusal"
+            else AdvanceFailureReason.DECISION_PUBLICATION_FAILED.value
+        ),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        (
+            PacketPublicationRefusalReason.SIGNING_FAILED.value
+            if corruption == "reason_on_other_refusal"
+            else "unknown"
+        ),
+        UtcInstant.from_datetime(RECORDED_AT).isoformat(),
+    )
+    with sqlite3.connect(database) as connection:
+        connection.execute("DROP TABLE advance_refusals")
+        connection.execute(
+            "CREATE TABLE advance_refusals "
+            "(refusal_id, idempotency_key, cycle_identity, reason_code, "
+            "evidence_policy_id, evidence_artifact_ids, evidence_refusal_ids, "
+            "attention_refusal_reason, research_refusal_id, research_refusal, "
+            "decision_publication_refusal, recorded_at)"
+        )
+        connection.execute(
+            "INSERT INTO advance_refusals VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            row,
+        )
+
+    with pytest.raises(
+        LifecyclePersistenceError,
+        match="invalid idempotency_key in lifecycle refusal ledger",
+    ):
+        capability(
+            cycle=_cycle_payload("2026-08-21"),
+            mode="champion",
+            idempotency_key="corrupt-decision-refusal",
         )
 
 
@@ -4341,10 +4784,11 @@ def test_research_refusal_identity_on_an_unrelated_refusal_fails_closed(
             "CREATE TABLE advance_refusals "
             "(refusal_id, idempotency_key, cycle_identity, reason_code, "
             "evidence_policy_id, evidence_artifact_ids, evidence_refusal_ids, "
-            "attention_refusal_reason, research_refusal_id, research_refusal, recorded_at)"
+            "attention_refusal_reason, research_refusal_id, research_refusal, "
+            "decision_publication_refusal, recorded_at)"
         )
         connection.execute(
-            "INSERT INTO advance_refusals VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO advance_refusals VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 1,
                 "corrupt-research-refusal",
@@ -4355,6 +4799,7 @@ def test_research_refusal_identity_on_an_unrelated_refusal_fails_closed(
                 None,
                 None,
                 "f" * SHA256_HEX_LENGTH,
+                None,
                 None,
                 UtcInstant.from_datetime(RECORDED_AT).isoformat(),
             ),
@@ -4526,25 +4971,12 @@ def test_corrupt_checkpoint_history_uses_the_call_timestamp_for_its_refusal(
     database = tmp_path / "runtime" / "lifecycle.sqlite3"
     _replace_with_corrupt_events(database, (("UPDATE lifecycle_events SET mode = 'invalid'",)))
 
-    refused = Advance(
+    refused = replace(
+        capability,
         ledger=ledger,
         configuration_version=1,
         configuration_hash="a" * SHA256_HEX_LENGTH,
-        universe_source=capability.universe_source,
-        enabled_asset_classes=capability.enabled_asset_classes,
-        universe_policy=capability.universe_policy,
-        evidence_capture=capability.evidence_capture,
-        attention_policy=capability.attention_policy,
-        attention_inputs=capability.attention_inputs,
         clock=FixedClock(refused_at),
-        constitution_registry=(capability.constitution_registry),
-        production_research=capability.production_research,
-        evidence_vault=capability.evidence_vault,
-        memory=capability.memory,
-        memory_refusal_ledger=capability.memory_refusal_ledger,
-        portfolio_policy=capability.portfolio_policy,
-        portfolio_input_source=capability.portfolio_input_source,
-        portfolio_ledger=capability.portfolio_ledger,
     )
     receipt = refused(
         cycle=_cycle_payload(request.session.isoformat()),
@@ -4670,7 +5102,8 @@ def test_corrupt_attention_history_fails_a_fresh_selection_closed(tmp_path: Path
         row = connection.execute(
             "SELECT refusal_id, idempotency_key, cycle_identity, reason_code, "
             "evidence_policy_id, evidence_artifact_ids, evidence_refusal_ids, "
-            "attention_refusal_reason, research_refusal_id, research_refusal, recorded_at "
+            "attention_refusal_reason, research_refusal_id, research_refusal, "
+            "decision_publication_refusal, recorded_at "
             "FROM advance_refusals"
         ).fetchone()
         connection.execute("DROP TABLE advance_refusals")
@@ -4678,11 +5111,12 @@ def test_corrupt_attention_history_fails_a_fresh_selection_closed(tmp_path: Path
             "CREATE TABLE advance_refusals "
             "(refusal_id, idempotency_key, cycle_identity, reason_code, "
             "evidence_policy_id, evidence_artifact_ids, evidence_refusal_ids, "
-            "attention_refusal_reason, research_refusal_id, research_refusal, recorded_at)"
+            "attention_refusal_reason, research_refusal_id, research_refusal, "
+            "decision_publication_refusal, recorded_at)"
         )
         assert row is not None
         connection.execute(
-            "INSERT INTO advance_refusals VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO advance_refusals VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 row[0],
                 row[1],
@@ -4695,6 +5129,7 @@ def test_corrupt_attention_history_fails_a_fresh_selection_closed(tmp_path: Path
                 row[8],
                 row[9],
                 row[10],
+                row[11],
             ),
         )
 
@@ -4735,7 +5170,7 @@ def test_restart_does_not_globally_validate_unrelated_history(tmp_path: Path) ->
         idempotency_key="fresh-after-restart",
     )
 
-    assert receipt.disposition is AdvanceDisposition.ADVANCED
+    assert receipt.disposition is AdvanceDisposition.NO_ACTION
     assert receipt.recovery is AdvanceRecovery.FRESH
 
 
@@ -4853,7 +5288,8 @@ def _replace_with_corrupt_events(
                    universe_snapshot, evidence_policy_id,
                    evidence_artifact_ids, evidence_refusal_ids,
                    attention_artifact_id, attention_artifact,
-                   research_checkpoint, portfolio_checkpoint, no_action_reason,
+                   research_checkpoint, portfolio_checkpoint, decision_checkpoint,
+                   no_action_reason,
                    event_envelope, recorded_at
             FROM lifecycle_events ORDER BY sequence
             """
@@ -4873,7 +5309,8 @@ def _replace_with_corrupt_events(
                 universe_snapshot, evidence_policy_id,
                 evidence_artifact_ids, evidence_refusal_ids,
                 attention_artifact_id, attention_artifact,
-                research_checkpoint, portfolio_checkpoint, no_action_reason,
+                research_checkpoint, portfolio_checkpoint, decision_checkpoint,
+                no_action_reason,
                 event_envelope, recorded_at
             )
             """
@@ -4881,7 +5318,7 @@ def _replace_with_corrupt_events(
         connection.executemany(
             "INSERT INTO lifecycle_events VALUES "
             "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
-            "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             rows,
         )
         for statement in statements:

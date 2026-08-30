@@ -187,6 +187,52 @@ class SQLitePortfolioLedger:
         except (json.JSONDecodeError, sqlite3.Error, TypeError, ValueError) as error:
             raise InvalidLifecycleStateError(_INVALID_HISTORY) from error
 
+    def load_cycle(self, reference: PortfolioCheckpointReference) -> PortfolioCycleResult:
+        """Load one exact revalidated Balanced-plus-shadow cycle by lifecycle reference."""
+        try:
+            with closing(sqlite3.connect(self.database, timeout=5.0)) as connection:
+                row = connection.execute(
+                    """
+                    SELECT run_id, result_id, house_view_id, policy_id, input_id,
+                           target_band_ids, refusal_reason, result_json, recorded_at
+                    FROM portfolio_constructions WHERE run_id = ?
+                    """,
+                    (reference.run_id,),
+                ).fetchone()
+                if row is None or _validated_reference(connection, row) != reference:
+                    raise InvalidLifecycleStateError(_INVALID_HISTORY)
+                return _load_cycle_for_row(connection, row)
+        except InvalidLifecycleStateError:
+            raise
+        except (json.JSONDecodeError, sqlite3.Error, TypeError, ValueError) as error:
+            raise InvalidLifecycleStateError(_INVALID_HISTORY) from error
+
+    def load_cycle_with_reference_for_run(
+        self,
+        run_id: str,
+    ) -> tuple[PortfolioCycleResult, PortfolioCheckpointReference]:
+        """Load one exact cycle together with its revalidated durable reference."""
+        if not is_sha256(run_id):
+            raise InvalidLifecycleStateError(_INVALID_HISTORY)
+        try:
+            with closing(sqlite3.connect(self.database, timeout=5.0)) as connection:
+                row = connection.execute(
+                    """
+                    SELECT run_id, result_id, house_view_id, policy_id, input_id,
+                           target_band_ids, refusal_reason, result_json, recorded_at
+                    FROM portfolio_constructions WHERE run_id = ?
+                    """,
+                    (run_id,),
+                ).fetchone()
+                if row is None:
+                    raise InvalidLifecycleStateError(_INVALID_HISTORY)
+                reference = _validated_reference(connection, row)
+                return _load_cycle_for_row(connection, row), reference
+        except InvalidLifecycleStateError:
+            raise
+        except (json.JSONDecodeError, sqlite3.Error, TypeError, ValueError) as error:
+            raise InvalidLifecycleStateError(_INVALID_HISTORY) from error
+
 
 def _validated_reference(
     connection: sqlite3.Connection,
@@ -248,6 +294,22 @@ def _checkpoint(
     )
 
 
+def _load_cycle_for_row(
+    connection: sqlite3.Connection,
+    row: tuple[object, ...],
+) -> PortfolioCycleResult:
+    run_id = _text_value(row[0])
+    decoded: object = json.loads(_text_value(row[7]))
+    balanced = parse_portfolio_construction_result(decoded)
+    recorded_at = _recorded_at(row[8])
+    if balanced is None or recorded_at is None:
+        raise InvalidLifecycleStateError(_INVALID_HISTORY)
+    return PortfolioCycleResult(
+        balanced,
+        _stored_shadows(connection, run_id, recorded_at),
+    )
+
+
 def _stored_shadows(
     connection: sqlite3.Connection,
     run_id: str,
@@ -292,3 +354,9 @@ def _recorded_at(value: object) -> UtcInstant | None:
         return UtcInstant.parse(value)
     except InvalidUtcInstantError:
         return None
+
+
+def _text_value(value: object) -> str:
+    if type(value) is not str:
+        raise InvalidLifecycleStateError(_INVALID_HISTORY)
+    return value

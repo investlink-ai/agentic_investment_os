@@ -21,7 +21,7 @@ from agentic_investment_os.domain.lifecycle import (
 )
 from agentic_investment_os.domain.temporal import UtcInstant
 from agentic_investment_os.entrypoints.configuration import ConfigurationSource
-from agentic_investment_os.entrypoints.lifecycle import configure_advance, configure_status
+from tests._decision import configure_advance, configure_status
 from tests._governance import BASELINE_GOVERNANCE_STATUS, RecordedSessionEligibility
 from tests._production_research import (
     ValidProductionModel,
@@ -91,9 +91,9 @@ def test_advance_durably_publishes_a_reconstructable_universe_snapshot(tmp_path:
         cycle=_cycle("2026-08-22"), mode="champion", idempotency_key="universe-1"
     )
 
-    assert first.disposition is AdvanceDisposition.ADVANCED
+    assert first.disposition is AdvanceDisposition.NO_ACTION
     assert first.completed_phase is not None
-    assert first.completed_phase.phase is LifecyclePhase.CONSTRUCT_PORTFOLIO
+    assert first.completed_phase.phase is LifecyclePhase.PUBLISH_DECISION
     assert first.recovery is AdvanceRecovery.FRESH
     assert first.universe_snapshot_id is not None
     assert first.pinned_run_identity is not None
@@ -123,6 +123,7 @@ def test_advance_durably_publishes_a_reconstructable_universe_snapshot(tmp_path:
         ("research_run", "RunResearch"),
         ("memory_updated", "UpdateMemory"),
         ("portfolio_constructed", "ConstructPortfolio"),
+        ("decision_published", "PublishDecision"),
     ]
     assert all(row[2] is None and row[3] is None for row in events[:2])
     assert events[2][2] == first.universe_snapshot_id
@@ -163,7 +164,7 @@ def test_cutoff_equal_to_record_time_remains_valid_after_reopen(tmp_path: Path) 
         idempotency_key="cutoff-at-record-time",
     )
 
-    assert first.disposition is AdvanceDisposition.ADVANCED
+    assert first.disposition is AdvanceDisposition.NO_ACTION
     assert replay.universe_snapshot_id == first.universe_snapshot_id
     assert replay.recovery is AdvanceRecovery.PREVIOUSLY_COMPLETED
 
@@ -188,8 +189,8 @@ def test_alias_only_change_replays_the_existing_authoritative_snapshot(tmp_path:
         idempotency_key="alias-provenance-replay",
     )
 
-    assert first.disposition is AdvanceDisposition.ADVANCED
-    assert replay.disposition is AdvanceDisposition.ADVANCED
+    assert first.disposition is AdvanceDisposition.NO_ACTION
+    assert replay.disposition is AdvanceDisposition.NO_ACTION
     assert replay.recovery is AdvanceRecovery.PREVIOUSLY_COMPLETED
     assert replay.pinned_run_identity == first.pinned_run_identity
     assert replay.universe_snapshot_id == first.universe_snapshot_id
@@ -231,7 +232,7 @@ def test_alias_change_after_pinning_publishes_the_first_normalized_provenance(
         idempotency_key="alias-after-pin",
     )
 
-    assert resumed.disposition is AdvanceDisposition.ADVANCED
+    assert resumed.disposition is AdvanceDisposition.NO_ACTION
     assert resumed.recovery is AdvanceRecovery.RESUMED
     with sqlite3.connect(database) as connection:
         row = connection.execute(
@@ -390,5 +391,5 @@ def test_retry_with_changed_recorded_snapshot_fails_without_changing_first_snaps
     assert replay.universe_snapshot_id == first.universe_snapshot_id
     assert replay.recovery is AdvanceRecovery.PREVIOUSLY_COMPLETED
     with sqlite3.connect(state_root / "lifecycle.sqlite3") as connection:
-        assert connection.execute("SELECT COUNT(*) FROM lifecycle_events").fetchone() == (10,)
+        assert connection.execute("SELECT COUNT(*) FROM lifecycle_events").fetchone() == (11,)
         assert connection.execute("SELECT COUNT(*) FROM advance_conflicts").fetchone() == (1,)

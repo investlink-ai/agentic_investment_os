@@ -8,7 +8,7 @@ import re
 from dataclasses import dataclass, field
 from datetime import date
 from enum import StrEnum
-from typing import TYPE_CHECKING, Protocol, TypeGuard, assert_never
+from typing import TYPE_CHECKING, Literal, Protocol, TypeGuard, assert_never
 
 from agentic_investment_os.domain.attention import (
     AttentionArtifact,
@@ -49,6 +49,9 @@ __all__ = (
     "AdvanceRequest",
     "AppendLifecycleRecord",
     "AppendTerminalLifecycleRecord",
+    "DecisionCheckpoint",
+    "DecisionCheckpointReference",
+    "DecisionPublicationRefusalReason",
     "DurableAdvanceConflict",
     "DurableAdvanceRefusal",
     "EvidenceCaptureCheckpoint",
@@ -73,6 +76,7 @@ __all__ = (
     "MemoryUpdateRefusalReason",
     "NoActionReason",
     "PerformAttentionSelection",
+    "PerformDecisionPublication",
     "PerformDossierBuild",
     "PerformEvidenceCapture",
     "PerformMemoryUpdate",
@@ -94,12 +98,14 @@ __all__ = (
     "derive_lifecycle_status",
     "is_sha256",
     "parse_advance_receipt",
+    "parse_decision_checkpoint",
     "parse_lifecycle_checkpoint",
     "parse_memory_update_refusal",
     "parse_portfolio_checkpoint",
     "parse_research_checkpoint",
     "parse_research_refusal",
     "reconstruct_constitution_uses",
+    "reconstruct_decision_checkpoints",
     "reconstruct_evidence_checkpoints",
     "reconstruct_memory_event_ids",
     "reconstruct_portfolio_checkpoints",
@@ -172,6 +178,7 @@ _RECEIPT_PAYLOAD_FIELDS = frozenset(
         "research_checkpoint",
         "memory_checkpoint",
         "portfolio_checkpoint",
+        "decision_checkpoint",
         "research_refusal_id",
         "no_action_reason",
     }
@@ -234,6 +241,8 @@ class LifecyclePhase(StrEnum):
     RUN_RESEARCH = "RunResearch"
     UPDATE_MEMORY = "UpdateMemory"
     CONSTRUCT_PORTFOLIO = "ConstructPortfolio"
+    PUBLISH_DECISION = "PublishDecision"
+    AWAIT_EXECUTION = "AwaitExecution"
 
 
 @dataclass(frozen=True, slots=True)
@@ -312,6 +321,7 @@ class LifecycleEventKind(StrEnum):
     RESEARCH_RUN = "research_run"
     MEMORY_UPDATED = "memory_updated"
     PORTFOLIO_CONSTRUCTED = "portfolio_constructed"
+    DECISION_PUBLISHED = "decision_published"
 
 
 class LifecycleLiveness(StrEnum):
@@ -345,6 +355,7 @@ class NoActionReason(StrEnum):
     NO_VALID_THESIS = "no_valid_thesis"
     SKEPTIC_REJECTED = "skeptic_rejected"
     CIO_ABSTAINED = "cio_abstained"
+    NO_AUTHORIZED_ADJUSTMENTS = "no_authorized_adjustments"
 
 
 class MemoryUpdateRefusalReason(StrEnum):
@@ -402,6 +413,17 @@ class AdvanceFailureReason(StrEnum):
     ATTENTION_SELECTION_FAILED = "attention_selection_failed"
     RESEARCH_FAILED = "research_failed"
     MEMORY_UPDATE_FAILED = "memory_update_failed"
+    DECISION_PUBLICATION_FAILED = "decision_publication_failed"
+
+
+class DecisionPublicationRefusalReason(StrEnum):
+    """Preserve the exact pre-publication failure that prevented packet visibility."""
+
+    INVALID_PORTFOLIO = "invalid_portfolio"
+    INVALID_FORECASTS = "invalid_forecasts"
+    MISSING_BENCHMARK_STATE = "missing_benchmark_state"
+    INVALID_VALIDITY_WINDOW = "invalid_validity_window"
+    SIGNING_FAILED = "signing_failed"
 
 
 class PortfolioCheckpointRefusalReason(StrEnum):
@@ -716,6 +738,117 @@ class PortfolioCheckpointReference:
             raise ValueError(_INVALID_CHECKPOINT_ORDER)
 
 
+@dataclass(frozen=True, slots=True)
+class DecisionCheckpoint:
+    """Expose atomic Champion Decision Record and optional packet publication identities."""
+
+    decision_record_id: str
+    packet_id: str | None
+    packet_expires_at: UtcInstant | None
+    recorded_at: UtcInstant
+    no_action_reason: NoActionReason | None = None
+
+    def __post_init__(self) -> None:
+        if (
+            not is_sha256(self.decision_record_id)
+            or (self.packet_id is not None and not is_sha256(self.packet_id))
+            or type(self.recorded_at) is not UtcInstant
+            or (
+                self.packet_id is not None
+                and (
+                    type(self.packet_expires_at) is not UtcInstant
+                    or self.packet_expires_at.value <= self.recorded_at.value
+                    or self.no_action_reason is not None
+                )
+            )
+            or (
+                self.packet_id is None
+                and (
+                    self.packet_expires_at is not None
+                    or self.no_action_reason is not NoActionReason.NO_AUTHORIZED_ADJUSTMENTS
+                )
+            )
+        ):
+            raise ValueError(_INVALID_CHECKPOINT_ORDER)
+
+    def to_payload(self) -> dict[str, object]:
+        return {
+            "schema_version": 1,
+            "decision_record_id": self.decision_record_id,
+            "packet_id": self.packet_id,
+            "packet_expires_at": (
+                None if self.packet_expires_at is None else self.packet_expires_at.isoformat()
+            ),
+            "recorded_at": self.recorded_at.isoformat(),
+            "no_action_reason": (
+                None if self.no_action_reason is None else self.no_action_reason.value
+            ),
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class DecisionCheckpointReference:
+    """Bind one lifecycle publication checkpoint to its exact run and cycle."""
+
+    run_id: str
+    cycle: MarketSession
+    checkpoint: DecisionCheckpoint
+
+    def __post_init__(self) -> None:
+        if (
+            not is_sha256(self.run_id)
+            or type(self.cycle) is not MarketSession
+            or type(self.checkpoint) is not DecisionCheckpoint
+        ):
+            raise ValueError(_INVALID_CHECKPOINT_ORDER)
+
+
+def parse_decision_checkpoint(value: object) -> DecisionCheckpoint | None:
+    """Validate one hostile durable decision-publication checkpoint."""
+    fields = _exact_mapping(
+        value,
+        frozenset(
+            {
+                "schema_version",
+                "decision_record_id",
+                "packet_id",
+                "packet_expires_at",
+                "recorded_at",
+                "no_action_reason",
+            }
+        ),
+    )
+    if fields is None or type(fields["schema_version"]) is not int or fields["schema_version"] != 1:
+        return None
+    decision_record_id = fields["decision_record_id"]
+    packet_id = fields["packet_id"]
+    if not is_sha256(decision_record_id) or (packet_id is not None and not is_sha256(packet_id)):
+        return None
+    try:
+        recorded_at = UtcInstant.parse(fields["recorded_at"])
+        expires_at = (
+            None
+            if fields["packet_expires_at"] is None
+            else UtcInstant.parse(fields["packet_expires_at"])
+        )
+    except InvalidUtcInstantError:
+        return None
+    valid_reason, reason = _optional_enum(NoActionReason, fields["no_action_reason"])
+    if not valid_reason:
+        return None
+    try:
+        checkpoint = DecisionCheckpoint(
+            decision_record_id,
+            packet_id,
+            expires_at,
+            recorded_at,
+            reason,
+        )
+    except (TypeError, ValueError):
+        return None
+    return checkpoint if checkpoint.to_payload() == fields else None
+
+
 def parse_portfolio_checkpoint(  # noqa: PLR0911 - reject each hostile checkpoint layer.
     value: object,
 ) -> PortfolioCheckpoint | None:
@@ -1006,6 +1139,7 @@ class AdvanceReceipt:
     research_checkpoint: ResearchCheckpoint | None = None
     memory_checkpoint: ResearchCheckpoint | None = None
     portfolio_checkpoint: PortfolioCheckpoint | None = None
+    decision_checkpoint: DecisionCheckpoint | None = None
     research_refusal_id: str | None = None
     no_action_reason: NoActionReason | None = None
 
@@ -1108,6 +1242,11 @@ class AdvanceReceipt:
                     if self.portfolio_checkpoint is None
                     else self.portfolio_checkpoint.to_payload()
                 ),
+                "decision_checkpoint": (
+                    None
+                    if self.decision_checkpoint is None
+                    else self.decision_checkpoint.to_payload()
+                ),
                 "research_refusal_id": self.research_refusal_id,
                 "no_action_reason": (
                     None if self.no_action_reason is None else self.no_action_reason.value
@@ -1127,9 +1266,17 @@ class AdvanceReceipt:
                 identity.evidence_cutoff.isoformat()
             except InvalidUtcInstantError as error:
                 raise ValueError(_INVALID_ADVANCED_RECEIPT) from error
+            portfolio_refused = (
+                type(self.portfolio_checkpoint) is PortfolioCheckpoint
+                and self.portfolio_checkpoint.refusal_reason is not None
+            )
             if (
                 self.completed_phase
-                != LifecycleCheckpoint.equity(LifecyclePhase.CONSTRUCT_PORTFOLIO)
+                != LifecycleCheckpoint.equity(
+                    LifecyclePhase.CONSTRUCT_PORTFOLIO
+                    if portfolio_refused
+                    else LifecyclePhase.PUBLISH_DECISION
+                )
                 or self.failure_reason is not None
                 or self.recovery is None
                 or self.universe_snapshot_id is None
@@ -1156,6 +1303,21 @@ class AdvanceReceipt:
                 or type(self.research_checkpoint) is not ResearchCheckpoint
                 or type(self.memory_checkpoint) is not ResearchCheckpoint
                 or type(self.portfolio_checkpoint) is not PortfolioCheckpoint
+                or (
+                    portfolio_refused
+                    and (
+                        self.decision_checkpoint is not None
+                        or self.disposition is not AdvanceDisposition.NO_ACTION
+                    )
+                )
+                or (
+                    not portfolio_refused
+                    and type(self.decision_checkpoint) is not DecisionCheckpoint
+                )
+                or (
+                    type(self.decision_checkpoint) is DecisionCheckpoint
+                    and self.decision_checkpoint.recorded_at.value > recorded_at.value
+                )
                 or self.portfolio_checkpoint.policy_id != identity.portfolio_policy_hash
                 or self.portfolio_checkpoint.input_id != identity.portfolio_input_hash
                 or self.research_refusal_id is not None
@@ -1164,7 +1326,9 @@ class AdvanceReceipt:
                     and (
                         not self.memory_checkpoint.artifact_ids
                         or self.no_action_reason is not None
-                        or self.portfolio_checkpoint.refusal_reason is not None
+                        or portfolio_refused
+                        or self.decision_checkpoint is None
+                        or self.decision_checkpoint.packet_id is None
                     )
                 )
                 or (
@@ -1175,7 +1339,11 @@ class AdvanceReceipt:
                             and self.no_action_reason is not None
                             and self.portfolio_checkpoint.refusal_reason is None
                         )
-                        or self.portfolio_checkpoint.refusal_reason is not None
+                        or portfolio_refused
+                        or (
+                            self.decision_checkpoint is not None
+                            and self.decision_checkpoint.packet_id is None
+                        )
                     )
                 )
             ):
@@ -1193,6 +1361,7 @@ class AdvanceReceipt:
                 or self.research_checkpoint is not None
                 or self.memory_checkpoint is not None
                 or self.portfolio_checkpoint is not None
+                or self.decision_checkpoint is not None
                 or self.no_action_reason is not None
                 or (
                     self.failure_reason
@@ -1266,15 +1435,23 @@ class AdvanceReceipt:
         research_checkpoint: ResearchCheckpoint,
         memory_checkpoint: ResearchCheckpoint,
         portfolio_checkpoint: PortfolioCheckpoint,
+        decision_checkpoint: DecisionCheckpoint | None,
         no_action_reason: NoActionReason | None,
     ) -> AdvanceReceipt:
         return cls(
             (
                 AdvanceDisposition.ADVANCED
-                if no_action_reason is None and portfolio_checkpoint.refusal_reason is None
+                if no_action_reason is None
+                and portfolio_checkpoint.refusal_reason is None
+                and decision_checkpoint is not None
+                and decision_checkpoint.packet_id is not None
                 else AdvanceDisposition.NO_ACTION
             ),
-            LifecycleCheckpoint.equity(LifecyclePhase.CONSTRUCT_PORTFOLIO),
+            LifecycleCheckpoint.equity(
+                LifecyclePhase.CONSTRUCT_PORTFOLIO
+                if portfolio_checkpoint.refusal_reason is not None
+                else LifecyclePhase.PUBLISH_DECISION
+            ),
             identity,
             None,
             recovery,
@@ -1288,6 +1465,7 @@ class AdvanceReceipt:
             research_checkpoint=research_checkpoint,
             memory_checkpoint=memory_checkpoint,
             portfolio_checkpoint=portfolio_checkpoint,
+            decision_checkpoint=decision_checkpoint,
             no_action_reason=no_action_reason,
         )
 
@@ -1395,6 +1573,7 @@ def parse_advance_receipt(  # noqa: PLR0911, PLR0912, PLR0915 - reject hostile f
     research_checkpoint = parse_research_checkpoint(payload["research_checkpoint"])
     memory_checkpoint = parse_research_checkpoint(payload["memory_checkpoint"])
     portfolio_checkpoint = parse_portfolio_checkpoint(payload["portfolio_checkpoint"])
+    decision_checkpoint = parse_decision_checkpoint(payload["decision_checkpoint"])
     if any(
         value is not None and parsed is None
         for value, parsed in (
@@ -1402,6 +1581,7 @@ def parse_advance_receipt(  # noqa: PLR0911, PLR0912, PLR0915 - reject hostile f
             (payload["research_checkpoint"], research_checkpoint),
             (payload["memory_checkpoint"], memory_checkpoint),
             (payload["portfolio_checkpoint"], portfolio_checkpoint),
+            (payload["decision_checkpoint"], decision_checkpoint),
         )
     ):
         return None
@@ -1439,6 +1619,7 @@ def parse_advance_receipt(  # noqa: PLR0911, PLR0912, PLR0915 - reject hostile f
             research_checkpoint=research_checkpoint,
             memory_checkpoint=memory_checkpoint,
             portfolio_checkpoint=portfolio_checkpoint,
+            decision_checkpoint=decision_checkpoint,
             research_refusal_id=research_refusal_id,
             no_action_reason=no_action_reason,
         )
@@ -1462,11 +1643,16 @@ class LifecycleProgress:
     research_checkpoint: ResearchCheckpoint | None = None
     memory_checkpoint: ResearchCheckpoint | None = None
     portfolio_checkpoint: PortfolioCheckpoint | None = None
+    decision_checkpoint: DecisionCheckpoint | None = None
     no_action_reason: NoActionReason | None = None
 
     @property
     def is_complete(self) -> bool:
-        return self.completed_phase is LifecyclePhase.CONSTRUCT_PORTFOLIO
+        return self.completed_phase is LifecyclePhase.PUBLISH_DECISION or (
+            self.completed_phase is LifecyclePhase.CONSTRUCT_PORTFOLIO
+            and self.portfolio_checkpoint is not None
+            and self.portfolio_checkpoint.refusal_reason is not None
+        )
 
     def require_prepared_universe_snapshot(self) -> UniverseSnapshot:
         """Return the pinned snapshot or reject access before its durable checkpoint."""
@@ -1513,6 +1699,12 @@ class LifecycleProgress:
             raise InvalidLifecycleStateError(_INVALID_CHECKPOINT_ORDER)
         return checkpoint
 
+    def require_decision_checkpoint(self) -> DecisionCheckpoint:
+        checkpoint = self.decision_checkpoint
+        if checkpoint is None:
+            raise InvalidLifecycleStateError(_INVALID_CHECKPOINT_ORDER)
+        return checkpoint
+
 
 @dataclass(frozen=True, slots=True)
 class LifecycleEvent:
@@ -1531,6 +1723,7 @@ class LifecycleEvent:
     attention_artifact: AttentionArtifact | None = None
     research_checkpoint: ResearchCheckpoint | None = None
     portfolio_checkpoint: PortfolioCheckpoint | None = None
+    decision_checkpoint: DecisionCheckpoint | None = None
     no_action_reason: NoActionReason | None = None
 
     @property
@@ -1602,6 +1795,11 @@ class LifecycleEvent:
                     if self.portfolio_checkpoint is None
                     else self.portfolio_checkpoint.to_payload()
                 ),
+                "decision_checkpoint": (
+                    None
+                    if self.decision_checkpoint is None
+                    else self.decision_checkpoint.to_payload()
+                ),
                 "no_action_reason": (
                     None if self.no_action_reason is None else self.no_action_reason.value
                 ),
@@ -1625,6 +1823,7 @@ class AdvanceCommand:
     research_run: ResearchCheckpoint | ResearchRefusal | None = None
     memory_update: ResearchCheckpoint | ResearchRefusal | None = None
     portfolio_construction: PortfolioCheckpoint | None = None
+    decision_publication: DecisionCheckpoint | DecisionPublicationRefusalReason | None = None
     no_action_reason: NoActionReason | None = None
 
 
@@ -1687,6 +1886,17 @@ class PerformPortfolioConstruction:
 
 
 @dataclass(frozen=True, slots=True)
+class PerformDecisionPublication:
+    """Return control for deterministic record construction, signing, and atomic publication."""
+
+    pinned_run_identity: PinnedRunIdentity
+    dossier_checkpoint: ResearchCheckpoint
+    research_checkpoint: ResearchCheckpoint
+    portfolio_checkpoint: PortfolioCheckpoint
+    no_action_reason: NoActionReason | None
+
+
+@dataclass(frozen=True, slots=True)
 class AdvanceAttempt:
     """Track only progress observed or appended during one Advance call."""
 
@@ -1710,6 +1920,7 @@ class LifecycleStatus:
     constitution_governance: ConstitutionGovernanceStatus | None = None
     no_action_reason: NoActionReason | None = None
     portfolio_checkpoint: PortfolioCheckpoint | None = None
+    decision_checkpoint: DecisionCheckpoint | None = None
 
     @classmethod
     def not_started(cls) -> LifecycleStatus:
@@ -1728,6 +1939,7 @@ class DurableAdvanceRefusal:
     evidence_capture: EvidenceCaptureCheckpoint | None = None
     attention_refusal_reason: AttentionRefusalReason | None = None
     research_refusal: ResearchRefusal | None = None
+    decision_publication_refusal: DecisionPublicationRefusalReason | None = None
 
     def __post_init__(self) -> None:
         if type(self.recorded_at) is not UtcInstant:
@@ -1811,11 +2023,32 @@ LifecycleDecision = (
     | PerformResearch
     | PerformMemoryUpdate
     | PerformPortfolioConstruction
+    | PerformDecisionPublication
     | AdvanceReceipt
 )
 
 
-_EVENT_SEQUENCE = (
+type _LifecycleEventPhase = Literal[
+    LifecyclePhase.RECONCILE_PRIOR_STATE,
+    LifecyclePhase.PIN_RUN_INPUTS,
+    LifecyclePhase.SNAPSHOT_UNIVERSE,
+    LifecyclePhase.CAPTURE_EVIDENCE,
+    LifecyclePhase.SELECT_ATTENTION,
+    LifecyclePhase.BUILD_DOSSIERS,
+    LifecyclePhase.RUN_RESEARCH,
+    LifecyclePhase.UPDATE_MEMORY,
+    LifecyclePhase.CONSTRUCT_PORTFOLIO,
+    LifecyclePhase.PUBLISH_DECISION,
+]
+type _LifecycleEventSequenceEntry = tuple[
+    LifecycleEventKind,
+    _LifecycleEventPhase | None,
+    bool,
+    bool,
+]
+
+
+_EVENT_SEQUENCE: tuple[_LifecycleEventSequenceEntry, ...] = (
     (LifecycleEventKind.ADVANCE_REQUESTED, None, False, False),
     (LifecycleEventKind.PHASE_COMPLETED, LifecyclePhase.RECONCILE_PRIOR_STATE, False, False),
     (LifecycleEventKind.RUN_INPUTS_PINNED, LifecyclePhase.PIN_RUN_INPUTS, True, False),
@@ -1831,6 +2064,12 @@ _EVENT_SEQUENCE = (
         False,
         False,
     ),
+    (
+        LifecycleEventKind.DECISION_PUBLISHED,
+        LifecyclePhase.PUBLISH_DECISION,
+        False,
+        False,
+    ),
 )
 
 
@@ -1842,10 +2081,27 @@ def decide_advance(
 ) -> LifecycleDecision:
     """Reconstruct authoritative history and choose one durable transition or receipt."""
     terminal = decide_terminal_refusal(history.refusals, command)
+    terminal_refusal = (
+        next(
+            (
+                refusal
+                for refusal in history.refusals
+                if isinstance(command, AdvanceCommand)
+                and refusal.idempotency_key == command.request.idempotency_key
+            ),
+            None,
+        )
+        if terminal is not None
+        else None
+    )
     if terminal is not None and not (
         terminal.evidence_artifact_ids
         or terminal.evidence_refusal_ids
         or terminal.research_refusal_id
+        or (
+            terminal_refusal is not None
+            and terminal_refusal.decision_publication_refusal is not None
+        )
     ):
         return terminal
     try:
@@ -1898,7 +2154,7 @@ def decide_evidence_refusal_replay(
     refusals: tuple[DurableAdvanceRefusal, ...],
     command: AdvanceCommand,
 ) -> AdvanceReceipt:
-    """Validate one evidence refusal against only its owning request stream."""
+    """Validate one effect-bound refusal against only its owning request stream."""
     terminal = decide_terminal_refusal(refusals, command)
     if terminal is None:
         return AdvanceReceipt.failed_closed(
@@ -1958,11 +2214,26 @@ def decide_evidence_refusal_replay(
         and progress is not None
         and progress.completed_phase is LifecyclePhase.RUN_RESEARCH
     )
+    decision_failure = (
+        refusal is not None
+        and refusal.reason is AdvanceFailureReason.DECISION_PUBLICATION_FAILED
+        and refusal.decision_publication_refusal is not None
+        and progress is not None
+        and progress.completed_phase is LifecyclePhase.CONSTRUCT_PORTFOLIO
+        and progress.portfolio_checkpoint is not None
+        and progress.portfolio_checkpoint.refusal_reason is None
+    )
     if (
         progress is None
         or refusal is None
         or refusal.cycle != command.request.session
-        or not (evidence_failure or attention_failure or research_failure or memory_failure)
+        or not (
+            evidence_failure
+            or attention_failure
+            or research_failure
+            or memory_failure
+            or decision_failure
+        )
     ):
         return AdvanceReceipt.failed_closed(
             AdvanceFailureReason.INVALID_DURABLE_STATE,
@@ -2252,6 +2523,22 @@ def reconstruct_portfolio_checkpoints(
     )
 
 
+def reconstruct_decision_checkpoints(
+    history: LifecycleHistory,
+) -> tuple[DecisionCheckpointReference, ...]:
+    """Return every immutable decision publication in validated lifecycle order."""
+    reconstruct_lifecycle(history)
+    return tuple(
+        DecisionCheckpointReference(
+            event.pinned_run_identity.run_id,
+            event.request.session,
+            event.decision_checkpoint,
+        )
+        for event in history.events
+        if event.decision_checkpoint is not None
+    )
+
+
 def reconstruct_constitution_uses(
     history: LifecycleHistory,
 ) -> tuple[ConstitutionUse, ...]:
@@ -2305,6 +2592,7 @@ def _validate_refusals(
             refusal.evidence_capture is not None
             or refusal.attention_refusal_reason is not None
             or refusal.research_refusal is not None
+            or refusal.decision_publication_refusal is not None
         ):
             raise InvalidLifecycleStateError(_INVALID_REFUSAL_ASSOCIATION)
         if key is None:
@@ -2324,6 +2612,7 @@ def _validate_refusals(
             AdvanceFailureReason.ATTENTION_SELECTION_FAILED,
             AdvanceFailureReason.RESEARCH_FAILED,
             AdvanceFailureReason.MEMORY_UPDATE_FAILED,
+            AdvanceFailureReason.DECISION_PUBLICATION_FAILED,
         ):
             raise InvalidLifecycleStateError(_INVALID_REFUSAL_ASSOCIATION)
         if associated_progress is not None:
@@ -2333,12 +2622,16 @@ def _validate_refusals(
                 and refusal.evidence_capture is not None
                 and not refusal.evidence_capture.is_complete
                 and refusal.attention_refusal_reason is None
+                and refusal.research_refusal is None
+                and refusal.decision_publication_refusal is None
             )
             attention_failure = (
                 refusal.reason is AdvanceFailureReason.ATTENTION_SELECTION_FAILED
                 and associated_progress.completed_phase is LifecyclePhase.CAPTURE_EVIDENCE
                 and refusal.evidence_capture == associated_progress.require_evidence_capture()
                 and refusal.attention_refusal_reason is not None
+                and refusal.research_refusal is None
+                and refusal.decision_publication_refusal is None
             )
             idempotency_conflict = (
                 refusal.reason is AdvanceFailureReason.IDEMPOTENCY_KEY_CONFLICT
@@ -2346,6 +2639,7 @@ def _validate_refusals(
                 and refusal.evidence_capture is None
                 and refusal.attention_refusal_reason is None
                 and refusal.research_refusal is None
+                and refusal.decision_publication_refusal is None
             )
             research_failure = (
                 refusal.reason is AdvanceFailureReason.RESEARCH_FAILED
@@ -2354,6 +2648,7 @@ def _validate_refusals(
                 and refusal.research_refusal is not None
                 and refusal.evidence_capture is None
                 and refusal.attention_refusal_reason is None
+                and refusal.decision_publication_refusal is None
             )
             memory_failure = (
                 refusal.reason is AdvanceFailureReason.MEMORY_UPDATE_FAILED
@@ -2364,6 +2659,17 @@ def _validate_refusals(
                 == refusal.recorded_at
                 and refusal.evidence_capture is None
                 and refusal.attention_refusal_reason is None
+                and refusal.decision_publication_refusal is None
+            )
+            decision_failure = (
+                refusal.reason is AdvanceFailureReason.DECISION_PUBLICATION_FAILED
+                and associated_progress.completed_phase is LifecyclePhase.CONSTRUCT_PORTFOLIO
+                and associated_progress.portfolio_checkpoint is not None
+                and associated_progress.portfolio_checkpoint.refusal_reason is None
+                and refusal.decision_publication_refusal is not None
+                and refusal.evidence_capture is None
+                and refusal.attention_refusal_reason is None
+                and refusal.research_refusal is None
             )
             if not any(
                 (
@@ -2371,6 +2677,7 @@ def _validate_refusals(
                     attention_failure,
                     research_failure,
                     memory_failure,
+                    decision_failure,
                     idempotency_conflict,
                 )
             ):
@@ -2379,6 +2686,7 @@ def _validate_refusals(
             refusal.evidence_capture is not None
             or refusal.attention_refusal_reason is not None
             or refusal.research_refusal is not None
+            or refusal.decision_publication_refusal is not None
         ):
             raise InvalidLifecycleStateError(_INVALID_REFUSAL_ASSOCIATION)
 
@@ -2449,6 +2757,7 @@ def _reconstruct_stream(  # noqa: PLR0912, PLR0915 - validate each checkpoint in
     research_checkpoint: ResearchCheckpoint | None = None
     memory_checkpoint: ResearchCheckpoint | None = None
     portfolio_checkpoint: PortfolioCheckpoint | None = None
+    decision_checkpoint: DecisionCheckpoint | None = None
     no_action_reason: NoActionReason | None = None
     for sequence, event in enumerate(events):
         if event.sequence != sequence:
@@ -2544,6 +2853,19 @@ def _reconstruct_stream(  # noqa: PLR0912, PLR0915 - validate each checkpoint in
             ):
                 raise InvalidLifecycleStateError(_CHANGED_PINNED_FACTS)
             portfolio_checkpoint = event.portfolio_checkpoint
+        publishes_decision = expected_phase is LifecyclePhase.PUBLISH_DECISION
+        if (event.decision_checkpoint is not None) is not publishes_decision:
+            raise InvalidLifecycleStateError(_INVALID_CHECKPOINT_ORDER)
+        if event.decision_checkpoint is not None:
+            if (
+                portfolio_checkpoint is None
+                or portfolio_checkpoint.refusal_reason is not None
+                or event.decision_checkpoint.recorded_at.value
+                < portfolio_checkpoint.recorded_at.value
+                or event.decision_checkpoint.recorded_at.value > event.recorded_at.value
+            ):
+                raise InvalidLifecycleStateError(_CHANGED_PINNED_FACTS)
+            decision_checkpoint = event.decision_checkpoint
         if (event.no_action_reason is not None) is not (
             expected_phase is LifecyclePhase.UPDATE_MEMORY
             and not event.research_checkpoint.artifact_ids
@@ -2563,6 +2885,7 @@ def _reconstruct_stream(  # noqa: PLR0912, PLR0915 - validate each checkpoint in
         research_checkpoint,
         memory_checkpoint,
         portfolio_checkpoint,
+        decision_checkpoint,
         no_action_reason,
     )
 
@@ -2608,7 +2931,17 @@ def _decide_valid_advance(
             progress.require_research_checkpoint(),
             progress.require_memory_checkpoint(),
             progress.require_portfolio_checkpoint(),
-            progress.no_action_reason,
+            (
+                None
+                if progress.decision_checkpoint is None
+                else progress.require_decision_checkpoint()
+            ),
+            progress.no_action_reason
+            or (
+                None
+                if progress.decision_checkpoint is None
+                else progress.require_decision_checkpoint().no_action_reason
+            ),
         )
     return _append_next_event(history, progress, command, recovery, recorded_at)
 
@@ -2749,7 +3082,7 @@ def _decide_idempotency_conflict(
     )
 
 
-def _append_next_event(  # noqa: PLR0911, PLR0912 - exhaust each lifecycle phase explicitly.
+def _append_next_event(  # noqa: PLR0911, PLR0912, PLR0915 - exhaust phases explicitly.
     history: LifecycleHistory,
     progress: LifecycleProgress,
     command: AdvanceCommand,
@@ -2764,6 +3097,7 @@ def _append_next_event(  # noqa: PLR0911, PLR0912 - exhaust each lifecycle phase
     | PerformResearch
     | PerformMemoryUpdate
     | PerformPortfolioConstruction
+    | PerformDecisionPublication
 ):
     sequence = progress.sequence + 1
     event_kind, phase, prepares_snapshot, publishes_snapshot = _EVENT_SEQUENCE[sequence]
@@ -2865,6 +3199,25 @@ def _append_next_event(  # noqa: PLR0911, PLR0912 - exhaust each lifecycle phase
             progress.require_attention_artifact(),
             progress.no_action_reason,
         )
+    if phase is LifecyclePhase.PUBLISH_DECISION and command.decision_publication is None:
+        return PerformDecisionPublication(
+            progress.pinned_run_identity,
+            progress.require_dossier_checkpoint(),
+            progress.require_research_checkpoint(),
+            progress.require_portfolio_checkpoint(),
+            progress.no_action_reason,
+        )
+    if phase is LifecyclePhase.PUBLISH_DECISION and isinstance(
+        command.decision_publication, DecisionPublicationRefusalReason
+    ):
+        return _append_refusal(
+            history,
+            command.request.idempotency_key,
+            AdvanceFailureReason.DECISION_PUBLICATION_FAILED,
+            recorded_at,
+            command.request.session,
+            decision_publication_refusal=command.decision_publication,
+        )
     prepared_snapshot = command.universe_snapshot if prepares_snapshot else None
     published_snapshot = (
         progress.require_prepared_universe_snapshot() if publishes_snapshot else None
@@ -2903,6 +3256,12 @@ def _append_next_event(  # noqa: PLR0911, PLR0912 - exhaust each lifecycle phase
         ),
         portfolio_checkpoint=(
             command.portfolio_construction if phase is LifecyclePhase.CONSTRUCT_PORTFOLIO else None
+        ),
+        decision_checkpoint=(
+            command.decision_publication
+            if phase is LifecyclePhase.PUBLISH_DECISION
+            and isinstance(command.decision_publication, DecisionCheckpoint)
+            else None
         ),
         no_action_reason=(
             command.no_action_reason if phase is LifecyclePhase.UPDATE_MEMORY else None
@@ -2978,6 +3337,8 @@ def _append_next_event(  # noqa: PLR0911, PLR0912 - exhaust each lifecycle phase
             or portfolio_checkpoint.recorded_at.value > recorded_at.value
         ):
             raise InvalidLifecycleStateError(_CHANGED_PINNED_FACTS)
+        if portfolio_checkpoint.refusal_reason is None:
+            return AppendLifecycleRecord(event, next_attempt)
         return AppendTerminalLifecycleRecord(
             event,
             AdvanceReceipt.advanced(
@@ -2991,7 +3352,37 @@ def _append_next_event(  # noqa: PLR0911, PLR0912 - exhaust each lifecycle phase
                 progress.require_research_checkpoint(),
                 progress.require_memory_checkpoint(),
                 portfolio_checkpoint,
+                None,
                 command.no_action_reason,
+            ),
+        )
+    if phase is LifecyclePhase.PUBLISH_DECISION:
+        decision_checkpoint = command.decision_publication
+        if not isinstance(decision_checkpoint, DecisionCheckpoint):
+            raise InvalidLifecycleStateError(_INVALID_CHECKPOINT_ORDER)
+        portfolio_checkpoint = progress.require_portfolio_checkpoint()
+        if (
+            portfolio_checkpoint.refusal_reason is not None
+            or decision_checkpoint.recorded_at.value < portfolio_checkpoint.recorded_at.value
+            or decision_checkpoint.recorded_at.value > recorded_at.value
+        ):
+            raise InvalidLifecycleStateError(_CHANGED_PINNED_FACTS)
+        no_action_reason = progress.no_action_reason or decision_checkpoint.no_action_reason
+        return AppendTerminalLifecycleRecord(
+            event,
+            AdvanceReceipt.advanced(
+                progress.pinned_run_identity,
+                progress.require_prepared_universe_snapshot(),
+                recovery,
+                recorded_at,
+                progress.require_evidence_capture(),
+                progress.require_attention_artifact(),
+                progress.require_dossier_checkpoint(),
+                progress.require_research_checkpoint(),
+                progress.require_memory_checkpoint(),
+                portfolio_checkpoint,
+                decision_checkpoint,
+                no_action_reason,
             ),
         )
     # Strict mypy proves this line unreachable; removing it is runtime-equivalent.
@@ -3008,6 +3399,7 @@ def _append_refusal(  # noqa: PLR0913 - refusal evidence remains explicit.
     evidence_capture: EvidenceCaptureCheckpoint | None = None,
     attention_refusal_reason: AttentionRefusalReason | None = None,
     research_refusal: ResearchRefusal | None = None,
+    decision_publication_refusal: DecisionPublicationRefusalReason | None = None,
 ) -> AppendTerminalLifecycleRecord:
     receipt = AdvanceReceipt.failed_closed(
         reason,
@@ -3031,6 +3423,7 @@ def _append_refusal(  # noqa: PLR0913 - refusal evidence remains explicit.
             evidence_capture,
             attention_refusal_reason,
             research_refusal,
+            decision_publication_refusal,
         ),
         receipt,
     )
@@ -3105,11 +3498,21 @@ def derive_lifecycle_status(history: LifecycleHistory) -> LifecycleStatus:
         )
 
     next_phase = None if current.is_complete else _EVENT_SEQUENCE[current.sequence + 1][1]
-    active_phase = None if next_phase is None else LifecycleCheckpoint.equity(next_phase)
+    awaiting_execution = current.completed_phase is LifecyclePhase.PUBLISH_DECISION
+    active_phase = (
+        LifecycleCheckpoint.equity(LifecyclePhase.AWAIT_EXECUTION)
+        if awaiting_execution
+        else None
+        if next_phase is None
+        else LifecycleCheckpoint.equity(next_phase)
+    )
+    decision_checkpoint = current.decision_checkpoint if awaiting_execution else None
+    no_action_reason = current.no_action_reason or (
+        None if decision_checkpoint is None else decision_checkpoint.no_action_reason
+    )
     return LifecycleStatus(
         active_phase=active_phase,
-        # Stage 3 ends at UpdateMemory; only the later Complete phase may publish this field.
-        last_completed_cycle=None,
+        last_completed_cycle=(current.pinned_run_identity.cycle if awaiting_execution else None),
         universe_snapshot_cycle=_latest_universe_cycle(progresses),
         pinned_run_identity=current.pinned_run_identity,
         liveness=LifecycleLiveness.ACTIVE,
@@ -3120,8 +3523,9 @@ def derive_lifecycle_status(history: LifecycleHistory) -> LifecycleStatus:
         universe_snapshot_id=_latest_universe_snapshot_id(progresses),
         attention_artifact_cycle=attention_artifact_cycle,
         attention_artifact_id=attention_artifact_id,
-        no_action_reason=(current.no_action_reason if current.is_complete else None),
+        no_action_reason=(no_action_reason if current.is_complete else None),
         portfolio_checkpoint=(current.portfolio_checkpoint if current.is_complete else None),
+        decision_checkpoint=decision_checkpoint,
     )
 
 
@@ -3140,6 +3544,7 @@ def _latest_universe_progress(
             LifecyclePhase.RUN_RESEARCH,
             LifecyclePhase.UPDATE_MEMORY,
             LifecyclePhase.CONSTRUCT_PORTFOLIO,
+            LifecyclePhase.PUBLISH_DECISION,
         )
     )
     if not published:
@@ -3214,6 +3619,8 @@ class LifecycleStatusProjection(Protocol):
     def rebuild_memory_event_ids(self) -> tuple[str, ...]: ...
 
     def rebuild_portfolio_checkpoints(self) -> tuple[PortfolioCheckpointReference, ...]: ...
+
+    def rebuild_decision_checkpoints(self) -> tuple[DecisionCheckpointReference, ...]: ...
 
     def rebuild_constitution_uses(self) -> tuple[ConstitutionUse, ...]: ...
 

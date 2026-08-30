@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -22,14 +22,19 @@ from agentic_investment_os.domain.lifecycle import (
     LifecyclePhase,
 )
 from agentic_investment_os.entrypoints.configuration import ConfigurationSource
-from agentic_investment_os.entrypoints.lifecycle import configure_advance, configure_status
+from tests._decision import configure_production_advance as configure_advance
+from tests._decision import configure_status
 from tests._governance import RecordedSessionEligibility
 from tests._production_research import (
     ValidProductionModel,
     production_recorded_evidence,
     production_recorded_official_evidence,
 )
-from tests._universe import recorded_portfolio, recorded_universe, runtime_configuration
+from tests._universe import (
+    recorded_packet_universe,
+    recorded_portfolio,
+    runtime_configuration,
+)
 
 if TYPE_CHECKING:
     from agentic_investment_os.domain.governance import ConstitutionUse
@@ -38,7 +43,7 @@ if TYPE_CHECKING:
 REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
 INTERRUPTED_EXIT_CODE = 75
 ARGUMENT_COUNT = 3
-SESSION = "2026-08-21"
+SESSION = "2026-08-24"
 MODE = "champion"
 IDEMPOTENCY_KEY = "lifecycle-system-journey"
 AUTHORITY_SENTINEL_NAMES = frozenset(
@@ -59,7 +64,7 @@ UNKNOWN_ACTION = "unknown system journey action"
 
 @dataclass(frozen=True, slots=True)
 class FixedClock:
-    instant: datetime = datetime(2026, 8, 21, 22, 0, tzinfo=UTC)
+    instant: datetime = datetime(2026, 8, 24, 13, 15, tzinfo=UTC)
 
     def now(self) -> datetime:
         return self.instant
@@ -102,11 +107,12 @@ def _sources(state_root: Path) -> tuple[ConfigurationSource, ...]:
 
 
 def _advance(state_root: Path) -> Advance:
+    universe = recorded_packet_universe()
     capability = configure_advance(
         _sources(state_root),
         repository_root=REPOSITORY_ROOT,
-        recorded_universe=recorded_universe(),
-        recorded_portfolio=recorded_portfolio(),
+        recorded_universe=universe,
+        recorded_portfolio=recorded_portfolio(universe),
         recorded_evidence=production_recorded_evidence(),
         recorded_official_evidence=production_recorded_official_evidence(),
         recorded_model=ValidProductionModel(),
@@ -182,25 +188,9 @@ def _emit_status(state_root: Path) -> None:
 
 def _interrupt_after_reconcile(state_root: Path) -> None:
     configured = _advance(state_root)
-    interrupted = Advance(
+    interrupted = replace(
+        configured,
         ledger=InterruptAfterReconcileLedger(configured.ledger),
-        configuration_version=configured.configuration_version,
-        configuration_hash=configured.configuration_hash,
-        universe_source=configured.universe_source,
-        enabled_asset_classes=configured.enabled_asset_classes,
-        universe_policy=configured.universe_policy,
-        evidence_capture=configured.evidence_capture,
-        attention_policy=configured.attention_policy,
-        attention_inputs=configured.attention_inputs,
-        clock=configured.clock,
-        constitution_registry=configured.constitution_registry,
-        production_research=configured.production_research,
-        evidence_vault=configured.evidence_vault,
-        memory=configured.memory,
-        memory_refusal_ledger=configured.memory_refusal_ledger,
-        portfolio_policy=configured.portfolio_policy,
-        portfolio_input_source=configured.portfolio_input_source,
-        portfolio_ledger=configured.portfolio_ledger,
     )
     interrupted(
         cycle=MarketSession(date.fromisoformat(SESSION)).to_payload(),

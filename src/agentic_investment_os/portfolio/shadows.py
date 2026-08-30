@@ -525,6 +525,13 @@ class PortfolioCycleResultLedger(Protocol):
 
     def validate_reference(self, reference: PortfolioCheckpointReference) -> None: ...
 
+    def load_cycle(self, reference: PortfolioCheckpointReference) -> PortfolioCycleResult: ...
+
+    def load_cycle_with_reference_for_run(
+        self,
+        run_id: str,
+    ) -> tuple[PortfolioCycleResult, PortfolioCheckpointReference]: ...
+
 
 class PortfolioCycleHistoryValidator(Protocol):
     """Validate durable Balanced and shadow artifacts named by lifecycle history."""

@@ -46,6 +46,19 @@ from agentic_investment_os.portfolio.construction import (
     construct_balanced_portfolio,
     parse_portfolio_construction_result,
 )
+from agentic_investment_os.portfolio.publication import (
+    DecisionPacketAccountScope,
+    DecisionPacketValidityWindow,
+    DecisionPublicationRefusal,
+    DecisionPublicationRefusalReason,
+    DecisionPublicationResult,
+    PacketNoActionReason,
+    PacketSignature,
+    construct_decision_publication,
+    parse_champion_decision_record,
+    parse_decision_packet,
+    validate_decision_publication,
+)
 from agentic_investment_os.portfolio.shadows import (
     PortfolioCycleResult,
     PortfolioShadowAccount,
@@ -65,6 +78,282 @@ _HASH_A = "a" * 64
 _HASH_B = "b" * 64
 _HASH_LENGTH = 64
 _MAX_DECIMAL_TEXT_LENGTH = 64
+_SYNTHETIC_SIGNING_FAILURE = "synthetic signing failure"
+
+
+def test_decision_publication_refusal_rejects_hostile_runtime_values() -> None:
+    with pytest.raises(ValueError, match="invalid decision publication result"):
+        DecisionPublicationRefusal(
+            "invalid",  # type: ignore[arg-type]  # Exercise a hostile runtime value.
+            _CUTOFF,
+        )
+    with pytest.raises(ValueError, match="invalid decision publication result"):
+        DecisionPublicationRefusal(
+            DecisionPublicationRefusalReason.INVALID_VALIDITY_WINDOW,
+            object(),  # type: ignore[arg-type]  # Exercise a hostile runtime value.
+        )
+
+
+class _SyntheticPacketSigner:
+    key_id = "9" * 64
+    signature_scheme = "hmac-sha256-v1"
+
+    def sign(self, material: bytes) -> PacketSignature:
+        return PacketSignature(
+            self.signature_scheme,
+            self.key_id,
+            hashlib.sha256(b"synthetic-signing-key" + material).hexdigest(),
+        )
+
+
+class _SyntheticPacketVerifier:
+    def verify(self, material: bytes, signature: PacketSignature) -> bool:
+        return signature == _SyntheticPacketSigner().sign(material)
+
+
+class _RaisingPacketSigner:
+    def sign(self, material: bytes) -> PacketSignature:
+        _ = material
+        raise RuntimeError(_SYNTHETIC_SIGNING_FAILURE)
+
+
+class _InvalidPacketSigner:
+    def sign(self, material: bytes) -> PacketSignature:
+        _ = material
+        return object()  # type: ignore[return-value]  # Exercise hostile runtime protocol output.
+
+
+def test_decision_publication_binds_complete_balanced_authority_and_signature() -> None:
+    cycle = construct_portfolio_cycle(
+        _request((_resolution(_AAPL, _HASH_A), _resolution(_SPY, _HASH_B)))
+    )
+    window = DecisionPacketValidityWindow(
+        cycle.balanced.require_house_view().cycle,
+        _CUTOFF,
+        UtcInstant.from_datetime(datetime(2026, 8, 21, 21, tzinfo=UTC)),
+    )
+
+    publication = construct_decision_publication(
+        cycle,
+        benchmark_identity=_SPY,
+        account_scope=DecisionPacketAccountScope("alpaca", "paper", "8" * 64),
+        validity_window=window,
+        signer=_SyntheticPacketSigner(),
+    )
+
+    assert isinstance(publication, DecisionPublicationResult)
+    assert publication.no_action_reason is None
+    assert publication.packet is not None
+    assert publication.packet.decision_record_id == publication.decision_record.decision_record_id
+    assert publication.packet.risk_profile == "balanced"
+    assert publication.packet.asset_class == "us_equity"
+    assert publication.packet.quantity_unit == "whole_share"
+    assert publication.packet.order_policy == "regular_session_day_limit_v1"
+    assert publication.packet.maximum_fraction_of_median_dollar_volume == Decimal("0.01")
+    assert tuple(item.identity for item in publication.packet.instructions) == (_AAPL, _SPY)
+    assert (
+        tuple(
+            (item.target_weight, item.authorized_weight) for item in publication.packet.instructions
+        )
+        == ((Decimal("0.08"), Decimal("0.04")),) * 2
+    )
+    assert parse_champion_decision_record(publication.decision_record.to_payload()) == (
+        publication.decision_record
+    )
+    assert (
+        parse_decision_packet(publication.packet.to_payload(), verifier=_SyntheticPacketVerifier())
+        == publication.packet
+    )
+
+
+def test_decision_publication_refuses_missing_benchmark_and_omits_no_trade_packet() -> None:
+    cycle = construct_portfolio_cycle(_request(()))
+    house_view = cycle.balanced.require_house_view()
+    window = DecisionPacketValidityWindow(
+        house_view.cycle,
+        _CUTOFF,
+        UtcInstant.from_datetime(datetime(2026, 8, 21, 21, tzinfo=UTC)),
+    )
+    scope = DecisionPacketAccountScope("alpaca", "paper", "8" * 64)
+
+    missing_benchmark = construct_decision_publication(
+        cycle,
+        benchmark_identity=EquityInstrumentIdentity("alpaca-paper", "equity-missing", "NYSE"),
+        account_scope=scope,
+        validity_window=window,
+        signer=_SyntheticPacketSigner(),
+    )
+    no_trade = construct_decision_publication(
+        cycle,
+        benchmark_identity=_SPY,
+        account_scope=scope,
+        validity_window=window,
+        signer=_SyntheticPacketSigner(),
+    )
+
+    assert missing_benchmark is DecisionPublicationRefusalReason.MISSING_BENCHMARK_STATE
+    assert isinstance(no_trade, DecisionPublicationResult)
+    assert no_trade.packet is None
+    assert no_trade.no_action_reason is PacketNoActionReason.NO_AUTHORIZED_ADJUSTMENTS
+    assert validate_decision_publication(no_trade, cycle, benchmark_identity=_SPY)
+
+
+@pytest.mark.parametrize(
+    ("field", "invalid_value"),
+    [
+        ("forecast_ids", ()),
+        ("model_fingerprint", "d" * 64),
+    ],
+)
+def test_decision_publication_binds_upstream_forecast_and_model_identity(
+    field: str,
+    invalid_value: object,
+) -> None:
+    cycle = construct_portfolio_cycle(
+        _request((_resolution(_AAPL, _HASH_A), _resolution(_SPY, _HASH_B)))
+    )
+    house_view = cycle.balanced.require_house_view()
+    window = DecisionPacketValidityWindow(
+        house_view.cycle,
+        _CUTOFF,
+        UtcInstant.from_datetime(_CUTOFF.value + timedelta(minutes=5)),
+    )
+    publication = construct_decision_publication(
+        cycle,
+        benchmark_identity=_SPY,
+        account_scope=DecisionPacketAccountScope("alpaca", "paper", "8" * 64),
+        validity_window=window,
+        signer=_SyntheticPacketSigner(),
+    )
+
+    assert isinstance(publication, DecisionPublicationResult)
+    assert publication.decision_record.forecast_ids == house_view.forecast_ids
+    assert publication.decision_record.model_fingerprint == house_view.model_fingerprint
+    object.__setattr__(publication.decision_record, field, invalid_value)
+    assert not validate_decision_publication(publication, cycle, benchmark_identity=_SPY)
+
+
+def test_decision_publication_refuses_invalid_portfolio_window_identity_and_signer() -> None:
+    cycle = construct_portfolio_cycle(
+        _request((_resolution(_AAPL, _HASH_A), _resolution(_SPY, _HASH_B)))
+    )
+    house_view = cycle.balanced.require_house_view()
+    scope = DecisionPacketAccountScope("alpaca", "paper", "8" * 64)
+    window = DecisionPacketValidityWindow(
+        house_view.cycle,
+        _CUTOFF,
+        UtcInstant.from_datetime(_CUTOFF.value + timedelta(minutes=5)),
+    )
+    refused_cycle = construct_portfolio_cycle(_request((), expected=(_HASH_A,)))
+    assert (
+        construct_decision_publication(
+            refused_cycle,
+            benchmark_identity=_SPY,
+            account_scope=scope,
+            validity_window=window,
+            signer=_SyntheticPacketSigner(),
+        )
+        is DecisionPublicationRefusalReason.INVALID_PORTFOLIO
+    )
+    assert (
+        construct_decision_publication(
+            cycle,
+            benchmark_identity=_SPY,
+            account_scope=scope,
+            validity_window=None,
+            signer=_SyntheticPacketSigner(),
+        )
+        is DecisionPublicationRefusalReason.INVALID_VALIDITY_WINDOW
+    )
+    assert (
+        construct_decision_publication(
+            cycle,
+            benchmark_identity=_SPY,
+            account_scope=scope,
+            validity_window=DecisionPacketValidityWindow(
+                MarketSession(date(2026, 8, 22)),
+                _CUTOFF,
+                UtcInstant.from_datetime(_CUTOFF.value + timedelta(minutes=5)),
+            ),
+            signer=_SyntheticPacketSigner(),
+        )
+        is DecisionPublicationRefusalReason.INVALID_VALIDITY_WINDOW
+    )
+    assert (
+        construct_decision_publication(
+            cycle,
+            benchmark_identity=_SPY,
+            account_scope=scope,
+            validity_window=DecisionPacketValidityWindow(
+                house_view.cycle,
+                UtcInstant.from_datetime(_CUTOFF.value - timedelta(microseconds=1)),
+                UtcInstant.from_datetime(_CUTOFF.value + timedelta(minutes=5)),
+            ),
+            signer=_SyntheticPacketSigner(),
+        )
+        is DecisionPublicationRefusalReason.INVALID_VALIDITY_WINDOW
+    )
+    assert (
+        construct_decision_publication(
+            cycle,
+            benchmark_identity=object(),  # type: ignore[arg-type]  # Hostile boundary input.
+            account_scope=scope,
+            validity_window=window,
+            signer=_SyntheticPacketSigner(),
+        )
+        is DecisionPublicationRefusalReason.MISSING_BENCHMARK_STATE
+    )
+    for signer in (_RaisingPacketSigner(), _InvalidPacketSigner()):
+        assert (
+            construct_decision_publication(
+                cycle,
+                benchmark_identity=_SPY,
+                account_scope=scope,
+                validity_window=window,
+                signer=signer,
+            )
+            is DecisionPublicationRefusalReason.SIGNING_FAILED
+        )
+
+
+def test_publication_value_objects_reject_invalid_windows_and_forged_serialization() -> None:
+    with pytest.raises(ValueError, match="invalid DecisionPacket validity window"):
+        DecisionPacketValidityWindow(
+            MarketSession(date(2026, 8, 21)),
+            _CUTOFF,
+            _CUTOFF,
+        )
+    publication = construct_decision_publication(
+        construct_portfolio_cycle(
+            _request((_resolution(_AAPL, _HASH_A), _resolution(_SPY, _HASH_B)))
+        ),
+        benchmark_identity=_SPY,
+        account_scope=DecisionPacketAccountScope("alpaca", "paper", "8" * 64),
+        validity_window=DecisionPacketValidityWindow(
+            MarketSession(date(2026, 8, 21)),
+            _CUTOFF,
+            UtcInstant.from_datetime(_CUTOFF.value + timedelta(minutes=5)),
+        ),
+        signer=_SyntheticPacketSigner(),
+    )
+    assert isinstance(publication, DecisionPublicationResult)
+    assert publication.packet is not None
+    packet_id = publication.packet.packet_id
+    object.__setattr__(publication.decision_record, "decision_record_id", "0" * 64)
+    with pytest.raises(ValueError, match="invalid Champion Decision Record"):
+        publication.decision_record.to_payload()
+    object.__setattr__(publication.packet, "packet_id", "")
+    with pytest.raises(ValueError, match="invalid DecisionPacket"):
+        publication.packet.signing_bytes()
+    object.__setattr__(publication.packet, "packet_id", packet_id)
+    object.__setattr__(publication.packet, "content_hash", "")
+    with pytest.raises(ValueError, match="invalid DecisionPacket"):
+        publication.packet.to_payload()
+    assert not validate_decision_publication(
+        object(),  # type: ignore[arg-type]  # Hostile boundary input.
+        construct_portfolio_cycle(_request(())),
+        benchmark_identity=_SPY,
+    )
 
 
 def test_balanced_capped_inverse_volatility_leaves_capped_remainder_in_cash() -> None:
@@ -78,6 +367,8 @@ def test_balanced_capped_inverse_volatility_leaves_capped_remainder_in_cash() ->
         constitution_hash="3" * 64,
         research_policy_hash="4" * 64,
         research_artifact_ids=(_HASH_A, _HASH_B),
+        forecast_ids=(_HASH_A, _HASH_B),
+        model_fingerprint="7" * 64,
         memory_event_ids=("5" * 64, "6" * 64),
         universe_snapshot_id="7" * 64,
         expected_research_request_ids=tuple(sorted((_HASH_A, _HASH_B))),
@@ -855,6 +1146,8 @@ def test_target_band_suppresses_an_exact_in_band_holding_adjustment() -> None:
         constitution_hash="3" * 64,
         research_policy_hash="4" * 64,
         research_artifact_ids=(_HASH_A,),
+        forecast_ids=(_HASH_A,),
+        model_fingerprint="7" * 64,
         memory_event_ids=("5" * 64,),
         universe_snapshot_id="7" * 64,
         expected_research_request_ids=(_HASH_A,),
@@ -863,6 +1156,7 @@ def test_target_band_suppresses_an_exact_in_band_holding_adjustment() -> None:
                 identity=_AAPL,
                 request_id=_HASH_A,
                 resolution_id=_HASH_A,
+                forecast_id=_HASH_A,
                 stance=PortfolioStance.HOLD,
                 uncertainty="low",
                 production_authority=True,
@@ -991,6 +1285,8 @@ def test_pending_material_event_blocks_only_a_new_position(
         constitution_hash="3" * 64,
         research_policy_hash="4" * 64,
         research_artifact_ids=(_HASH_A,),
+        forecast_ids=(_HASH_A,),
+        model_fingerprint="7" * 64,
         memory_event_ids=("5" * 64,),
         universe_snapshot_id="7" * 64,
         expected_research_request_ids=(_HASH_A,),
@@ -1037,6 +1333,8 @@ def test_portfolio_result_round_trips_only_through_its_canonical_hashed_envelope
         constitution_hash="3" * 64,
         research_policy_hash="4" * 64,
         research_artifact_ids=(_HASH_A,),
+        forecast_ids=(_HASH_A,),
+        model_fingerprint="7" * 64,
         memory_event_ids=("5" * 64,),
         universe_snapshot_id="7" * 64,
         expected_research_request_ids=(_HASH_A,),
@@ -1096,9 +1394,9 @@ def test_canonical_portfolio_material_has_stable_content_identities() -> None:
     assert result.house_view is not None
     assert (
         result.house_view.house_view_id
-        == "058a08fc7056c34440cf5aa40a4ddc64dcd8939b61fa425caf0147371c8ca508"
+        == "0644470e9328997a74cf913da2f119824b1c9c95bc5bbdd62e9620a7305b9190"
     )
-    assert result.content_hash == "31895c94eb557618de0bea20c030840956dd1fdff0dafdb1e5407b40d0ecd7b4"
+    assert result.content_hash == "09536a7d60b5ad906b20e6b9607babc37e66a092419a205b8f54335baf964381"
     assert (
         result.target_bands[0].target_band_id
         == "19bb8f2b0c9c37e13cc7909e77abe8bcc936d9c85d926319c46d035d577d2d3f"
@@ -1973,6 +2271,7 @@ def test_forged_future_adjusted_close_timestamp_fails_closed(field: str) -> None
         ("identity", "not-an-equity-identity"),
         ("request_id", "a" * 63),
         ("resolution_id", "A" * 64),
+        ("forecast_id", "A" * 64),
         ("stance", "long"),
         ("uncertainty", "extreme"),
         ("production_authority", 1),
@@ -1994,14 +2293,26 @@ def test_invalid_terminal_resolution_fields_return_a_typed_request_refusal(
     assert result.refusal is PortfolioRefusalReason.INVALID_REQUEST
 
 
+@pytest.mark.parametrize("field", ["configuration_hash", "model_fingerprint"])
 @pytest.mark.parametrize("invalid_hash", ["a" * 63, "A" * 64, "X" * 64, 1])
-def test_invalid_request_hashes_return_a_typed_refusal(invalid_hash: object) -> None:
+def test_invalid_request_hashes_return_a_typed_refusal(
+    field: str,
+    invalid_hash: object,
+) -> None:
     request = replace(
         _request((_resolution(_AAPL, _HASH_A),)),
-        configuration_hash=invalid_hash,  # type: ignore[arg-type]  # Exercise hostile runtime values.
+        **{field: invalid_hash},  # type: ignore[arg-type]  # Exercise hostile runtime values.
     )
 
     result = construct_balanced_portfolio(request)
+
+    assert result.refusal is PortfolioRefusalReason.INVALID_REQUEST
+
+
+def test_request_forecasts_must_exactly_match_terminal_resolutions() -> None:
+    request = _request((_resolution(_AAPL, _HASH_A),))
+
+    result = construct_balanced_portfolio(replace(request, forecast_ids=()))
 
     assert result.refusal is PortfolioRefusalReason.INVALID_REQUEST
 
@@ -2618,6 +2929,12 @@ def test_hostile_result_parser_rejects_every_nested_shape_and_semantic_corruptio
     bad_artifacts = deepcopy(payload)
     _house_view_payload(bad_artifacts)["research_artifact_ids"] = [1]
     corruptions.append(bad_artifacts)
+    bad_forecasts = deepcopy(payload)
+    _house_view_payload(bad_forecasts)["forecast_ids"] = [1]
+    corruptions.append(bad_forecasts)
+    bad_model = deepcopy(payload)
+    _house_view_payload(bad_model)["model_fingerprint"] = 1
+    corruptions.append(bad_model)
     bad_house_hash = deepcopy(payload)
     _house_view_payload(bad_house_hash)["house_view_id"] = "f" * 64
     corruptions.append(bad_house_hash)
@@ -2679,6 +2996,7 @@ def test_hostile_result_parser_rejects_every_nested_shape_and_semantic_corruptio
         ("root", "targets"),
         ("root", "target_bands"),
         ("house", "research_artifact_ids"),
+        ("house", "forecast_ids"),
         ("house", "memory_event_ids"),
         ("house", "items"),
     ],
@@ -2819,6 +3137,8 @@ def _request(
         constitution_hash="3" * 64,
         research_policy_hash="4" * 64,
         research_artifact_ids=tuple(sorted(item.resolution_id for item in resolutions)),
+        forecast_ids=tuple(sorted(item.forecast_id for item in resolutions)),
+        model_fingerprint="7" * 64,
         memory_event_ids=("5" * 64,),
         universe_snapshot_id="7" * 64,
         expected_research_request_ids=request_ids if expected is None else expected,
@@ -2845,6 +3165,7 @@ def _resolution(identity: EquityInstrumentIdentity, resolution_id: str) -> House
         identity=identity,
         request_id=resolution_id,
         resolution_id=resolution_id,
+        forecast_id=resolution_id,
         stance=PortfolioStance.LONG,
         uncertainty="low",
         production_authority=True,

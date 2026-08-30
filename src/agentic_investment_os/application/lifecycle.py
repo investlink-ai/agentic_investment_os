@@ -32,6 +32,7 @@ from agentic_investment_os.domain.lifecycle import (
     AdvanceRequest,
     AppendLifecycleRecord,
     AppendTerminalLifecycleRecord,
+    DecisionCheckpointReference,
     EvidenceCaptureCheckpoint,
     InputRefusal,
     InputRefusalCode,
@@ -44,6 +45,7 @@ from agentic_investment_os.domain.lifecycle import (
     MemoryUpdateRefusal,
     MemoryUpdateRefusalReason,
     PerformAttentionSelection,
+    PerformDecisionPublication,
     PerformDossierBuild,
     PerformEvidenceCapture,
     PerformMemoryUpdate,
@@ -53,6 +55,9 @@ from agentic_investment_os.domain.lifecycle import (
     PortfolioCheckpointReference,
     ResearchCheckpoint,
     ResearchRefusal,
+)
+from agentic_investment_os.domain.lifecycle import (
+    DecisionPublicationRefusalReason as LifecycleDecisionPublicationRefusalReason,
 )
 from agentic_investment_os.domain.temporal import InvalidUtcInstantError, UtcInstant
 from agentic_investment_os.domain.universe import (
@@ -94,6 +99,18 @@ from agentic_investment_os.portfolio.construction import (
     PortfolioRefusalReason,
     PortfolioStance,
 )
+from agentic_investment_os.portfolio.publication import (
+    DecisionPacketAccountScope,
+    DecisionPacketSigner,
+    DecisionPacketValidityWindow,
+    DecisionPacketWindowSource,
+    DecisionPublicationHistoryValidator,
+    DecisionPublicationLedger,
+    DecisionPublicationRefusal,
+    DecisionPublicationRefusalReason,
+    DecisionPublicationResult,
+    construct_decision_publication,
+)
 from agentic_investment_os.portfolio.shadows import (
     PortfolioCycleHistoryValidator,
     PortfolioCycleResultLedger,
@@ -134,6 +151,7 @@ __all__ = ("Advance", "Clock", "ConstitutionResolver", "Status")
 
 _INCOMPLETE_CHECKPOINT_RESULT = "lifecycle ledger returned an incomplete checkpoint result"
 _CLOCK_INVALID = "lifecycle clock must return a timezone-aware instant representable in UTC"
+_CLOCK_REGRESSED = "lifecycle clock precedes the latest durable checkpoint"
 _UNIVERSE_SOURCE_INVALID = "universe source returned a noncanonical absolute instant"
 _MEMORY_REFUSAL_CONFLICT = "memory refusal observation conflicts with the accepted event prefix"
 
@@ -197,6 +215,11 @@ class Advance:
     portfolio_policy: BalancedPortfolioPolicy
     portfolio_input_source: PortfolioInputSource
     portfolio_ledger: PortfolioCycleResultLedger
+    decision_ledger: DecisionPublicationLedger
+    decision_signer: DecisionPacketSigner
+    decision_window_source: DecisionPacketWindowSource
+    decision_account_scope: DecisionPacketAccountScope
+    benchmark_identity: EquityInstrumentIdentity
 
     def __call__(  # noqa: PLR0912, PLR0915 - exhaust each typed lifecycle decision.
         self,
@@ -218,10 +241,7 @@ class Advance:
             mode=mode,
             idempotency_key=idempotency_key,
         )
-        try:
-            recorded_at = UtcInstant.from_datetime(self.clock.now())
-        except InvalidUtcInstantError as error:
-            raise LifecyclePersistenceError(_CLOCK_INVALID) from error
+        recorded_at = _clock_instant(self.clock)
         command = self._prepare_command(parsed, recorded_at)
         attempt = AdvanceAttempt()
         while True:
@@ -229,10 +249,12 @@ class Advance:
             if isinstance(decision, AdvanceReceipt):
                 self._validate_evidence_receipt(command, decision)
                 self._validate_portfolio_receipt(decision)
+                self._validate_decision_receipt(decision)
                 return decision
             if isinstance(decision, AppendTerminalLifecycleRecord):
                 self._validate_evidence_receipt(command, decision.receipt)
                 self._validate_portfolio_receipt(decision.receipt)
+                self._validate_decision_receipt(decision.receipt)
                 return decision.receipt
             if isinstance(decision, AppendLifecycleRecord):
                 if decision.attempt.last_sequence is None or (
@@ -373,6 +395,111 @@ class Advance:
                         recorded_at,
                     ),
                     no_action_reason=decision.no_action_reason,
+                )
+                continue
+            if isinstance(decision, PerformDecisionPublication):
+                if not isinstance(command, AdvanceCommand):
+                    raise InvalidLifecycleStateError(_INCOMPLETE_CHECKPOINT_RESULT)
+                replayed_publication = self.decision_ledger.replay_publication(
+                    decision.pinned_run_identity.run_id,
+                    command.request.session,
+                )
+                if replayed_publication is not None:
+                    command = replace(command, decision_publication=replayed_publication)
+                    continue
+                try:
+                    cycle_result = self.portfolio_ledger.load_cycle(
+                        PortfolioCheckpointReference(
+                            decision.pinned_run_identity.run_id,
+                            decision.portfolio_checkpoint,
+                            decision.portfolio_checkpoint.recorded_at,
+                        )
+                    )
+                except InvalidLifecycleStateError:
+                    command = replace(
+                        command,
+                        decision_publication=(
+                            LifecycleDecisionPublicationRefusalReason.INVALID_PORTFOLIO
+                        ),
+                    )
+                    continue
+                replayed_run = self.production_research.replay_run(
+                    run_id=decision.pinned_run_identity.run_id,
+                    dossier_checkpoint=decision.dossier_checkpoint,
+                    research_checkpoint=decision.research_checkpoint,
+                    no_action_reason=decision.no_action_reason,
+                )
+                if replayed_run is None:
+                    raise InvalidLifecycleStateError(_INCOMPLETE_CHECKPOINT_RESULT)
+                issued_at = _clock_instant(self.clock)
+                if issued_at.value < decision.portfolio_checkpoint.recorded_at.value:
+                    raise LifecyclePersistenceError(_CLOCK_REGRESSED)
+                validity_window = self.decision_window_source.window_for(
+                    command.request.session,
+                    issued_at,
+                )
+                publication: DecisionPublicationResult | DecisionPublicationRefusalReason
+                publication = construct_decision_publication(
+                    cycle_result,
+                    benchmark_identity=self.benchmark_identity,
+                    account_scope=self.decision_account_scope,
+                    validity_window=(
+                        None
+                        if isinstance(validity_window, DecisionPublicationRefusalReason)
+                        else validity_window
+                    ),
+                    signer=self.decision_signer,
+                )
+                if isinstance(publication, DecisionPublicationRefusalReason):
+                    command = replace(
+                        command,
+                        decision_publication=LifecycleDecisionPublicationRefusalReason(
+                            publication.value
+                        ),
+                    )
+                    continue
+                visible_at = _clock_instant(self.clock)
+                packet = publication.packet
+                if (
+                    visible_at.value < issued_at.value
+                    or visible_at.value < decision.portfolio_checkpoint.recorded_at.value
+                    or (
+                        packet is not None
+                        and not self.decision_window_source.allows_publication(
+                            DecisionPacketValidityWindow(
+                                packet.cycle,
+                                packet.issued_at,
+                                packet.expires_at,
+                            ),
+                            visible_at,
+                        )
+                    )
+                ):
+                    command = replace(
+                        command,
+                        decision_publication=(
+                            LifecycleDecisionPublicationRefusalReason.INVALID_VALIDITY_WINDOW
+                        ),
+                    )
+                    continue
+                admitted = self.decision_ledger.record_publication(
+                    decision.pinned_run_identity.run_id,
+                    publication,
+                    visible_at,
+                )
+                if isinstance(admitted, DecisionPublicationRefusal):
+                    recorded_at = admitted.recorded_at
+                    command = replace(
+                        command,
+                        decision_publication=LifecycleDecisionPublicationRefusalReason(
+                            admitted.reason.value
+                        ),
+                    )
+                    continue
+                recorded_at = admitted.recorded_at
+                command = replace(
+                    command,
+                    decision_publication=admitted,
                 )
                 continue
             # Strict mypy proves this line unreachable; removing it is runtime-equivalent.
@@ -740,6 +867,17 @@ class Advance:
             )
         )
 
+    def _validate_decision_receipt(self, receipt: AdvanceReceipt) -> None:
+        checkpoint = receipt.decision_checkpoint
+        identity = receipt.pinned_run_identity
+        if checkpoint is None:
+            return
+        if identity is None or type(identity.cycle) is not MarketSession:
+            raise InvalidLifecycleStateError(_INCOMPLETE_CHECKPOINT_RESULT)
+        self.decision_ledger.validate_reference(
+            DecisionCheckpointReference(identity.run_id, identity.cycle, checkpoint)
+        )
+
     def _prepare_command(  # noqa: PLR0911 - map each hostile input refusal explicitly.
         self,
         parsed: AdvanceRequest | InputRefusal,
@@ -859,6 +997,9 @@ class Advance:
             cio = resolution.cio
             if cio is None:
                 continue
+            forecast = resolution.forecast
+            if forecast is None:
+                raise InvalidLifecycleStateError(_INCOMPLETE_CHECKPOINT_RESULT)
             subject = subjects.get(canonical_instrument_bytes(cio.subject))
             if subject is None:
                 raise InvalidLifecycleStateError(_INCOMPLETE_CHECKPOINT_RESULT)
@@ -867,6 +1008,7 @@ class Advance:
                     identity=cio.subject,
                     request_id=resolution.request_id,
                     resolution_id=cio.content_hash,
+                    forecast_id=forecast.content_hash,
                     stance=PortfolioStance(cio.stance.value),
                     uncertainty=cio.uncertainty,
                     production_authority=(
@@ -958,6 +1100,22 @@ class Advance:
                     }
                 )
             ),
+            forecast_ids=tuple(
+                sorted(
+                    resolution.forecast.content_hash
+                    for resolution in run.resolutions
+                    if resolution.forecast is not None
+                )
+            ),
+            model_fingerprint=_content_hash(
+                [
+                    {
+                        "role": contract.role.value,
+                        "model_configuration": contract.model_configuration.to_payload(),
+                    }
+                    for contract in self.production_research.policy.role_contracts
+                ]
+            ),
             memory_event_ids=memory_checkpoint.artifact_ids,
             universe_snapshot_id=command.universe_snapshot.snapshot_id,
             expected_research_request_ids=expected_request_ids,
@@ -976,6 +1134,13 @@ def _research_refusal(memory_refusal: MemoryUpdateRefusal) -> ResearchRefusal:
         ResearchCheckpoint(memory_refusal.accepted_event_ids),
         memory_update_refusal=memory_refusal,
     )
+
+
+def _clock_instant(clock: Clock) -> UtcInstant:
+    try:
+        return UtcInstant.from_datetime(clock.now())
+    except InvalidUtcInstantError as error:
+        raise LifecyclePersistenceError(_CLOCK_INVALID) from error
 
 
 def _content_hash(value: object) -> str:
@@ -1018,6 +1183,7 @@ class Status:
     research_history_validator: ProductionResearchHistoryValidator
     memory_history_validator: BeliefHistoryValidator
     portfolio_history_validator: PortfolioCycleHistoryValidator
+    decision_history_validator: DecisionPublicationHistoryValidator
 
     def __call__(self) -> LifecycleStatus:
         status = self.projection.rebuild_status()
@@ -1028,6 +1194,9 @@ class Status:
         self.memory_history_validator.validate_history(self.projection.rebuild_memory_event_ids())
         self.portfolio_history_validator.validate_history(
             self.projection.rebuild_portfolio_checkpoints()
+        )
+        self.decision_history_validator.validate_history(
+            self.projection.rebuild_decision_checkpoints()
         )
         uses = self.projection.rebuild_constitution_uses()
         return replace(status, constitution_governance=self.constitution_status(uses))

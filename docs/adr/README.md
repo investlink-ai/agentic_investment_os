@@ -20,6 +20,7 @@ Each ADR header is authoritative for status and supersession metadata.
 | [0008: Bind portfolio construction to a durable HouseView](0008-bind-portfolio-construction-to-durable-house-view.md) | Superseded | Superseded by [0009](0009-account-for-required-same-input-portfolio-shadows.md) | Production research-to-portfolio authority, replay, and persistence |
 | [0009: Account for required same-input portfolio shadows](0009-account-for-required-same-input-portfolio-shadows.md) | Accepted | Supersedes [0008](0008-bind-portfolio-construction-to-durable-house-view.md) | Shared HouseView, shadow authority, and atomic portfolio-cycle persistence |
 | [0010: Isolate Market Session scheduler history](0010-isolate-market-session-scheduler-history.md) | Accepted | — | Scheduler authority, calendar, append-only recovery, and live-process serialization |
+| [0011: Atomically publish one Balanced decision](0011-atomically-publish-one-balanced-decision.md) | Accepted | — | Champion decision identity, packet authority, signing, replay, and atomic publication |
 
 Agent Notes under `.agents/notes/` own durable feature, simplification, testing, bug-prevention, and
 development-process reasoning below this threshold. Issues own work state. Do not create an Agent Note

@@ -20,6 +20,7 @@ from agentic_investment_os.domain.identity import MarketSession
 from agentic_investment_os.domain.lifecycle import (
     AdvanceFailureReason,
     InvalidLifecycleStateError,
+    LifecycleCheckpoint,
     LifecycleLiveness,
     LifecyclePersistenceError,
     LifecyclePhase,
@@ -30,7 +31,7 @@ from agentic_investment_os.entrypoints.configuration import (
     ConfigurationRefusalCode,
     ConfigurationSource,
 )
-from agentic_investment_os.entrypoints.lifecycle import configure_advance, configure_status
+from tests._decision import configure_advance, configure_status
 from tests._governance import BASELINE_GOVERNANCE_STATUS, RecordedSessionEligibility
 from tests._production_research import (
     ValidProductionModel,
@@ -246,8 +247,8 @@ def test_status_reports_empty_incomplete_and_universe_snapshot_history(tmp_path:
 
     pinned = status()
     assert pinned.liveness is LifecycleLiveness.ACTIVE
-    assert pinned.active_phase is None
-    assert pinned.last_completed_cycle is None
+    assert pinned.active_phase == LifecycleCheckpoint.equity(LifecyclePhase.AWAIT_EXECUTION)
+    assert pinned.last_completed_cycle == MarketSession(date(2026, 8, 21))
     assert pinned.universe_snapshot_cycle == MarketSession(date(2026, 8, 21))
     assert pinned.pinned_run_identity == receipt.pinned_run_identity
     assert pinned.durable_reason is None
@@ -259,8 +260,16 @@ def test_status_reports_empty_incomplete_and_universe_snapshot_history(tmp_path:
     assert _projection(database) == [
         (
             1,
-            None,
-            None,
+            json.dumps(
+                pinned.active_phase.to_payload(),
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+            json.dumps(
+                pinned.last_completed_cycle.to_payload(),
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
             receipt.pinned_run_identity.run_id,
             receipt.pinned_run_identity.configuration_version,
             receipt.pinned_run_identity.configuration_hash,
@@ -293,6 +302,15 @@ def test_status_reports_empty_incomplete_and_universe_snapshot_history(tmp_path:
                 if receipt.portfolio_checkpoint is None
                 else json.dumps(
                     receipt.portfolio_checkpoint.to_payload(),
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+            ),
+            (
+                None
+                if receipt.decision_checkpoint is None
+                else json.dumps(
+                    receipt.decision_checkpoint.to_payload(),
                     sort_keys=True,
                     separators=(",", ":"),
                 )
@@ -392,7 +410,7 @@ def test_status_reports_an_unrelated_refusal_without_terminating_the_current_str
     status = _status(state_root)()
 
     assert status.liveness is LifecycleLiveness.ACTIVE
-    assert status.active_phase is None
+    assert status.active_phase == LifecycleCheckpoint.equity(LifecyclePhase.AWAIT_EXECUTION)
     assert status.pinned_run_identity == receipt.pinned_run_identity
     assert status.durable_reason is AdvanceFailureReason.INVALID_MODE
 
@@ -416,7 +434,9 @@ def test_status_reports_completed_conflicts_without_terminating_a_stream(
     assert conflict.failure_reason is AdvanceFailureReason.IDEMPOTENCY_KEY_CONFLICT
     conflicted_status = _status(state_root)()
     assert conflicted_status.liveness is LifecycleLiveness.ACTIVE
-    assert conflicted_status.active_phase is None
+    assert conflicted_status.active_phase == LifecycleCheckpoint.equity(
+        LifecyclePhase.AWAIT_EXECUTION
+    )
     assert conflicted_status.pinned_run_identity == original.pinned_run_identity
     assert conflicted_status.durable_reason is AdvanceFailureReason.IDEMPOTENCY_KEY_CONFLICT
 
@@ -566,7 +586,8 @@ def test_status_rejects_corrupt_authoritative_history_instead_of_using_projectio
                    universe_snapshot, evidence_policy_id,
                    evidence_artifact_ids, evidence_refusal_ids,
                        attention_artifact_id, attention_artifact,
-                       research_checkpoint, portfolio_checkpoint, no_action_reason,
+                       research_checkpoint, portfolio_checkpoint, decision_checkpoint,
+                       no_action_reason,
                    event_envelope, recorded_at
             FROM lifecycle_events ORDER BY sequence
             """
@@ -586,7 +607,8 @@ def test_status_rejects_corrupt_authoritative_history_instead_of_using_projectio
                 universe_snapshot, evidence_policy_id,
                 evidence_artifact_ids, evidence_refusal_ids,
                     attention_artifact_id, attention_artifact,
-                    research_checkpoint, portfolio_checkpoint, no_action_reason,
+                    research_checkpoint, portfolio_checkpoint, decision_checkpoint,
+                    no_action_reason,
                 event_envelope, recorded_at
             )
             """
@@ -594,7 +616,7 @@ def test_status_rejects_corrupt_authoritative_history_instead_of_using_projectio
         connection.executemany(
             "INSERT INTO lifecycle_events VALUES "
             "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
-            "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             rows,
         )
         connection.execute(
@@ -754,7 +776,8 @@ def test_status_rejects_an_invalid_refusal_reason_for_a_partial_stream(tmp_path:
                 SELECT 2, idempotency_key, cycle_identity, reason_code,
                        evidence_policy_id, evidence_artifact_ids,
                        evidence_refusal_ids, attention_refusal_reason,
-                       research_refusal_id, research_refusal, recorded_at
+                       research_refusal_id, research_refusal,
+                       decision_publication_refusal, recorded_at
                 FROM advance_refusals
                 """,
             "refusal uniqueness is invalid",
@@ -778,7 +801,8 @@ def test_status_rejects_corrupt_refusal_history(
         rows = connection.execute(
             "SELECT refusal_id, idempotency_key, cycle_identity, reason_code, "
             "evidence_policy_id, evidence_artifact_ids, evidence_refusal_ids, "
-            "attention_refusal_reason, research_refusal_id, research_refusal, recorded_at "
+            "attention_refusal_reason, research_refusal_id, research_refusal, "
+            "decision_publication_refusal, recorded_at "
             "FROM advance_refusals"
         ).fetchall()
         connection.execute("DROP TABLE advance_refusals")
@@ -786,10 +810,11 @@ def test_status_rejects_corrupt_refusal_history(
             "CREATE TABLE advance_refusals "
             "(refusal_id, idempotency_key, cycle_identity, reason_code, "
             "evidence_policy_id, evidence_artifact_ids, evidence_refusal_ids, "
-            "attention_refusal_reason, research_refusal_id, research_refusal, recorded_at)"
+            "attention_refusal_reason, research_refusal_id, research_refusal, "
+            "decision_publication_refusal, recorded_at)"
         )
         connection.executemany(
-            "INSERT INTO advance_refusals VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO advance_refusals VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             rows,
         )
         connection.execute(corruption)
@@ -811,7 +836,8 @@ def test_status_rejects_duplicate_unkeyed_refusal_authority(tmp_path: Path) -> N
         rows = connection.execute(
             "SELECT refusal_id, idempotency_key, cycle_identity, reason_code, "
             "evidence_policy_id, evidence_artifact_ids, evidence_refusal_ids, "
-            "attention_refusal_reason, research_refusal_id, research_refusal, recorded_at "
+            "attention_refusal_reason, research_refusal_id, research_refusal, "
+            "decision_publication_refusal, recorded_at "
             "FROM advance_refusals"
         ).fetchall()
         connection.execute("DROP TABLE advance_refusals")
@@ -819,10 +845,11 @@ def test_status_rejects_duplicate_unkeyed_refusal_authority(tmp_path: Path) -> N
             "CREATE TABLE advance_refusals "
             "(refusal_id, idempotency_key, cycle_identity, reason_code, "
             "evidence_policy_id, evidence_artifact_ids, evidence_refusal_ids, "
-            "attention_refusal_reason, research_refusal_id, research_refusal, recorded_at)"
+            "attention_refusal_reason, research_refusal_id, research_refusal, "
+            "decision_publication_refusal, recorded_at)"
         )
         connection.executemany(
-            "INSERT INTO advance_refusals VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO advance_refusals VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             rows,
         )
         connection.execute(
@@ -830,7 +857,8 @@ def test_status_rejects_duplicate_unkeyed_refusal_authority(tmp_path: Path) -> N
             INSERT INTO advance_refusals
             SELECT 2, idempotency_key, cycle_identity, reason_code,
                    evidence_policy_id, evidence_artifact_ids, evidence_refusal_ids,
-                   attention_refusal_reason, research_refusal_id, research_refusal, recorded_at
+                   attention_refusal_reason, research_refusal_id, research_refusal,
+                   decision_publication_refusal, recorded_at
             FROM advance_refusals
             """
         )
@@ -1003,7 +1031,8 @@ def _replace_event_table(database: Path, statement: str) -> None:
                    universe_snapshot, evidence_policy_id,
                    evidence_artifact_ids, evidence_refusal_ids,
                    attention_artifact_id, attention_artifact,
-                   research_checkpoint, portfolio_checkpoint, no_action_reason,
+                   research_checkpoint, portfolio_checkpoint, decision_checkpoint,
+                   no_action_reason,
                    event_envelope, recorded_at
             FROM lifecycle_events ORDER BY stream_id, sequence
             """
@@ -1023,7 +1052,8 @@ def _replace_event_table(database: Path, statement: str) -> None:
                 universe_snapshot, evidence_policy_id,
                 evidence_artifact_ids, evidence_refusal_ids,
                 attention_artifact_id, attention_artifact,
-                research_checkpoint, portfolio_checkpoint, no_action_reason,
+                research_checkpoint, portfolio_checkpoint, decision_checkpoint,
+                no_action_reason,
                 event_envelope, recorded_at
             )
             """
@@ -1031,7 +1061,7 @@ def _replace_event_table(database: Path, statement: str) -> None:
         connection.executemany(
             "INSERT INTO lifecycle_events VALUES "
             "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
-            "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             rows,
         )
         connection.execute(statement)

@@ -60,6 +60,16 @@ Store source event time, publication or acceptance time, first-observed time, an
 time when they differ. As-of reads admit evidence by availability at the pinned cutoff, never merely by
 the date described inside the evidence.
 
+## Revalidate time-bounded authority at visibility
+
+A time check before signing, serialization, or another potentially slow operation proves only that
+the operation started in bounds. Resample the authoritative clock after that work and apply the same
+code-owned policy again at the atomic publication boundary. The authoritative store acquires its write
+transaction, validates the complete candidate, then owns the final clock sample immediately before
+insertion; a caller's earlier timestamp cannot prove visibility. Persist that instant and revalidate it
+with the artifact's exact issue and expiry on reopen. Keep this gate scoped to the time-bounded
+executable artifact; an associated no-action record must not acquire execution timing authority.
+
 ## Separate absolute instants from calendar time
 
 Normalize every aware absolute timestamp to the canonical UTC representation before deterministic or

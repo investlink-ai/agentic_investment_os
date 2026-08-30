@@ -31,6 +31,12 @@ fixed Champion mode, and stable policy-and-session idempotency identity. It has 
 stage, research, model, portfolio, packet, signing, executor, broker, credential, or account port.
 Lifecycle `Status` remains the only lifecycle-liveness authority.
 
+The scheduler process invokes those capabilities through a process client. A separately composed
+operating-system process owns lifecycle persistence, research and model ports, DecisionPacket signing
+and verification, and account scope. Passing an in-process lifecycle object to the scheduler would
+transfer its reachable authority and is therefore not an admissible composition even if the object is
+typed only as the public callable protocol.
+
 A private `scheduler.sqlite3` ledger stores immutable policy metadata and append-only `started`,
 `resumed`, `completed`, `missed`, and `refused` events. `started` or `resumed` is appended before
 `Advance`; a terminal event appends the exact public lifecycle receipt and hash afterward. Rebuild
