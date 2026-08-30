@@ -31,6 +31,7 @@ from agentic_investment_os.domain.temporal import UtcInstant
 from agentic_investment_os.portfolio.publication import (
     DecisionPacketAccountScope,
     DecisionPacketValidityWindow,
+    DecisionPublicationRefusal,
     DecisionPublicationRefusalReason,
     DecisionPublicationResult,
     PacketSignature,
@@ -136,8 +137,13 @@ def _reference(
     return DecisionCheckpointReference(house_view.run_id, house_view.cycle, checkpoint)
 
 
-def _checkpoint(value: DecisionCheckpoint | DecisionPublicationRefusalReason) -> DecisionCheckpoint:
+def _checkpoint(value: DecisionCheckpoint | DecisionPublicationRefusal) -> DecisionCheckpoint:
     assert isinstance(value, DecisionCheckpoint)
+    return value
+
+
+def _refusal(value: DecisionCheckpoint | DecisionPublicationRefusal) -> DecisionPublicationRefusal:
+    assert isinstance(value, DecisionPublicationRefusal)
     return value
 
 
@@ -231,11 +237,13 @@ def test_official_packet_window_is_revalidated_at_the_durable_boundary(
     regular_open = UtcInstant.from_datetime(datetime(2026, 8, 24, 13, 30, tzinfo=UTC))
 
     assert (
-        decisions.record_publication(
-            publication.decision_record.run_id,
-            publication,
-            regular_open,
-        )
+        _refusal(
+            decisions.record_publication(
+                publication.decision_record.run_id,
+                publication,
+                regular_open,
+            )
+        ).reason
         is DecisionPublicationRefusalReason.INVALID_VALIDITY_WINDOW
     )
     with sqlite3.connect(database) as connection:
@@ -251,7 +259,7 @@ def test_sqlite_lock_crossing_open_refuses_packet_with_no_visible_row(tmp_path: 
     publication = _publication(cycle_result)
     entered = Event()
 
-    def record_while_locked() -> DecisionCheckpoint | DecisionPublicationRefusalReason:
+    def record_while_locked() -> DecisionCheckpoint | DecisionPublicationRefusal:
         entered.set()
         return decisions.record_publication(
             publication.decision_record.run_id,
@@ -266,10 +274,10 @@ def test_sqlite_lock_crossing_open_refuses_packet_with_no_visible_row(tmp_path: 
             assert entered.wait(timeout=1.0)
             clock.instant = regular_open
             blocker.rollback()
-            assert (
-                future.result(timeout=2.0)
-                is DecisionPublicationRefusalReason.INVALID_VALIDITY_WINDOW
-            )
+            refusal = _refusal(future.result(timeout=2.0))
+
+    assert refusal.reason is DecisionPublicationRefusalReason.INVALID_VALIDITY_WINDOW
+    assert refusal.recorded_at == UtcInstant.from_datetime(regular_open)
 
     with sqlite3.connect(database) as connection:
         assert connection.execute("SELECT COUNT(*) FROM decision_publications").fetchone() == (0,)
@@ -312,11 +320,13 @@ def test_durable_boundary_refuses_a_regressed_clock(tmp_path: Path) -> None:
     publication = _publication(cycle_result)
 
     assert (
-        decisions.record_publication(
-            publication.decision_record.run_id,
-            publication,
-            requested_at,
-        )
+        _refusal(
+            decisions.record_publication(
+                publication.decision_record.run_id,
+                publication,
+                requested_at,
+            )
+        ).reason
         is DecisionPublicationRefusalReason.INVALID_VALIDITY_WINDOW
     )
     with sqlite3.connect(database) as connection:
@@ -381,7 +391,7 @@ def test_coherently_signed_nonofficial_packet_window_never_becomes_visible(
     assert publication.packet is not None
 
     assert (
-        decisions.record_publication(house_view.run_id, publication, _PUBLISHED_AT)
+        _refusal(decisions.record_publication(house_view.run_id, publication, _PUBLISHED_AT)).reason
         is DecisionPublicationRefusalReason.INVALID_VALIDITY_WINDOW
     )
     with sqlite3.connect(database) as connection:
@@ -543,11 +553,13 @@ def test_invalid_signature_material_never_becomes_visible(tmp_path: Path) -> Non
     )
 
     assert (
-        decisions.record_publication(
-            cycle_result.balanced.require_house_view().run_id,
-            publication,
-            _PUBLISHED_AT,
-        )
+        _refusal(
+            decisions.record_publication(
+                cycle_result.balanced.require_house_view().run_id,
+                publication,
+                _PUBLISHED_AT,
+            )
+        ).reason
         is DecisionPublicationRefusalReason.INVALID_PORTFOLIO
     )
     with sqlite3.connect(database) as connection:
@@ -568,11 +580,13 @@ def test_coherently_hashed_wrong_key_signature_never_becomes_visible(tmp_path: P
     )
 
     assert (
-        decisions.record_publication(
-            cycle_result.balanced.require_house_view().run_id,
-            publication,
-            _PUBLISHED_AT,
-        )
+        _refusal(
+            decisions.record_publication(
+                cycle_result.balanced.require_house_view().run_id,
+                publication,
+                _PUBLISHED_AT,
+            )
+        ).reason
         is DecisionPublicationRefusalReason.SIGNING_FAILED
     )
     with sqlite3.connect(database) as connection:
@@ -598,7 +612,7 @@ def test_wrong_official_benchmark_never_becomes_visible(tmp_path: Path) -> None:
     assert publication.packet is None
 
     assert (
-        decisions.record_publication(house_view.run_id, publication, _PUBLISHED_AT)
+        _refusal(decisions.record_publication(house_view.run_id, publication, _PUBLISHED_AT)).reason
         is DecisionPublicationRefusalReason.INVALID_PORTFOLIO
     )
     with sqlite3.connect(database) as connection:
@@ -798,7 +812,7 @@ def test_publication_before_the_portfolio_checkpoint_never_becomes_valid_history
     )
 
     assert (
-        decisions.record_publication(run_id, publication, before_portfolio)
+        _refusal(decisions.record_publication(run_id, publication, before_portfolio)).reason
         is DecisionPublicationRefusalReason.INVALID_VALIDITY_WINDOW
     )
     with sqlite3.connect(database) as connection:
@@ -828,7 +842,7 @@ def test_expired_new_packet_and_mismatched_cycle_fail_closed(tmp_path: Path) -> 
     expired_at = packet.expires_at
 
     assert (
-        decisions.record_publication(run_id, publication, expired_at)
+        _refusal(decisions.record_publication(run_id, publication, expired_at)).reason
         is DecisionPublicationRefusalReason.INVALID_VALIDITY_WINDOW
     )
     with sqlite3.connect(database) as connection:
@@ -883,11 +897,13 @@ def test_missing_portfolio_history_is_a_typed_publication_refusal(tmp_path: Path
     invalid = replace(decisions, portfolio_ledger=missing_portfolio)
 
     assert (
-        invalid.record_publication(
-            cycle_result.balanced.require_house_view().run_id,
-            publication,
-            _PUBLISHED_AT,
-        )
+        _refusal(
+            invalid.record_publication(
+                cycle_result.balanced.require_house_view().run_id,
+                publication,
+                _PUBLISHED_AT,
+            )
+        ).reason
         is DecisionPublicationRefusalReason.INVALID_PORTFOLIO
     )
     with sqlite3.connect(database) as connection:

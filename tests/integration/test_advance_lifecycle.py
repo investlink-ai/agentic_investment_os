@@ -6,6 +6,7 @@ import sqlite3
 import stat
 import subprocess
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime, timedelta, timezone
@@ -13,6 +14,7 @@ from decimal import Decimal
 from pathlib import Path
 from shutil import copytree
 from tempfile import TemporaryDirectory
+from threading import Event
 from typing import TYPE_CHECKING, Literal, Never, assert_never, cast, override
 
 import pytest
@@ -26,6 +28,7 @@ from agentic_investment_os.adapters.sqlite_lifecycle import (
     SQLiteLifecycleLedger,
     prepare_runtime_database,
 )
+from agentic_investment_os.adapters.sqlite_portfolio import SQLitePortfolioLedger
 from agentic_investment_os.application.lifecycle import Advance, Clock, Status
 from agentic_investment_os.domain.attention import (
     AttentionArtifact,
@@ -821,6 +824,20 @@ class SequenceClock:
         instant = self.instants[min(self.calls, len(self.instants) - 1)]
         self.calls += 1
         return instant
+
+
+@dataclass
+class SignaledMutableClock:
+    instant: datetime
+    calls: int = 0
+    notify_on_call: int | None = None
+    sampled: Event = field(default_factory=Event)
+
+    def now(self) -> datetime:
+        self.calls += 1
+        if self.calls == self.notify_on_call:
+            self.sampled.set()
+        return self.instant
 
 
 @dataclass(frozen=True)
@@ -2020,6 +2037,77 @@ def test_decision_publication_refuses_when_signing_crosses_the_regular_open(
     assert receipt.decision_checkpoint is None
     with sqlite3.connect(state_root / "lifecycle.sqlite3") as connection:
         assert connection.execute("SELECT COUNT(*) FROM decision_publications").fetchone() == (0,)
+
+
+def test_decision_publication_lock_crossing_open_records_boundary_refusal_time(
+    tmp_path: Path,
+) -> None:
+    state_root = tmp_path / "runtime"
+    pre_open = datetime(2026, 8, 24, 13, 29, 59, 500000, tzinfo=UTC)
+    regular_open = datetime(2026, 8, 24, 13, 30, tzinfo=UTC)
+    clock = SignaledMutableClock(pre_open)
+    capability = _configure(
+        state_root,
+        clock=clock,
+        cio_stance="long",
+        packet_capable_universe=True,
+        production_window=True,
+    )
+    ledger = capability.ledger
+    assert isinstance(ledger, SQLiteLifecycleLedger)
+    interrupted = replace(
+        capability,
+        ledger=InterruptingLedger(ledger, "portfolio", "after"),
+    )
+    request = {
+        "cycle": _cycle_payload("2026-08-24"),
+        "mode": "champion",
+        "idempotency_key": "decision-publication-lock-crossed-open",
+    }
+
+    with pytest.raises(SimulatedInterruptionError):
+        interrupted(**request)
+
+    database = state_root / "lifecycle.sqlite3"
+    decision_database = state_root / "blocked-decision-boundary.sqlite3"
+    with (
+        sqlite3.connect(database) as source,
+        sqlite3.connect(decision_database) as destination,
+    ):
+        source.backup(destination)
+    decision_ledger = capability.decision_ledger
+    assert isinstance(decision_ledger, SQLiteDecisionPublicationLedger)
+    resumed = replace(
+        capability,
+        decision_ledger=replace(
+            decision_ledger,
+            database=decision_database,
+            portfolio_ledger=SQLitePortfolioLedger(decision_database),
+        ),
+    )
+    clock.sampled.clear()
+    clock.notify_on_call = clock.calls + 3
+    with sqlite3.connect(decision_database, timeout=5.0) as blocker:
+        blocker.execute("BEGIN IMMEDIATE")
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(lambda: resumed(**request))
+            assert clock.sampled.wait(timeout=2.0)
+            clock.instant = regular_open
+            blocker.rollback()
+            receipt = future.result(timeout=5.0)
+
+    assert receipt.failure_reason is AdvanceFailureReason.DECISION_PUBLICATION_FAILED
+    assert receipt.decision_checkpoint is None
+    with sqlite3.connect(decision_database) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM decision_publications").fetchone() == (0,)
+    with sqlite3.connect(database) as connection:
+        refusal = connection.execute(
+            "SELECT decision_publication_refusal, recorded_at FROM advance_refusals"
+        ).fetchone()
+    assert refusal == (
+        PacketPublicationRefusalReason.INVALID_VALIDITY_WINDOW.value,
+        UtcInstant.from_datetime(regular_open).isoformat(),
+    )
 
 
 @pytest.mark.parametrize(

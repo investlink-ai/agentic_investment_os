@@ -175,7 +175,8 @@ enter through uncredentialed composition; no broker credential or execution port
 The decision and packet share one append-only SQLite row so neither can become independently visible.
 Fresh packet publication requires the exact code-owned issue and expiry times and durable visibility
 before the regular open. The publication ledger resamples the shared trusted clock after acquiring
-its write transaction and persists that ledger-owned instant; no-action decisions remain publishable
+its write transaction and persists that ledger-owned instant. A refusal at that boundary carries the
+same authoritative observation time into lifecycle history; no-action decisions remain publishable
 without packet timing authority. Exact replay reparses the signature, reconstructs semantics from the
 durable portfolio cycle, and revalidates recorded visibility against the same calendar policy without
 resigning; changed authorization conflicts.

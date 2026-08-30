@@ -49,6 +49,7 @@ __all__ = (
     "DecisionPublicationClock",
     "DecisionPublicationHistoryValidator",
     "DecisionPublicationLedger",
+    "DecisionPublicationRefusal",
     "DecisionPublicationRefusalReason",
     "DecisionPublicationResult",
     "PacketDirection",
@@ -96,6 +97,21 @@ class DecisionPublicationRefusalReason(StrEnum):
     MISSING_BENCHMARK_STATE = "missing_benchmark_state"
     INVALID_VALIDITY_WINDOW = "invalid_validity_window"
     SIGNING_FAILED = "signing_failed"
+
+
+@dataclass(frozen=True, slots=True)
+class DecisionPublicationRefusal:
+    """Bind a durable-boundary refusal to its authoritative observation time."""
+
+    reason: DecisionPublicationRefusalReason
+    recorded_at: UtcInstant
+
+    def __post_init__(self) -> None:
+        if (
+            type(self.reason) is not DecisionPublicationRefusalReason
+            or type(self.recorded_at) is not UtcInstant
+        ):
+            raise ValueError(_INVALID_PUBLICATION)
 
 
 class PacketNoActionReason(StrEnum):
@@ -211,7 +227,7 @@ class DecisionPublicationLedger(Protocol):
         run_id: str,
         result: DecisionPublicationResult,
         recorded_at: UtcInstant,
-    ) -> DecisionCheckpoint | DecisionPublicationRefusalReason: ...
+    ) -> DecisionCheckpoint | DecisionPublicationRefusal: ...
 
     def replay_publication(
         self,

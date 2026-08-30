@@ -106,6 +106,7 @@ from agentic_investment_os.portfolio.publication import (
     DecisionPacketWindowSource,
     DecisionPublicationHistoryValidator,
     DecisionPublicationLedger,
+    DecisionPublicationRefusal,
     DecisionPublicationRefusalReason,
     DecisionPublicationResult,
     construct_decision_publication,
@@ -486,12 +487,12 @@ class Advance:
                     publication,
                     visible_at,
                 )
-                if isinstance(admitted, DecisionPublicationRefusalReason):
-                    recorded_at = visible_at
+                if isinstance(admitted, DecisionPublicationRefusal):
+                    recorded_at = admitted.recorded_at
                     command = replace(
                         command,
                         decision_publication=LifecycleDecisionPublicationRefusalReason(
-                            admitted.value
+                            admitted.reason.value
                         ),
                     )
                     continue

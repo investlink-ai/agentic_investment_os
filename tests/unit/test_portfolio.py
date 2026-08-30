@@ -49,6 +49,7 @@ from agentic_investment_os.portfolio.construction import (
 from agentic_investment_os.portfolio.publication import (
     DecisionPacketAccountScope,
     DecisionPacketValidityWindow,
+    DecisionPublicationRefusal,
     DecisionPublicationRefusalReason,
     DecisionPublicationResult,
     PacketNoActionReason,
@@ -78,6 +79,19 @@ _HASH_B = "b" * 64
 _HASH_LENGTH = 64
 _MAX_DECIMAL_TEXT_LENGTH = 64
 _SYNTHETIC_SIGNING_FAILURE = "synthetic signing failure"
+
+
+def test_decision_publication_refusal_rejects_hostile_runtime_values() -> None:
+    with pytest.raises(ValueError, match="invalid decision publication result"):
+        DecisionPublicationRefusal(
+            "invalid",  # type: ignore[arg-type]  # Exercise a hostile runtime value.
+            _CUTOFF,
+        )
+    with pytest.raises(ValueError, match="invalid decision publication result"):
+        DecisionPublicationRefusal(
+            DecisionPublicationRefusalReason.INVALID_VALIDITY_WINDOW,
+            object(),  # type: ignore[arg-type]  # Exercise a hostile runtime value.
+        )
 
 
 class _SyntheticPacketSigner:

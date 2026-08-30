@@ -40,7 +40,9 @@ append-only row. Unique run and cycle keys permit one publication per Market Ses
 must carry the exact official issue and expiry times and become durably visible before the regular
 open. After acquiring the write transaction and validating the complete candidate, the ledger samples
 the shared trusted clock immediately before insertion, reapplies the calendar policy, and persists
-that ledger-owned visibility instant. Exact replay reparses, verifies, and semantically reconstructs
+that ledger-owned visibility instant. A refusal returned at that boundary carries the same instant
+into lifecycle history so the terminal cause remains reconstructable. Exact replay reparses, verifies,
+and semantically reconstructs
 the stored publication without resigning it, including revalidating its recorded visibility against
 the same calendar policy.
 Concurrent candidates with the same decision and authorization intent return the first complete

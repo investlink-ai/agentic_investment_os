@@ -28,6 +28,7 @@ from agentic_investment_os.portfolio.publication import (
     DecisionPacketVerifier,
     DecisionPacketWindowSource,
     DecisionPublicationClock,
+    DecisionPublicationRefusal,
     DecisionPublicationRefusalReason,
     DecisionPublicationResult,
     PacketNoActionReason,
@@ -85,8 +86,8 @@ class SQLiteDecisionPublicationLedger:
         run_id: str,
         result: DecisionPublicationResult,
         recorded_at: UtcInstant,
-    ) -> DecisionCheckpoint | DecisionPublicationRefusalReason:
-        """Atomically insert or exactly replay a decision and optional complete packet."""
+    ) -> DecisionCheckpoint | DecisionPublicationRefusal:
+        """Atomically insert, replay, or timestamp a refused decision publication."""
         if (
             not is_sha256(run_id)
             or type(result) is not DecisionPublicationResult
@@ -118,7 +119,7 @@ class SQLiteDecisionPublicationLedger:
                     return stored_reference.checkpoint
                 refusal = self._fresh_publication_refusal(run_id, result, recorded_at)
                 if refusal is not None:
-                    return refusal
+                    return DecisionPublicationRefusal(refusal, _clock_instant(self.clock))
                 decision_json = _canonical_json(result.decision_record.to_payload())
                 packet_json = None if packet is None else _canonical_json(packet.to_payload())
                 visibility_at = _clock_instant(self.clock)
@@ -127,7 +128,10 @@ class SQLiteDecisionPublicationLedger:
                     visibility_at,
                     self.decision_window_source,
                 ):
-                    return DecisionPublicationRefusalReason.INVALID_VALIDITY_WINDOW
+                    return DecisionPublicationRefusal(
+                        DecisionPublicationRefusalReason.INVALID_VALIDITY_WINDOW,
+                        visibility_at,
+                    )
                 checkpoint = _checkpoint(result, visibility_at)
                 connection.execute(
                     """
